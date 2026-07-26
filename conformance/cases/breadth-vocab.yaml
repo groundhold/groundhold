@@ -4461,3 +4461,141 @@ cases:
             service.managed: true
     expect:
       error: candidate
+
+  - name: ai-speech-residency-cmk-retention-verify
+    description: >
+      capability.ai.speech (D350). Voice is personal data, so the three facts an
+      organization must be able to PROVE about transcription are where audio is
+      processed, whether the key encrypting it is one the customer can revoke, and
+      how long it survives. All three are plain constraints over observed
+      attributes — no new engine code, the same shape ai.inference established.
+    vocab:
+      - capability: capability.ai.speech
+        version: 0.1
+        stateful: false
+        attributes:
+          location.region: { kind: string }
+          encryption.customerManagedKeys: { kind: bool }
+          retention.maximum: { kind: duration }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: speech-1, environment: production, version: 1 }
+      capabilities:
+        - id: asr
+          type: capability.ai.speech
+      constraints:
+        hard:
+          - id: c-eu
+            subject: asr
+            path: location.region
+            op: in
+            value: [europe-west1, europe-west4, eu-central-1]
+            verify: { method: static }
+          - id: c-cmk
+            subject: asr
+            path: encryption.customerManagedKeys
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-retention
+            subject: asr
+            path: retention.maximum
+            op: lte
+            value: 24h
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: speech-1
+      capabilities:
+        asr:
+          attributes:
+            location.region: europe-west1
+            encryption.customerManagedKeys: true
+            retention.maximum: 1h
+    expect:
+      executable: true
+      verdicts:
+        c-eu: satisfied
+        c-cmk: satisfied
+        c-retention: satisfied
+
+  - name: ai-speech-retention-ceiling-violated
+    description: >
+      Data minimisation is a CEILING, so the operator is lte and the failure is
+      keeping audio too long. A recogniser retaining transcripts for 30 days under a
+      24h ceiling is `violated` at verify — before any audio is processed, not after
+      a regulator asks. The value of the type is precisely that this stops being a
+      README sentence.
+    vocab:
+      - capability: capability.ai.speech
+        version: 0.1
+        stateful: false
+        attributes:
+          retention.maximum: { kind: duration }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: speech-2, environment: production, version: 1 }
+      capabilities:
+        - id: asr
+          type: capability.ai.speech
+      constraints:
+        hard:
+          - id: c-retention
+            subject: asr
+            path: retention.maximum
+            op: lte
+            value: 24h
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: speech-2
+      capabilities:
+        asr:
+          attributes:
+            retention.maximum: 720h
+    expect:
+      executable: false
+      verdicts:
+        c-retention: violated
+
+  - name: ai-speech-retention-kind-mismatch-is-load-error
+    description: >
+      retention.maximum is declared a duration. A candidate supplying a bare number
+      is a load error, never a coerced "30 of something" — invariant #2, no type
+      coercion. On a retention ceiling the coercion would be worse than useless: it
+      would silently decide whether a data-minimisation rule passes.
+    vocab:
+      - capability: capability.ai.speech
+        version: 0.1
+        stateful: false
+        attributes:
+          retention.maximum: { kind: duration }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: speech-3, environment: test, version: 1 }
+      capabilities:
+        - id: asr
+          type: capability.ai.speech
+      constraints:
+        hard:
+          - id: c-retention
+            subject: asr
+            path: retention.maximum
+            op: lte
+            value: 24h
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: speech-3
+      capabilities:
+        asr:
+          attributes:
+            retention.maximum: 30
+    expect:
+      error: candidate

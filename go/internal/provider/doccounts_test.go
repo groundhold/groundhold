@@ -132,3 +132,131 @@ func mustReadRepo(t *testing.T, name string) string {
 	}
 	return strings.ReplaceAll(string(raw), " ", " ")
 }
+
+// D352: MATURITY.md is the honesty document, and it was the only one carrying
+// these numbers WITHOUT a gate. It had drifted three ways — a 446-case suite that
+// is now 494, GCP at 41 services when the drivers certify 42, and AWS at "46
+// services" when 46 is the capability-TYPE count and the service count is 50.
+// That last one is precisely the services-versus-types confusion D324 was written
+// about, reappearing in the file that judges the project's own honesty.
+//
+// The per-cloud service counts are read from the drivers' certified maps, exactly
+// as the README gate reads them; the conformance total is counted from the case
+// files, since the suite is the source of truth for its own size.
+func TestMaturityCountsMatchReality(t *testing.T) {
+	got := map[string]int{}
+	for name, p := range map[string]any{
+		"AWS":   aws.NewDriver("eu-central-1"),
+		"GCP":   gcp.NewDriver("p"),
+		"Azure": azure.NewDriver("s"),
+	} {
+		m, ok := p.(provider.CapabilityMapper)
+		if !ok {
+			t.Fatalf("%s driver is not a CapabilityMapper", name)
+		}
+		got[name] = len(m.ServiceCapabilities())
+	}
+
+	maturity := mustReadRepo(t, "docs/MATURITY.md")
+	claim := func(what, pattern string, actual int) {
+		m := regexp.MustCompile(pattern).FindStringSubmatch(maturity)
+		if m == nil {
+			t.Fatalf("docs/MATURITY.md no longer states %s in the form this gate "+
+				"checks — update both, or the number is unguarded again", what)
+		}
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			t.Fatalf("%s: %q is not a number", what, m[1])
+		}
+		if n != actual {
+			t.Errorf("MATURITY.md claims %s = %d, reality is %d — the honesty "+
+				"document drifted", what, n, actual)
+		}
+	}
+	claim("AWS services", `AWS drivers \((\d+) services`, got["AWS"])
+	claim("GCP services", `GCP drivers \((\d+) services`, got["GCP"])
+	claim("Azure services", `Azure drivers \((\d+) services`, got["Azure"])
+
+	// The conformance suite's own size, counted from the cases it runs.
+	cases, err := filepath.Glob(filepath.Join(repoRoot(t), "conformance", "cases", "*.yaml"))
+	if err != nil {
+		t.Fatalf("glob conformance cases: %v", err)
+	}
+	total := 0
+	for _, f := range cases {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		total += len(regexp.MustCompile(`(?m)^\s*- name:`).FindAllString(string(raw), -1))
+	}
+	claim("the conformance suite size", `one (\d+)-case conformance suite`, total)
+}
+
+// D353: the docs site states the suite's size and its DUAL subset. Both were
+// wrong — the site said 407 cases and described the whole suite as something
+// "two independent implementations must pass identically", when 274 of 494 carry
+// `impl: go`. The split is the honest claim, so it is the one that is gated.
+func TestWebsiteConformanceCountsMatchTheSuite(t *testing.T) {
+	total, dual := suiteCounts(t)
+
+	check := func(doc, what, pattern string, actual int) {
+		raw := mustReadRepo(t, doc)
+		m := regexp.MustCompile(pattern).FindStringSubmatch(raw)
+		if m == nil {
+			t.Fatalf("%s no longer states %s in the form this gate checks — "+
+				"update both, or the number is unguarded again", doc, what)
+		}
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			t.Fatalf("%s: %q is not a number", what, m[1])
+		}
+		if n != actual {
+			t.Errorf("%s claims %s = %d, the suite holds %d", doc, what, n, actual)
+		}
+	}
+	check("website/pages/conformance.md", "the suite size", `(\d+) cases, plus seeded`, total)
+	check("website/pages/conformance.md", "the dual subset", `\*\*(\d+) run against BOTH`, dual)
+	check("website/pages/quickstart.md", "the suite size", `conformance suite \((\d+) cases\)`, total)
+}
+
+// suiteCounts reads the suite's own size and its dual subset from the case files.
+// A case is dual unless it carries `impl: go`; verified against both runners,
+// which report exactly these totals.
+func suiteCounts(t *testing.T) (total, dual int) {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(repoRoot(t), "conformance", "cases", "*.yaml"))
+	if err != nil {
+		t.Fatalf("glob cases: %v", err)
+	}
+	nameRe := regexp.MustCompile(`^\s*-\s+name:\s*(\S+)`)
+	implRe := regexp.MustCompile(`^\s+impl:\s*go\b`)
+	isDual := map[string]bool{}
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		cur := ""
+		for _, line := range strings.Split(string(raw), "\n") {
+			if m := nameRe.FindStringSubmatch(line); m != nil {
+				cur = m[1]
+				isDual[cur] = true
+				continue
+			}
+			if cur != "" && implRe.MatchString(line) {
+				isDual[cur] = false
+			}
+		}
+	}
+	for _, d := range isDual {
+		total++
+		if d {
+			dual++
+		}
+	}
+	if total < 400 {
+		t.Fatalf("only %d cases parsed — the parser broke, not the docs", total)
+	}
+	return total, dual
+}
