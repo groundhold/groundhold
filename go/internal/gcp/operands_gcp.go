@@ -41,6 +41,7 @@ var gcpConsumedOperands = map[string][]string{
 	"pd":                {"disk_type", "kms_key_name", "replica_zones", "size_gb", "source_snapshot", "zone"},
 	// a witness has no operands: nothing is built, so there is nothing to configure
 	"computeimage":         {},
+	"mig":                  {"instance_template", "region", "target_cpu_utilization", "zone"},
 	"artifactregistry":     {"kms_key"},
 	"filestore":            {"capacity_gb", "kms_key_name", "network"},
 	"firestore":            {"kms_key_name"},

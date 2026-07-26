@@ -79,6 +79,7 @@ var registry = []Pin{
 	// (the IAM policy-LANGUAGE version "2012-10-17" is NOT an API version and is
 	// deliberately absent — see awsPolicyLangAllow in consistency_test.go.)
 	aws("ec2", "2016-11-15", "ec2.amazonaws.com (Query API)"),
+	aws("autoscaling", "2011-01-01", "autoscaling.amazonaws.com (Query API)"),
 	aws("rds", "2014-10-31", "rds.amazonaws.com (Query API)"),
 	aws("elasticache", "2015-02-02", "elasticache.amazonaws.com (Query API)"),
 	aws("elbv2", "2015-12-01", "elasticloadbalancing.amazonaws.com (Query API)"),
@@ -153,6 +154,8 @@ var registry = []Pin{
 	az("compute-vm", "2024-07-01", "Microsoft.Compute/virtualMachines"),
 	az("compute-disk", "2024-03-02", "Microsoft.Compute/disks"),
 	az("compute-image", "2024-07-01", "Microsoft.Compute/images"),
+	az("compute-vmss", "2024-07-01", "Microsoft.Compute/virtualMachineScaleSets"),
+	az("insights-autoscale", "2022-10-01", "Microsoft.Insights/autoscalesettings"),
 	az("network", "2023-11-01", "Microsoft.Network"),
 	az("private-dns", "2020-06-01", "Microsoft.Network/privateDnsZones"),
 	az("public-dns", "2018-05-01", "Microsoft.Network/dnsZones"),

@@ -145,7 +145,7 @@ var projectOK = regexp.MustCompile(`^([a-z][a-z0-9-]{4,28}[a-z0-9]|[0-9]{1,20})$
 
 func (d *Driver) requireService(service string) error {
 	switch service {
-	case "cloudsql", "cloudrun", "gcs", "vpc", "cloudfunctions", "cloudfunctions-fn", "pubsub-topic", "pubsub-queue", "secretmanager", "memorystore", "clouddns", "clouddnsrecord", "iambinding", "customrole", "monitoring", "dashboard", "uptime", "logmetric", "artifactregistry", "filestore", "firestore", "managedkafka", "cloudarmor", "certmanager", "cloudrunjobs", "serviceaccount", "bigquery", "cloudscheduler", "cloudkms", "vpngateway", "backupvault", "assetfeed", "loadbalancer", "billingbudget", "logbucket", "auditlogs", "scc", "vertexai", "gke", "gke-addon", "gke-workloadidentity", "backupplan", "gce", "pd", "computeimage":
+	case "cloudsql", "cloudrun", "gcs", "vpc", "cloudfunctions", "cloudfunctions-fn", "pubsub-topic", "pubsub-queue", "secretmanager", "memorystore", "clouddns", "clouddnsrecord", "iambinding", "customrole", "monitoring", "dashboard", "uptime", "logmetric", "artifactregistry", "filestore", "firestore", "managedkafka", "cloudarmor", "certmanager", "cloudrunjobs", "serviceaccount", "bigquery", "cloudscheduler", "cloudkms", "vpngateway", "backupvault", "assetfeed", "loadbalancer", "billingbudget", "logbucket", "auditlogs", "scc", "vertexai", "gke", "gke-addon", "gke-workloadidentity", "backupplan", "gce", "pd", "computeimage", "mig":
 		// project is empty on read-only paths (observe/discover — it rides in
 		// the providerId); when pinned it MUST be a valid identifier.
 		if d.Project != "" && !projectOK.MatchString(d.Project) {
@@ -256,6 +256,10 @@ func (d *Driver) Validate(service, capability, environment string,
 	}
 	if service == "pd" {
 		_, err := BuildPDCreate(d.Project, environment, capability, attrs, impl, generation)
+		return err
+	}
+	if service == "mig" {
+		_, err := BuildMIGCreate(d.Project, environment, capability, attrs, impl, generation)
 		return err
 	}
 	// A WITNESS service (D177/D370) is refused before any operand check: the reason
@@ -458,6 +462,9 @@ func (d *Driver) createService(service, capability, environment string,
 	if service == "pd" {
 		return d.createPD(capability, environment, attrs, impl, generation)
 	}
+	if service == "mig" {
+		return d.createMIG(capability, environment, attrs, impl, generation)
+	}
 	if !provider.CanAuthor("gcp", service) {
 		return provider.CreateResult{Status: "failed", Reason: errWitnessOnlyGCP(service).Error()}
 	}
@@ -650,6 +657,9 @@ func (d *Driver) Observe(service, capability,
 	}
 	if service == "computeimage" {
 		return d.observeGCPImage(capability, providerID)
+	}
+	if service == "mig" {
+		return d.observeMIG(capability, providerID)
 	}
 	if service == "artifactregistry" {
 		return d.observeARRepo(capability, providerID)

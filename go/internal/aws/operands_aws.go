@@ -44,6 +44,7 @@ var awsConsumedOperands = map[string][]string{
 	"ebs":            {"availability_zone", "iops", "kms_key_id", "size_gb", "snapshot_id", "throughput", "volume_type"},
 	// a witness has no operands: nothing is built, so there is nothing to configure
 	"ami":                    {},
+	"asg":                    {"launch_template_id", "launch_template_version", "subnet_ids", "target_cpu_utilization"},
 	"efs":                    {"availability_zone", "kms_key_id"},
 	"eks":                    {"clusterName", "clusterRoleArn", "kmsKeyArn", "nodeGroup", "nodeRoleArn", "securityGroupIds", "subnetIds"},
 	"eks-addon":              {"clusterName", "region", "serviceRoleArn"},

@@ -71,6 +71,7 @@ func (d *Driver) serviceDiscoverers() []azSweep {
 		{[]string{"azvm"}, d.discoverAzureVMs},
 		{[]string{"azdisk"}, d.discoverAzureDisks},
 		{[]string{"azimage"}, d.discoverAzureImages},
+		{[]string{"azvmss"}, d.discoverAzureVMSS},
 		{[]string{"aisearch"}, d.discoverAISearch},
 		{[]string{"apim"}, d.discoverAPIM},
 		{[]string{"azkafka"}, d.discoverAzKafka},

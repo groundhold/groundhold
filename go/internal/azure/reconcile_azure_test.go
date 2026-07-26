@@ -62,6 +62,7 @@ func reconRows() []struct{ svc, pid string } {
 		{"vnet", vnetProviderID(testSub, "rg1", "res1")},
 		{"azvm", azureVMProviderID(testSub, "rg1", "pv-vm-abc123456789")},
 		{"azdisk", azureDiskProviderID(testSub, "rg1", "pv-disk-orders-abc12345")},
+		{"azvmss", azureVMSSProviderID(testSub, "rg1", "pv-vmss-web-abc12345")},
 		{"cosmos", cosmosProviderID(testSub, "rg1", "acct1")},
 		{"keyvault", keyVaultProviderID(testSub, "rg1", "vault1")},
 		{"rediscache", redisAzureProviderID(testSub, "rg1", "res1")},

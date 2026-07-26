@@ -27,6 +27,7 @@ var azureConsumedOperands = map[string][]string{
 	"azdisk":      {"disk_encryption_set_id", "disk_sku", "resource_group", "size_gb", "source_resource_id", "zone"},
 	// a witness has no operands: nothing is built, so there is nothing to configure
 	"azimage":              {},
+	"azvmss":               {"admin_username", "image_reference", "resource_group", "ssh_public_key", "subnet_id", "target_cpu_utilization", "vm_size", "zones"},
 	"aisearch":             {"resource_group"},
 	"aks":                  {"authorizedIPRanges", "clusterName", "dnsPrefix", "identity", "kmsKeyId", "nodePool", "resource_group", "userAssignedIdentityId"},
 	"aks-addon":            {"addon_config", "clusterName", "resource_group"},

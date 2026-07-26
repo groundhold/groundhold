@@ -48,6 +48,9 @@ func queryXMLRole(_ *http.Request, body []byte) certifynet.Role {
 		return certifynet.RoleMutateParsed // instanceId becomes the providerId (D358)
 	case action == "CreateVolume":
 		return certifynet.RoleMutateParsed // volumeId becomes the providerId (D367)
+	case action == "CreateAutoScalingGroup", action == "PutScalingPolicy":
+		// the group NAME is deterministic, so nothing is parsed out of the response
+		return certifynet.RoleMutateOpaque
 	default:
 		// CreateSubnet's id is NOT consumed at create time (delete re-enumerates
 		// via DescribeSubnets), so it is an opaque status-only mutation.
@@ -1162,6 +1165,72 @@ func TestHonestyHarnessEBS(t *testing.T) {
 				Happy: func() *httptest.Server { return ebsHonestyServer(t) },
 				Run: func(pr provider.Provider) provider.CreateResult {
 					return pr.Delete("ebs", "orders-data", "production", pid, "k")
+				},
+			},
+		},
+	}
+	certifynet.CertifyDriverNet(t, p)
+}
+
+// asgHonestyServer answers the happy path for the fleet probe: the two
+// preflights, the group create, the policy, the read-back and the delete.
+func asgHonestyServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		switch actionOf(string(body)) {
+		case "DescribeSubnets":
+			_, _ = w.Write([]byte(asgTwoZonesXML))
+		case "DescribeLaunchTemplateVersions":
+			_, _ = w.Write([]byte(asgPrivateTemplateXML))
+		case "DescribeAutoScalingGroups":
+			_, _ = w.Write([]byte(asgGroupXML))
+		case "DescribePolicies":
+			_, _ = w.Write([]byte(asgHasPolicyXML))
+		case "CreateAutoScalingGroup":
+			_, _ = w.Write([]byte(`<CreateAutoScalingGroupResponse/>`))
+		case "PutScalingPolicy":
+			_, _ = w.Write([]byte(`<PutScalingPolicyResponse/>`))
+		case "DeleteAutoScalingGroup":
+			_, _ = w.Write([]byte(`<DeleteAutoScalingGroupResponse/>`))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+}
+
+// The adversarial honesty pass for a fleet (D371). The stake here is neither
+// data nor a single machine: it is a BILL. A create wrongly reported `failed`
+// invites a retry, and a second fleet does not sit idle — it scales, and it keeps
+// scaling until somebody notices.
+func TestHonestyHarnessASG(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	pid := "asg:eu-central-1:000000000000:groundhold-web-fleet-production"
+	p := &certifynet.Probe{
+		Name:            "aws/asg",
+		AssertTransient: true, // D237 sweep
+		Classify:        queryXMLRole,
+		OwnerTagValue:   "web-fleet",
+		DeterministicID: true, // the group name is a chosen slug
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := newHonestyDriver(happyURL, rt)
+			d.AutoScalingBaseURL = happyURL
+			return d
+		},
+		Ops: []certifynet.Op{
+			{
+				Name:  "create",
+				Happy: func() *httptest.Server { return asgHonestyServer(t) },
+				Run: func(pr provider.Provider) provider.CreateResult {
+					return pr.Create("asg", "web-fleet", "production", asgAttrs(), asgImpl(), "k", 1)
+				},
+			},
+			{
+				Name:  "delete",
+				Happy: func() *httptest.Server { return asgHonestyServer(t) },
+				Run: func(pr provider.Provider) provider.CreateResult {
+					return pr.Delete("asg", "web-fleet", "production", pid, "k")
 				},
 			},
 		},

@@ -682,6 +682,36 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			case "delete":
 				return sortedDedup([]string{"logging.logMetrics.delete", "logging.logMetrics.get"})
 			}
+		case "mig":
+			// D371. A fleet (capability.compute.autoscaling). insert takes no
+			// idempotency key, so the deterministic NAME is the mechanism and
+			// instanceGroupManagers.get is the quiet read (409 continuation + delete
+			// pre-read). Ownership is the DESCRIPTION MARKER — a managed instance group
+			// has no labels.
+			//
+			// instanceTemplates.get is the PREFLIGHT, not an extra: the group inherits
+			// the template's addressing and cannot override it, so
+			// `network.publicExposure` cannot be honored without reading a resource the
+			// group does not own. Both operation scopes are listed because a regional
+			// group is a different resource at a different scope.
+			switch operation {
+			case "create", "adopt":
+				p := []string{"compute.instanceGroupManagers.create",
+					"compute.instanceGroupManagers.get", "compute.instanceTemplates.get",
+					"compute.zoneOperations.get", "compute.regionOperations.get"}
+				if on, _ := attrs["autoscaling.enabled"].(bool); on {
+					p = append(p, "compute.autoscalers.create", "compute.autoscalers.list")
+				}
+				return sortedDedup(p)
+			case "update":
+				return sortedDedup([]string{"compute.instanceGroupManagers.get",
+					"compute.instanceGroupManagers.update", "compute.autoscalers.list",
+					"compute.autoscalers.update", "compute.instanceTemplates.get"})
+			case "delete":
+				return sortedDedup([]string{"compute.instanceGroupManagers.delete",
+					"compute.instanceGroupManagers.get", "compute.zoneOperations.get",
+					"compute.regionOperations.get"})
+			}
 		case "computeimage":
 			// D370. A machine image (capability.compute.image), WITNESSED not authored
 			// (D177) — so there is no create/delete permission set, only the reads.
@@ -1653,6 +1683,34 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			case "create", "adopt", "update", "delete":
 				return sortedDedup([]string{"ec2:DescribeImages", "ec2:DescribeSnapshots"})
 			}
+		case "asg":
+			// D371. A fleet (capability.compute.autoscaling). CreateAutoScalingGroup
+			// takes no client token, so the deterministic NAME is the mechanism and
+			// DescribeAutoScalingGroups is the quiet read (name-conflict continuation +
+			// delete pre-read). Ownership is tags.
+			//
+			// The two EC2 reads are the PREFLIGHTS, not extras: the group's zone spread
+			// follows its subnets and its addressing follows its launch template, so
+			// neither `availability.class` nor `network.publicExposure` can be honored
+			// without resolving a resource the group does not own. An identity that
+			// cannot make those reads cannot create a group whose contract is true.
+			switch operation {
+			case "create", "adopt":
+				p := []string{"autoscaling:CreateAutoScalingGroup",
+					"autoscaling:DescribeAutoScalingGroups", "autoscaling:CreateOrUpdateTags",
+					"ec2:DescribeSubnets", "ec2:DescribeLaunchTemplateVersions"}
+				if on, _ := attrs["autoscaling.enabled"].(bool); on {
+					p = append(p, "autoscaling:PutScalingPolicy")
+				}
+				return sortedDedup(p)
+			case "update":
+				return sortedDedup([]string{"autoscaling:DescribeAutoScalingGroups",
+					"autoscaling:DescribePolicies", "autoscaling:UpdateAutoScalingGroup",
+					"autoscaling:PutScalingPolicy", "ec2:DescribeLaunchTemplateVersions"})
+			case "delete":
+				return sortedDedup([]string{"autoscaling:DeleteAutoScalingGroup",
+					"autoscaling:DescribeAutoScalingGroups"})
+			}
 		case "ebs":
 			// D367. A block volume (capability.storage.block). The volume id is
 			// server-assigned; DescribeVolumes recovers it after a lost create (the
@@ -2320,6 +2378,36 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 				return sortedDedup([]string{
 					"Microsoft.DocumentDB/databaseAccounts/delete",
 					"Microsoft.DocumentDB/databaseAccounts/read"})
+			}
+		case "azvmss":
+			// D372. A fleet (capability.compute.autoscaling). ARM PUT is an UPSERT and
+			// idempotent by name, so virtualMachineScaleSets/read is the quiet read.
+			// Ownership is tags.
+			//
+			// Unlike its two twins there is NO template permission: a scale set holds
+			// its VM profile inline, so `network.publicExposure` is authored here
+			// rather than verified against a resource the fleet only references. The
+			// autoscale permissions are attribute-conditional AND appear on delete
+			// unconditionally — a setting left behind keeps evaluating against a
+			// target that no longer exists.
+			switch operation {
+			case "create", "adopt":
+				p := []string{"Microsoft.Compute/virtualMachineScaleSets/write",
+					"Microsoft.Compute/virtualMachineScaleSets/read"}
+				if on, _ := attrs["autoscaling.enabled"].(bool); on {
+					p = append(p, "Microsoft.Insights/autoscalesettings/write",
+						"Microsoft.Insights/autoscalesettings/read")
+				}
+				return sortedDedup(p)
+			case "update":
+				return sortedDedup([]string{"Microsoft.Compute/virtualMachineScaleSets/read",
+					"Microsoft.Compute/virtualMachineScaleSets/write",
+					"Microsoft.Insights/autoscalesettings/read",
+					"Microsoft.Insights/autoscalesettings/write"})
+			case "delete":
+				return sortedDedup([]string{"Microsoft.Compute/virtualMachineScaleSets/delete",
+					"Microsoft.Compute/virtualMachineScaleSets/read",
+					"Microsoft.Insights/autoscalesettings/delete"})
 			}
 		case "azimage":
 			// D370. A machine image (capability.compute.image), WITNESSED not authored

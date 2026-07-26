@@ -36,16 +36,17 @@ func (d *Driver) ServiceCapabilities() map[string]string {
 		"roleassignment": "capability.authorization.grant", // discoverRoleAssignments (literal)
 
 		// --- gap batch A (discover_gap_azure_a.go) ---
-		"acr":        "capability.registry.image",     // discoverACR (discoverRegional arg)
-		"azdisk":     "capability.storage.block",      // discoverAzureDisks
-		"azimage":    "capability.compute.image",      // discoverAzureImages (witness, D370)
-		"azvm":       "capability.compute.instance",   // discoverAzureVMs
-		"aisearch":   "capability.search.index",       // discoverAISearch (discoverRegional arg)
-		"apim":       "capability.apigateway.http",    // discoverAPIM (discoverRegional arg)
-		"azkafka":    "capability.messaging.kafka",    // discoverAzKafka (discoverRegional arg)
-		"azurefiles": "capability.storage.filesystem", // discoverAzureFiles -> azFilesShareLeaves (literal)
-		"azurecdn":   "capability.cdn.distribution",   // discoverAzureCDN -> azcdnEndpointLeaves (literal)
-		"dnszone":    "capability.dns.zone",           // discoverDNSZone -> dnszoneZonesOfKind (literal, both pub+priv)
+		"acr":        "capability.registry.image",      // discoverACR (discoverRegional arg)
+		"azdisk":     "capability.storage.block",       // discoverAzureDisks
+		"azimage":    "capability.compute.image",       // discoverAzureImages (witness, D370)
+		"azvmss":     "capability.compute.autoscaling", // discoverAzureVMSS
+		"azvm":       "capability.compute.instance",    // discoverAzureVMs
+		"aisearch":   "capability.search.index",        // discoverAISearch (discoverRegional arg)
+		"apim":       "capability.apigateway.http",     // discoverAPIM (discoverRegional arg)
+		"azkafka":    "capability.messaging.kafka",     // discoverAzKafka (discoverRegional arg)
+		"azurefiles": "capability.storage.filesystem",  // discoverAzureFiles -> azFilesShareLeaves (literal)
+		"azurecdn":   "capability.cdn.distribution",    // discoverAzureCDN -> azcdnEndpointLeaves (literal)
+		"dnszone":    "capability.dns.zone",            // discoverDNSZone -> dnszoneZonesOfKind (literal, both pub+priv)
 
 		// --- gap batch B (discover_gap_azure_b.go) ---
 		"metricalert":    "capability.monitoring.alert",     // discoverMetricAlert (discoverGapBGlobal arg)

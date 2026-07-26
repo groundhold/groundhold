@@ -399,8 +399,8 @@ after the slice.
 
 ## Since the vertical slice (the short version)
 
-- **Breadth**: 142 service mappings across AWS (53), GCP (45) and Azure (44),
-  fulfilling 49/44/44 distinct capability TYPES respectively — one type is often
+- **Breadth**: 145 service mappings across AWS (54), GCP (46) and Azure (45),
+  fulfilling 50/45/45 distinct capability TYPES respectively — one type is often
   reached by several services (rds and aurora both fulfil
   `capability.database.relational`, D76). Counts are read from the drivers' own
   certified `ServiceCapabilities()` maps, not from prose. Reached through a

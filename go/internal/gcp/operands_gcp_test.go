@@ -134,6 +134,7 @@ func TestConsumedOperandsExactSets(t *testing.T) {
 		"pd": {"disk_type", "kms_key_name", "replica_zones", "size_gb", "source_snapshot", "zone"},
 		// a witness (D370) has no operands: nothing is built, so nothing is configured
 		"computeimage": {},
+		"mig":          {"instance_template", "region", "target_cpu_utilization", "zone"},
 	}
 	// this test's case map must itself cover every certified service — guards
 	// against a service being silently added to the map above without a
