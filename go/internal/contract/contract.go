@@ -65,6 +65,7 @@ var capabilityTypesV01 = map[string]bool{
 	"capability.email.sending":            true,
 	"capability.ai.inference":             true,
 	"capability.ai.speech":                true,
+	"capability.compute.instance":         true,
 	"capability.cost.budget":              true,
 	"capability.observability.changefeed": true,
 	"capability.network.loadbalancer":     true,

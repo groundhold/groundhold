@@ -1,0 +1,95 @@
+# Attribute vocabulary for capability.compute.instance, spec v0.1 (D357).
+#
+# A virtual machine as a governed capability — EC2 / Compute Engine / Azure VM.
+# The most-expected cloud primitive, and until now the most conspicuous absence:
+# the type did not exist, no document said why, and a reader was left to guess
+# whether that was principle or oversight. It was oversight. This closes it.
+#
+# THE TENSION, STATED RATHER THAN AVOIDED. A VM is the canonical "pet", and a
+# declarative contract is at its weakest describing pets. The resolution is that
+# the contract does NOT govern the machine's identity, its shell history or what
+# someone installed on it by hand. It governs the properties an organization is
+# accountable for: where it runs, whether its disks are encrypted with a key the
+# customer can revoke, whether anything from the internet can reach it, and what
+# it costs. Those are facts about a capability, observable and provable, and they
+# do not become less true because the workload inside is imperative.
+#
+# STATEFUL (D47). Retiring an instance destroys its disks, so retirement is data
+# loss: the delete_stateful autonomy gate binds it and replacement needs explicit
+# allow_replace_stateful consent. This is the difference from
+# capability.workload.container, which is stateless by definition.
+#
+# DELIBERATELY ABSENT: instance type/size, image id, SSH keys, user-data, disk
+# type and disk size. Every one is an operator OPERAND (the free-form
+# implementation block, D26) — sizing and flags are implementation noise, not
+# capability semantics, and admitting them here would turn the vocabulary into a
+# provisioning API.
+#
+# NOT IN THIS TYPE: autoscaling. A group (ASG / MIG / VMSS) expresses CAPACITY
+# and an instance expresses a MACHINE; putting replicas.minimum on a single VM
+# would make it meaningless. The group is its own capability, next.
+#
+# One TYPE, many services (D76): aws.ec2, gcp.computeengine, azure.vm.
+
+capability: capability.compute.instance
+version: 0.1
+stateful: true   # D47: retirement destroys the attached disks
+
+attributes:
+
+  location.region:
+    kind: string
+    description: The region the instance runs in — the residency surface for anything on its disks
+    mappings:
+      aws.ec2: the instance's region
+      gcp.computeengine: the region of the instance's zone
+      azure.vm: the virtual machine's location
+
+  availability.class:
+    kind: string
+    enum: [zonal, regional]
+    description: Whether the instance's placement is pinned to one availability zone. A single VM is zonal; regional placement is a property of a group, not a machine.
+    mappings:
+      aws.ec2: derived from the subnet's availability zone
+      gcp.computeengine: zonal for a standard instance
+      azure.vm: zonal when an availability zone is set
+
+  network.publicExposure:
+    kind: bool
+    description: Whether any path from the public internet to the instance exists — a public address, not merely an open security-group rule
+    mappings:
+      aws.ec2: a public or elastic IP is associated
+      gcp.computeengine: the network interface has an external IP
+      azure.vm: a public IP is attached to the NIC
+
+  encryption.atRest:
+    kind: bool
+    description: Whether the instance's attached disks are encrypted at rest
+    mappings:
+      aws.ec2: EBS volume encryption state
+      gcp.computeengine: persistent disk encryption (always on; CMEK reported separately)
+      azure.vm: managed disk encryption state
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: Disks are encrypted with a CUSTOMER-managed key (CMEK/KMS), not merely the provider's default key — an independently revocable key, which is what a BYOK control actually means
+    mappings:
+      aws.ec2: the volume's KMS key is customer-managed, not the aws/ebs default
+      gcp.computeengine: the disk carries a customer-managed encryption key
+      azure.vm: the disk uses a disk-encryption set backed by a customer key
+
+  cost.monthly:
+    kind: money
+    description: Projected monthly cost of the instance — a projection from published rates, never a quote
+    mappings:
+      aws.ec2: on-demand rate for the instance type in the region
+      gcp.computeengine: on-demand rate for the machine type in the region
+      azure.vm: pay-as-you-go rate for the VM size in the region
+
+  service.managed:
+    kind: bool
+    description: Whether groundhold manages this instance's lifecycle (the machine is self-operated compute by nature; this says who owns its existence, not who runs the software inside)
+    mappings:
+      aws.ec2: const true when observed through the driver
+      gcp.computeengine: const true when observed through the driver
+      azure.vm: const true when observed through the driver

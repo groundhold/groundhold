@@ -10323,3 +10323,34 @@ precisely the job it exists for, and it caught a defect written by the same sess
 finished congratulating itself on gating that defect class. The lesson is not "be more careful" — it is
 that a gate is only trustworthy where its subject exists, and asking WHERE a check is meaningful is part
 of writing it, not a detail to discover in production.
+
+## D357. Virtual machines: the absence was oversight, not principle
+An inventory prompted by a direct question — "seriously, no EC2? no GCE?" — confirmed it: no capability
+type for a virtual machine on any cloud, and no entry anywhere explaining the omission. The EC2 API is
+called constantly, but only for VPCs, subnets and VPN gateways; no driver has ever created a machine
+outside a managed node group. Fifty-three capability types covered API gateways, warehouses, WAFs and
+speech recognition, and not the single primitive most people mean by "cloud".
+The gap analysis found this to be the ONLY missing family — everything else a mainstream engineer
+expects is present on all three clouds — which made the silence worse rather than better. A project this
+deliberate about recording what it will not do had said nothing about the most expected thing of all,
+and a reader fills that silence themselves, wrongly. The decision, taken explicitly rather than left
+implicit: build it.
+The tension is real and is stated in the vocabulary rather than avoided. A VM is the canonical pet, and
+a declarative contract is at its weakest describing pets. The resolution is that the contract does not
+govern the machine's identity, its shell history, or what someone installed by hand; it governs what the
+organization is accountable for — where it runs, whether a customer-revocable key encrypts its disks,
+whether anything from the internet can reach it, and what it costs. Those remain facts about a
+capability, observable and provable, and they do not become less true because the workload inside is
+imperative.
+Two shaping decisions. The type is STATEFUL (D47): retiring an instance destroys its disks, so the
+delete_stateful gate binds it and replacement needs explicit consent — the difference from
+capability.workload.container, which is stateless by definition. And autoscaling is NOT an attribute
+here: a group expresses CAPACITY while an instance expresses a MACHINE, so `replicas.minimum` on a single
+VM would be meaningless. The group is its own capability, as are block storage and images. Instance type,
+image id, SSH keys, user-data, disk type and disk size are operator OPERANDS (D26) — admitting sizing and
+flags into the vocabulary would turn it into a provisioning API.
+Shipped as the vocabulary slice (D10), the shape that worked for D350: the type, registration in both
+implementations, three DUAL conformance cases — residency/CMK/exposure satisfied, public exposure
+violated, and the availability-class enum enforced — and a regenerated parity matrix reading `unbuilt` on
+all three clouds, which is the truthful state until the drivers exist. Those drivers are the next slice
+and are held to the five-layer authoring standard, symmetrically across AWS, GCP and Azure.
