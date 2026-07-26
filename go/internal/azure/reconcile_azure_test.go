@@ -60,6 +60,7 @@ func reconRows() []struct{ svc, pid string } {
 	alog := activityLogName("prod", "sessions", 1)
 	return []struct{ svc, pid string }{
 		{"vnet", vnetProviderID(testSub, "rg1", "res1")},
+		{"azvm", azureVMProviderID(testSub, "rg1", "pv-vm-abc123456789")},
 		{"cosmos", cosmosProviderID(testSub, "rg1", "acct1")},
 		{"keyvault", keyVaultProviderID(testSub, "rg1", "vault1")},
 		{"rediscache", redisAzureProviderID(testSub, "rg1", "res1")},

@@ -48,6 +48,7 @@ func (d *Driver) ServiceCapabilities() map[string]string {
 		"cloudfront":             "capability.cdn.distribution",         // discoverCloudFront
 		"cloudwatchdash":         "capability.monitoring.dashboard",     // discoverCloudWatchDashboards
 		"custompolicy":           "capability.authorization.role",       // discoverCustomPolicies
+		"ec2":                    "capability.compute.instance",         // discoverEC2Instances
 		"efs":                    "capability.storage.filesystem",       // discoverEFS
 		"eventbridgescheduler":   "capability.scheduler.cron",           // discoverEventBridgeSchedulers
 		"kinesis":                "capability.streaming.pipe",           // discoverKinesis

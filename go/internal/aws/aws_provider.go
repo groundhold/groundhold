@@ -12,7 +12,7 @@ import (
 
 func (d *Driver) requireService(service string) error {
 	switch service {
-	case "s3", "rds", "ecs", "apprunner", "vpc", "sns", "sqs", "secretsmanager", "elasticache", "elasticache-serverless", "route53", "route53record", "rolepolicy", "custompolicy", "cloudwatch", "cloudwatchdash", "route53health", "cwlogfilter", "ecr", "efs", "dynamodb", "opensearch", "opensearch-serverless", "kinesis", "msk", "waf", "acm", "cloudfront", "apigateway", "iam", "redshiftserverless", "eventbridgescheduler", "kms", "vpngateway", "backupvault", "changefeed", "loadbalancer", "eks", "eks-addon", "eks-podidentity", "ses-sending", "ses-inbound", "aurora", "bedrock", "budgets", "cloudtrail", "backupplan", "guardduty", "cwlogs", "lambda":
+	case "s3", "rds", "ecs", "apprunner", "vpc", "sns", "sqs", "secretsmanager", "elasticache", "elasticache-serverless", "route53", "route53record", "rolepolicy", "custompolicy", "cloudwatch", "cloudwatchdash", "route53health", "cwlogfilter", "ecr", "efs", "dynamodb", "opensearch", "opensearch-serverless", "kinesis", "msk", "waf", "acm", "cloudfront", "apigateway", "iam", "redshiftserverless", "eventbridgescheduler", "kms", "vpngateway", "backupvault", "changefeed", "loadbalancer", "eks", "eks-addon", "eks-podidentity", "ses-sending", "ses-inbound", "aurora", "bedrock", "budgets", "cloudtrail", "backupplan", "guardduty", "cwlogs", "lambda", "ec2":
 		if d.Region != "" && !regionOK.MatchString(d.Region) {
 			return fmt.Errorf("aws driver: pinned region %q is not valid", d.Region)
 		}
@@ -131,6 +131,9 @@ func (d *Driver) Validate(service, capability, environment string,
 		return err
 	case "ecr":
 		_, err := BuildECR(environment, capability, attrs, impl, generation)
+		return err
+	case "ec2":
+		_, err := BuildEC2InstanceCreate(environment, capability, attrs, impl, generation)
 		return err
 	case "efs":
 		_, err := BuildEFSCreate(environment, capability, attrs, impl, generation)
@@ -425,6 +428,12 @@ func (d *Driver) createService(service, capability, environment string,
 			return *r
 		}
 		return d.createACM(region, account, environment, capability, attrs, impl, generation)
+	case "ec2":
+		region, account, r := d.createScope(attrs)
+		if r != nil {
+			return *r
+		}
+		return d.createEC2Instance(region, account, environment, capability, attrs, impl, generation)
 	case "efs":
 		region, account, r := d.createScope(attrs)
 		if r != nil {
@@ -698,6 +707,8 @@ func (d *Driver) Observe(service, capability, providerID string) ([]provider.Obs
 		return d.observeCWLogFilter(capability, providerID)
 	case "ecr":
 		return d.observeECR(capability, providerID)
+	case "ec2":
+		return d.observeEC2Instance(capability, providerID)
 	case "efs":
 		return d.observeEFS(capability, providerID)
 	case "dynamodb":
@@ -808,6 +819,8 @@ func (d *Driver) Delete(service, capability, environment, providerID, key string
 		return d.deleteCWLogFilter(capability, environment, providerID)
 	case "ecr":
 		return d.deleteECR(capability, environment, providerID)
+	case "ec2":
+		return d.deleteEC2Instance(capability, environment, providerID)
 	case "efs":
 		return d.deleteEFS(capability, environment, providerID)
 	case "dynamodb":
@@ -889,6 +902,8 @@ func (d *Driver) Delete(service, capability, environment, providerID, key string
 func (d *Driver) ClassifyChange(service, path string, current, desired any,
 	impl map[string]any) (string, string) {
 	switch service {
+	case "ec2":
+		return classifyEC2InstanceChange(path)
 	case "s3":
 		return classifyS3Change(path, desired, impl)
 	case "apprunner":

@@ -682,6 +682,32 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			case "delete":
 				return sortedDedup([]string{"logging.logMetrics.delete", "logging.logMetrics.get"})
 			}
+		case "gce":
+			// D359. A virtual machine (capability.compute.instance). instances.insert
+			// takes no idempotency key, so the deterministic NAME is the mechanism and
+			// instances.get is the quiet read (409 continuation + delete pre-read).
+			// Ownership is labels. A customer-managed disk key adds the KMS encrypt/
+			// decrypt pair, which the platform-managed default does not need.
+			switch operation {
+			case "create", "adopt":
+				p := []string{"compute.instances.create", "compute.instances.get",
+					"compute.disks.create", "compute.subnetworks.use", "compute.zoneOperations.get"}
+				if cmk, _ := attrs["encryption.customerManagedKeys"].(bool); cmk {
+					p = append(p, "cloudkms.cryptoKeys.get",
+						"cloudkms.cryptoKeyVersions.useToEncrypt")
+				}
+				if public, _ := attrs["network.publicExposure"].(bool); public {
+					p = append(p, "compute.subnetworks.useExternalIp")
+				}
+				return sortedDedup(p)
+			case "update":
+				// Every governed attribute is immutable on a machine (D357/D359), so an
+				// update is a read plus the replacement the compiler plans.
+				return sortedDedup([]string{"compute.instances.get"})
+			case "delete":
+				return sortedDedup([]string{"compute.instances.delete",
+					"compute.instances.get", "compute.zoneOperations.get"})
+			}
 		case "artifactregistry":
 			// D110. A container image registry (capability.registry.image). LRO create/
 			// delete; repositories.get is the quiet read. Public exposure adds the IAM
@@ -1563,6 +1589,23 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 				return sortedDedup([]string{"ecr:DeleteRepository",
 					"ecr:DescribeRepositories", "ecr:ListTagsForResource"})
 			}
+		case "ec2":
+			// D358. A virtual machine (capability.compute.instance). The instance id is
+			// server-assigned; DescribeInstances recovers it after a lost create (the
+			// ClientToken is deterministic). Ownership is tags. DescribeVolumes is the
+			// disk-encryption read — an observe that cannot make it reports the fact
+			// as unread rather than defaulting it.
+			switch operation {
+			case "create", "adopt":
+				return sortedDedup([]string{"ec2:RunInstances", "ec2:DescribeInstances",
+					"ec2:DescribeVolumes", "ec2:CreateTags"})
+			case "update":
+				// Every governed attribute is immutable on a machine (D358), so an
+				// update is a read plus the replacement the compiler plans.
+				return sortedDedup([]string{"ec2:DescribeInstances", "ec2:DescribeVolumes"})
+			case "delete":
+				return sortedDedup([]string{"ec2:TerminateInstances", "ec2:DescribeInstances"})
+			}
 		case "efs":
 			// D111. A managed NFS file share (capability.storage.filesystem). The
 			// file-system id is server-assigned; DescribeFileSystems recovers it after
@@ -2213,6 +2256,31 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 				return sortedDedup([]string{
 					"Microsoft.DocumentDB/databaseAccounts/delete",
 					"Microsoft.DocumentDB/databaseAccounts/read"})
+			}
+		case "azvm":
+			// D360. A virtual machine (capability.compute.instance). ARM PUT is an
+			// UPSERT and idempotent by name, so virtualMachines/read is the quiet read
+			// (foreign-upsert refusal + delete pre-read). networkInterfaces/read is the
+			// public-exposure read: on Azure the address belongs to the interface, not
+			// the machine, so observing exposure needs a second permission.
+			switch operation {
+			case "create", "adopt":
+				p := []string{"Microsoft.Compute/virtualMachines/write",
+					"Microsoft.Compute/virtualMachines/read",
+					"Microsoft.Network/networkInterfaces/read",
+					"Microsoft.Network/networkInterfaces/join/action"}
+				if cmk, _ := attrs["encryption.customerManagedKeys"].(bool); cmk {
+					p = append(p, "Microsoft.Compute/diskEncryptionSets/read")
+				}
+				return sortedDedup(p)
+			case "update":
+				// Every governed attribute is immutable on a machine (D357), so an
+				// update is a read plus the replacement the compiler plans.
+				return sortedDedup([]string{"Microsoft.Compute/virtualMachines/read",
+					"Microsoft.Network/networkInterfaces/read"})
+			case "delete":
+				return sortedDedup([]string{"Microsoft.Compute/virtualMachines/delete",
+					"Microsoft.Compute/virtualMachines/read"})
 			}
 		case "aisearch":
 			// D113. A managed search service (capability.search.index). searchServices/

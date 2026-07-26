@@ -43,6 +43,8 @@ func queryXMLRole(_ *http.Request, body []byte) certifynet.Role {
 		return certifynet.RoleRead
 	case action == "CreateVpc":
 		return certifynet.RoleMutateParsed // vpcId becomes the providerId
+	case action == "RunInstances":
+		return certifynet.RoleMutateParsed // instanceId becomes the providerId (D358)
 	default:
 		// CreateSubnet's id is NOT consumed at create time (delete re-enumerates
 		// via DescribeSubnets), so it is an opaque status-only mutation.

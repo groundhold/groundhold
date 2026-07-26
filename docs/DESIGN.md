@@ -10354,3 +10354,74 @@ implementations, three DUAL conformance cases — residency/CMK/exposure satisfi
 violated, and the availability-class enum enforced — and a regenerated parity matrix reading `unbuilt` on
 all three clouds, which is the truthful state until the drivers exist. Those drivers are the next slice
 and are held to the five-layer authoring standard, symmetrically across AWS, GCP and Azure.
+
+## D359. The GCE twin — where a shared vocabulary must diverge, and where it must not
+capability.compute.instance now has its second driver, which is what the symmetry rule asks for: a
+capability domain lands on AWS and GCP together, never on one cloud with a promise about the other.
+`spec/parity.yaml` reads `fulfilled: [ec2]` and `fulfilled: [gce]`; Azure stays `unbuilt` and says so.
+The capability/operand split is IDENTICAL to the EC2 twin, and deliberately so — it is a property of
+the vocabulary rather than of a cloud. The contract governs residency, public exposure and disk
+encryption; the machine type, image, zone and subnetwork are operator operands (D26). Neither driver
+invents a default size or a default image, for the same reason on both clouds: a guess provisions
+capacity nobody asked for and bills for it.
+Three divergences are real, and each is stated in the driver rather than smoothed over.
+(1) **Compute Engine encrypts every persistent disk and cannot be told not to.** So
+`encryption.atRest: false` is REFUSED as unhonorable, where the EC2 twin honors both values because
+EBS genuinely can be unencrypted. The same vocabulary entry, two different honest behaviours. It also
+changes the change-classifier verdict: `unsupported` on GCP (nothing to patch) versus `immutable` on
+AWS (fixed at volume creation) — a distinction worth keeping, because "cannot be changed" and "does
+not exist as a setting" are different facts.
+(2) **Public exposure is the PRESENCE of an accessConfig, not a boolean field.** A private instance
+carries no block at all; there is no `false` to write. The reverse mapping therefore reads presence,
+and a test pins that an empty block never appears — an empty accessConfigs still requests an address.
+(3) **The deterministic NAME is the idempotency mechanism** (D43), because instances.insert takes no
+idempotency key where RunInstances takes a ClientToken. That makes the 409 path load-bearing: a name
+conflict is resolved by READING the existing instance and checking OUR labels. A machine with the
+right name and someone else's labels is a refusal, never an adoption — binding it would put a
+stranger's server under this contract.
+One rule this driver adds that the AWS twin does not have: **the contract's region is checked AGAINST
+the operand's zone.** A contract saying europe-west1 with a zone operand of us-central1-a is refused.
+Without that check the machine would be created in the operand's region and REPORTED in the
+contract's, which would make a residency verdict a lie — the one failure this project cannot afford
+to let through, and the reason the check belongs in the pure core rather than in a review comment.
+Notably, no second operation poller was written. `computeInsert` and `pollComputeOperation` already
+carry the D29 discipline for this API family, and their scope argument takes "zones/<zone>" as readily
+as "global" or "regions/<r>". A copy would have diverged, and the copy is always the one missing the
+fix — the same reasoning that made the third occurrence of the crossing-artifact defect (D355) worth
+gating rather than patching again.
+Five layers, both drivers: pure core with golden tests, network shell with httptest, dispatch and
+certification, and the adversarial honesty harness (D87). Both harnesses were proven to have teeth by
+breaking the driver on purpose — EC2 caught http500/http503 reported as `failed`, GCE caught
+garbled200/empty-body reported as `succeeded`. A harness that has never failed is decoration.
+
+## D360. Azure VM completes the compute capability on all three clouds
+`capability.compute.instance` now reads `fulfilled` on AWS, GCP and Azure. The vocabulary landed with a
+recorded decision (D357), EC2 and GCE closed the symmetry rule (D358/D359), and this is the third cloud
+the rule allows to follow.
+Azure diverges in one way neither twin does, and it is a genuinely interesting modelling problem:
+**public exposure is not a property of the machine at all.** An Azure VM references a network interface,
+and the interface carries the public address. The pure core therefore CANNOT decide exposure — it records
+what the contract asked for, and the shell reads the NIC to observe what is true. When that second read
+fails, the attribute is reported UNREAD rather than defaulted, because a silent `false` would pass an
+"is it private?" constraint on a machine that may be sitting on the internet. The change classifier says
+`unsupported` for the same reason: changing exposure is an edit to a resource this driver does not own.
+Two decisions worth keeping. **A password operand is refused outright** — `admin_password` and `password`
+are rejected before anything else is read, so the refusal does not depend on the rest of the document
+being valid, and `disablePasswordAuthentication` is set structurally rather than left to convention. A
+candidate is a reviewed, stored document; accepting a credential "just this once" is how secrets reach
+git. And the SSH key operand is validated as a PUBLIC key, which cheaply catches the worst paste.
+**Managed disks are always encrypted**, so `encryption.atRest: false` is refused — the same call GCE
+makes, and for the same reason. Only EC2 honors `false`, because EBS genuinely can be unencrypted. Three
+clouds, one vocabulary entry, three honest behaviours; the classifier records the distinction between
+"cannot be changed" (immutable) and "does not exist as a setting" (unsupported).
+The wiring was again driven by gates rather than by a checklist, and Azure's are stricter than the other
+two: beyond certification, permissions and discoverability, it demanded a Validate-dispatch FIXTURE (so
+the switch is proven to route to the right builder, not merely that the builder works), a RECONCILE row
+and its implementation, and registration of the API version in the drift registry (D335). The NIC read
+deliberately reuses the already-registered Microsoft.Network version instead of pinning a second one:
+every distinct pin is drift surface the canary must watch.
+Also fixed here, and worth recording as its own lesson: the README still claimed every release carries a
+SLSA attestation. D354 corrected the workflow that GENERATES release notes and the live v0.1.4 notes, but
+the README makes that claim SEPARATELY, and the audit had looked at the release path rather than at every
+document repeating its promise. A fix applied where a falsehood was reported is not the same as a fix
+applied everywhere it was written.

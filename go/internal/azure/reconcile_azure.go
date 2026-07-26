@@ -87,6 +87,8 @@ func (d *Driver) Reconcile(capability, environment string,
 		return d.reconcileRedis(capability, environment, pid)
 	case "acr":
 		return d.reconcileACR(capability, environment, pid)
+	case "azvm":
+		return d.reconcileAzureVM(capability, environment, pid)
 	case "aisearch":
 		return d.reconcileAISearch(capability, environment, pid)
 	case "frontdoorwaf":
@@ -326,6 +328,18 @@ func (d *Driver) reconcileACR(capability, environment, pid string) provider.Reco
 	}
 	return d.reconcileStdARM(pid, sub, rg, "Microsoft.ContainerRegistry/registries/"+name,
 		acrAPIVersion, "container registry "+name, capability, environment)
+}
+
+// reconcileAzureVM concludes a create whose outcome was lost: the machine's name
+// is deterministic, so the standard ARM reconcile can find it, check that it is
+// ours and report whether the create actually landed (D360).
+func (d *Driver) reconcileAzureVM(capability, environment, pid string) provider.ReconcileResult {
+	sub, rg, name, err := splitAzureVMProviderID(pid)
+	if err != nil {
+		return badPidReconcile("azvm", err)
+	}
+	return d.reconcileStdARM(pid, sub, rg, d.azureVMPath(name), azureVMAPIVersion,
+		"virtual machine "+name, capability, environment)
 }
 
 func (d *Driver) reconcileAISearch(capability, environment, pid string) provider.ReconcileResult {

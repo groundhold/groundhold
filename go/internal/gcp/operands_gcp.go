@@ -37,6 +37,7 @@ var gcpConsumedOperands = map[string][]string{
 	"dashboard":            {},
 	"uptime":               {"port"},
 	"logmetric":            {"value_field"},
+	"gce":                  {"disk_size_gb", "kms_key_name", "machine_type", "source_image", "subnetwork", "zone"},
 	"artifactregistry":     {"kms_key"},
 	"filestore":            {"capacity_gb", "kms_key_name", "network"},
 	"firestore":            {"kms_key_name"},

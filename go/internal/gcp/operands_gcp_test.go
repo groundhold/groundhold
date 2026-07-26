@@ -126,6 +126,8 @@ func TestConsumedOperandsExactSets(t *testing.T) {
 		"gke":                  {"nodePool"},
 		"gke-addon":            {"clusterName", "location"},
 		"gke-workloadidentity": {"clusterProject", "gsaEmail"},
+		// naming trap: the GCE key operand is kms_key_name, unlike artifactregistry's kms_key
+		"gce": {"disk_size_gb", "kms_key_name", "machine_type", "source_image", "subnetwork", "zone"},
 	}
 	// this test's case map must itself cover every certified service — guards
 	// against a service being silently added to the map above without a
