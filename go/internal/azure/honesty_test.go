@@ -789,3 +789,66 @@ func TestHonestyHarnessAzureKey(t *testing.T) {
 	}
 	certifynet.CertifyDriverNet(t, p)
 }
+
+// azDiskHarnessFake answers the happy path for the managed-disk probe: a PUT that
+// succeeds, a GET that returns a readable disk carrying our tags, a DELETE that
+// works. certifynet then injects transport faults, 5xx, garbled and empty bodies
+// into each mutating call and checks the driver never converts an unknown outcome
+// into a definite one.
+func azDiskHarnessFake() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"location":"swedencentral","sku":{"name":"Premium_LRS"},
+"tags":{"groundhold-capability":"orders-data","groundhold-environment":"prod"},
+"properties":{"provisioningState":"Succeeded"}}`))
+	}))
+}
+
+// The adversarial honesty pass for the Azure half of capability.storage.block
+// (D369). ARM's PUT is an UPSERT, which is why the foreign-upsert refusal (D254)
+// carries more weight here than on a stateless resource: a name collision that
+// wrote anyway would not misconfigure somebody else's disk, it would overwrite
+// their data.
+func TestHonestyHarnessAzureDisk(t *testing.T) {
+	pid := azureDiskProviderID(testSub, "rg1", "pv-disk-orders-data-prod-abcd1234")
+	p := &certifynet.Probe{
+		Name:            "azure/azdisk",
+		AssertTransient: true, // D237 sweep
+		Classify:        armRole,
+		OwnerTagValue:   "orders-data",
+		DeterministicID: true, // the disk name is a deterministic hash
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver(testSub)
+			d.BaseURL = happyURL
+			d.HTTP = &http.Client{Transport: rt}
+			d.token = "test-token"
+			d.Now = time.Now
+			d.PollInterval = time.Millisecond
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Ops: []certifynet.Op{
+			{
+				Name:  "create",
+				Happy: azDiskHarnessFake,
+				Run: func(pr provider.Provider) provider.CreateResult {
+					return pr.Create("azdisk", "orders-data", "prod", azDiskAttrs(),
+						map[string]any{"resource_group": "rg1", "disk_sku": "Premium_LRS", "size_gb": 100},
+						"k", 1)
+				},
+			},
+			{
+				Name:  "delete",
+				Happy: azDiskHarnessFake,
+				Run: func(pr provider.Provider) provider.CreateResult {
+					return pr.Delete("azdisk", "orders-data", "prod", pid, "k")
+				},
+			},
+		},
+	}
+	certifynet.CertifyDriverNet(t, p)
+}

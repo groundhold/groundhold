@@ -89,6 +89,8 @@ func (d *Driver) Reconcile(capability, environment string,
 		return d.reconcileACR(capability, environment, pid)
 	case "azvm":
 		return d.reconcileAzureVM(capability, environment, pid)
+	case "azdisk":
+		return d.reconcileAzureDisk(capability, environment, pid)
 	case "aisearch":
 		return d.reconcileAISearch(capability, environment, pid)
 	case "frontdoorwaf":
@@ -340,6 +342,23 @@ func (d *Driver) reconcileAzureVM(capability, environment, pid string) provider.
 	}
 	return d.reconcileStdARM(pid, sub, rg, d.azureVMPath(name), azureVMAPIVersion,
 		"virtual machine "+name, capability, environment)
+}
+
+// reconcileAzureDisk concludes a create whose outcome was lost: the disk's name
+// is deterministic, so the standard ARM reconcile can find it, check that it is
+// ours and report whether the create actually landed (D369).
+//
+// This matters more on a stateful capability than anywhere else. Without it a
+// lost create leaves an operator with a disk they cannot see and cannot be told
+// about — and the safe next step, creating another one, is how the data ends up
+// split across two.
+func (d *Driver) reconcileAzureDisk(capability, environment, pid string) provider.ReconcileResult {
+	sub, rg, name, err := splitAzureDiskProviderID(pid)
+	if err != nil {
+		return badPidReconcile("azdisk", err)
+	}
+	return d.reconcileStdARM(pid, sub, rg, d.azureDiskPath(name), azureDiskAPIVersion,
+		"managed disk "+name, capability, environment)
 }
 
 func (d *Driver) reconcileAISearch(capability, environment, pid string) provider.ReconcileResult {

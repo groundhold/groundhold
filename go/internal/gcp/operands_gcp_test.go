@@ -128,6 +128,12 @@ func TestConsumedOperandsExactSets(t *testing.T) {
 		"gke-workloadidentity": {"clusterProject", "gsaEmail"},
 		// naming trap: the GCE key operand is kms_key_name, unlike artifactregistry's kms_key
 		"gce": {"disk_size_gb", "kms_key_name", "machine_type", "source_image", "subnetwork", "zone"},
+		// naming trap: a standalone disk sizes with size_gb, while the same disk as
+		// a GCE boot operand is disk_size_gb — one concept, two spellings, and a
+		// silently ignored operand is exactly what this registry exists to prevent
+		"pd": {"disk_type", "kms_key_name", "replica_zones", "size_gb", "source_snapshot", "zone"},
+		// a witness (D370) has no operands: nothing is built, so nothing is configured
+		"computeimage": {},
 	}
 	// this test's case map must itself cover every certified service — guards
 	// against a service being silently added to the map above without a

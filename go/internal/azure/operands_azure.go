@@ -20,10 +20,13 @@ import "groundhold/internal/provider"
 // Naming trap kept verbatim: dnsrecord reads camelCase "resourceGroup" while
 // every other service reads snake_case "resource_group".
 var azureConsumedOperands = map[string][]string{
-	"acr":                  {"key_vault_key", "resource_group"},
-	"acsemail":             {"domain", "domain_management", "email_service_name", "resource_group"},
-	"activitylog":          {"destination", "diagnosticSettingName", "kms_key_name", "log_categories"},
-	"azvm":                 {"admin_username", "disk_encryption_set_id", "image_reference", "network_interface_id", "os_disk_size_gb", "resource_group", "ssh_public_key", "vm_size"},
+	"acr":         {"key_vault_key", "resource_group"},
+	"acsemail":    {"domain", "domain_management", "email_service_name", "resource_group"},
+	"activitylog": {"destination", "diagnosticSettingName", "kms_key_name", "log_categories"},
+	"azvm":        {"admin_username", "disk_encryption_set_id", "image_reference", "network_interface_id", "os_disk_size_gb", "resource_group", "ssh_public_key", "vm_size"},
+	"azdisk":      {"disk_encryption_set_id", "disk_sku", "resource_group", "size_gb", "source_resource_id", "zone"},
+	// a witness has no operands: nothing is built, so there is nothing to configure
+	"azimage":              {},
 	"aisearch":             {"resource_group"},
 	"aks":                  {"authorizedIPRanges", "clusterName", "dnsPrefix", "identity", "kmsKeyId", "nodePool", "resource_group", "userAssignedIdentityId"},
 	"aks-addon":            {"addon_config", "clusterName", "resource_group"},

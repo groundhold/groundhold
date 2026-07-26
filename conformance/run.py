@@ -419,6 +419,16 @@ def run_plan_case_cli(case: dict, impl: list[str]) -> list[str]:
             if cap not in got_unver:
                 failures.append(f"unverified: expected capability {cap!r}, "
                                 f"got {sorted(got_unver)}")
+    # witnessed (D177): capabilities the plan VERIFIES but never authors. A case
+    # that only asserted `absentActions` would also pass if the capability had been
+    # dropped from the plan entirely — which is the omission the explicit record
+    # exists to make impossible, so it is asserted positively.
+    if "witnessed" in expect:
+        got_wit = {w["capability"] for w in doc.get("witnessed") or []}
+        for cap in expect["witnessed"]:
+            if cap not in got_wit:
+                failures.append(f"witnessed: expected capability {cap!r}, "
+                                f"got {sorted(got_wit)}")
     if "provider" in expect and doc.get("reads", {}).get("provider") != expect["provider"]:
         failures.append(f"provider: expected {expect['provider']!r}, "
                         f"got {doc.get('reads', {}).get('provider')!r}")

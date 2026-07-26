@@ -34,6 +34,8 @@ var azureServices = map[string]bool{
 	"azurefiles":       true, // capability.storage.filesystem (Microsoft.Storage account+fileShare)
 	"cosmos":           true, // capability.database.nosql (Microsoft.DocumentDB/databaseAccounts)
 	"azvm":             true, // capability.compute.instance (Microsoft.Compute/virtualMachines)
+	"azdisk":           true, // capability.storage.block (Microsoft.Compute/disks)
+	"azimage":          true, // capability.compute.image (Microsoft.Compute/images) — WITNESS
 	"aisearch":         true, // capability.search.index (Microsoft.Search/searchServices)
 	"eventhubs":        true, // capability.streaming.pipe (Microsoft.EventHub namespace+hub)
 	"azkafka":          true, // capability.messaging.kafka (Event Hubs namespace, kafkaEnabled)
@@ -137,6 +139,11 @@ func (d *Driver) Validate(service, capability, environment string,
 	case "azvm":
 		_, err := BuildAzureVM(environment, capability, attrs, impl, generation)
 		return err
+	case "azdisk":
+		_, err := BuildAzureDisk(environment, capability, attrs, impl, generation)
+		return err
+	case "azimage":
+		return errWitnessOnlyAzure("azimage")
 	case "aisearch":
 		_, err := BuildAISearch(environment, capability, attrs, impl, generation)
 		return err
@@ -289,6 +296,10 @@ func (d *Driver) createService(service, capability, environment string,
 		return d.createCosmos(environment, capability, attrs, impl, generation)
 	case "azvm":
 		return d.createAzureVM(environment, capability, attrs, impl, generation)
+	case "azdisk":
+		return d.createAzureDisk(environment, capability, attrs, impl, generation)
+	case "azimage":
+		return provider.CreateResult{Status: "failed", Reason: errWitnessOnlyAzure("azimage").Error()}
 	case "aisearch":
 		return d.createAISearch(environment, capability, attrs, impl, generation)
 	case "eventhubs":
@@ -419,6 +430,10 @@ func (d *Driver) observeDispatch(service, capability, providerID string) ([]prov
 		return d.observeCosmos(capability, providerID)
 	case "azvm":
 		return d.observeAzureVM(capability, providerID)
+	case "azdisk":
+		return d.observeAzureDisk(capability, providerID)
+	case "azimage":
+		return d.observeAzureImage(capability, providerID)
 	case "aisearch":
 		return d.observeAISearch(capability, providerID)
 	case "eventhubs":
@@ -517,6 +532,12 @@ func (d *Driver) Delete(service, capability, environment, providerID, key string
 		return d.deleteCosmos(capability, environment, providerID)
 	case "azvm":
 		return d.deleteAzureVM(capability, environment, providerID)
+	case "azdisk":
+		return d.deleteAzureDisk(capability, environment, providerID)
+	case "azimage":
+		// Deleting an image groundhold never created would destroy something a
+		// pipeline owns, on the strength of a record we only ever read.
+		return provider.CreateResult{Status: "failed", Reason: errWitnessOnlyAzure("azimage").Error()}
 	case "aisearch":
 		return d.deleteAISearch(capability, environment, providerID)
 	case "eventhubs":
@@ -576,6 +597,10 @@ func (d *Driver) ClassifyChange(service, path string, current, desired any,
 	switch service {
 	case "azvm":
 		return classifyAzureVMChange(path)
+	case "azdisk":
+		return classifyAzureDiskChange(path)
+	case "azimage":
+		return classifyAzureImageChange(path)
 	case "acr":
 		return classifyACRChange(path)
 	case "blob":

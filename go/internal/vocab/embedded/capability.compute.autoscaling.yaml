@@ -1,0 +1,108 @@
+# Attribute vocabulary for capability.compute.autoscaling, spec v0.1 (D363).
+#
+# A managed group of interchangeable machines — Auto Scaling group / managed
+# instance group / virtual machine scale set. The third companion to
+# capability.compute.instance (D357), and the one that answers a question the
+# instance type deliberately refused.
+#
+# A GROUP EXPRESSES CAPACITY; AN INSTANCE EXPRESSES A MACHINE. That distinction is
+# why `replicas.minimum` was refused on the instance type and lives here instead:
+# a floor of one machine is meaningless on a single machine, and a floor of three
+# is exactly what a group is for. The same reasoning gives this type the
+# `availability.class=regional` that an instance refuses — spreading across zones
+# is something a GROUP can do and a machine cannot, which is most of the reason
+# groups exist.
+#
+# STATELESS, and this is a claim about the group rather than about its members.
+# Retiring a group destroys no data that the group itself holds; the machines it
+# manages are cattle by construction — interchangeable, replaced on failure,
+# replaced on scale-in. An operator who puts irreplaceable state on a group member
+# has stepped outside what a group means, and no vocabulary can make that safe. A
+# volume that must survive is a capability.storage.block (D361), which IS stateful
+# and IS gated.
+#
+# DELIBERATELY ABSENT: the scaling POLICY — target CPU, cooldowns, schedules,
+# metric sources. A policy is a control loop with its own tuning, it differs
+# structurally across the three clouds, and encoding it here would drag a
+# scheduling language into a contract whose operator set is deliberately closed
+# (invariant 4). What the contract governs is the ENVELOPE the policy must respect:
+# never fewer than this, never more than that. `autoscaling.enabled` records
+# whether a policy exists at all — the difference between a group that scales and a
+# fixed-size fleet, which is a fact and not a tuning parameter.
+#
+# The machine SHAPE (size, image) is an operand, exactly as it is on the instance
+# type. A group's template is implementation, not capability semantics.
+#
+# One TYPE, many services (D76): aws.asg, gcp.mig, azure.vmss.
+
+capability: capability.compute.autoscaling
+version: 0.1
+stateful: false
+
+attributes:
+
+  location.region:
+    kind: string
+    description: The region the group's machines run in — the residency surface for the fleet
+    mappings:
+      aws.asg: the region of the group's subnets
+      gcp.mig: the group's region, or the region of its zone
+      azure.vmss: the scale set's location
+
+  availability.class:
+    kind: string
+    enum: [zonal, regional]
+    description: Whether the group spreads its machines across availability zones. Regional survives losing a zone; zonal does not. Unlike a single instance, a group CAN be regional — which is most of the reason to use one.
+    mappings:
+      aws.asg: regional when the group spans subnets in more than one availability zone
+      gcp.mig: regional for a regional managed instance group, zonal otherwise
+      azure.vmss: regional when the scale set declares more than one zone
+
+  replicas.minimum:
+    kind: number
+    description: Capacity FLOOR — the number of machines that must exist even at zero load. The attribute an instance type has no meaning for, and the reason a group is its own capability.
+    mappings:
+      aws.asg: MinSize
+      gcp.mig: the autoscaler's minNumReplicas, or targetSize when no autoscaler exists
+      azure.vmss: the autoscale profile's minimum capacity, or sku.capacity when fixed
+
+  replicas.maximum:
+    kind: number
+    description: Capacity CEILING — the number of machines the group may never exceed. A cost and blast-radius control, not a performance tuning knob.
+    mappings:
+      aws.asg: MaxSize
+      gcp.mig: the autoscaler's maxNumReplicas
+      azure.vmss: the autoscale profile's maximum capacity
+
+  autoscaling.enabled:
+    kind: bool
+    description: Whether a scaling policy exists at all — the difference between a group that scales and a fixed-size fleet. Records existence, never the policy's tuning.
+    mappings:
+      aws.asg: a scaling policy is attached to the group
+      gcp.mig: an autoscaler is attached to the group
+      azure.vmss: an autoscale setting targets the scale set
+
+  network.publicExposure:
+    kind: bool
+    description: Whether the group's machines receive public addresses — a fleet-wide fact, and one that is set once in a template and inherited by every machine created afterwards
+    mappings:
+      aws.asg: the launch template associates a public IP
+      gcp.mig: the instance template's network interface has an external IP
+      azure.vmss: the scale set's network profile assigns public IPs
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost of the group at its capacity FLOOR — a projection from published rates, never a quote, and never the ceiling (which is a risk, not a bill)
+    mappings:
+      aws.asg: MinSize × the instance type's on-demand rate
+      gcp.mig: the floor × the machine type's on-demand rate
+      azure.vmss: the floor × the VM size's pay-as-you-go rate
+
+  service.managed:
+    kind: bool
+    description: Whether groundhold manages this group's lifecycle
+    mappings:
+      aws.asg: const true when observed through the driver
+      gcp.mig: const true when observed through the driver
+      azure.vmss: const true when observed through the driver

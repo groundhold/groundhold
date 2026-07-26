@@ -80,6 +80,7 @@ attributes:
 
   cost.monthly:
     kind: money
+    evidence: projection      # D311: a forecast, never resource state
     description: Projected monthly cost of the instance — a projection from published rates, never a quote
     mappings:
       aws.ec2: on-demand rate for the instance type in the region

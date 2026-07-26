@@ -24,6 +24,9 @@ func TestConsumedOperands_KnownServices(t *testing.T) {
 			"s3ObjectKeyPrefix", "snsTopicArn"},
 		"ecr":       {"kms_key"},
 		"apprunner": {"access_role_arn", "auto_scaling_configuration_arn", "autoScalingConfigurationArn", "cpu", "image", "image_repository_type", "memory", "port"},
+		// naming trap: EBS sizes with size_gb while the same disk as an EC2 boot
+		// operand is root_volume_gb, and the key is kms_key_id on both.
+		"ebs": {"availability_zone", "iops", "kms_key_id", "size_gb", "snapshot_id", "throughput", "volume_type"},
 		// zero-operand services declare the empty set, not nil-with-a-panic.
 		"acm": {}, "kms": {}, "waf": {}, "vpngateway": {}, "custompolicy": {},
 	}

@@ -151,6 +151,8 @@ var registry = []Pin{
 	az("managed-identity", "2023-01-31", "Microsoft.ManagedIdentity"),
 	az("managed-identity-federated-credential", "2023-01-31", "Microsoft.ManagedIdentity/federatedIdentityCredentials"),
 	az("compute-vm", "2024-07-01", "Microsoft.Compute/virtualMachines"),
+	az("compute-disk", "2024-03-02", "Microsoft.Compute/disks"),
+	az("compute-image", "2024-07-01", "Microsoft.Compute/images"),
 	az("network", "2023-11-01", "Microsoft.Network"),
 	az("private-dns", "2020-06-01", "Microsoft.Network/privateDnsZones"),
 	az("public-dns", "2018-05-01", "Microsoft.Network/dnsZones"),

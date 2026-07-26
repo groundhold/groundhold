@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"groundhold/internal/provider"
 )
 
 // serviceCases extracts the service tokens dispatched in a `func (d *Driver)
@@ -153,6 +155,14 @@ func TestObserveCompleteness(t *testing.T) {
 
 	var phantom []string
 	for svc := range observe {
+		// A WITNESS service (D177/D370) is observe-only BY DESIGN: groundhold reads
+		// an image and never builds one, so the absence of a create arm is the
+		// intended shape rather than a gap. Derived from the witness registry, not a
+		// list of names — a service that stops being a witness is caught again the
+		// moment it does.
+		if !provider.CanAuthor("gcp", svc) {
+			continue
+		}
 		if !create[svc] {
 			phantom = append(phantom, svc)
 		}

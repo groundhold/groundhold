@@ -1,0 +1,89 @@
+# Attribute vocabulary for capability.compute.image, spec v0.1 (D362).
+#
+# A machine image as a governed capability — AMI / Compute Engine image / Azure
+# image. The second companion to capability.compute.instance (D357): a machine
+# runs SOMETHING, and what it runs is the largest ungoverned surface in the
+# compute family.
+#
+# WITNESSED, NOT AUTHORED — the decision that shapes this type. Images are BUILT,
+# and building is a pipeline concern: Packer, a CI job, a golden-image process
+# with its own review. groundhold has no business owning that, and a driver that
+# "creates an image" would either be a thin wrapper over someone else's build or
+# an invitation to move build logic into an infrastructure contract. So this type
+# follows the author-vs-witness doctrine (D177, as capability.gitops.application
+# and the AWS half of capability.ai.speech already do): the contract states what
+# must be TRUE of the image a machine boots, and observe proves it against the
+# image that actually exists.
+#
+# That is not a lesser form of governance. The facts below are exactly the ones an
+# organization is accountable for and cannot see today: an image is a blob that
+# outlives the pipeline that made it, gets copied between regions, and is shared
+# by an account setting nobody re-reads. "Is our base image public?" is a question
+# most estates cannot answer, and it is one `verify` can answer deterministically.
+#
+# DELIBERATELY ABSENT: the image family, the OS version, the build date, the
+# package manifest. Those describe CONTENT, and content is what the pipeline
+# reviews — an infrastructure contract that pinned a package list would be
+# duplicating a job it cannot do well. `sourceProvenance` records only whether the
+# build chain is attested, which is a property of the artifact rather than of what
+# is inside it.
+#
+# STATELESS: retiring the image record destroys no data. The machines booted from
+# it are separate capabilities with their own gates — which is precisely why they
+# are separate.
+#
+# One TYPE, many services (D76): aws.ami, gcp.computeimage, azure.image.
+
+capability: capability.compute.image
+version: 0.1
+stateful: false
+
+attributes:
+
+  location.region:
+    kind: string
+    description: The region the image is stored in — an image is a copy of a disk, so it carries the residency of everything that was on that disk
+    mappings:
+      aws.ami: the region the AMI is registered in
+      gcp.computeimage: images are global; the storage location is reported here
+      azure.image: the image resource's location
+
+  network.publicExposure:
+    kind: bool
+    description: Whether the image is shared beyond the account that owns it — a public image is readable by strangers, and anything baked into it is readable with it
+    mappings:
+      aws.ami: launch permissions include `all` (public) or another account
+      gcp.computeimage: the image IAM policy grants allAuthenticatedUsers or allUsers
+      azure.image: the image is shared through a gallery with public or cross-tenant scope
+
+  encryption.atRest:
+    kind: bool
+    description: Whether the image's underlying snapshot is encrypted at rest
+    mappings:
+      aws.ami: the backing snapshot's encryption state
+      gcp.computeimage: platform encryption, always on; CMEK reported separately
+      azure.image: the source blob/disk encryption state
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: The image is encrypted with a CUSTOMER-managed key (CMEK/KMS), not merely the provider's default key — which matters more here than elsewhere, because an image is copied and shared far more readily than the disk it came from
+    mappings:
+      aws.ami: the backing snapshot's KMS key is customer-managed
+      gcp.computeimage: the image carries a customer-managed encryption key
+      azure.image: the image uses a disk-encryption set backed by a customer key
+
+  sourceProvenance:
+    kind: bool
+    description: Whether the image carries verifiable build provenance (a signed attestation naming what built it). Records only that the chain is attested — never what is inside the image, which is the pipeline's review, not the contract's.
+    mappings:
+      aws.ami: an attached attestation or signature the account trusts
+      gcp.computeimage: an attestation the project's binary-authorization policy accepts
+      azure.image: a signed image definition version
+
+  service.managed:
+    kind: bool
+    description: Whether groundhold observes this image through a driver (never that groundhold built it — images are witnessed, not authored)
+    mappings:
+      aws.ami: const true when observed through the driver
+      gcp.computeimage: const true when observed through the driver
+      azure.image: const true when observed through the driver

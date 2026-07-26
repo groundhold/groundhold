@@ -12,7 +12,7 @@ import (
 
 func (d *Driver) requireService(service string) error {
 	switch service {
-	case "s3", "rds", "ecs", "apprunner", "vpc", "sns", "sqs", "secretsmanager", "elasticache", "elasticache-serverless", "route53", "route53record", "rolepolicy", "custompolicy", "cloudwatch", "cloudwatchdash", "route53health", "cwlogfilter", "ecr", "efs", "dynamodb", "opensearch", "opensearch-serverless", "kinesis", "msk", "waf", "acm", "cloudfront", "apigateway", "iam", "redshiftserverless", "eventbridgescheduler", "kms", "vpngateway", "backupvault", "changefeed", "loadbalancer", "eks", "eks-addon", "eks-podidentity", "ses-sending", "ses-inbound", "aurora", "bedrock", "budgets", "cloudtrail", "backupplan", "guardduty", "cwlogs", "lambda", "ec2":
+	case "s3", "rds", "ecs", "apprunner", "vpc", "sns", "sqs", "secretsmanager", "elasticache", "elasticache-serverless", "route53", "route53record", "rolepolicy", "custompolicy", "cloudwatch", "cloudwatchdash", "route53health", "cwlogfilter", "ecr", "efs", "dynamodb", "opensearch", "opensearch-serverless", "kinesis", "msk", "waf", "acm", "cloudfront", "apigateway", "iam", "redshiftserverless", "eventbridgescheduler", "kms", "vpngateway", "backupvault", "changefeed", "loadbalancer", "eks", "eks-addon", "eks-podidentity", "ses-sending", "ses-inbound", "aurora", "bedrock", "budgets", "cloudtrail", "backupplan", "guardduty", "cwlogs", "lambda", "ec2", "ebs", "ami":
 		if d.Region != "" && !regionOK.MatchString(d.Region) {
 			return fmt.Errorf("aws driver: pinned region %q is not valid", d.Region)
 		}
@@ -61,6 +61,13 @@ func (d *Driver) Validate(service, capability, environment string,
 	attrs, impl map[string]any, generation int) error {
 	if err := d.requireService(service); err != nil {
 		return err
+	}
+	// A WITNESS service (D177/D370) is refused FIRST, before any operand check. The
+	// reason a witness create is refused has nothing to do with the region, and an
+	// operator told "location.region is missing" would go and add one — then hit the
+	// real refusal on the next run. The first thing said should be the true thing.
+	if !provider.CanAuthor("aws", service) {
+		return errWitnessOnly(service, "this capability")
 	}
 	// refuse an invalid/missing region here (refuse-before-mutate) exactly as
 	// createScope does at apply — the builders don't all enforce regionOK. Only for
@@ -135,6 +142,11 @@ func (d *Driver) Validate(service, capability, environment string,
 	case "ec2":
 		_, err := BuildEC2InstanceCreate(environment, capability, attrs, impl, generation)
 		return err
+	case "ebs":
+		_, err := BuildEBSVolumeCreate(environment, capability, attrs, impl, generation)
+		return err
+	// "ami" needs no arm: the witness gate above refuses it before the switch, and a
+	// second refusal here could only drift from the first.
 	case "efs":
 		_, err := BuildEFSCreate(environment, capability, attrs, impl, generation)
 		return err
@@ -434,6 +446,15 @@ func (d *Driver) createService(service, capability, environment string,
 			return *r
 		}
 		return d.createEC2Instance(region, account, environment, capability, attrs, impl, generation)
+	case "ebs":
+		region, account, r := d.createScope(attrs)
+		if r != nil {
+			return *r
+		}
+		return d.createEBSVolume(region, account, environment, capability, attrs, impl, generation)
+	case "ami":
+		return provider.CreateResult{Status: "failed",
+			Reason: errWitnessOnly("ami", "capability.compute.image").Error()}
 	case "efs":
 		region, account, r := d.createScope(attrs)
 		if r != nil {
@@ -709,6 +730,10 @@ func (d *Driver) Observe(service, capability, providerID string) ([]provider.Obs
 		return d.observeECR(capability, providerID)
 	case "ec2":
 		return d.observeEC2Instance(capability, providerID)
+	case "ebs":
+		return d.observeEBSVolume(capability, providerID)
+	case "ami":
+		return d.observeAMI(capability, providerID)
 	case "efs":
 		return d.observeEFS(capability, providerID)
 	case "dynamodb":
@@ -821,6 +846,13 @@ func (d *Driver) Delete(service, capability, environment, providerID, key string
 		return d.deleteECR(capability, environment, providerID)
 	case "ec2":
 		return d.deleteEC2Instance(capability, environment, providerID)
+	case "ebs":
+		return d.deleteEBSVolume(capability, environment, providerID)
+	case "ami":
+		// Deleting an image groundhold never created would destroy something a
+		// pipeline owns, on the strength of a record we only ever read.
+		return provider.CreateResult{Status: "failed",
+			Reason: errWitnessOnly("ami", "capability.compute.image").Error()}
 	case "efs":
 		return d.deleteEFS(capability, environment, providerID)
 	case "dynamodb":
@@ -904,6 +936,10 @@ func (d *Driver) ClassifyChange(service, path string, current, desired any,
 	switch service {
 	case "ec2":
 		return classifyEC2InstanceChange(path)
+	case "ebs":
+		return classifyEBSVolumeChange(path)
+	case "ami":
+		return classifyAMIChange(path)
 	case "s3":
 		return classifyS3Change(path, desired, impl)
 	case "apprunner":
