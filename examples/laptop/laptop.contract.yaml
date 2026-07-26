@@ -1,0 +1,25 @@
+# The smallest honest contract: one capability, one hard constraint.
+#
+# Paired with laptop.candidate.yaml, this runs the FULL loop against the
+# built-in `fake` provider — no cloud account, no credentials, no cost.
+#
+# It is deliberately minimal because `fake` can only observe one attribute
+# honestly (service.managed). A constraint the provider cannot witness would
+# come back inconclusive, which is the observation gate working, not a bug —
+# see website/pages/quickstart.md for that case spelled out.
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta: { id: orders, environment: production, version: 1 }
+
+capabilities:
+  - id: db
+    type: capability.database.relational
+
+constraints:
+  hard:
+    - id: c-managed
+      subject: db
+      path: service.managed
+      op: equals
+      value: true
+      verify: { method: static }

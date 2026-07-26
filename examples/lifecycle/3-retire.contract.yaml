@@ -1,0 +1,26 @@
+# STAGE 3 — the assets bucket is no longer wanted.
+#
+# Retirement is EXPLICIT (D47): `state: retired`, never mere absence. Deleting a
+# capability by deleting its lines would make "I forgot to write it" and "destroy
+# it" the same edit, so the system refuses that reading. Note the constraint on
+# `assets` is gone too — a constraint targeting a retired capability is a
+# contradiction and is rejected as one.
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta: { id: orders, environment: production, version: 3 }
+
+capabilities:
+  - id: db
+    type: capability.database.relational
+  - id: assets
+    type: capability.storage.object
+    state: retired
+
+constraints:
+  hard:
+    - id: c-db-managed
+      subject: db
+      path: service.managed
+      op: equals
+      value: true
+      verify: { method: static }

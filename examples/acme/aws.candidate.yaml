@@ -151,7 +151,13 @@ capabilities:
       model.provider: anthropic
       service.managed: true
     implementation:
-      inferenceProfile: eu.anthropic.claude-sonnet-4
+      # inferenceProfileName is the NAME this create gives the application
+      # inference profile it provisions — a naming input, not a lookup of
+      # something pre-existing. modelSource is the profile or foundation-model
+      # ARN it routes to; the EU cross-region profile is what keeps
+      # inference.destinationRegions inside the residency allowlist above.
+      inferenceProfileName: acme-eu-sonnet
+      modelSource: arn:aws:bedrock:eu-central-1::inference-profile/eu.anthropic.claude-sonnet-4
 
   platform-key:
     provider: aws
@@ -194,8 +200,8 @@ capabilities:
       reliability.deadLetter: true
       service.managed: true
     implementation:
-      deadLetterTargetArn: arn:aws:sqs:eu-central-1:000000000000:acme-parse-dlq
-      maxReceiveCount: 5
+      dead_letter_target_arn: arn:aws:sqs:eu-central-1:000000000000:acme-parse-dlq
+      max_receive_count: 5
 
   backup-plan:
     provider: aws

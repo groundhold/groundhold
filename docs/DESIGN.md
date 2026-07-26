@@ -10037,3 +10037,92 @@ free organization. This is the same platform-reality class as dormant Pages and 
 CodeQL job (D344) — the configuration is decided and recorded here, and applies the moment the repo
 becomes public. Until then the branch-and-PR discipline is convention, and it is stated as convention,
 not claimed as enforcement.
+
+## D346. Shipped examples are gated, not trusted — verify and plan are different questions
+`examples/acme/aws.candidate.yaml` verified clean — 48 satisfied, 0 violated, PROVEN — and could not
+be compiled. Two implementation operands named keys no driver reads: `inferenceProfile` where the
+Bedrock driver requires `inferenceProfileName` plus `modelSource`, and camelCase
+`deadLetterTargetArn`/`maxReceiveCount` where the SQS driver reads snake_case. `plan` refused with
+`unknown-operand`, which is the operand contract working exactly as designed (D26: a key the driver
+would ignore is refused, never silently dropped). The example had been exported to the public repo in
+that state, and a second defect sat beside it: the GCP gitops candidate was missing the `gitops-root`
+witness its AWS twin carries, so it verified `unknown` on two constraints and blocked.
+The lesson is not "someone was careless". It is that **verify and plan ask different questions**, and
+only verify had ever been run against the examples. Verify asks whether the declared attributes
+satisfy the constraints; plan asks whether a driver can actually execute the declaration. An example
+can pass the first and fail the second forever, silently, because nothing was checking. Prose and
+examples rot the same way numbers do (D324) — for the same reason: no gate.
+So `examples/check.sh` now runs both questions against every shipped pair, plus the README's converge
+loop on the `fake` provider (first run converges, second run proves the no-op), and `make check`
+depends on it. Two properties matter. First, **expectations are declared, not inferred**: a REFUSED
+example is legitimate when the refusal IS the lesson — `orders-production` must keep refusing, because
+an RTO claim is provable only by a restore test, and if it ever starts compiling the central guarantee
+has broken. What is never legitimate is an outcome nobody wrote down. Second, the gate lives in
+`examples/`, not `scripts/`, because `examples/` crosses the export boundary and `scripts/` does not
+(D345) — so the identical gate runs inside the PUBLIC tree during the export's standalone `make check`.
+An example that cannot work can no longer reach the public repo. The clock is pinned (`--at` fixed)
+so a failure is reproducible on any day, and the runner reports every broken example rather than
+exiting on the first. Proven to have teeth by breaking an operand on purpose and watching it name the
+offending example and exit 1.
+Left standing, deliberately: the operand naming convention is inconsistent between drivers (Bedrock
+camelCase, SQS snake_case). That is a real wart, but renaming operands is a compatibility change to
+the candidate surface, not a docs fix, and it belongs in its own entry rather than smuggled into one
+about gating.
+
+## D347. The README leads with using the system, not building it
+The README opened with what the project believes, then how to compile it. Both are things a reader
+wants EVENTUALLY; neither is what someone deciding whether to care wants FIRST. A contributor is
+already engaged and will scroll — the person who has not decided yet will not. So the top of the file
+is now, in order: get a binary, watch the loop close on a fake provider, create/change/delete real
+capabilities, point it at a real cloud, drive it from an agent. The conceptual material and the build
+instructions keep their content and move below, with the former Quickstart renamed to say plainly
+that it is for working ON Groundhold rather than with it.
+Three things this forced into existence rather than merely documented:
+(1) **The lifecycle is now an example, not a claim.** `examples/lifecycle/` carries the three stages —
+create two capabilities, tighten the contract to EU residency and watch a us-east-1 proposal get
+refused, retire a capability and watch `--yes` REFUSE to cover destruction until `--allow-data-loss`
+is added. All three run on `fake` and are asserted by `examples/check.sh` (D346), including that the
+delete names its target from the recorded binding rather than guessing from the edited file. The
+residency refusal is pinned as a REFUSAL: a constraint that quietly stopped biting would be the worst
+regression this project could ship, and it now cannot happen silently.
+(2) **Credentials are stated honestly, for all three clouds.** Only GCP had a documented auth story
+(spec/providers/gcp.md); AWS and Azure had it in code comments. The README now says what each driver
+actually reads — AWS: the three standard env vars ONLY, with `~/.aws/credentials` and `AWS_PROFILE`
+deliberately NOT consulted; GCP: token → `service_account` key file → metadata server, explicitly not
+ADC; Azure: an AAD bearer token in the environment. This is a NARROW adapter, and a cloud engineer
+who assumes the SDK credential chain will be surprised, so the surprise belongs on the front page
+rather than in a stack trace. The uneven maturity is stated in the same breath instead of implied.
+(3) **A binary you can download beats a binary you must build.** The release workflow published
+`groundhold_<version>_<os>_<arch>`, which cannot be linked as "the newest" — GitHub's
+`/releases/latest/download/<asset>` resolves only a FIXED name. It now also publishes version-less
+copies of the same bytes, so a one-line `curl` install exists that never goes stale. The versioned
+names stay for pinned and archived downloads.
+Open, and NOT papered over: the public repository has no releases yet, so the download link is dead
+until a tag is pushed there. Writing a link that 404s would be exactly the kind of unchecked claim
+D346 exists to prevent, so this is recorded as a launch step rather than presented as working today.
+
+## D348. The distinguishing behaviour is shown, not asserted — and the screenshot is generated, never drawn
+The README described what the system believes and demonstrated that it runs, but the things that make
+it different — four-valued verdicts, provenance as a type, refusal-as-a-result, a deterministic core —
+were inferable at best. Naming them in a feature list would have been the wrong fix: a list of claims
+is exactly what a reader discounts. So the front page now shows ONE screen of real `verify` output and
+reads it back: `c-rto` is `unknown` rather than `false`; the two dimmed rows are provenance rendered as
+brightness and the summary counts them; the dim line teaches in passing; the run ends BLOCKED with no
+flag that could have let it through; nothing in the loop involved a model. Six properties, one image,
+no adjectives. A second section ("what you meet later") covers the ledger, signed events, capsules and
+the anchor, permission preflight, adoption and parity — deliberately below the fold, because they are
+what makes the front page hold up rather than what earns attention.
+The screenshot is GENERATED (`scripts/ansi2svg.py`), never hand-drawn. The presentation layer (D89/D90)
+carries meaning in colour and brightness — yellow is `unknown`, red is `violated`, a dimmed row is a
+verdict resting on an inferred value — and a markdown code block silently discards all of it, which is
+how a project ends up illustrating a feature it cannot show. So the real bytes are captured under a pty
+and rendered to SVG by a tool that draws what the program printed and nothing else. A hand-made
+terminal mock would be precisely the unchecked claim D346 exists to prevent.
+Two findings from building it, both kept rather than hidden. The glyph vocabulary is only as good as the
+reader's font: the first render showed tofu where every `✓` belonged, fixed by leading the font stack
+with a family that actually carries U+2713 — worth knowing, since the same substitution can happen in a
+user's terminal. And `converge` REDRAWS its phase checklist in place (cursor-up, erase-to-end), so its
+output is an animation, not a document: a faithful still needs a real VT emulator, and a naive capture
+stacks every frame. Rather than ship a screenshot that misrepresents what the terminal shows, converge
+stays a text block and the animated display is recorded here as a known limit of static capture. Only
+the honest image shipped.

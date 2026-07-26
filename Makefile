@@ -1,8 +1,15 @@
-.PHONY: check validate verify plan conformance conformance-cli conformance-go vet differential embed-vocab parity mutation race lint cover tidy
+.PHONY: check validate verify plan conformance conformance-cli conformance-go examples vet differential embed-vocab parity mutation race lint cover tidy
 
 # the gate for every change: all suites, both implementations, vet
-check: vet validate conformance conformance-cli conformance-go
+check: vet validate conformance conformance-cli conformance-go examples
 	@echo "all gates passed"
+
+# every shipped example must still work — verify AND plan, plus the README's
+# converge loop. Runs here so the export's standalone `make check` proves the
+# examples in the PUBLIC tree before anything is pushed there.
+examples:
+	@cd go && go build -o ../bin/groundhold-go ./cmd/groundhold
+	@./examples/check.sh
 
 vet:
 	@cd go && f=$$(gofmt -l .); if [ -n "$$f" ]; then echo "gofmt: unformatted files:"; echo "$$f"; exit 1; fi

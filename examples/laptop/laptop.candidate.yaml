@@ -1,0 +1,16 @@
+# The proposal: how laptop.contract.yaml gets implemented.
+#
+# An agent writes this; the verifier decides whether it may execute. Here the
+# provider is `fake` — an in-process stand-in that records what it was asked to
+# do and can observe service.managed back. Swap provider/service for aws/gcp/
+# azure and the same document drives real infrastructure.
+apiVersion: candidate/v0.1
+kind: ImplementationCandidate
+contract: orders
+
+capabilities:
+  db:
+    attributes:
+      service.managed: true
+    provider: fake
+    service: sql

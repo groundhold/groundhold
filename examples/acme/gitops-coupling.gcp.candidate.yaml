@@ -27,3 +27,22 @@ capabilities:
       service.managed: true
     implementation:
       gsaEmail: acme-argocd-appctl@acme-prod.iam.gserviceaccount.com
+
+  # WITNESSED — groundhold verifies this, never authors it (D177). The values are
+  # inferred from the live controller; a real emit reads them via observe.
+  #
+  # Identical to the AWS twin on purpose: the controller is Kubernetes-native, so
+  # the witness does not change when the cloud underneath it does. Only the
+  # identity coupling above is cloud-specific.
+  gitops-root:
+    provider: k8s
+    service: argocd-application
+    attributes:
+      sync.status:
+        value: synced
+        status: inferred
+        source: argocd:application.status.sync
+      health.status:
+        value: healthy
+        status: inferred
+        source: argocd:application.status.health

@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1140" height="342" viewBox="0 0 1140 342" role="img" aria-label="groundhold verify orders-production.contract.yaml gcp-cloudsql.candidate.yaml">
+<rect width="1140" height="342" rx="8" fill="#1b1f27"/>
+<circle cx="22" cy="18" r="5" fill="#e06c75"/>
+<circle cx="40" cy="18" r="5" fill="#e5c07b"/>
+<circle cx="58" cy="18" r="5" fill="#8dc891"/>
+<text x="76" y="22" fill="#7a8296" font-family="DejaVu Sans Mono,Menlo,Consolas,ui-monospace,monospace" font-size="12">groundhold verify orders-production.contract.yaml gcp-cloudsql.candidate.yaml</text>
+<g font-family="DejaVu Sans Mono,Menlo,Consolas,ui-monospace,SFMono-Regular,monospace" font-size="14" xml:space="preserve">
+<text x="18.0" y="44" fill="#d8dee9">contract orders-production v3</text>
+<text x="18.0" y="64" fill="#d8dee9">  </text>
+<text x="34.9" y="64" fill="#8dc891">✓</text>
+<text x="43.3" y="64" fill="#d8dee9"> c-residency                  satisfied     location.region in [europe-west1 europe-west3]: observed europe-west1</text>
+<text x="18.0" y="84" fill="#d8dee9">  </text>
+<text x="34.9" y="84" fill="#8dc891">✓</text>
+<text x="43.3" y="84" fill="#d8dee9"> c-private                    satisfied     network.publicExposure equals false: observed false</text>
+<text x="18.0" y="104" fill="#d8dee9">  </text>
+<text x="34.9" y="104" fill="#8dc891">✓</text>
+<text x="43.3" y="104" fill="#d8dee9"> c-encrypted                  satisfied     encryption.atRest equals true: observed true</text>
+<text x="18.0" y="124" fill="#d8dee9">  </text>
+<text x="34.9" y="124" fill="#8dc891">✓</text>
+<text x="43.3" y="124" fill="#d8dee9"> c-rpo                        satisfied     recovery.rpo lte 5m: observed 5m</text>
+<text x="18.0" y="144" fill="#d8dee9">  </text>
+<text x="34.9" y="144" fill="#e5c07b">?</text>
+<text x="43.3" y="144" fill="#d8dee9"> c-rto                        unknown       requires probe verification; not evaluable from the candidate alone</text>
+<text x="18.0" y="164" fill="#d8dee9">      </text>
+<text x="68.6" y="164" fill="#d8dee9" opacity="0.62">recovery.rto — time to restore service after failure; probe-only — a value here is a claim until a restore test measures it</text>
+<text x="18.0" y="184" fill="#d8dee9">  </text>
+<text x="34.9" y="184" fill="#8dc891">✓</text>
+<text x="43.3" y="184" fill="#d8dee9"> </text>
+<text x="51.7" y="184" fill="#d8dee9" opacity="0.62">s-cost                       satisfied    [inferred]  objective minimize cost.monthly (scored, not gated)</text>
+<text x="18.0" y="204" fill="#d8dee9">  </text>
+<text x="34.9" y="204" fill="#8dc891">✓</text>
+<text x="43.3" y="204" fill="#d8dee9"> s-managed                    satisfied     service.managed equals true: observed true</text>
+<text x="18.0" y="224" fill="#d8dee9">  </text>
+<text x="34.9" y="224" fill="#8dc891">✓</text>
+<text x="43.3" y="224" fill="#d8dee9"> </text>
+<text x="51.7" y="224" fill="#d8dee9" opacity="0.62">c-budget                     satisfied    [inferred]  cost.monthly lte map[amount:1500 currency:EUR]: observed 912 EUR</text>
+<text x="18.0" y="244" fill="#d8dee9">  </text>
+<text x="34.9" y="244" fill="#8dc891">✓</text>
+<text x="43.3" y="244" fill="#d8dee9"> req-orders-db-engine.protocol satisfied     engine.protocol compatible-with postgresql/16: observed postgresql/16.4</text>
+<text x="18.0" y="284" fill="#d8dee9">  8 satisfied, 0 violated, 1 unknown, 0 unverifiable, 2 verdict(s) rest on assumed/inferred values</text>
+<text x="18.0" y="304" fill="#d8dee9">  </text>
+<text x="34.9" y="304" fill="#e5c07b">BLOCKED</text>
+<text x="93.9" y="304" fill="#d8dee9">: c-rto unknown — recovery.rto requires probe verification</text>
+</g></svg>

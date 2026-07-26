@@ -16,6 +16,290 @@ adversarially hardened; execution has closed the loop against two real clouds
 (GCP author-run, AWS at one external pilot that filed 36 findings) while Azure
 is golden-tested only; there has been one pilot, no external security audit and
 no production record.
+## TL;DR — see it work in 60 seconds, no cloud account
+
+Grab a binary — no toolchain, no clone. The link always resolves to the newest
+release, so it does not go stale:
+
+```sh
+curl -Lo groundhold https://github.com/groundhold/groundhold/releases/latest/download/groundhold_linux_amd64
+chmod +x groundhold
+```
+
+Swap `linux_amd64` for `linux_arm64`, `darwin_amd64` or `darwin_arm64`. Every
+release also carries `SHA256SUMS`, a CycloneDX SBOM, `BUILDINFO.txt` for a
+reproducible rebuild, and a keyless SLSA build-provenance attestation
+(`gh attestation verify groundhold --repo groundhold/groundhold`). All releases:
+[**github.com/groundhold/groundhold/releases/latest**](https://github.com/groundhold/groundhold/releases/latest).
+
+Prefer to build it yourself? Go ≥ 1.25 and nothing else:
+
+```sh
+cd go && go build -o ../bin/groundhold-go ./cmd/groundhold && cd ..
+```
+
+Then run the loop. The examples below use the built path; a downloaded binary
+works identically — substitute `./groundhold`.
+
+```sh
+bin/groundhold-go converge \
+  examples/laptop/laptop.contract.yaml examples/laptop/laptop.candidate.yaml \
+  --ledger state/try.jsonl --provider fake \
+  --at "$(date -u +%FT%TZ)" --yes
+```
+
+```
+converge → apply
+→ apply
+  applied
+converge → observe
+→ observe (recording reality)
+converge → convergence-check
+  ✓ converged — verified against observed reality
+converge phases:
+  ✓ verify
+  ✓ plan
+  » observe (evidence fresh)
+  ✓ forecast
+  ✓ confirm
+  ✓ apply
+  ✓ observe
+  ✓ convergence-check
+CONVERGED
+```
+
+Run the identical command again:
+
+```
+  ✓ converged — the world already matches the candidate
+CONVERGED
+```
+
+Nothing was touched, and convergence was *proven* against what the world
+reported back — not assumed because an apply exited zero. `fake` is a built-in
+in-process provider, so there is nothing to sign up for and nothing to clean up.
+
+## What a verdict looks like
+
+![groundhold verify — four-valued verdicts, provenance dimmed, execution blocked](website/img/verify-four-valued.svg)
+
+Six things are happening in that one screen, and they are the reasons this
+project exists rather than features bolted onto it.
+
+`c-rto` is **`unknown`, not `false`.** Recovery time is not provable by reading
+configuration — only a restore test measures it — so the system says so instead
+of guessing, and the run ends `BLOCKED` rather than proceeding. A verdict is
+`satisfied | violated | unknown | unverifiable`, and there is **no flag that
+lets an unproven hard constraint through**.
+
+The two dimmed rows are **provenance rendered as brightness**: `s-cost` and
+`c-budget` are satisfied, but they rest on *inferred* values, and the summary
+counts them — `2 verdict(s) rest on assumed/inferred values`. Where a number
+came from travels with the number.
+
+The dim line under `c-rto` **teaches in passing** — every refusal explains
+itself, carries a machine error code, and names a next step, which is what lets
+an agent recover from a rejection instead of guessing.
+
+And none of it involves a model. **The verifier is deterministic** — no LLM, no
+network, no heuristics — so the same documents always produce the same verdict.
+The probabilistic part proposes; this part decides.
+
+## Using it: create, change, delete
+
+Everything below runs on `fake` and is checked on every commit
+([`examples/check.sh`](examples/check.sh)) — these are not illustrations, they
+are tests.
+
+### Create
+
+Two capabilities. The contract names no vendor; the candidate proposes how.
+
+```sh
+bin/groundhold-go converge \
+  examples/lifecycle/1-create.contract.yaml examples/lifecycle/1-create.candidate.yaml \
+  --ledger state/orders.jsonl --provider fake --at "$(date -u +%FT%TZ)" --yes
+```
+
+```
+→ forecast
+  plan:
+    create a-create-assets [R1 dataLoss=none downtime=none]
+    create a-create-db [R1 dataLoss=none downtime=none]
+  forecast rollup: willCreate 2
+converge → confirm
+converge → apply
+→ apply
+  applied
+converge → observe
+→ observe (recording reality)
+converge → convergence-check
+  ✓ converged — verified against observed reality
+```
+
+### Change the intent, and watch it refuse
+
+Now the data must stay in the EU. The implementation did not change — the
+*contract* got stricter, and the proposal is a database in `us-east-1`:
+
+```sh
+bin/groundhold-go verify \
+  examples/lifecycle/2-refused.contract.yaml examples/lifecycle/2-refused.candidate.yaml
+```
+
+```
+  ✓ c-db-managed                 satisfied     service.managed equals true: observed true
+  ✗ c-eu-only                    violated      location.region in [eu-central-1 eu-west-1]: observed us-east-1
+      location.region — Primary region of the instance
+
+  1 satisfied, 1 violated, 0 unknown, 0 unverifiable
+  VIOLATED: c-eu-only violated — location.region
+```
+
+Exit 2, before a plan is compiled, let alone applied. The offending value is
+named. There is no flag that lets a violated hard constraint through.
+
+### Delete
+
+Retirement is explicit — `state: retired`, never mere absence, so that "I forgot
+to write it" and "destroy it" can never be the same edit:
+
+```sh
+bin/groundhold-go converge \
+  examples/lifecycle/3-retire.contract.yaml examples/lifecycle/3-retire.candidate.yaml \
+  --ledger state/orders.jsonl --provider fake --at "$(date -u +%FT%TZ)" --yes
+```
+
+```
+  plan:
+    delete a-delete-assets [R4 dataLoss=certain downtime=certain] target=fake:assets-db46c0e38fdf
+  forecast rollup: willDelete 1
+converge → confirm
+…
+  plan contains dataLoss/identity-replacing actions — --yes does not cover destruction; add --allow-data-loss or confirm interactively
+REFUSED consent-required
+```
+
+`--yes` deliberately does **not** cover destruction; that needs
+`--allow-data-loss`, and only then does the delete run. Note the target is
+`fake:assets-db46c0e38fdf` — the exact resource, pinned from the ledger's
+recorded binding rather than guessed from the file you just edited.
+
+## Pointing it at a real cloud
+
+Groundhold talks to provider APIs directly. Credential handling is a
+**deliberately narrow adapter, not the cloud SDK credential chains** — there is
+no `gcloud`/`aws`/`az` shell-out and no tool coupling. What that means in
+practice per cloud:
+
+| Cloud | Where credentials come from |
+|-------|------------------------------|
+| **AWS** | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` (env only — `~/.aws/credentials` and `AWS_PROFILE` are **not** read). Region from `AWS_REGION`, falling back to `AWS_DEFAULT_REGION`. |
+| **GCP** | In order: `GROUNDHOLD_GCP_ACCESS_TOKEN` (a ready token) → `GROUNDHOLD_GCP_KEY_FILE` (a `service_account` key JSON **only** — no federation configs, no user credentials) → the GCE metadata server. Not ADC. |
+| **Azure** | `GROUNDHOLD_AZURE_ACCESS_TOKEN`, an AAD bearer token. A full client-credentials exchange is a later addition. |
+
+So an engineer arriving with a working cloud CLI exports a short-lived token
+rather than pointing at a profile:
+
+```sh
+# GCP
+export GROUNDHOLD_GCP_ACCESS_TOKEN="$(gcloud auth print-access-token)"
+
+# Azure
+export GROUNDHOLD_AZURE_ACCESS_TOKEN="$(az account get-access-token --query accessToken -o tsv)"
+
+# AWS — the three standard variables, however you normally obtain them
+export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_REGION=eu-central-1
+```
+
+Then the same command, with the provider swapped:
+
+```sh
+bin/groundhold-go converge my.contract.yaml my.candidate.yaml \
+  --ledger state/prod.jsonl --provider aws --at "$(date -u +%FT%TZ)"
+```
+
+Two things happen automatically before anything is mutated. The plan declares
+the permissions each action needs, and apply preflights them against the acting
+identity — refusing *before* touching infrastructure rather than failing
+halfway. And dropping `--yes` makes converge stop at the plan and wait for you
+to type `apply`; in a pipe it refuses outright rather than assuming consent.
+
+This is the least proven part of the system, and
+[`docs/MATURITY.md`](docs/MATURITY.md) says so plainly: GCP and AWS have closed
+the loop against real clouds, Azure is golden-tested only.
+
+## Using it with an AI agent
+
+The premise is that an agent proposes and a deterministic runtime disposes, so
+the agent-facing surface is a first-class part of the system rather than a
+wrapper someone added later.
+
+**MCP server.** `groundhold mcp` speaks MCP over stdio and exposes
+`groundhold_verify`, `groundhold_plan`, `groundhold_forecast`,
+`groundhold_observe`, `groundhold_hash`, `groundhold_draft` and — only when
+explicitly enabled — `groundhold_apply`. To wire it up:
+
+```sh
+bin/groundhold-go mcp --print-config
+```
+
+which prints both the `.mcp.json` block and the one-liner
+(`claude mcp add groundhold -- …`). The read-only tools are always available;
+the apply tool mutates infrastructure and stays off unless the server is started
+with `GROUNDHOLD_MCP_ALLOW_APPLY=1`, and it is two-step by design.
+
+**How an agent learns the system.** Not by being told to read the source.
+`groundhold explain` is the single place to ask about any noun the runtime
+emits — every machine error code and every vocabulary attribute:
+
+```sh
+bin/groundhold-go explain capability.database.relational --vocab spec/vocab
+```
+
+```
+capability.database.relational — capability type (11 attributes)
+  availability.class  (string = zonal|regional|multi-regional)
+  cost.monthly  (money) — Projected monthly cost of the capability
+  …
+  recovery.rto  (duration) — Time to restore service after failure
+  …
+  next: groundhold explain <attribute> for one; groundhold example candidate <contract.yaml> to scaffold
+```
+
+Error codes answer the same way — `groundhold explain consent-required` returns
+what it means and what to do next. Every refusal carries a machine code and a
+`next` step, so an agent recovers from a rejection instead of guessing.
+
+**Packaged workflows.** [`.claude/skills/`](.claude/skills/) holds the
+agent-side procedures: `draft-contract` (prose → contract), `code-to-contract`
+(read an app repo, infer its infrastructure needs with citations),
+`emit-candidate`, `bake-off` (compare vendors deterministically — the runtime
+gates eligibility, a human picks), `onboard-existing` and `adopt-candidate`
+(bring infrastructure Groundhold did not create under contract),
+`transcript-to-contract` (a meeting recording → a draft), and `dr-forensics`.
+
+## What you meet later
+
+Not front-page material, but the reasons the front page holds up.
+
+Every run appends to a **hash-chained ledger** — `groundhold export` replays it,
+`groundhold audit` checks recorded reality back against the contract and reports
+violations as transitions rather than heartbeats. Evidence **travels**: events
+can be signed (`keygen`, `--sign-key`, `--trust`), a single capability's
+subchain can be lifted out as a standalone **evidence capsule** that verifies on
+its own, and an **anchor** catches the one thing a capsule cannot — an omission.
+
+Before anything is mutated, a plan **declares the permissions each action
+needs** and apply checks them against the acting identity, so a run refuses up
+front instead of failing halfway. Cost is projected, not guessed, and labelled a
+projection rather than a quote.
+
+Infrastructure that already exists is not a second-class citizen: `discover` →
+`adopt` brings it under contract, and a **converged no-op run is the proof** the
+takeover worked. `groundhold parity` shows, per capability, whether each cloud
+fulfils it, structurally cannot, or simply has no driver yet — which is what
+makes a vendor **bake-off** a deterministic comparison rather than an opinion.
 
 ## What this is
 
@@ -37,7 +321,6 @@ Core ideas:
 4. **Constraints declare how they are proven** (`static`, `provider-api`,
    `probe`). An RTO claim is not satisfied by configuration — only by a
    measured restore test.
-
 ## Repository layout
 
 ```
@@ -48,13 +331,13 @@ ref/            reference implementation (Python): loader, four-valued verifier,
 go/             Go runtime — passes the identical conformance suite through
                 its own binary
 conformance/    language-independent test cases — the real definition of semantics
-docs/           design decisions and rationale (D1–D203)
+docs/           design decisions and rationale (D1–D345)
 ```
 
-## Quickstart
+## Building from source, and the gates
 
-Requirements: Go ≥ 1.25, Python ≥ 3.12 + PyYAML. Nothing else — the runtime
-is stdlib + yaml only.
+For working *on* Groundhold rather than with it. Requirements: Go ≥ 1.25,
+Python ≥ 3.12 + PyYAML. Nothing else — the runtime is stdlib + yaml only.
 
 ```
 make check                              # every gate: vet + all suites, both implementations

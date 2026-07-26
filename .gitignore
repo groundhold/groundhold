@@ -5,3 +5,4 @@ differential-failures/
 .integration/
 .canary/
 .groundhold/
+state/
