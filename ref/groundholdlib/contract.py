@@ -43,6 +43,7 @@ CAPABILITY_TYPES_V01 = {
     "capability.email.sending",
     "capability.ai.inference",
     "capability.ai.speech",
+    "capability.compute.instance",
     "capability.cost.budget",
     "capability.cluster.addon",
     "capability.identity.podidentity",

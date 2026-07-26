@@ -124,6 +124,13 @@ capabilities:
       unbuilt: true
     azure:
       unbuilt: true
+  capability.compute.instance:
+    aws:
+      unbuilt: true
+    gcp:
+      unbuilt: true
+    azure:
+      unbuilt: true
   capability.compute.quota:
     aws:
       unbuilt: true

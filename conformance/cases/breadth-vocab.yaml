@@ -4599,3 +4599,138 @@ cases:
             retention.maximum: 30
     expect:
       error: candidate
+
+  - name: compute-instance-residency-cmk-exposure-verify
+    description: >
+      capability.compute.instance (D357). A VM is the canonical pet, and the
+      contract governs it anyway — not its shell history, but the facts an
+      organization is accountable for: where it runs, whether a customer-revocable
+      key encrypts its disks, and whether the internet can reach it.
+    vocab:
+      - capability: capability.compute.instance
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          encryption.customerManagedKeys: { kind: bool }
+          network.publicExposure: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: vm-1, environment: production, version: 1 }
+      capabilities:
+        - id: box
+          type: capability.compute.instance
+      constraints:
+        hard:
+          - id: c-eu
+            subject: box
+            path: location.region
+            op: in
+            value: [eu-central-1, eu-west-1]
+            verify: { method: static }
+          - id: c-cmk
+            subject: box
+            path: encryption.customerManagedKeys
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-private
+            subject: box
+            path: network.publicExposure
+            op: equals
+            value: false
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: vm-1
+      capabilities:
+        box:
+          attributes:
+            location.region: eu-central-1
+            encryption.customerManagedKeys: true
+            network.publicExposure: false
+    expect:
+      executable: true
+      verdicts:
+        c-eu: satisfied
+        c-cmk: satisfied
+        c-private: satisfied
+
+  - name: compute-instance-public-exposure-violated
+    description: >
+      An instance carrying a public address under a contract that forbids one is
+      `violated` at verify — the check that matters most on a VM, because a public
+      IP is the difference between a private workload and an internet-facing host,
+      and it is one flag away at all times.
+    vocab:
+      - capability: capability.compute.instance
+        version: 0.1
+        stateful: true
+        attributes:
+          network.publicExposure: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: vm-2, environment: production, version: 1 }
+      capabilities:
+        - id: box
+          type: capability.compute.instance
+      constraints:
+        hard:
+          - id: c-private
+            subject: box
+            path: network.publicExposure
+            op: equals
+            value: false
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: vm-2
+      capabilities:
+        box:
+          attributes:
+            network.publicExposure: true
+    expect:
+      executable: false
+      verdicts:
+        c-private: violated
+
+  - name: compute-instance-availability-class-enum-is-enforced
+    description: >
+      availability.class is a closed enum on this type: a single machine is zonal,
+      and `regional` is a property of a GROUP, not of an instance. A candidate
+      inventing a third value is a load error, not a silently accepted string.
+    vocab:
+      - capability: capability.compute.instance
+        version: 0.1
+        stateful: true
+        attributes:
+          availability.class: { kind: string, enum: [zonal, regional] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: vm-3, environment: test, version: 1 }
+      capabilities:
+        - id: box
+          type: capability.compute.instance
+      constraints:
+        hard:
+          - id: c-zonal
+            subject: box
+            path: availability.class
+            op: equals
+            value: zonal
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: vm-3
+      capabilities:
+        box:
+          attributes:
+            availability.class: planet-scale
+    expect:
+      error: candidate

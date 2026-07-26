@@ -434,6 +434,11 @@ after the slice.
 
 ## What's next
 
+- **Virtual machines, and the family around them.** `capability.compute.instance`
+  landed as a vocabulary first (D357); the EC2, Compute Engine and Azure VM
+  drivers follow, then block storage, images and autoscaling groups — a group
+  expresses capacity where an instance expresses a machine, so they are separate
+  capabilities rather than one overloaded type.
 - **`capability.ai.speech` drivers** — the GCP recogniser and the Azure account.
   The type and its semantics landed first (D350); AWS has no ASR resource to
   author, so it is witnessed there rather than faked.
