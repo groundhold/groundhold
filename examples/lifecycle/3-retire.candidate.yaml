@@ -1,0 +1,14 @@
+# STAGE 3 — the retired capability carries no attributes here either; declaring
+# an implementation for something the contract retires is refused as structurally
+# contradictory. What gets deleted is not guessed from this file: the delete
+# target is pinned from the ledger's recorded binding, so the plan names the
+# exact resource that was created.
+apiVersion: candidate/v0.1
+kind: ImplementationCandidate
+contract: orders
+
+capabilities:
+  db:
+    attributes: { service.managed: true }
+    provider: fake
+    service: sql

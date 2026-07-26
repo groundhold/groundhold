@@ -1,0 +1,27 @@
+# STAGE 2 — the intent changed: this data must stay in the EU.
+#
+# Nothing about the implementation changed; the CONTRACT got stricter. Paired
+# with 2-refused.candidate.yaml (a database in us-east-1), this is refused at
+# verify — before any plan is compiled, let alone applied.
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta: { id: orders, environment: production, version: 2 }
+
+capabilities:
+  - id: db
+    type: capability.database.relational
+
+constraints:
+  hard:
+    - id: c-db-managed
+      subject: db
+      path: service.managed
+      op: equals
+      value: true
+      verify: { method: static }
+    - id: c-eu-only
+      subject: db
+      path: location.region
+      op: in
+      value: [eu-central-1, eu-west-1]
+      verify: { method: static }

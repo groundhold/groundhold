@@ -1,0 +1,16 @@
+# STAGE 1 — how it gets implemented. An agent writes this; the verifier decides
+# whether it may execute. `fake` is the in-process provider, so this runs with no
+# cloud account; swapping it for aws/gcp/azure is the only edit that matters.
+apiVersion: candidate/v0.1
+kind: ImplementationCandidate
+contract: orders
+
+capabilities:
+  db:
+    attributes: { service.managed: true }
+    provider: fake
+    service: sql
+  assets:
+    attributes: { service.managed: true }
+    provider: fake
+    service: bucket

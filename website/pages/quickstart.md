@@ -85,7 +85,9 @@ contract orders v1
 The full loop (verify → plan → forecast → confirm → apply → observe →
 convergence check) runs end to end against the built-in `fake`
 provider. It can only observe one attribute honestly
-(`service.managed`), so the laptop demo uses a minimal pair:
+(`service.managed`), so the laptop demo uses a minimal pair — shipped in
+the repository as `examples/laptop/`, so you can run it without pasting
+anything:
 
 ```yaml
 # lap.contract.yaml
@@ -119,13 +121,15 @@ capabilities:
 ```
 
 ```sh
-bin/groundhold-go converge lap.contract.yaml lap.candidate.yaml \
+bin/groundhold-go converge \
+  examples/laptop/laptop.contract.yaml examples/laptop/laptop.candidate.yaml \
   --ledger state/prod.jsonl --provider fake --at "$(date -u +%FT%TZ)" --yes
 # ... apply, observe ...
 #   ✓ converged — verified against observed reality
 # CONVERGED
 
-bin/groundhold-go converge lap.contract.yaml lap.candidate.yaml \
+bin/groundhold-go converge \
+  examples/laptop/laptop.contract.yaml examples/laptop/laptop.candidate.yaml \
   --ledger state/prod.jsonl --provider fake --at "$(date -u +%FT%TZ)" --yes
 #   ✓ converged — the world already matches the candidate
 # CONVERGED

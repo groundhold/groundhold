@@ -47,6 +47,13 @@ jobs:
             GOOS="$os" GOARCH="$arch" go build -trimpath \
               -ldflags "-s -w -X main.buildVersion=${VERSION}" \
               -o "../dist/${out}" ./cmd/groundhold
+            # A second, VERSION-LESS copy of the same bytes. GitHub's
+            # /releases/latest/download/<asset> only resolves a FIXED asset name,
+            # so a versioned name cannot be linked as "always the newest". These
+            # copies make a one-line install possible without the reader first
+            # looking up what the current tag is. The versioned names stay —
+            # they are what an archived or pinned download refers to.
+            cp "../dist/${out}" "../dist/groundhold_${os}_${arch}"
           done
 
       - name: Checksums

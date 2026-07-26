@@ -1,0 +1,14 @@
+# STAGE 2 — the proposal that must NOT be allowed to execute: a database outside
+# the EU under a contract that requires it inside. The point of this example is
+# that it is refused, deterministically, with the offending value named.
+apiVersion: candidate/v0.1
+kind: ImplementationCandidate
+contract: orders
+
+capabilities:
+  db:
+    attributes:
+      service.managed: true
+      location.region: us-east-1
+    provider: fake
+    service: sql

@@ -1,0 +1,25 @@
+# STAGE 1 — what must be true. Two capabilities, no vendor named anywhere.
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta: { id: orders, environment: production, version: 1 }
+
+capabilities:
+  - id: db
+    type: capability.database.relational
+  - id: assets
+    type: capability.storage.object
+
+constraints:
+  hard:
+    - id: c-db-managed
+      subject: db
+      path: service.managed
+      op: equals
+      value: true
+      verify: { method: static }
+    - id: c-assets-managed
+      subject: assets
+      path: service.managed
+      op: equals
+      value: true
+      verify: { method: static }
