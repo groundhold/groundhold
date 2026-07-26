@@ -1,0 +1,85 @@
+# Attribute vocabulary for capability.storage.block, spec v0.1 (D361).
+#
+# A block volume as a governed capability — EBS / Persistent Disk / Managed Disk.
+# The companion a machine cannot do without: capability.compute.instance (D357)
+# gave the machine, and a machine with no separately-governed storage cannot
+# outlive its own root disk.
+#
+# WHAT IS DELIBERATELY ABSENT, and it is most of what people expect: size, IOPS,
+# throughput and the volume type (gp3 / pd-ssd / Premium_LRS). Every one of them
+# is sizing — implementation noise in the free-form operand block (D26), not
+# capability semantics. The test the vocabulary rule asks is not "does anyone care
+# about this number" (they do) but "is it a fact an organization is ACCOUNTABLE
+# for". A regulator asks where the data sits and whether the key is revocable; it
+# does not ask how many IOPS were provisioned.
+#
+# STATEFUL (D47), and this is the point of the type. A block volume IS the data:
+# retiring one is data loss, so the delete_stateful autonomy gate binds it and a
+# replacement needs explicit allow_replace_stateful consent. That is precisely why
+# the volume deserves its own capability rather than living as an operand of the
+# machine — an operand cannot be gated, and a disk that vanishes quietly with its
+# machine is the failure this separation exists to prevent.
+#
+# availability.class carries a REAL cross-cloud difference rather than a
+# formality: an EBS volume is zonal, a GCP regional persistent disk is
+# synchronously replicated across two zones, and an Azure ZRS disk spans zones.
+# A contract that needs a volume to survive losing a zone can say so and have it
+# verified, instead of trusting that someone chose the right disk type.
+#
+# One TYPE, many services (D76): aws.ebs, gcp.pd, azure.manageddisk.
+
+capability: capability.storage.block
+version: 0.1
+stateful: true   # D47: retiring a volume destroys the data on it
+
+attributes:
+
+  location.region:
+    kind: string
+    description: The region the volume lives in — the residency surface for everything written to it
+    mappings:
+      aws.ebs: the volume's region (derived from its availability zone)
+      gcp.pd: the disk's region (derived from its zone, or the region for a regional disk)
+      azure.manageddisk: the managed disk's location
+
+  availability.class:
+    kind: string
+    enum: [zonal, regional]
+    description: Whether the volume survives the loss of a single availability zone. Zonal lives in one zone; regional is synchronously replicated across zones. This is a durability guarantee, not a performance tier.
+    mappings:
+      aws.ebs: always zonal — an EBS volume lives in one availability zone
+      gcp.pd: regional when the disk is a regional persistent disk, zonal otherwise
+      azure.manageddisk: regional when the SKU is zone-redundant (ZRS), zonal otherwise
+
+  encryption.atRest:
+    kind: bool
+    description: Whether the data written to the volume is encrypted at rest
+    mappings:
+      aws.ebs: the volume's encryption state
+      gcp.pd: platform encryption, always on; CMEK reported separately
+      azure.manageddisk: managed-disk encryption state
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: Data is encrypted with a CUSTOMER-managed key (CMEK/KMS), not merely the provider's default key — an independently revocable key, which is what a BYOK control actually means
+    mappings:
+      aws.ebs: the volume's KMS key is customer-managed, not the aws/ebs default
+      gcp.pd: the disk carries a customer-managed encryption key
+      azure.manageddisk: the disk uses a disk-encryption set backed by a customer key
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost of the volume — a projection from published rates, never a quote
+    mappings:
+      aws.ebs: provisioned capacity and type at the region's published rate
+      gcp.pd: provisioned capacity and type at the region's published rate
+      azure.manageddisk: the disk SKU at the region's published rate
+
+  service.managed:
+    kind: bool
+    description: Whether groundhold manages this volume's lifecycle
+    mappings:
+      aws.ebs: const true when observed through the driver
+      gcp.pd: const true when observed through the driver
+      azure.manageddisk: const true when observed through the driver

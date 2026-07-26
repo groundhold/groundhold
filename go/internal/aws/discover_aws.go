@@ -66,7 +66,7 @@ func (d *Driver) serviceDiscoverers() map[string]func(string) ([]provider.Discov
 		"acm": d.discoverACM, "apigateway": d.discoverAPIGateway,
 		"backupvault": d.discoverBackupVaults, "cloudfront": d.discoverCloudFront,
 		"cloudwatchdash": d.discoverCloudWatchDashboards, "custompolicy": d.discoverCustomPolicies,
-		"ec2": d.discoverEC2Instances, "efs": d.discoverEFS, "eventbridgescheduler": d.discoverEventBridgeSchedulers,
+		"ec2": d.discoverEC2Instances, "ebs": d.discoverEBSVolumes, "ami": d.discoverAMIs, "efs": d.discoverEFS, "eventbridgescheduler": d.discoverEventBridgeSchedulers,
 		"kinesis": d.discoverKinesis, "kms": d.discoverKMS, "msk": d.discoverMSK,
 		"opensearch": d.discoverOpenSearch, "opensearch-serverless": d.discoverOpenSearchServerless,
 		"redshiftserverless": d.discoverRedshiftServerless,

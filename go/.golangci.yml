@@ -40,6 +40,13 @@ issues:
     - path: internal/gcp/secretmanager\.go
       linters: [gosec]
       text: "G101"
+    # secretscan.go holds the DETECTION patterns for credentials (D364) — regexes
+    # describing the SHAPE of a secret, never a secret. gosec reads "AKIA…",
+    # "GOCSPX-" and the PEM headers and concludes the opposite of what they are.
+    # The irony is instructive but the finding is false.
+    - path: internal/contract/secretscan\.go
+      linters: [gosec]
+      text: "G101"
     # Bounded integer conversions: the pace backoff shift (attempt is a small,
     # capped retry counter) and the canonicalizer (numeric values are already
     # constrained to the JSON-safe range upstream — D66).

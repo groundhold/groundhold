@@ -1,6 +1,7 @@
 package aws
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -45,6 +46,8 @@ func queryXMLRole(_ *http.Request, body []byte) certifynet.Role {
 		return certifynet.RoleMutateParsed // vpcId becomes the providerId
 	case action == "RunInstances":
 		return certifynet.RoleMutateParsed // instanceId becomes the providerId (D358)
+	case action == "CreateVolume":
+		return certifynet.RoleMutateParsed // volumeId becomes the providerId (D367)
 	default:
 		// CreateSubnet's id is NOT consumed at create time (delete re-enumerates
 		// via DescribeSubnets), so it is an opaque status-only mutation.
@@ -1099,6 +1102,66 @@ func TestHonestyHarnessAWSKMS(t *testing.T) {
 				Happy: func() *httptest.Server { return awsKMSServer(t, "datakey", true, 90) },
 				Run: func(pr provider.Provider) provider.CreateResult {
 					return pr.Delete("kms", "datakey", "prod", pid, "k")
+				},
+			},
+		},
+	}
+	certifynet.CertifyDriverNet(t, p)
+}
+
+// ebsHonestyServer answers the happy path for the EBS probe: a create that names
+// the volume, a describe that reports it available and owned, a delete that works.
+// certifynet then injects transport faults, 5xx, garbled and empty bodies into
+// each mutating call and checks the driver never converts an unknown outcome into
+// a definite one.
+func ebsHonestyServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		switch actionOf(string(body)) {
+		case "CreateVolume":
+			_, _ = w.Write([]byte(ebsCreateOKXML))
+		case "DescribeVolumes":
+			_, _ = w.Write([]byte(ebsAvailableXML))
+		case "DeleteVolume":
+			_, _ = w.Write([]byte(`<DeleteVolumeResponse><return>true</return></DeleteVolumeResponse>`))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+}
+
+// The adversarial honesty pass for the first STATEFUL member of the compute
+// family (D367). The rule it enforces matters more here than on a stateless
+// resource: a create wrongly reported `failed` invites a retry, and a retry that
+// is not deduplicated leaves the data split across two volumes — a failure the
+// operator discovers later, from the half that is missing writes.
+func TestHonestyHarnessEBS(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	pid := "ebs:eu-central-1:000000000000:vol-0123456789abcdef0"
+	p := &certifynet.Probe{
+		Name:            "aws/ebs",
+		AssertTransient: true, // D237 sweep
+		Classify:        queryXMLRole,
+		OwnerTagValue:   "orders-data",
+		DeterministicID: false, // vol-xxx is server-assigned
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			return newHonestyDriver(happyURL, rt)
+		},
+		Ops: []certifynet.Op{
+			{
+				Name:  "create",
+				Happy: func() *httptest.Server { return ebsHonestyServer(t) },
+				Run: func(pr provider.Provider) provider.CreateResult {
+					return pr.Create("ebs", "orders-data", "production", ebsVolAttrs(), ebsVolImpl(), "k", 1)
+				},
+			},
+			{
+				Name:  "delete",
+				Happy: func() *httptest.Server { return ebsHonestyServer(t) },
+				Run: func(pr provider.Provider) provider.CreateResult {
+					return pr.Delete("ebs", "orders-data", "production", pid, "k")
 				},
 			},
 		},

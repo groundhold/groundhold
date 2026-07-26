@@ -61,6 +61,7 @@ func reconRows() []struct{ svc, pid string } {
 	return []struct{ svc, pid string }{
 		{"vnet", vnetProviderID(testSub, "rg1", "res1")},
 		{"azvm", azureVMProviderID(testSub, "rg1", "pv-vm-abc123456789")},
+		{"azdisk", azureDiskProviderID(testSub, "rg1", "pv-disk-orders-abc12345")},
 		{"cosmos", cosmosProviderID(testSub, "rg1", "acct1")},
 		{"keyvault", keyVaultProviderID(testSub, "rg1", "vault1")},
 		{"rediscache", redisAzureProviderID(testSub, "rg1", "res1")},
@@ -148,6 +149,13 @@ func TestReconcileEverySucceeds_coversDispatch(t *testing.T) {
 	// servicebusqueue+topic collapse to one reconcile, both listed; the azureServices
 	// set is the source of truth for the dispatch surface.
 	for svc := range azureServices {
+		// A WITNESS service (D177/D370) never creates anything, so there is no lost
+		// outcome to conclude and nothing for reconcile to do. Derived from the
+		// witness registry, not a list of names: a service that stops being a witness
+		// immediately needs a reconcile row again.
+		if !provider.CanAuthor("azure", svc) {
+			continue
+		}
 		if !covered[svc] {
 			t.Errorf("service %q is in the Create dispatch but has no reconcile test row", svc)
 		}

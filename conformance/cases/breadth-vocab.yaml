@@ -4734,3 +4734,408 @@ cases:
             availability.class: planet-scale
     expect:
       error: candidate
+
+  - name: block-storage-zone-survival-and-cmk-verify
+    description: >
+      capability.storage.block (D361). availability.class on a volume is a
+      DURABILITY guarantee, not a performance tier: a regional disk survives losing
+      a zone, a zonal one does not. A contract that needs the data to outlive a
+      zone failure says so and has it verified, instead of trusting that somebody
+      picked the right disk type.
+    vocab:
+      - capability: capability.storage.block
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          availability.class: { kind: string, enum: [zonal, regional] }
+          encryption.customerManagedKeys: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: vol-1, environment: production, version: 1 }
+      capabilities:
+        - id: data
+          type: capability.storage.block
+      constraints:
+        hard:
+          - id: c-eu
+            subject: data
+            path: location.region
+            op: in
+            value: [europe-west1, eu-central-1]
+            verify: { method: static }
+          - id: c-survives-zone-loss
+            subject: data
+            path: availability.class
+            op: equals
+            value: regional
+            verify: { method: static }
+          - id: c-cmk
+            subject: data
+            path: encryption.customerManagedKeys
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: vol-1
+      capabilities:
+        data:
+          attributes:
+            location.region: europe-west1
+            availability.class: regional
+            encryption.customerManagedKeys: true
+    expect:
+      executable: true
+      verdicts:
+        c-eu: satisfied
+        c-survives-zone-loss: satisfied
+        c-cmk: satisfied
+
+  - name: block-storage-zonal-volume-violates-zone-survival
+    description: >
+      A zonal volume under a contract that requires surviving a zone loss is
+      `violated` at verify — before the outage, not during it. This is the check
+      that makes the attribute worth having: "which disk type did we pick" is
+      invisible in a review, "does this survive losing a zone" is a verdict.
+    vocab:
+      - capability: capability.storage.block
+        version: 0.1
+        stateful: true
+        attributes:
+          availability.class: { kind: string, enum: [zonal, regional] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: vol-2, environment: production, version: 1 }
+      capabilities:
+        - id: data
+          type: capability.storage.block
+      constraints:
+        hard:
+          - id: c-survives-zone-loss
+            subject: data
+            path: availability.class
+            op: equals
+            value: regional
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: vol-2
+      capabilities:
+        data:
+          attributes:
+            availability.class: zonal
+    expect:
+      executable: false
+      verdicts:
+        c-survives-zone-loss: violated
+
+  - name: block-storage-availability-enum-is-enforced
+    description: >
+      availability.class is a closed enum. A candidate inventing a value — a disk
+      TYPE, say, where a durability class belongs — is a load error rather than a
+      silently accepted string, which is exactly the confusion this attribute
+      exists to prevent.
+    vocab:
+      - capability: capability.storage.block
+        version: 0.1
+        stateful: true
+        attributes:
+          availability.class: { kind: string, enum: [zonal, regional] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: vol-3, environment: test, version: 1 }
+      capabilities:
+        - id: data
+          type: capability.storage.block
+      constraints:
+        hard:
+          - id: c-zonal
+            subject: data
+            path: availability.class
+            op: equals
+            value: zonal
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: vol-3
+      capabilities:
+        data:
+          attributes:
+            availability.class: gp3
+    expect:
+      error: candidate
+
+  - name: compute-image-public-sharing-violated
+    description: >
+      capability.compute.image (D362). "Is our base image public?" is a question
+      most estates cannot answer — it is an account setting nobody re-reads, and a
+      public image is readable by strangers along with everything baked into it.
+      Here it is a deterministic verdict: an image shared beyond the account
+      violates a contract that forbids it, at verify.
+    vocab:
+      - capability: capability.compute.image
+        version: 0.1
+        stateful: false
+        attributes:
+          network.publicExposure: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: img-1, environment: production, version: 1 }
+      capabilities:
+        - id: base
+          type: capability.compute.image
+      constraints:
+        hard:
+          - id: c-not-public
+            subject: base
+            path: network.publicExposure
+            op: equals
+            value: false
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: img-1
+      capabilities:
+        base:
+          attributes:
+            network.publicExposure: true
+    expect:
+      executable: false
+      verdicts:
+        c-not-public: violated
+
+  - name: compute-image-provenance-and-residency-verify
+    description: >
+      The image is WITNESSED, not authored (D177): groundhold does not build it,
+      so every attribute arrives as an observation of what exists. Provenance is
+      recorded as `inferred` from the attestation the account trusts, and the
+      verdict carries that basis rather than pretending the value was declared.
+    vocab:
+      - capability: capability.compute.image
+        version: 0.1
+        stateful: false
+        attributes:
+          location.region: { kind: string }
+          sourceProvenance: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: img-2, environment: production, version: 1 }
+      capabilities:
+        - id: base
+          type: capability.compute.image
+      constraints:
+        hard:
+          - id: c-eu
+            subject: base
+            path: location.region
+            op: in
+            value: [eu-central-1, europe-west1]
+            verify: { method: static }
+          - id: c-attested
+            subject: base
+            path: sourceProvenance
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: img-2
+      capabilities:
+        base:
+          attributes:
+            location.region: eu-central-1
+            sourceProvenance:
+              value: true
+              status: inferred
+              source: ami:describe-image-attribute
+    expect:
+      executable: true
+      verdicts:
+        c-eu: satisfied
+        c-attested: satisfied
+
+  - name: compute-image-provenance-kind-mismatch-is-load-error
+    description: >
+      sourceProvenance is declared a bool: it records THAT the build chain is
+      attested, never what is inside the image. A candidate supplying the builder's
+      name instead is a load error, not a coerced truthy string — otherwise "built
+      by jenkins" would silently satisfy "is attested".
+    vocab:
+      - capability: capability.compute.image
+        version: 0.1
+        stateful: false
+        attributes:
+          sourceProvenance: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: img-3, environment: test, version: 1 }
+      capabilities:
+        - id: base
+          type: capability.compute.image
+      constraints:
+        hard:
+          - id: c-attested
+            subject: base
+            path: sourceProvenance
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: img-3
+      capabilities:
+        base:
+          attributes:
+            sourceProvenance: "built-by-jenkins"
+    expect:
+      error: candidate
+
+  - name: autoscaling-capacity-envelope-and-zone-spread-verify
+    description: >
+      capability.compute.autoscaling (D363). A group expresses CAPACITY where an
+      instance expresses a machine — which is why replicas.minimum lives here and
+      was refused on the instance type, and why `regional` is available here and
+      refused there. The contract governs the ENVELOPE (never fewer than, never
+      more than); the scaling policy's tuning stays out.
+    vocab:
+      - capability: capability.compute.autoscaling
+        version: 0.1
+        stateful: false
+        attributes:
+          availability.class: { kind: string, enum: [zonal, regional] }
+          replicas.minimum: { kind: number }
+          replicas.maximum: { kind: number }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: asg-1, environment: production, version: 1 }
+      capabilities:
+        - id: fleet
+          type: capability.compute.autoscaling
+      constraints:
+        hard:
+          - id: c-survives-zone-loss
+            subject: fleet
+            path: availability.class
+            op: equals
+            value: regional
+            verify: { method: static }
+          - id: c-floor
+            subject: fleet
+            path: replicas.minimum
+            op: gte
+            value: 3
+            verify: { method: static }
+          - id: c-ceiling
+            subject: fleet
+            path: replicas.maximum
+            op: lte
+            value: 20
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: asg-1
+      capabilities:
+        fleet:
+          attributes:
+            availability.class: regional
+            replicas.minimum: 3
+            replicas.maximum: 12
+    expect:
+      executable: true
+      verdicts:
+        c-survives-zone-loss: satisfied
+        c-floor: satisfied
+        c-ceiling: satisfied
+
+  - name: autoscaling-floor-below-the-contract-is-violated
+    description: >
+      A floor of one under a contract requiring three is `violated` — the failure
+      an availability requirement is written to catch, visible at verify rather
+      than during the incident that finds it. A ceiling breach is the same check
+      pointing the other way: it is a cost and blast-radius control.
+    vocab:
+      - capability: capability.compute.autoscaling
+        version: 0.1
+        stateful: false
+        attributes:
+          replicas.minimum: { kind: number }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: asg-2, environment: production, version: 1 }
+      capabilities:
+        - id: fleet
+          type: capability.compute.autoscaling
+      constraints:
+        hard:
+          - id: c-floor
+            subject: fleet
+            path: replicas.minimum
+            op: gte
+            value: 3
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: asg-2
+      capabilities:
+        fleet:
+          attributes:
+            replicas.minimum: 1
+    expect:
+      executable: false
+      verdicts:
+        c-floor: violated
+
+  - name: autoscaling-replica-count-kind-mismatch-is-load-error
+    description: >
+      replicas.minimum is a number. A candidate supplying a scaling EXPRESSION —
+      the tuning this vocabulary deliberately excludes — is a load error rather
+      than a coerced value, which is what keeps a control loop out of a contract
+      whose operator set is closed (invariant 4).
+    vocab:
+      - capability: capability.compute.autoscaling
+        version: 0.1
+        stateful: false
+        attributes:
+          replicas.minimum: { kind: number }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: asg-3, environment: test, version: 1 }
+      capabilities:
+        - id: fleet
+          type: capability.compute.autoscaling
+      constraints:
+        hard:
+          - id: c-floor
+            subject: fleet
+            path: replicas.minimum
+            op: gte
+            value: 3
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: asg-3
+      capabilities:
+        fleet:
+          attributes:
+            replicas.minimum: "cpu > 70% ? 5 : 2"
+    expect:
+      error: candidate

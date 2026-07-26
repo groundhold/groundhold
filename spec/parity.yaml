@@ -124,6 +124,20 @@ capabilities:
       unbuilt: true
     azure:
       unbuilt: true
+  capability.compute.autoscaling:
+    aws:
+      unbuilt: true
+    gcp:
+      unbuilt: true
+    azure:
+      unbuilt: true
+  capability.compute.image:
+    aws:
+      fulfilled: [ami]
+    gcp:
+      fulfilled: [computeimage]
+    azure:
+      fulfilled: [azimage]
   capability.compute.instance:
     aws:
       fulfilled: [ec2]
@@ -372,6 +386,13 @@ capabilities:
       fulfilled: [cloudarmor]
     azure:
       fulfilled: [frontdoorwaf]
+  capability.storage.block:
+    aws:
+      fulfilled: [ebs]
+    gcp:
+      fulfilled: [pd]
+    azure:
+      fulfilled: [azdisk]
   capability.storage.filesystem:
     aws:
       fulfilled: [efs]

@@ -646,6 +646,9 @@ func run(args []string) int {
 	record := false
 	yes := false
 	allowDataLoss := false
+	// D364: silences the plaintext-credential warning. A warning nobody can turn
+	// off is a warning everybody learns to ignore.
+	allowPlaintextSecret := false
 	adoptMap := map[string]string{}
 	discoveryPath := ""
 	format := "auto"
@@ -1098,6 +1101,8 @@ func run(args []string) int {
 			yes = true
 		case "--allow-data-loss":
 			allowDataLoss = true
+		case "--allow-plaintext-secret":
+			allowPlaintextSecret = true
 		default:
 			pos = append(pos, args[i])
 		}
@@ -2051,6 +2056,7 @@ func run(args []string) int {
 			fmt.Fprintf(os.Stderr, "candidate error: %v\n", err)
 			return 1
 		}
+		warnPlaintextSecrets(os.Stderr, cand, allowPlaintextSecret)
 		report, verr := verify.Verify(c, cand, vocabs)
 		if verr != nil {
 			fmt.Fprintf(os.Stderr, "candidate error: %v\n", verr)
@@ -2211,6 +2217,7 @@ func run(args []string) int {
 			fmt.Fprintf(os.Stderr, "candidate error: %v\n", err)
 			return 1
 		}
+		warnPlaintextSecrets(os.Stderr, cand, allowPlaintextSecret)
 		report, verr := verify.Verify(c, cand, vocabs)
 		if verr != nil {
 			fmt.Fprintf(os.Stderr, "candidate error: %v\n", verr)
@@ -2297,6 +2304,7 @@ func run(args []string) int {
 			fmt.Fprintf(os.Stderr, "candidate error: %v\n", err)
 			return 1
 		}
+		warnPlaintextSecrets(os.Stderr, cand, allowPlaintextSecret)
 		// D173: the parity matrix governs — a candidate binding a service to a
 		// capability TYPE that service does not fulfil refuses before compile.
 		if err := checkParityBindings(c, cand); err != nil {
@@ -2435,6 +2443,7 @@ func run(args []string) int {
 			fmt.Fprintf(os.Stderr, "candidate error: %v\n", err)
 			return 1
 		}
+		warnPlaintextSecrets(os.Stderr, cand, allowPlaintextSecret)
 		prov := crawlProvider(providerName, project, kubeconfigPath, kubeContext)
 		if prov == nil {
 			fmt.Fprintf(os.Stderr, "unknown provider %q\n", providerName)
@@ -2470,6 +2479,7 @@ func run(args []string) int {
 			fmt.Fprintf(os.Stderr, "candidate error: %v\n", err)
 			return 1
 		}
+		warnPlaintextSecrets(os.Stderr, cand, allowPlaintextSecret)
 		planDoc, err := plan.LoadPlan(pos[3])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "plan error: %v\n", err)
@@ -4248,6 +4258,31 @@ func renderSuggestText(w io.Writer, contractID string, res suggest.Result, asMod
 // renderSuggestHint prints the one-line advisory pointer at the end of plan/
 // converge (stderr, like the cost line). Never gates; silent when there is
 // nothing to suggest.
+// warnPlaintextSecrets reports values whose SHAPE says they should not be in a
+// stored document (D364). It is a WARNING, never a refusal: groundhold records
+// what it is told to record, and a heuristic must not block a run it cannot prove
+// anything about. What it must do is say what the operator can do instead — the
+// reporter's point was that "this is dangerous" alone leaves you where you were.
+//
+// Silenced with --allow-plaintext-secret, because a warning nobody can turn off
+// is a warning everybody learns to ignore.
+func warnPlaintextSecrets(w io.Writer, cand *contract.Candidate, allowed bool) {
+	if allowed {
+		return
+	}
+	findings := contract.ScanForPlaintextSecrets(cand)
+	if len(findings) == 0 {
+		return
+	}
+	for _, f := range findings {
+		fmt.Fprintf(w, "WARNING  %s\n", f.Pointer)
+		fmt.Fprintf(w, "  looks like %s. groundhold will apply and PERSIST this value in the\n", f.Kind)
+		fmt.Fprintf(w, "  ledger verbatim — the ledger then holds material as sensitive as this value.\n")
+		fmt.Fprintf(w, "  Instead: %s.\n", f.Advice)
+	}
+	fmt.Fprintf(w, "  Deliberate? re-run with --allow-plaintext-secret to silence this.\n")
+}
+
 func renderSuggestHint(w io.Writer, c *contract.Contract, vocabs map[string]vocab.Vocabulary, cand *contract.Candidate) {
 	res := suggest.Compute(c, vocabs, cand)
 	if len(res.Suggestions) == 0 {

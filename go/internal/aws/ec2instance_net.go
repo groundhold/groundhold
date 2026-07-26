@@ -112,38 +112,84 @@ func (d *Driver) describeEC2Instances(region string, extra map[string]string) (e
 	return ec2Instance{}, false, nil
 }
 
-// ec2Volume is the slice of DescribeVolumes the encryption attributes need.
+// ec2Volume is the slice of DescribeVolumes both compute drivers read: the
+// instance driver needs the encryption pair for its root disk, and the EBS
+// driver (D367) governs the volume in its own right, so it also needs the
+// identity, the state, the zone and the ownership tags. One reader, one place
+// the response shape is parsed.
 type ec2Volume struct {
-	Encrypted bool
-	KmsKeyID  string
+	VolumeID         string
+	State            string
+	AvailabilityZone string
+	Encrypted        bool
+	KmsKeyID         string
+	Tags             map[string]string
 }
 
-func (d *Driver) describeEC2Volume(region, volumeID string) (ec2Volume, bool, error) {
-	st, body, err := d.ec2PostBase(region, encodeForm(map[string]string{
-		"Action": "DescribeVolumes", "Version": ec2Version, "VolumeId.1": volumeID,
-	}))
+// describeEC2Volumes runs a DescribeVolumes query and returns every volume it
+// names. A `NotFound` 400 is an EMPTY list with no error — the API answered and
+// the volume is not there, which is different from "the read failed", and the
+// difference is what keeps a delete idempotent instead of guessing.
+func (d *Driver) describeEC2Volumes(region string, extra map[string]string) ([]ec2Volume, error) {
+	params := map[string]string{"Action": "DescribeVolumes", "Version": ec2Version}
+	for k, v := range extra {
+		params[k] = v
+	}
+	st, body, err := d.ec2PostBase(region, encodeForm(params))
 	if err != nil {
-		return ec2Volume{}, false, readTransport("DescribeVolumes", err)
+		return nil, readTransport("DescribeVolumes", err)
 	}
 	if st == http.StatusBadRequest && strings.Contains(ec2ErrCode(body), "NotFound") {
-		return ec2Volume{}, false, nil
+		return nil, nil
 	}
 	if st != http.StatusOK {
-		return ec2Volume{}, false, readHTTP("DescribeVolumes", st, awsErrCodeOf(body))
+		return nil, readHTTP("DescribeVolumes", st, awsErrCodeOf(body))
 	}
 	var resp struct {
 		Items []struct {
+			VolumeID  string `xml:"volumeId"`
+			Status    string `xml:"status"`
+			Zone      string `xml:"availabilityZone"`
 			Encrypted bool   `xml:"encrypted"`
 			KmsKeyID  string `xml:"kmsKeyId"`
+			Tags      []struct {
+				Key   string `xml:"key"`
+				Value string `xml:"value"`
+			} `xml:"tagSet>item"`
 		} `xml:"volumeSet>item"`
 	}
 	if xml.Unmarshal(body, &resp) != nil {
-		return ec2Volume{}, false, readBody("DescribeVolumes", st)
+		return nil, readBody("DescribeVolumes", st)
 	}
-	if len(resp.Items) == 0 {
+	out := make([]ec2Volume, 0, len(resp.Items))
+	for _, it := range resp.Items {
+		// A deleted volume is gone as far as the contract is concerned; reading one
+		// as present would make a delete look unfinished forever.
+		if it.Status == "deleted" {
+			continue
+		}
+		v := ec2Volume{
+			VolumeID: it.VolumeID, State: it.Status, AvailabilityZone: it.Zone,
+			Encrypted: it.Encrypted, KmsKeyID: it.KmsKeyID,
+			Tags: map[string]string{},
+		}
+		for _, t := range it.Tags {
+			v.Tags[t.Key] = t.Value
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+func (d *Driver) describeEC2Volume(region, volumeID string) (ec2Volume, bool, error) {
+	vols, err := d.describeEC2Volumes(region, map[string]string{"VolumeId.1": volumeID})
+	if err != nil {
+		return ec2Volume{}, false, err
+	}
+	if len(vols) == 0 {
 		return ec2Volume{}, false, nil
 	}
-	return ec2Volume{Encrypted: resp.Items[0].Encrypted, KmsKeyID: resp.Items[0].KmsKeyID}, true, nil
+	return vols[0], true, nil
 }
 
 func (d *Driver) createEC2Instance(region, account, environment, capability string,

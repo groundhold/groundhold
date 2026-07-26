@@ -35,6 +35,8 @@ func (d *Driver) ServiceCapabilities() map[string]string {
 		"uptime":               "capability.monitoring.uptime",        // discoverUptimeChecks (discover_gcp.go:727)
 		"logmetric":            "capability.monitoring.logmetric",     // discoverLogMetrics (discover_gap_gcp_b.go:270)
 		"gce":                  "capability.compute.instance",         // discoverGCEInstances
+		"computeimage":         "capability.compute.image",            // discoverGCPImages (witness, D370)
+		"pd":                   "capability.storage.block",            // discoverPD
 		"artifactregistry":     "capability.registry.image",           // discoverArtifactRegistries (discover_gcp.go:817)
 		"filestore":            "capability.storage.filesystem",       // discoverFilestore (discover_gap_gcp_b.go:131)
 		"firestore":            "capability.database.nosql",           // discoverFirestore (discover_gcp.go:335)

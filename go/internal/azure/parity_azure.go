@@ -37,6 +37,8 @@ func (d *Driver) ServiceCapabilities() map[string]string {
 
 		// --- gap batch A (discover_gap_azure_a.go) ---
 		"acr":        "capability.registry.image",     // discoverACR (discoverRegional arg)
+		"azdisk":     "capability.storage.block",      // discoverAzureDisks
+		"azimage":    "capability.compute.image",      // discoverAzureImages (witness, D370)
 		"azvm":       "capability.compute.instance",   // discoverAzureVMs
 		"aisearch":   "capability.search.index",       // discoverAISearch (discoverRegional arg)
 		"apim":       "capability.apigateway.http",    // discoverAPIM (discoverRegional arg)

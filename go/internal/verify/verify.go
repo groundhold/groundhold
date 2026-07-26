@@ -43,6 +43,17 @@ type Summary struct {
 	VerdictsOnAssumedValues int `json:"verdictsOnAssumedValues"`
 }
 
+// Advisory is a machine-readable warning: something groundhold noticed that is
+// not a verdict but that an operator — or an AGENT — should know about (D365).
+// It never blocks. It carries a stable Code precisely so an agent can route on it
+// without parsing prose.
+type Advisory struct {
+	Code    string `json:"code"`
+	Pointer string `json:"pointer"`
+	Detail  string `json:"detail"`
+	Next    string `json:"next"`
+}
+
 type Report struct {
 	SpecVersion     string    `json:"specVersion"`
 	ContractHash    string    `json:"contractHash"`
@@ -55,6 +66,10 @@ type Report struct {
 	Code            string    `json:"code,omitempty"` // "not-executable" gdy blokuje (D64/D65)
 	BlockingReasons []string  `json:"blockingReasons"`
 	Verdicts        []Verdict `json:"verdicts"`
+	// Advisories ride in the REPORT rather than only on stderr: an agent reads
+	// this document and never sees the terminal, so a warning that lives only in
+	// prose is a warning the agent is structurally unable to act on.
+	Advisories []Advisory `json:"advisories,omitempty"`
 }
 
 func codeOf(executable bool) string {
@@ -141,7 +156,28 @@ func Verify(c *contract.Contract, cand *contract.Candidate,
 		BlockingReasons: blocking,
 		Code:            codeOf(len(blocking) == 0),
 		Verdicts:        verdicts,
+		Advisories:      advisoriesFor(cand),
 	}, nil
+}
+
+// advisoriesFor lifts the candidate scan (D364) into the report. It never affects
+// `executable`: an advisory is something noticed, not something proven.
+func advisoriesFor(cand *contract.Candidate) []Advisory {
+	findings := contract.ScanForPlaintextSecrets(cand)
+	if len(findings) == 0 {
+		return nil
+	}
+	out := make([]Advisory, 0, len(findings))
+	for _, f := range findings {
+		out = append(out, Advisory{
+			Code:    f.Code,
+			Pointer: f.Pointer,
+			Detail: "looks like " + f.Kind + "; groundhold will apply and persist this " +
+				"value in the ledger verbatim",
+			Next: f.Advice,
+		})
+	}
+	return out
 }
 
 func eval(c contract.Constraint, cand *contract.Candidate) Verdict {

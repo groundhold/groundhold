@@ -1159,3 +1159,60 @@ func TestNoDuplicateGKE(t *testing.T) {
 	}
 	certifynet.CertifyNoDuplicate(t, p)
 }
+
+// pdHonestyServer answers the happy path for the persistent-disk probe: an insert
+// that returns an operation, an operation that is DONE, a disk that is readable
+// and owned, a delete that works. certifynet then injects transport faults, 5xx,
+// garbled and empty bodies into each mutating call and checks the driver never
+// converts an unknown outcome into a definite one.
+func pdHonestyServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/operations/"):
+			_, _ = w.Write([]byte(`{"name":"op-1","status":"DONE"}`))
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(ownedDisk))
+		default:
+			_, _ = w.Write([]byte(`{"name":"op-1"}`))
+		}
+	}))
+}
+
+// The adversarial honesty pass for the GCP half of capability.storage.block
+// (D368). The rule matters more on a stateful capability than a stateless one: a
+// create wrongly reported `failed` invites a retry, and while the deterministic
+// name means a retry converges rather than duplicating, a `failed` verdict that
+// should have been `unknown` sends the operator looking for a disk they were told
+// does not exist.
+func TestHonestyHarnessPD(t *testing.T) {
+	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
+	pid := "pd:acme-prod:europe-west1-b:orders-data-production-abc12345"
+	p := &certifynet.Probe{
+		Name:            "gcp/pd",
+		AssertTransient: true,      // D237 sweep
+		Classify:        gcpOpRole, // LRO create/delete parse the operation name
+		OwnerTagValue:   "orders-data",
+		DeterministicID: true, // the disk name is a chosen slug+hash
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			return newGcpHonestyDriver(happyURL, rt)
+		},
+		Ops: []certifynet.Op{
+			{
+				Name:  "create",
+				Happy: func() *httptest.Server { return pdHonestyServer(t) },
+				Run: func(pr provider.Provider) provider.CreateResult {
+					return pr.Create("pd", "orders-data", "production", pdAttrs(), pdImpl(), "k", 1)
+				},
+			},
+			{
+				Name:  "delete",
+				Happy: func() *httptest.Server { return pdHonestyServer(t) },
+				Run: func(pr provider.Provider) provider.CreateResult {
+					return pr.Delete("pd", "orders-data", "production", pid, "k")
+				},
+			},
+		},
+	}
+	certifynet.CertifyDriverNet(t, p)
+}

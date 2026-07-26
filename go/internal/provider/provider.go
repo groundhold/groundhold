@@ -682,6 +682,42 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			case "delete":
 				return sortedDedup([]string{"logging.logMetrics.delete", "logging.logMetrics.get"})
 			}
+		case "computeimage":
+			// D370. A machine image (capability.compute.image), WITNESSED not authored
+			// (D177) — so there is no create/delete permission set, only the reads.
+			// getIamPolicy is a second permission for a second question: public sharing
+			// is a POLICY on GCP, not a field on the resource, and an observe that
+			// cannot make that call reports the fact unread rather than defaulting it.
+			switch operation {
+			case "create", "adopt", "update", "delete":
+				return sortedDedup([]string{"compute.images.get", "compute.images.list",
+					"compute.images.getIamPolicy"})
+			}
+		case "pd":
+			// D368. A block volume (capability.storage.block). disks.insert takes no
+			// idempotency key, so the deterministic NAME is the mechanism and disks.get
+			// is the quiet read (409 continuation + delete pre-read). Ownership is
+			// labels — and on a STATEFUL capability that read is what stands between a
+			// mis-pinned providerId and destroying data that is not ours, so it is
+			// required on the delete path. A REGIONAL disk is a different resource at a
+			// different scope, which is why regionOperations.get joins the zonal one.
+			switch operation {
+			case "create", "adopt":
+				p := []string{"compute.disks.create", "compute.disks.get",
+					"compute.zoneOperations.get", "compute.regionOperations.get"}
+				if cmk, _ := attrs["encryption.customerManagedKeys"].(bool); cmk {
+					p = append(p, "cloudkms.cryptoKeys.get",
+						"cloudkms.cryptoKeyVersions.useToEncrypt")
+				}
+				return sortedDedup(p)
+			case "update":
+				// Every governed attribute is immutable on a volume (D368), so an
+				// update is a read plus the replacement the compiler plans.
+				return sortedDedup([]string{"compute.disks.get"})
+			case "delete":
+				return sortedDedup([]string{"compute.disks.delete", "compute.disks.get",
+					"compute.zoneOperations.get", "compute.regionOperations.get"})
+			}
 		case "gce":
 			// D359. A virtual machine (capability.compute.instance). instances.insert
 			// takes no idempotency key, so the deterministic NAME is the mechanism and
@@ -1606,6 +1642,34 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			case "delete":
 				return sortedDedup([]string{"ec2:TerminateInstances", "ec2:DescribeInstances"})
 			}
+		case "ami":
+			// D370. A machine image (capability.compute.image), WITNESSED not authored
+			// (D177) — so there is no create/delete permission set, only the reads.
+			// DescribeSnapshots is a second permission for a second resource: the
+			// encryption pair lives on the backing snapshot, not on the image, and an
+			// observe that cannot make that call reports the facts unread rather than
+			// defaulting them.
+			switch operation {
+			case "create", "adopt", "update", "delete":
+				return sortedDedup([]string{"ec2:DescribeImages", "ec2:DescribeSnapshots"})
+			}
+		case "ebs":
+			// D367. A block volume (capability.storage.block). The volume id is
+			// server-assigned; DescribeVolumes recovers it after a lost create (the
+			// ClientToken is deterministic). Ownership is tags — and on a STATEFUL
+			// capability that read is what stands between a mis-pinned providerId and
+			// destroying someone else's data, so it is required on the delete path.
+			switch operation {
+			case "create", "adopt":
+				return sortedDedup([]string{"ec2:CreateVolume", "ec2:DescribeVolumes",
+					"ec2:CreateTags"})
+			case "update":
+				// Every governed attribute is immutable on a volume (D367), so an
+				// update is a read plus the replacement the compiler plans.
+				return sortedDedup([]string{"ec2:DescribeVolumes"})
+			case "delete":
+				return sortedDedup([]string{"ec2:DeleteVolume", "ec2:DescribeVolumes"})
+			}
 		case "efs":
 			// D111. A managed NFS file share (capability.storage.filesystem). The
 			// file-system id is server-assigned; DescribeFileSystems recovers it after
@@ -2256,6 +2320,45 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 				return sortedDedup([]string{
 					"Microsoft.DocumentDB/databaseAccounts/delete",
 					"Microsoft.DocumentDB/databaseAccounts/read"})
+			}
+		case "azimage":
+			// D370. A machine image (capability.compute.image), WITNESSED not authored
+			// (D177) — so there is no create/delete permission set, only the read. A
+			// managed image cannot be shared outside its subscription, so unlike the
+			// GCP twin there is no policy permission to ask for.
+			switch operation {
+			case "create", "adopt", "update", "delete":
+				return sortedDedup([]string{"Microsoft.Compute/images/read"})
+			}
+		case "azdisk":
+			// D369. A block volume (capability.storage.block). ARM PUT is an UPSERT and
+			// idempotent by name, so disks/read is the quiet read (foreign-upsert
+			// refusal + delete pre-read) — and on a STATEFUL capability that read is
+			// what stands between a name collision and overwriting somebody else's
+			// data. A disk-encryption set adds a read of its own, because it cannot be
+			// used without being readable.
+			//
+			// A COPY source also needs Microsoft.Compute/snapshots/read, and it is
+			// deliberately absent: this table sees `attrs`, not the operand block, so
+			// the copy source is invisible here. Claiming it unconditionally would
+			// refuse identities that only ever create empty disks — and the honest
+			// failure mode of omitting it is a permission error from the API on the
+			// one create that needed it, which is what a preflight is allowed to
+			// miss (D75: a pass is evidence, not proof).
+			switch operation {
+			case "create", "adopt":
+				p := []string{"Microsoft.Compute/disks/write", "Microsoft.Compute/disks/read"}
+				if cmk, _ := attrs["encryption.customerManagedKeys"].(bool); cmk {
+					p = append(p, "Microsoft.Compute/diskEncryptionSets/read")
+				}
+				return sortedDedup(p)
+			case "update":
+				// Every governed attribute is immutable on a volume (D369), so an
+				// update is a read plus the replacement the compiler plans.
+				return sortedDedup([]string{"Microsoft.Compute/disks/read"})
+			case "delete":
+				return sortedDedup([]string{"Microsoft.Compute/disks/delete",
+					"Microsoft.Compute/disks/read"})
 			}
 		case "azvm":
 			// D360. A virtual machine (capability.compute.instance). ARM PUT is an

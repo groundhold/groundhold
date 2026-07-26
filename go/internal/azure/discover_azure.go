@@ -69,6 +69,8 @@ func (d *Driver) serviceDiscoverers() []azSweep {
 		// discoverability backfill
 		{[]string{"acr"}, d.discoverACR},
 		{[]string{"azvm"}, d.discoverAzureVMs},
+		{[]string{"azdisk"}, d.discoverAzureDisks},
+		{[]string{"azimage"}, d.discoverAzureImages},
 		{[]string{"aisearch"}, d.discoverAISearch},
 		{[]string{"apim"}, d.discoverAPIM},
 		{[]string{"azkafka"}, d.discoverAzKafka},

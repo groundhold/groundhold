@@ -2986,3 +2986,267 @@ cases:
             - Microsoft.Network/dnsZones/*/read
             - Microsoft.Network/dnsZones/*/write
             - Microsoft.Network/dnsZones/read
+
+  - name: plan-emits-aws-ebs-permissions-cmek
+    impl: go
+    description: >
+      A customer-encrypted block volume (capability.storage.block on aws/ebs,
+      D367) — the companion capability a machine cannot do without, and the
+      first STATEFUL member of the compute family. The volume IS the data, so
+      it is a capability of its own rather than an operand of the instance: an
+      operand cannot be gated, and D47's delete_stateful gate is the whole
+      point of the separation. ec2:CreateTags rides along because ownership is
+      tags, and the delete path requires ec2:DescribeVolumes — on a stateful
+      capability the ownership read is what stands between a mis-pinned
+      providerId and destroying data that is not ours.
+    plan:
+      at: "2026-07-26T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d367ebs, environment: test, version: 1 }
+        capabilities:
+          - id: vol
+            type: capability.storage.block
+        constraints:
+          hard:
+            - id: c-region
+              subject: vol
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+            - id: c-cmek
+              subject: vol
+              path: encryption.customerManagedKeys
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d367ebs
+        capabilities:
+          vol:
+            provider: aws
+            service: ebs
+            attributes:
+              location.region: eu-central-1
+              availability.class: zonal
+              encryption.atRest: true
+              encryption.customerManagedKeys: true
+              service.managed: true
+            implementation:
+              availability_zone: eu-central-1a
+              size_gb: 100
+              volume_type: gp3
+              kms_key_id: arn:aws:kms:eu-central-1:000000000000:key/abc-123
+    expect:
+      actions:
+        a-create-vol:
+          operation: create
+          requiredPermissions:
+            - ec2:CreateTags
+            - ec2:CreateVolume
+            - ec2:DescribeVolumes
+
+  - name: plan-emits-gcp-pd-permissions-regional
+    impl: go
+    description: >
+      A REGIONAL persistent disk (capability.storage.block on gcp/pd, D368) —
+      the same vocabulary AWS EBS fulfils, and the case where the clouds
+      genuinely differ. The EBS twin REFUSES availability.class=regional
+      because AWS does not sell it; GCP replicates a regional disk across two
+      zones synchronously, so this driver honors it — through a different API
+      surface (regionDisks scoped to regions/<r>), which is why
+      compute.regionOperations.get rides along with the zonal one. The
+      attribute earning its place: one contract, one verdict, two clouds that
+      answer it differently and say so.
+    plan:
+      at: "2026-07-26T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d368pd, environment: test, version: 1 }
+        capabilities:
+          - id: vol
+            type: capability.storage.block
+        constraints:
+          hard:
+            - id: c-region
+              subject: vol
+              path: location.region
+              op: equals
+              value: europe-west1
+              verify: { method: static }
+            - id: c-zone-survivable
+              subject: vol
+              path: availability.class
+              op: equals
+              value: regional
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d368pd
+        capabilities:
+          vol:
+            provider: gcp
+            service: pd
+            attributes:
+              location.region: europe-west1
+              availability.class: regional
+              encryption.atRest: true
+              encryption.customerManagedKeys: false
+              service.managed: true
+            implementation:
+              size_gb: 200
+              disk_type: pd-ssd
+              replica_zones: [europe-west1-b, europe-west1-c]
+    expect:
+      actions:
+        a-create-vol:
+          operation: create
+          requiredPermissions:
+            - compute.disks.create
+            - compute.disks.get
+            - compute.regionOperations.get
+            - compute.zoneOperations.get
+
+  - name: plan-emits-azure-disk-permissions-zrs
+    impl: go
+    description: >
+      A zone-redundant managed disk (capability.storage.block on azure/azdisk,
+      D369) — the THIRD cloud for this vocabulary, and the third mechanism for
+      the same attribute. EBS refuses availability.class=regional (AWS does not
+      sell one); GCP honors it through a different API surface (regionDisks +
+      replicaZones); Azure honors it through a SKU SUFFIX (_ZRS). One contract
+      sentence, three clouds, and the driver that cannot honor it says so
+      rather than downgrading quietly. Ownership is tags, and disks/read is
+      required on the delete path because on a stateful capability it is what
+      stands between a mis-pinned providerId and destroying data.
+    plan:
+      at: "2026-07-26T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d369disk, environment: test, version: 1 }
+        capabilities:
+          - id: vol
+            type: capability.storage.block
+        constraints:
+          hard:
+            - id: c-region
+              subject: vol
+              path: location.region
+              op: equals
+              value: swedencentral
+              verify: { method: static }
+            - id: c-zone-survivable
+              subject: vol
+              path: availability.class
+              op: equals
+              value: regional
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d369disk
+        capabilities:
+          vol:
+            provider: azure
+            service: azdisk
+            attributes:
+              location.region: swedencentral
+              availability.class: regional
+              encryption.atRest: true
+              encryption.customerManagedKeys: false
+              service.managed: true
+            implementation:
+              resource_group: rg
+              disk_sku: Premium_ZRS
+              size_gb: 200
+    expect:
+      actions:
+        a-create-vol:
+          operation: create
+          requiredPermissions:
+            - Microsoft.Compute/disks/read
+            - Microsoft.Compute/disks/write
+
+  - name: plan-witnesses-a-machine-image-and-authors-only-the-machine
+    impl: go
+    description: >
+      capability.compute.image on aws/ami (D370) — the first CLOUD driver that
+      is a WITNESS rather than an author (D177) — alongside the machine that
+      boots it. Images are BUILT, and building is a pipeline concern with its
+      own review; a driver that "created" one would be a wrapper over somebody
+      else's build. So the plan authors the INSTANCE and records the IMAGE as
+      `witnessed`, with no action for it.
+      Both halves are asserted: the absence of a create for the image, and the
+      presence of the record. A case that only checked the absence would also
+      pass if the capability had been dropped from the plan entirely, which is
+      exactly the omission the explicit record exists to make impossible in a
+      signed artifact.
+      The pairing is also the realistic shape, and it is why a witness-only
+      plan is refused as `nothing-to-change`: a plan exists to change things,
+      and witnessing is not a change.
+    plan:
+      at: "2026-07-26T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d370img, environment: test, version: 1 }
+        capabilities:
+          - id: base
+            type: capability.compute.image
+          - id: box
+            type: capability.compute.instance
+        constraints:
+          hard:
+            - id: c-image-not-public
+              subject: base
+              path: network.publicExposure
+              op: equals
+              value: false
+              verify: { method: static }
+            - id: c-box-region
+              subject: box
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d370img
+        capabilities:
+          base:
+            provider: aws
+            service: ami
+            attributes:
+              location.region: eu-central-1
+              network.publicExposure: false
+              encryption.atRest: true
+              encryption.customerManagedKeys: true
+              service.managed: true
+          box:
+            provider: aws
+            service: ec2
+            attributes:
+              location.region: eu-central-1
+              availability.class: zonal
+              network.publicExposure: false
+              encryption.atRest: true
+              encryption.customerManagedKeys: false
+              service.managed: true
+            implementation:
+              instance_type: m6i.large
+              image_id: ami-0123456789abcdef0
+              subnet_id: subnet-0abc123456789def0
+    expect:
+      absentActions: [a-create-base]
+      witnessed: [base]
+      actions:
+        a-create-box:
+          operation: create

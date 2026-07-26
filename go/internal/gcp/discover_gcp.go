@@ -45,7 +45,7 @@ func (d *Driver) serviceDiscoverers() map[string]func(string) ([]provider.Discov
 		"serviceaccount": d.discoverServiceAccounts, "customrole": d.discoverCustomRoles,
 		"iambinding": d.discoverIAMBindings, "secretmanager": d.discoverSecrets,
 		"monitoring": d.discoverAlertPolicies, "uptime": d.discoverUptimeChecks,
-		"gce": d.discoverGCEInstances, "artifactregistry": d.discoverArtifactRegistries, "loadbalancer": d.discoverLoadBalancers,
+		"gce": d.discoverGCEInstances, "pd": d.discoverPD, "computeimage": d.discoverGCPImages, "artifactregistry": d.discoverArtifactRegistries, "loadbalancer": d.discoverLoadBalancers,
 		// discoverability backfill
 		"backupvault": d.discoverBackupVault, "bigquery": d.discoverBigQuery,
 		"certmanager": d.discoverCertManager, "cloudarmor": d.discoverCloudArmor,

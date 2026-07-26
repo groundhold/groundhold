@@ -104,6 +104,36 @@
             "type": "string"
           }
         },
+        "advisories": {
+          "description": "Things groundhold noticed that are NOT verdicts and never affect `executable` — bad practice it can see and would otherwise stay silent about (D365). Present so an AGENT can route on `code` without parsing prose.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "code",
+              "pointer",
+              "detail",
+              "next"
+            ],
+            "properties": {
+              "code": {
+                "description": "Stable machine name, e.g. plaintext-credential or unsubstituted-placeholder.",
+                "type": "string"
+              },
+              "pointer": {
+                "description": "Where in the candidate the advisory applies. Never the offending VALUE — an advisory that quotes a secret defeats itself.",
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              },
+              "next": {
+                "description": "What to do instead. An advisory that only alarms leaves the operator where they were.",
+                "type": "string"
+              }
+            }
+          }
+        },
         "verdicts": {
           "type": "array",
           "items": {

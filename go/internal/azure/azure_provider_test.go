@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"groundhold/internal/provider"
 )
 
 // azValidServiceFixtures pairs EVERY wired azure service token (the keys of
@@ -20,6 +22,7 @@ func azValidServiceFixtures() map[string]struct{ attrs, impl map[string]any } {
 	return map[string]struct{ attrs, impl map[string]any }{
 		"vnet":             {vnetAttrs(), map[string]any{"resource_group": "rg1"}},
 		"azvm":             {azVMAttrs(), azVMImpl()},
+		"azdisk":           {azDiskAttrs(), azDiskImpl()},
 		"blob":             {blobAttrs(), map[string]any{"resource_group": "rg1"}},
 		"containerapps":    {acaAttrs(), acaImpl()},
 		"flexpostgres":     {flexAttrs(), flexImpl()},
@@ -79,6 +82,22 @@ func azValidServiceFixtures() map[string]struct{ attrs, impl map[string]any } {
 func TestValidateDispatchAllWiredServices(t *testing.T) {
 	fixtures := azValidServiceFixtures()
 	for svc := range azureServices {
+		// A WITNESS service (D177/D370) is in the dispatch only to REFUSE: there is
+		// no create, so there is no known-good candidate to validate. The exemption
+		// is DERIVED from the witness registry rather than a list of names, so a
+		// service that stops being a witness immediately needs a fixture again.
+		if !provider.CanAuthor("azure", svc) {
+			t.Run(svc+" (witness)", func(t *testing.T) {
+				err := NewDriver(testSub).Validate(svc, "cap", "prod", nil, nil, 1)
+				if err == nil {
+					t.Fatalf("Validate(%q) accepted a create for a witness service", svc)
+				}
+				if !strings.Contains(err.Error(), "WITNESS") {
+					t.Fatalf("Validate(%q) refusal = %q, want it to name the reason", svc, err)
+				}
+			})
+			continue
+		}
 		fx, ok := fixtures[svc]
 		if !ok {
 			t.Errorf("service %q has no fixture in azValidServiceFixtures — add one so Validate dispatch is exercised", svc)

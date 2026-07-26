@@ -48,6 +48,10 @@ func (d *Driver) ClassifyChange(service, path string, current, desired any,
 		return classifyVertexChange(path)
 	case "gce":
 		return classifyGCEInstanceChange(path)
+	case "pd":
+		return classifyPDChange(path)
+	case "computeimage":
+		return classifyComputeImageChange(path)
 	case "artifactregistry":
 		return classifyARChange(path)
 	case "gke":
@@ -500,6 +504,14 @@ func (d *Driver) Delete(service, capability, environment, providerID string,
 	}
 	if service == "gce" {
 		return d.deleteGCEInstance(capability, environment, providerID)
+	}
+	if service == "pd" {
+		return d.deletePD(capability, environment, providerID)
+	}
+	if !provider.CanAuthor("gcp", service) {
+		// Deleting an image groundhold never created would destroy something a
+		// pipeline owns, on the strength of a record we only ever read.
+		return provider.CreateResult{Status: "failed", Reason: errWitnessOnlyGCP(service).Error()}
 	}
 	if service == "artifactregistry" {
 		return d.deleteARRepo(capability, environment, providerID)

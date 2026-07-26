@@ -1,9 +1,11 @@
 package provider_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -95,4 +97,76 @@ func TestEveryDeclaredEvidenceClassIsInTheClosedSet(t *testing.T) {
 			t.Error(err)
 		}
 	}
+}
+
+// One attribute path, one evidence class — across the WHOLE type system.
+//
+// The two gates above check that a driver does not re-decide a declared class and
+// that a declared class is spelt correctly. Neither notices the failure that
+// actually happened: an attribute that IS a projection simply not saying so. Four
+// vocabularies landed with `cost.monthly` and no `evidence:` marker, so it
+// defaulted to resource state (the deliberate fail-safe of EvidenceOf) and was
+// carried into the builders, which refuse every attribute they cannot map.
+//
+// The shape of that bug is what makes it worth a gate: `plan` never calls a
+// builder, so the contract SEALED and the refusal arrived at `apply` — past the
+// gate, at the mutation boundary. A refusal is only useful before the resource
+// exists.
+//
+// This needs no list of known projections, which is the point: it derives the
+// expectation from the vocabularies themselves. If 36 of them call cost.monthly a
+// projection and 3 say nothing, the 3 are the drift. A genuinely new attribute is
+// unconstrained until a SECOND vocabulary declares it — from then on the type
+// system holds itself to one meaning.
+func TestAnAttributeMeansTheSameThingInEveryVocabulary(t *testing.T) {
+	vocabs, err := vocab.Embedded()
+	if err != nil {
+		t.Fatalf("embedded vocabularies: %v", err)
+	}
+	// path -> evidence class -> the capabilities declaring it that way.
+	seen := map[string]map[string][]string{}
+	for capType, v := range vocabs {
+		for path := range v.Attributes {
+			class := v.EvidenceOf(path)
+			if seen[path] == nil {
+				seen[path] = map[string][]string{}
+			}
+			seen[path][class] = append(seen[path][class], capType)
+		}
+	}
+	if len(seen) == 0 {
+		t.Fatal("no vocabulary declared any attribute — this gate would be vacuous")
+	}
+	for _, path := range sortedPaths(seen) {
+		classes := seen[path]
+		if len(classes) < 2 {
+			continue
+		}
+		var parts []string
+		for _, class := range sortedPaths(classes) {
+			caps := append([]string(nil), classes[class]...)
+			sort.Strings(caps)
+			shown := caps
+			if len(shown) > 4 {
+				shown = append(append([]string{}, shown[:4]...),
+					fmt.Sprintf("+%d more", len(caps)-4))
+			}
+			parts = append(parts, fmt.Sprintf("%s in %s", class, strings.Join(shown, ", ")))
+		}
+		t.Errorf("attribute %q carries %d different evidence classes: %s.\n"+
+			"\tOne path must mean one thing. An attribute the majority calls a "+
+			"projection but a few leave unmarked defaults to resource state, reaches "+
+			"the builders, and refuses at apply instead of at the gate.",
+			path, len(classes), strings.Join(parts, "; "))
+	}
+}
+
+// sortedPaths keys a map deterministically, so a failure prints the same way twice.
+func sortedPaths[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

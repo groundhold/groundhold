@@ -10425,3 +10425,314 @@ SLSA attestation. D354 corrected the workflow that GENERATES release notes and t
 the README makes that claim SEPARATELY, and the audit had looked at the release path rather than at every
 document repeating its promise. A fix applied where a falsehood was reported is not the same as a fix
 applied everywhere it was written.
+
+## D361. Block storage: the volume is the data, which is why it is a capability and not an operand
+A machine landed in D357-D360. A machine with no separately-governed storage cannot outlive its own root
+disk, so `capability.storage.block` is the first of the companion families — EBS, Persistent Disk,
+Managed Disk.
+The decision that shapes it is STATEFUL (D47), and it is the reason the volume deserves a capability at
+all rather than living as an operand of the machine. A block volume IS the data: retiring one is data
+loss, so the delete_stateful autonomy gate binds it and a replacement needs explicit
+allow_replace_stateful consent. An OPERAND cannot be gated. A disk that vanishes quietly along with its
+machine is exactly the failure this separation prevents, and no amount of care in the compute driver
+would have prevented it, because the compute driver has no place to record that the disk mattered.
+Most of what people expect is deliberately absent: size, IOPS, throughput and the volume type
+(gp3 / pd-ssd / Premium_LRS). All of it is sizing — free-form operands (D26), not capability semantics.
+The rule the vocabulary applies is not "does anyone care about this number" (they do, intensely) but "is
+it a fact the organization is ACCOUNTABLE for". A regulator asks where the data sits and whether the key
+is revocable. It does not ask how many IOPS were provisioned.
+`availability.class` carries a real cross-cloud difference rather than a formality, and it is the
+attribute that earns the type its keep. An EBS volume is zonal; a GCP regional persistent disk is
+synchronously replicated across two zones; an Azure ZRS disk spans zones. So "does this volume survive
+losing a zone" becomes a VERDICT instead of an inference from a disk-type string that nobody reads in
+review. The conformance case pins the failing direction too — a zonal volume under a contract requiring
+zone survival is `violated` at verify, before the outage rather than during it — and the enum guard
+pins that a disk TYPE offered where a durability class belongs is a load error, which is precisely the
+confusion the attribute exists to end.
+Shipped as the vocabulary slice (D10), the shape that worked for D350 and D357: the type, registration in
+both implementations, three DUAL conformance cases, and a parity matrix reading `unbuilt` on all three
+clouds — the truthful state until the drivers exist. Images and autoscaling groups follow, then the
+drivers for all three families.
+
+## D362. Machine images are witnessed, not authored
+The second companion family. A machine runs SOMETHING, and what it runs is the largest ungoverned
+surface in the compute family — but groundhold has no business building it. Images are BUILT, and
+building is a pipeline concern with its own review: Packer, a CI job, a golden-image process. A driver
+that "creates an image" would either be a thin wrapper over someone else's build or an invitation to
+move build logic into an infrastructure contract.
+So `capability.compute.image` follows the author-vs-witness doctrine (D177), as
+capability.gitops.application and the AWS half of capability.ai.speech already do: the contract states
+what must be TRUE of the image a machine boots, and observe proves it against the image that exists.
+That is not weaker governance. The facts it covers are ones most estates genuinely cannot answer today.
+An image is a blob that outlives the pipeline that made it, gets copied between regions, and is shared
+by an account setting nobody re-reads — "is our base image public?" is a real question with no cheap
+answer, and here it becomes a deterministic verdict. Residency matters for the same unglamorous reason:
+an image is a copy of a disk, so it carries the residency of everything that was on that disk.
+Deliberately absent: the image family, OS version, build date and package manifest. Those describe
+CONTENT, and content is what the pipeline reviews; a contract that pinned a package list would be
+duplicating a job it cannot do well. `sourceProvenance` records only WHETHER the build chain is
+attested — a property of the artifact, not of what is inside it — and the kind-mismatch case pins that
+the builder's NAME offered where a bool belongs is a load error, so that "built by jenkins" can never
+quietly satisfy "is attested".
+
+## D363. Autoscaling groups: capacity is the thing an instance could not express
+The third companion, and the one that answers a question D357 deliberately refused. `replicas.minimum`
+was rejected on the instance type because a floor of one machine is meaningless on a single machine; a
+floor of three is exactly what a group is for. The same reasoning restores `availability.class=regional`
+here: spreading across zones is something a GROUP can do and a machine cannot, and it is most of the
+reason groups exist.
+The contract governs the ENVELOPE — never fewer than this, never more than that — and stops there. The
+scaling POLICY is deliberately absent: target utilisation, cooldowns, schedules and metric sources are a
+control loop with its own tuning, they differ structurally across the three clouds, and encoding them
+would drag a scheduling language into a contract whose operator set is closed (invariant 4). The
+kind-mismatch case pins the boundary by rejecting a scaling EXPRESSION offered where a number belongs.
+`autoscaling.enabled` records only whether a policy exists at all — the difference between a group that
+scales and a fixed-size fleet, which is a fact rather than a tuning parameter. `cost.monthly` is
+projected at the FLOOR, because the ceiling is a risk rather than a bill.
+STATELESS, and that is a claim about the group rather than its members: retiring a group destroys no
+data the group holds, and its machines are cattle by construction. An operator who puts irreplaceable
+state on a group member has stepped outside what a group means, and no vocabulary can make that safe —
+a volume that must survive is a capability.storage.block (D361), which IS stateful and IS gated.
+A note on how the divergence in this slice was caught, because it justifies the dual suite. Registering
+these two types in the Go runtime SILENTLY failed: `gofmt` had realigned the type map after the previous
+insertion, so a literal string replacement no longer matched and quietly did nothing. The Python
+reference had all three types, the Go binary had one; `make conformance` passed 232/232 while
+`make conformance-go` reported 500/506 with `unknown capability type`. Two implementations disagreeing
+is exactly the signal the suite exists to produce, and it produced it within seconds of the mistake. The
+edits now assert that their anchor matched before writing.
+
+## D364. A credential in a candidate is warned about, not refused
+Reported from the field, with evidence: a candidate may carry a credential as a literal value, and the
+ledger then persists it verbatim — `grep -c "BEGIN PRIVATE KEY" ledger` returned 3. The ledger therefore
+inherits the sensitivity of the most sensitive value in the document, and nothing anywhere said so. A
+team keeping its ledger beside its IaC files is one `git add` from publishing a private key.
+The reporter's framing was the right one and used this project's own behaviour as the argument:
+`unknown-operand` refuses rather than silently dropping an operand, and `model.access` refuses to
+fabricate an observation, so credentials deserve the same seriousness. What they asked for was not a
+refusal but a warning that says WHAT TO DO — "this is dangerous" alone leaves the operator where they
+were.
+A warning is also the correct verdict on the merits, and the distinction is worth stating because this
+repository holds the opposite line elsewhere. The redactor (D309) is deliberately EXACT rather than
+pattern-based, because it decides what to HIDE and a missed secret is a leak. This decides what to SAY,
+so a pattern is the right instrument: a false positive costs one sentence, while a refusal driven by a
+heuristic would block a run on a guess. groundhold recorded exactly what it was told to record — that
+part was never wrong.
+The same scan catches an UNSUBSTITUTED PLACEHOLDER, and that is the half with the higher expected value.
+The reporter's actual outage was not a leak: `{{secret:...}}` reached a Lambda's environment verbatim
+because the substitution step was never written, and the API lost its database for thirteen minutes.
+groundhold could see that string and said nothing. The tool sees more than the user here, and now says so.
+Three properties the implementation keeps. A finding NEVER carries the value — a warning that quotes the
+secret defeats itself, and a test asserts it. The patterns are narrow on purpose, with a negative-control
+test over ordinary configuration (instance types, AMI ids, KMS ARNs, an SSH PUBLIC key, a passwordless
+connection string): a warning that fires on normal input trains people to ignore it, which is worse than
+having none. And `--allow-plaintext-secret` silences it, because a warning nobody can turn off is a
+warning everybody learns to ignore.
+Two things the report got wrong or asked for beyond this change, recorded so the reply is precise. The
+ledger is ALREADY created 0600 in every write path (D73) — the claim that it inherits the umask is not
+true for a file groundhold creates, though the mode applies at creation and an existing file keeps its
+own. And native secret-manager REFERENCES — their preferred fix — are a change to the candidate schema
+and to what D26 calls a free-form implementation block; that is a spec decision, not an implementation
+one, and it is deliberately not made here.
+
+## D365. Standing directive: see a bad practice, say so — and say it where an AGENT will hear it
+Stated by the project owner as a general rule rather than a feature request: groundhold should catch bad
+practice and SAY so, never see it and stay silent. And with a sharpened condition — this matters MORE
+when the caller is an agent (claude-cli, codex and their kin) than when it is a person at a terminal.
+The condition is the part with teeth, and it immediately convicted the change made just before it. D364
+added a plaintext-credential warning that prints to stderr as prose. A human sees it. An agent does not:
+it reads the report document and never looks at the terminal, so `verify --json` carried
+`blockingReasons`, `verdicts` and nothing else. The advice existed and was unreachable by the caller
+most likely to be driving the tool. A warning only a human can parse is, for an agent, indistinguishable
+from silence.
+So advisories now ride in the REPORT: `advisories[]`, each with a STABLE `code` an agent routes on
+(`plaintext-credential`, `unsubstituted-placeholder`), a `pointer` into the document, a `detail`, and a
+`next`. Prose is for the human; the code is for the machine; neither is the only channel. The field is
+omitted when empty so a clean report stays clean, and it never touches `executable` — an advisory is
+something NOTICED, not something proven, and the four-valued verdict remains the only thing that gates
+execution.
+The general shape this fixes, worth naming because it will recur: this project already refuses well. It
+refuses an unknown operand, a fabricated observation, an unproven hard constraint. What it has been
+weaker at is the middle ground — things it can SEE, cannot prove, and must not block on. The honest
+handling of that middle is an advisory: named, coded, actionable, non-blocking, and delivered on every
+channel the caller might be listening to. Each future one belongs in the same place, for the same
+reason.
+Two properties are load-bearing and tested. An advisory NEVER carries the offending value — one that
+quotes a secret defeats itself. And the detection stays narrow, with a negative control over ordinary
+configuration, because an advisory that fires on normal input teaches its audience to ignore the
+channel; that costs more than the advisory was ever worth, and an agent trained on noisy output learns
+the same lesson faster than a human does.
+
+## D366. One attribute path means one thing: the evidence class is a property of the TYPE SYSTEM, not of a file
+D311 moved an attribute's evidence class out of ~190 hand-copied driver `case` arms and into the
+vocabulary, where the engine derives it. `cost.monthly` is a projection: the compiler reads it for the
+cost forecast, and `attributesRaw` drops it at the contract/driver boundary so it never reaches a
+builder — which matters because a builder refuses every attribute it cannot map, by design (a silent
+drop is the thing that rule exists to prevent).
+Four vocabularies landed after that (D357 instance, D361 block, D363 autoscaling) declaring
+`cost.monthly` with no `evidence:` marker. `EvidenceOf` defaults an unmarked attribute to resource
+state — deliberately, because a typo must not be able to weaken a reconcile (D311) — so for those types
+the attribute became state, survived the boundary, reached the builder and was refused as unmappable.
+The FAILURE SHAPE is the reason this is written down rather than quietly fixed. `plan` does not call a
+builder; `apply` does. So a contract declaring a projected cost on a machine SEALED — passed the gate,
+produced a plan, printed the forecast — and refused later, at the mutation boundary. A refusal is only
+worth anything before the resource exists. The four-valued verdict was not wrong at any point; the
+attribute simply never reached the layer that would have judged it.
+The fix is three `evidence: projection` lines. The gate is the part worth keeping:
+`TestAnAttributeMeansTheSameThingInEveryVocabulary` requires one evidence class per attribute PATH
+across every vocabulary, and it hardcodes no list of known projections — it derives the expectation from
+the vocabularies themselves. Thirty-six types calling `cost.monthly` a projection and three saying
+nothing is not a tie; it is drift, and the gate names the odd ones out. A genuinely new attribute stays
+unconstrained until a second vocabulary declares it, at which point the type system begins holding
+itself to a single meaning.
+Generalized: `spec/vocab/` is not documentation that the engine happens to read. It is the type system,
+and a type system with two answers for one path has a bug in it wherever that path is used. The
+existing gates checked that nobody CONTRADICTS a declared class and that nobody MISSPELLS one; neither
+could see an omission, which is the cheapest mistake to make when adding a vocabulary by copying a
+neighbour and trimming what looks like boilerplate.
+## D367. The EBS volume: the first stateful member of the compute family, and why the disk is not an operand
+D357/D358 gave the machine. A machine with no separately-governed storage cannot outlive its own root
+disk, so `capability.storage.block` (D361) is the companion the family needed first — and the AWS
+driver for it is the first place the compute vocabulary meets D47.
+The design question worth writing down is why the volume is a CAPABILITY rather than an operand of the
+instance that mounts it. `root_volume_gb` already exists as an operand on the EC2 driver, and extending
+that pattern would have been the smaller change. It is also the wrong one: an operand cannot be gated.
+Retiring this resource destroys data, and the machinery that makes that safe — `delete_stateful`
+autonomy, `allow_replace_stateful` consent, a pinned delete target — all attaches to a capability. A
+disk that vanishes quietly along with its machine is precisely the failure the separation exists to
+prevent, and an operand is exactly the shape that vanishes quietly.
+Two refusals in the pure core are the substance:
+`availability.class=regional` is REFUSED rather than downgraded. An EBS volume lives in one availability
+zone; there is no regional EBS. GCP genuinely sells regional persistent disks, so the vocabulary is
+right to carry the attribute and this driver is right to say no to it — the alternative is certifying a
+durability guarantee AWS does not sell under this service. The pattern generalizes: an attribute one
+cloud can honor and another cannot is not a reason to drop it from the vocabulary, it is a reason for
+the driver that cannot to refuse loudly.
+The availability zone must lie INSIDE `location.region`. The region is the residency surface the
+contract governs; the zone is an operand, and nothing otherwise stops `eu-central-1` from being
+implemented in `us-east-1a`. That create SUCCEEDS — in the wrong jurisdiction, with the contract
+reporting satisfied. Same class of check as the GCE zone/region rule (D359), and it is worth stating as
+a rule for every driver where a coarse governed fact and a fine operand describe the same placement: if
+the operand can contradict the attribute, the driver must check, because the cloud will not.
+Size has one honest exception. The driver invents no capacity — but `snapshot_id` carries its own, so a
+restore with no explicit size is allowed while an empty volume with no size is refused. The test is not
+"can a default be produced" but "would the default be INVENTED".
+On honesty (D29), the stakes differ in kind from a stateless resource. A create wrongly reported
+`failed` invites a retry; a retry that is not deduplicated leaves the data split across two volumes,
+and the operator finds out later, from the half that is missing writes. The deterministic ClientToken
+and the `IdempotentParameterMismatch` refusal are what keep that from happening, and both are pinned.
+The ownership-tag read on the delete path is load-bearing for the same reason: it is the only thing
+between a mis-pinned providerId and destroying data that is not ours.
+Noted while building, not fixed here: `aws/ec2` has no `TestHonestyHarness*` of its own — D358 added
+the `RunInstances` arm to `queryXMLRole` but no probe that uses it. EBS has one. EC2 should get one.
+
+## D368. The persistent disk: where the vocabulary's `availability.class` stops being a formality
+The GCP half of `capability.storage.block`, and the first place a compute attribute means genuinely
+different things on two clouds without meaning two different things to the CONTRACT.
+D367 refuses `availability.class: regional` on EBS: an EBS volume lives in one availability zone, and
+downgrading the request silently would certify a durability guarantee AWS does not sell. GCP does sell
+one — a regional persistent disk is synchronously replicated across two zones and survives losing
+either. So this driver HONORS the attribute, and honoring it is not a flag: regional disks are a
+different resource at a different scope (`/regions/<r>/disks`, `replicaZones` naming the two zones,
+operations polled under `regions/` rather than `zones/`).
+That is the shape the whole thesis wants. One contract says "this volume must survive losing a zone".
+On GCP it is satisfied by a regional disk. On AWS it is REFUSED, out loud, before anything is
+provisioned. Neither answer is a silent downgrade, and neither cloud had to have the attribute removed
+from the vocabulary so the other could pretend. An attribute one cloud cannot honor is not a reason to
+drop it — it is a reason for that cloud's driver to refuse loudly, and the four-valued verdict is what
+makes "refused" a usable answer rather than a failure.
+Three consequences worth recording because each is a way to get this wrong:
+The class is OBSERVED from the resource (`replicaZones`), never inferred from the providerId scope. The
+scope records where we looked; the resource says what it is. On a durability guarantee, reading the
+lookup path back as if it were evidence is precisely the fabrication `measured` is supposed to exclude.
+Discovery must sweep BOTH scopes. `aggregatedList` keys carry `zones/…` and `regions/…`, and a sweep
+that enumerated zones only would miss every regional disk and report the account clean — the worst kind
+of wrong answer, because it looks like good news.
+`replica_zones` is validated hard: exactly two, distinct, both in one region, all inside
+`location.region`. Two copies in the same zone survive nothing a single copy does not, and a contract
+would still call that `regional`. Three zones silently truncated to two would misreport how many
+failures the disk survives. None of these are API errors — the API would happily take some of them.
+Also noted, not fixed here: the GCP operand test carries a COMPLETENESS guard (its case map must cover
+every certified service) and the AWS one is a deliberate sample of naming traps. The asymmetry is real
+— a new AWS service can join the operand registry with no spot-check — but changing the AWS test's
+stated contract is a decision of its own, not a side effect of adding a driver. Both new services got
+their entries; the guard question is left open.
+
+## D369. The managed disk, and the gate that was only on one cloud
+The Azure third of `capability.storage.block`, which completes the family — and the place where a
+missing gate showed itself.
+On the driver: Azure keeps the durability guarantee in the SKU SUFFIX. `Premium_ZRS` is zone-redundant;
+`Premium_LRS` is not. So one vocabulary attribute now has THREE mechanisms behind it — AWS refuses it
+(D367, EBS is always zonal), GCP honors it through a different API surface (D368, regionDisks with
+replicaZones), Azure honors it through a string suffix. The contract sentence is identical on all three,
+and so is the verdict; only the driver differs. That is the whole claim of a provider-agnostic
+vocabulary, and it only holds because the cloud that cannot honor the attribute REFUSES rather than
+quietly downgrading.
+Two rules follow from the SKU carrying a governed fact:
+The SKU is a REQUIRED operand, where EBS lets the volume type default. The difference is not taste: on
+EBS the type carries nothing the contract governs, so a service default costs nothing; on Azure the
+default would silently decide whether the disk survives losing a zone. A governed fact must never come
+from an unstated default.
+The declared class is cross-checked against the SKU in BOTH directions, and the two failures differ. An
+over-claim (`regional` on `_LRS`) certifies zone survivability the disk does not have. An under-claim
+(`zonal` on `_ZRS`) is subtler and worse to live with: the disk observes back as `regional`, so a
+converge that should be a no-op reports a violation it can never resolve. Declared and observed must
+agree, or the loop never closes.
+An unreadable SKU is reported UNREAD, never defaulted. `zonal` would pass a zone-survivability
+constraint the disk may violate; `regional` would fail one it may satisfy. Neither is a reading.
+THE FINDING, which is the more useful half of this entry. Azure's test suite carries two completeness
+gates AWS's and GCP's do not: every wired service must have a Validate fixture, and every service in the
+Create dispatch must have a reconcile row. Both fired on this driver — correctly, because both were
+genuinely missing. And then they revealed something else: `ec2` (D358) and `gce` (D359) are NOT wired
+into reconcile AT ALL. They shipped, they are marked `fulfilled` in parity, and a lost create on either
+cannot be concluded by `resume`. Nothing caught it because only Azure has the gate that would have.
+The behaviour degrades honestly — the reconcile default returns `unknown` with "not wired yet —
+reconcile manually", which is the fail-closed answer and not a lie. But `unknown` on a lost create is
+exactly the state the whole resume/reconcile machinery exists to get OUT of, and on a stateful
+capability the operator's natural next move (create another one) is how data ends up split across two
+resources.
+Recorded rather than fixed in this slice, because fixing it means touching two shipped drivers and the
+two test suites that lack the gate — which is its own change. The general lesson is the one worth
+keeping: a completeness gate on one cloud and not the others does not give you two-thirds of the
+protection, it gives you a blind spot shaped exactly like the clouds that lack it. Parity of GATES is a
+precondition for parity of DRIVERS, and this project has been asserting the second while only holding
+the first on one of three.
+
+## D370. The machine image: the first CLOUD witness, and what a driver owes when it cannot see a fact
+`capability.compute.image` (D362) on all three clouds — and the first time a CLOUD driver registers a
+witness predicate (D177). Until now the clouds relied on the fail-OPEN default: an unregistered provider
+authors everything, which was correct while everything they observed they also created. That is no
+longer true.
+Images are BUILT, and building is a pipeline concern with its own review — Packer, a CI job, a
+golden-image process. A driver that "creates an image" is either a thin wrapper over somebody else's
+build or an invitation to move build logic into an infrastructure contract. So the contract states what
+must be TRUE of the image a machine boots, `observe` proves it, and the compiler records the capability
+as `witnessed` rather than emitting an action the driver would refuse.
+This is not weaker governance. "Is our base image public?" is a question most estates cannot answer, and
+it is one `verify` answers deterministically. An image is a blob that outlives the pipeline that made
+it, gets copied between regions, and is shared by an account setting nobody re-reads.
+THE PART WORTH GENERALIZING: `sourceProvenance` is NOT EMITTED, on any of the three clouds. The
+vocabulary asks whether the image carries verifiable build provenance. None of the three APIs exposes
+such a field for a machine image — AWS has none, GCP's Binary Authorization attestations attach to
+container images and are evaluated at admission, an Azure gallery image VERSION can be signed but a
+managed image cannot. Emitting `false` would state as MEASURED FACT that the image has no attestation,
+when the truth is that the driver cannot see one. So the attribute is left unobserved with a diagnostic
+saying exactly why, a hard constraint on it stays `unknown`, and the plan BLOCKS.
+That is the correct outcome and worth stating as a rule: when a driver cannot see a fact, the answer is
+silence plus a diagnostic, never a plausible default. Four-valued verdicts exist so that "we do not
+know" is expressible; a driver that resolves its own ignorance into a boolean throws away the one
+mechanism designed to carry it, and it does so in the direction that looks like good news.
+The same discipline shapes the derivations. Azure's `network.publicExposure` is `false` with derivation
+CONFIG-INTENT, not `measured` — a Microsoft.Compute/images resource cannot be shared outside its
+subscription at all (cross-tenant sharing lives in a Compute Gallery, a different type). `measured`
+would claim the driver read a sharing setting and found it off; the truth is there is no such setting.
+The value is right either way, and only one of the two survives being asked "how do you know?".
+Three smaller decisions, each a cloud difference rather than a vocabulary one: the GCP providerId
+carries no region (images are global there, and inventing one would make two names for one image); GCP
+public sharing is an IAM POLICY and so a second call, unread rather than `false` when it fails; the AWS
+list is scoped `Owner=self`, without which DescribeImages returns every public AMI in the region as if
+it were part of the estate.
+On gates: the witness shape broke three completeness tests that assume every dispatched service is
+authored — Azure's Validate-fixture and reconcile-row gates, GCP's observe-has-a-create gate. All three
+now exempt witnesses, and every exemption is DERIVED from `CanAuthor` rather than a list of names, so a
+service that stops being a witness is caught again the moment it does. A hardcoded exemption would have
+been three more places to forget.
