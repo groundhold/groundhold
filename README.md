@@ -35,9 +35,12 @@ release also ships version-less asset names, so the moment a stable release
 exists this becomes a one-liner that never goes stale:
 `curl -Lo groundhold …/releases/latest/download/groundhold_linux_amd64`.
 
-Every release carries `SHA256SUMS`, a CycloneDX SBOM, `BUILDINFO.txt` for a
-reproducible rebuild, and a keyless SLSA build-provenance attestation
-(`gh attestation verify <file> --repo groundhold/groundhold`).
+Every release carries `SHA256SUMS`, a CycloneDX SBOM and `BUILDINFO.txt` for a
+reproducible rebuild — verify a download with
+`sha256sum -c SHA256SUMS --ignore-missing`. A keyless SLSA build-provenance
+attestation is produced only once this repository is public: GitHub does not make
+one retrievable for a private repository on a free plan, so the release notes
+claim it only after the workflow has confirmed it exists (D354).
 
 Prefer to build it yourself? Go ≥ 1.25 and nothing else:
 
@@ -396,8 +399,8 @@ after the slice.
 
 ## Since the vertical slice (the short version)
 
-- **Breadth**: 133 service mappings across AWS (50), GCP (42) and Azure (41),
-  fulfilling 46/41/41 distinct capability TYPES respectively — one type is often
+- **Breadth**: 136 service mappings across AWS (51), GCP (43) and Azure (42),
+  fulfilling 47/42/42 distinct capability TYPES respectively — one type is often
   reached by several services (rds and aurora both fulfil
   `capability.database.relational`, D76). Counts are read from the drivers' own
   certified `ServiceCapabilities()` maps, not from prose. Reached through a

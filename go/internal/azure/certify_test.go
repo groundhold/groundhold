@@ -9,7 +9,7 @@ import (
 // azureCertifyServices is the authoritative set of SERVICE tokens the Azure
 // driver observes/provisions — both certification gates run over the same set.
 var azureCertifyServices = []string{"loadbalancer", "changefeed", "vnet", "blob", "containerapps",
-	"flexpostgres", "servicebusqueue", "servicebustopic", "keyvault", "rediscache", "dnszone", "dnsrecord", "roleassignment", "customroledef", "metricalert", "portaldash", "webtest", "scheduledquery", "acr", "azurefiles", "cosmos", "aisearch", "eventhubs", "azkafka", "frontdoorwaf", "azurecdn", "apim", "containerappsjob", "managedidentity", "keyvaultkey", "consumptionbudget", "loganalytics", "activitylog", "defender", "azureopenai", "aks", "aks-addon", "aks-workloadidentity", "backuppolicy", "acsemail", "backupvault"}
+	"flexpostgres", "servicebusqueue", "servicebustopic", "keyvault", "rediscache", "dnszone", "dnsrecord", "roleassignment", "customroledef", "metricalert", "portaldash", "webtest", "scheduledquery", "acr", "azurefiles", "cosmos", "aisearch", "eventhubs", "azkafka", "frontdoorwaf", "azurecdn", "apim", "containerappsjob", "managedidentity", "keyvaultkey", "consumptionbudget", "loganalytics", "activitylog", "defender", "azureopenai", "aks", "aks-addon", "aks-workloadidentity", "backuppolicy", "acsemail", "backupvault", "azvm"}
 
 // TestCertifyAzureDriver runs the network-free certification battery (dispatch
 // fails closed, providerId charset, permission tables non-empty + quiet-reads).

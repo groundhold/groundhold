@@ -46,6 +46,8 @@ func (d *Driver) ClassifyChange(service, path string, current, desired any,
 		return classifySCCChange(path)
 	case "vertexai":
 		return classifyVertexChange(path)
+	case "gce":
+		return classifyGCEInstanceChange(path)
 	case "artifactregistry":
 		return classifyARChange(path)
 	case "gke":
@@ -495,6 +497,9 @@ func (d *Driver) Delete(service, capability, environment, providerID string,
 	}
 	if service == "logmetric" {
 		return d.deleteLogMetric(capability, environment, providerID)
+	}
+	if service == "gce" {
+		return d.deleteGCEInstance(capability, environment, providerID)
 	}
 	if service == "artifactregistry" {
 		return d.deleteARRepo(capability, environment, providerID)

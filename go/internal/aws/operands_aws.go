@@ -40,6 +40,7 @@ var awsConsumedOperands = map[string][]string{
 	"dynamodb":               {"kms_key_id"},
 	"ecr":                    {"kms_key"},
 	"ecs":                    {"containerPort", "cpu", "execution_role_arn", "image", "memory", "security_groups", "subnets", "targetGroupArn"},
+	"ec2":                    {"image_id", "instance_type", "key_name", "kms_key_id", "root_volume_gb", "security_group_ids", "subnet_id"},
 	"efs":                    {"availability_zone", "kms_key_id"},
 	"eks":                    {"clusterName", "clusterRoleArn", "kmsKeyArn", "nodeGroup", "nodeRoleArn", "securityGroupIds", "subnetIds"},
 	"eks-addon":              {"clusterName", "region", "serviceRoleArn"},

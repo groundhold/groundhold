@@ -145,7 +145,7 @@ var projectOK = regexp.MustCompile(`^([a-z][a-z0-9-]{4,28}[a-z0-9]|[0-9]{1,20})$
 
 func (d *Driver) requireService(service string) error {
 	switch service {
-	case "cloudsql", "cloudrun", "gcs", "vpc", "cloudfunctions", "cloudfunctions-fn", "pubsub-topic", "pubsub-queue", "secretmanager", "memorystore", "clouddns", "clouddnsrecord", "iambinding", "customrole", "monitoring", "dashboard", "uptime", "logmetric", "artifactregistry", "filestore", "firestore", "managedkafka", "cloudarmor", "certmanager", "cloudrunjobs", "serviceaccount", "bigquery", "cloudscheduler", "cloudkms", "vpngateway", "backupvault", "assetfeed", "loadbalancer", "billingbudget", "logbucket", "auditlogs", "scc", "vertexai", "gke", "gke-addon", "gke-workloadidentity", "backupplan":
+	case "cloudsql", "cloudrun", "gcs", "vpc", "cloudfunctions", "cloudfunctions-fn", "pubsub-topic", "pubsub-queue", "secretmanager", "memorystore", "clouddns", "clouddnsrecord", "iambinding", "customrole", "monitoring", "dashboard", "uptime", "logmetric", "artifactregistry", "filestore", "firestore", "managedkafka", "cloudarmor", "certmanager", "cloudrunjobs", "serviceaccount", "bigquery", "cloudscheduler", "cloudkms", "vpngateway", "backupvault", "assetfeed", "loadbalancer", "billingbudget", "logbucket", "auditlogs", "scc", "vertexai", "gke", "gke-addon", "gke-workloadidentity", "backupplan", "gce":
 		// project is empty on read-only paths (observe/discover — it rides in
 		// the providerId); when pinned it MUST be a valid identifier.
 		if d.Project != "" && !projectOK.MatchString(d.Project) {
@@ -248,6 +248,10 @@ func (d *Driver) Validate(service, capability, environment string,
 	}
 	if service == "logmetric" {
 		_, err := BuildLogMetric(d.Project, environment, capability, attrs, impl, generation)
+		return err
+	}
+	if service == "gce" {
+		_, err := BuildGCEInstanceCreate(d.Project, environment, capability, attrs, impl, generation)
 		return err
 	}
 	if service == "artifactregistry" {
@@ -439,6 +443,9 @@ func (d *Driver) createService(service, capability, environment string,
 	if service == "logmetric" {
 		return d.createLogMetric(capability, environment, attrs, impl, generation)
 	}
+	if service == "gce" {
+		return d.createGCEInstance(capability, environment, attrs, impl, generation)
+	}
 	if service == "artifactregistry" {
 		return d.createARRepo(capability, environment, attrs, impl, generation)
 	}
@@ -619,6 +626,9 @@ func (d *Driver) Observe(service, capability,
 	}
 	if service == "logmetric" {
 		return d.observeLogMetric(capability, providerID)
+	}
+	if service == "gce" {
+		return d.observeGCEInstance(capability, providerID)
 	}
 	if service == "artifactregistry" {
 		return d.observeARRepo(capability, providerID)

@@ -33,6 +33,7 @@ var azureServices = map[string]bool{
 	"acr":              true, // capability.registry.image (Microsoft.ContainerRegistry/registries)
 	"azurefiles":       true, // capability.storage.filesystem (Microsoft.Storage account+fileShare)
 	"cosmos":           true, // capability.database.nosql (Microsoft.DocumentDB/databaseAccounts)
+	"azvm":             true, // capability.compute.instance (Microsoft.Compute/virtualMachines)
 	"aisearch":         true, // capability.search.index (Microsoft.Search/searchServices)
 	"eventhubs":        true, // capability.streaming.pipe (Microsoft.EventHub namespace+hub)
 	"azkafka":          true, // capability.messaging.kafka (Event Hubs namespace, kafkaEnabled)
@@ -132,6 +133,9 @@ func (d *Driver) Validate(service, capability, environment string,
 		return err
 	case "cosmos":
 		_, err := BuildCosmos(environment, capability, attrs, impl, generation)
+		return err
+	case "azvm":
+		_, err := BuildAzureVM(environment, capability, attrs, impl, generation)
 		return err
 	case "aisearch":
 		_, err := BuildAISearch(environment, capability, attrs, impl, generation)
@@ -283,6 +287,8 @@ func (d *Driver) createService(service, capability, environment string,
 		return d.createAzFiles(environment, capability, attrs, impl, generation)
 	case "cosmos":
 		return d.createCosmos(environment, capability, attrs, impl, generation)
+	case "azvm":
+		return d.createAzureVM(environment, capability, attrs, impl, generation)
 	case "aisearch":
 		return d.createAISearch(environment, capability, attrs, impl, generation)
 	case "eventhubs":
@@ -411,6 +417,8 @@ func (d *Driver) observeDispatch(service, capability, providerID string) ([]prov
 		return d.observeAzFiles(capability, providerID)
 	case "cosmos":
 		return d.observeCosmos(capability, providerID)
+	case "azvm":
+		return d.observeAzureVM(capability, providerID)
 	case "aisearch":
 		return d.observeAISearch(capability, providerID)
 	case "eventhubs":
@@ -507,6 +515,8 @@ func (d *Driver) Delete(service, capability, environment, providerID, key string
 		return d.deleteAzFiles(capability, environment, providerID)
 	case "cosmos":
 		return d.deleteCosmos(capability, environment, providerID)
+	case "azvm":
+		return d.deleteAzureVM(capability, environment, providerID)
 	case "aisearch":
 		return d.deleteAISearch(capability, environment, providerID)
 	case "eventhubs":
@@ -564,6 +574,8 @@ func (d *Driver) Delete(service, capability, environment, providerID, key string
 func (d *Driver) ClassifyChange(service, path string, current, desired any,
 	impl map[string]any) (string, string) {
 	switch service {
+	case "azvm":
+		return classifyAzureVMChange(path)
 	case "acr":
 		return classifyACRChange(path)
 	case "blob":

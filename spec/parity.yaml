@@ -126,11 +126,11 @@ capabilities:
       unbuilt: true
   capability.compute.instance:
     aws:
-      unbuilt: true
+      fulfilled: [ec2]
     gcp:
-      unbuilt: true
+      fulfilled: [gce]
     azure:
-      unbuilt: true
+      fulfilled: [azvm]
   capability.compute.quota:
     aws:
       unbuilt: true

@@ -8,7 +8,7 @@ import (
 
 // awsCertifyServices is the authoritative set of SERVICE tokens the AWS driver
 // observes/provisions — the same set both certification gates run over.
-var awsCertifyServices = []string{"loadbalancer", "changefeed", "s3", "rds", "ecs", "apprunner", "eks", "eks-addon", "eks-podidentity", "ses-sending", "aurora", "bedrock", "budgets", "vpc", "sns", "sqs", "secretsmanager", "elasticache", "elasticache-serverless", "route53", "route53record", "rolepolicy", "custompolicy", "cloudwatch", "cloudwatchdash", "route53health", "cwlogfilter", "ecr", "efs", "dynamodb", "opensearch", "opensearch-serverless", "kinesis", "msk", "waf", "acm", "cloudfront", "apigateway", "iam", "redshiftserverless", "eventbridgescheduler", "kms", "vpngateway", "backupvault", "cloudtrail", "backupplan", "ses-inbound", "guardduty", "cwlogs", "lambda"}
+var awsCertifyServices = []string{"loadbalancer", "changefeed", "s3", "rds", "ecs", "apprunner", "eks", "eks-addon", "eks-podidentity", "ses-sending", "aurora", "bedrock", "budgets", "vpc", "sns", "sqs", "secretsmanager", "elasticache", "elasticache-serverless", "route53", "route53record", "rolepolicy", "custompolicy", "cloudwatch", "cloudwatchdash", "route53health", "cwlogfilter", "ecr", "efs", "dynamodb", "opensearch", "opensearch-serverless", "kinesis", "msk", "waf", "acm", "cloudfront", "apigateway", "iam", "redshiftserverless", "eventbridgescheduler", "kms", "vpngateway", "backupvault", "cloudtrail", "backupplan", "ses-inbound", "guardduty", "cwlogs", "lambda", "ec2"}
 
 // The AWS driver passes the same network-free certification battery every driver
 // must (fail-closed dispatch, well-formed permission tables).

@@ -19,6 +19,7 @@ func azValidServiceFixtures() map[string]struct{ attrs, impl map[string]any } {
 	aksAttrs, aksImpl := aksCandidate()
 	return map[string]struct{ attrs, impl map[string]any }{
 		"vnet":             {vnetAttrs(), map[string]any{"resource_group": "rg1"}},
+		"azvm":             {azVMAttrs(), azVMImpl()},
 		"blob":             {blobAttrs(), map[string]any{"resource_group": "rg1"}},
 		"containerapps":    {acaAttrs(), acaImpl()},
 		"flexpostgres":     {flexAttrs(), flexImpl()},
