@@ -1,0 +1,4 @@
+# Pinned docs toolchain for the mkdocs site (website/). The Pages workflow
+# installs exactly these; bump deliberately.
+mkdocs==1.6.1
+mkdocs-material==9.7.7

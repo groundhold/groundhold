@@ -1,0 +1,538 @@
+# Retirement and delete (D47). Retirement is EXPLICIT, never absence —
+# Terraform's absence-means-destroy is the footgun this design refuses.
+# Contract-loader rules are dual-implemented; plan/apply/forecast cases
+# carry impl: go (D24).
+
+cases:
+  - name: retired-capability-with-requirements-is-load-error
+    description: D47 - a retired capability with requirements is a contradiction.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e18, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+          state: retired
+          requirements:
+            engine.protocol:
+              op: compatible-with
+              value: postgresql/16
+    expect:
+      error: contract
+
+  - name: constraint-targeting-retired-capability-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e19, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+          state: retired
+      constraints:
+        hard:
+          - id: c-orphaned
+            subject: db
+            path: encryption.atRest
+            op: equals
+            value: true
+    expect:
+      error: contract
+
+  - name: invalid-capability-state-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e20, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+          state: decommissioned
+    expect:
+      error: contract
+
+  - name: retired-contract-hash-is-pinned
+    description: >
+      D47: retirement is semantic, so it is part of contract identity;
+      active stays absent from the canonical form, keeping every
+      pre-existing hash unchanged.
+    document:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: r-demo, environment: test, version: 2 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+          state: retired
+    expect:
+      hash: sha256:672b8bc8f9b927f48fdadb84f13e5a6adc2f036a9571effac44f247812867374
+
+  - name: delete-without-pinned-target-is-load-error
+    description: >
+      D47: a delete pins the exact identity it destroys — a rebind
+      between seal and apply must not redirect it. Dual-implemented.
+    document:
+      apiVersion: plan/v0
+      kind: SealedPlan
+      plan:
+        contract: r-demo
+        environment: test
+        reads:
+          contractHash: "sha256:672b8bc8f9b927f48fdadb84f13e5a6adc2f036a9571effac44f247812867374"
+          candidateHash: "sha256:0a4458276880b13fa78e5f7d518e3599ff98101870f7b8c8f48d7888c7f83c1f"
+          heads: { db: genesis }
+          toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+        writes: [db]
+        actions:
+          - id: a-delete-db
+            capability: db
+            operation: delete
+            target: fake.svc/db
+            idempotencyKey: db-delete-1
+            risk:
+              reversibility: R4
+              dataLoss: certain
+              downtime: certain
+              securityExposure: none
+              costDelta: { amount: 0, currency: EUR }
+              identityReplacement: true
+        preconditions:
+          - type: report-executable
+    expect:
+      error: document
+
+  - name: plan-emits-delete-for-retired-bound-capability
+    impl: go
+    plan:
+      at: "2026-07-11T19:00:00Z"
+      bindings: { db: "fake:db-1" }
+      contract: &r-contract
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: r-demo, environment: test, version: 2 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+            state: retired
+      candidate: &r-candidate
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: r-demo
+        capabilities: {}
+    expect:
+      actions:
+        a-delete-db:
+          operation: delete
+
+  - name: plan-refuses-delete-stateful-under-autonomy
+    impl: go
+    description: >
+      D47: the dangling delete_stateful bezpiecznik from the very first
+      example contract, finally live. No vocabulary = fail closed:
+      statelessness cannot be proven, so it is stateful.
+    plan:
+      at: "2026-07-11T19:00:00Z"
+      bindings: { db: "fake:db-1" }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: r-forbid, environment: test, version: 2 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+            state: retired
+        autonomy:
+          forbidden:
+            - delete_stateful: true
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: r-forbid
+        capabilities: {}
+    expect:
+      error: plan
+      code: consent-required
+
+  - name: plan-skips-retired-unbound-capability
+    impl: go
+    description: retired and unbound is already converged - nothing to change.
+    plan:
+      at: "2026-07-11T19:00:00Z"
+      contract: *r-contract
+      candidate: *r-candidate
+    expect:
+      error: plan
+
+  - name: apply-deletes-with-structured-tombstone
+    impl: go
+    apply:
+      at: "2026-07-11T19:10:00Z"
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: binding.updated
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+            body:
+              capability: db
+              environment: test
+              provider: { name: fake }
+              resources:
+                - { id: primary, type: t, providerId: "fake:db-1", generation: 1 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.released
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+      contract: *r-contract
+      candidate: *r-candidate
+      plan: &delete-plan
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: r-demo
+          environment: test
+          reads:
+            contractHash: "sha256:672b8bc8f9b927f48fdadb84f13e5a6adc2f036a9571effac44f247812867374"
+            candidateHash: "sha256:0a4458276880b13fa78e5f7d518e3599ff98101870f7b8c8f48d7888c7f83c1f"
+            heads: { db: "sha256:77ffa631b51360f022c62eb6d348b0680a108ddd0ebce924fe14d509b352e043" }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-delete-db
+              capability: db
+              operation: delete
+              target: fake.svc/db
+              idempotencyKey: db-delete-1
+              targetProviderId: "fake:db-1"
+              targetGeneration: 1
+              risk:
+                reversibility: R4
+                dataLoss: certain
+                downtime: certain
+                securityExposure: none
+                costDelta: { amount: 0, currency: EUR }
+                identityReplacement: true
+          preconditions:
+            - type: report-executable
+    expect:
+      exit: 0
+      status: applied
+      events: [lease.acquired, apply.started, operation.receipt,
+               binding.updated, operation.receipt, apply.finished,
+               lease.released]
+
+  - name: apply-refuses-redirected-delete
+    impl: go
+    description: >
+      D47: the plan pinned fake:db-OTHER; the binding says fake:db-1 —
+      a rebind must not redirect a delete. Exit 3: re-seal.
+    apply:
+      at: "2026-07-11T19:10:00Z"
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: binding.updated
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+            body:
+              capability: db
+              environment: test
+              provider: { name: fake }
+              resources:
+                - { id: primary, type: t, providerId: "fake:db-1", generation: 1 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.released
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+      contract: *r-contract
+      candidate: *r-candidate
+      plan:
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: r-demo
+          environment: test
+          reads:
+            contractHash: "sha256:672b8bc8f9b927f48fdadb84f13e5a6adc2f036a9571effac44f247812867374"
+            candidateHash: "sha256:0a4458276880b13fa78e5f7d518e3599ff98101870f7b8c8f48d7888c7f83c1f"
+            heads: { db: "sha256:77ffa631b51360f022c62eb6d348b0680a108ddd0ebce924fe14d509b352e043" }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-delete-db
+              capability: db
+              operation: delete
+              target: fake.svc/db
+              idempotencyKey: db-delete-1
+              targetProviderId: "fake:db-OTHER"
+              targetGeneration: 1
+              risk:
+                reversibility: R4
+                dataLoss: certain
+                downtime: certain
+                securityExposure: none
+                costDelta: { amount: 0, currency: EUR }
+                identityReplacement: true
+          preconditions:
+            - type: report-executable
+    expect:
+      exit: 3
+      status: refused
+      events: []
+
+  - name: apply-autonomy-gate-is-unconditional
+    impl: go
+    description: >
+      D47: a hand-authored delete plan cannot bypass compiler policy —
+      the executor evaluates the pinned contract's autonomy block before
+      any mutation.
+    apply:
+      at: "2026-07-11T19:10:00Z"
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: binding.updated
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+            body:
+              capability: db
+              environment: test
+              provider: { name: fake }
+              resources:
+                - { id: primary, type: t, providerId: "fake:db-1", generation: 1 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.released
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: r-forbid, environment: test, version: 2 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+            state: retired
+        autonomy:
+          forbidden:
+            - delete_stateful: true
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: r-forbid
+        capabilities: {}
+      plan:
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: r-forbid
+          environment: test
+          reads:
+            contractHash: "sha256:c3196948c0a2ae5e8fb8e8d2516c139cd11d9bb29d10c105eba530776a5c6e74"
+            candidateHash: "sha256:a5357cd263eb04c5001032b90a3b731eb8d2d3938ac8a316bb0a99bb8d50fa23"
+            heads: { db: "sha256:77ffa631b51360f022c62eb6d348b0680a108ddd0ebce924fe14d509b352e043" }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-delete-db
+              capability: db
+              operation: delete
+              target: fake.svc/db
+              idempotencyKey: db-delete-1
+              targetProviderId: "fake:db-1"
+              targetGeneration: 1
+              risk:
+                reversibility: R4
+                dataLoss: certain
+                downtime: certain
+                securityExposure: none
+                costDelta: { amount: 0, currency: EUR }
+                identityReplacement: true
+          preconditions:
+            - type: report-executable
+    expect:
+      exit: 2
+      status: refused
+      events: []
+
+  - name: forecast-will-delete-and-identity-mismatch
+    impl: go
+    forecast:
+      at: "2026-07-11T19:00:00Z"
+      bindings: { db: "fake:db-1" }
+      plan: *delete-plan
+      candidate: *r-candidate
+    expect:
+      freshPlan: false
+      effects:
+        a-delete-db: stale-plan
+    # note: the pinned plan's heads reference the seeded ledger, but this
+    # forecast runs against genesis heads — stale-plan fires first, which
+    # is itself the honest answer. The will-delete happy path:
+
+  - name: forecast-will-delete
+    impl: go
+    forecast:
+      at: "2026-07-11T19:00:00Z"
+      bindings: { db: "fake:db-1" }
+      heads: { db: "sha256:77ffa631b51360f022c62eb6d348b0680a108ddd0ebce924fe14d509b352e043" }
+      plan: *delete-plan
+      candidate: *r-candidate
+    expect:
+      freshPlan: true
+      effects:
+        a-delete-db: will-delete
+
+  - name: forecast-will-delete-a-deposed-orphan
+    impl: go
+    description: >
+      D71: a deposed delete pins an ORPHAN whose capability is bound to
+      the SUCCESSOR — the ordinary binding-match logic would call it
+      stale-plan, but deposed:true routes it to will-delete, validated
+      against the deposed projection at apply.
+    forecast:
+      at: "2026-07-11T19:00:00Z"
+      bindings: { db: "fake:db-2" }   # the successor is bound
+      heads: { db: "sha256:77ffa631b51360f022c62eb6d348b0680a108ddd0ebce924fe14d509b352e043" }
+      plan:
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: r-demo
+          environment: test
+          reads:
+            contractHash: "sha256:672b8bc8f9b927f48fdadb84f13e5a6adc2f036a9571effac44f247812867374"
+            candidateHash: "sha256:0a4458276880b13fa78e5f7d518e3599ff98101870f7b8c8f48d7888c7f83c1f"
+            heads: { db: "sha256:77ffa631b51360f022c62eb6d348b0680a108ddd0ebce924fe14d509b352e043" }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-delete-deposed-db-g1
+              capability: db
+              operation: delete
+              target: fake.svc/db
+              idempotencyKey: db-deposed-delete-1
+              targetProviderId: "fake:db-1"
+              targetGeneration: 1
+              deposed: true
+              risk:
+                reversibility: R4
+                dataLoss: certain
+                downtime: certain
+                securityExposure: none
+                costDelta: { amount: 0, currency: EUR }
+                identityReplacement: true
+          preconditions:
+            - type: report-executable
+      candidate: *r-candidate
+    expect:
+      freshPlan: true
+      effects:
+        a-delete-deposed-db-g1: will-delete
+
+  - name: plan-pins-provider-identity-from-binding
+    impl: go
+    description: >
+      Found in the first real-cloud run: a retirement candidate has no
+      capabilities, so provider identity cannot come from candidate
+      extras — the BINDING carries it. Without this, apply --provider
+      gcp rightly refused the unpinned read-set (D28 as a safety net)
+      and the live instance survived its own retirement.
+    plan:
+      at: "2026-07-11T19:10:00Z"
+      project: test-project
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: binding.updated
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+            body:
+              capability: db
+              environment: test
+              provider: { name: fake }
+              resources:
+                - { id: primary, type: t, providerId: "fake:db-1", generation: 1 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.released
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+      contract: *r-contract
+      candidate: *r-candidate
+    expect:
+      actions:
+        a-delete-db:
+          operation: delete
+      provider: { name: fake, project: test-project }

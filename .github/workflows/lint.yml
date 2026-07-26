@@ -1,0 +1,63 @@
+# Syntax and lint gates for the non-Go surface: the workflows themselves, shell
+# scripts, and the Python reference implementation. (Go formatting/vetting/
+# security-linting live in ci.yml `make check` and security.yml golangci-lint.)
+name: lint
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+# shellcheck (standalone and the copy actionlint drives over embedded run:
+# scripts) gates on warning+ — real bugs (unguarded cd, an rm that could expand
+# to /, unused vars) block; info/style stays advisory. Ratchet down over time.
+env:
+  SHELLCHECK_OPTS: "--severity=warning"
+
+jobs:
+  actionlint:
+    # Lints every workflow file (syntax, expression types, deprecated actions)
+    # and runs shellcheck over embedded `run:` scripts.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+        run: |
+          curl -sSfL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz actionlint
+          ./actionlint -color
+
+  shellcheck:
+    # shellcheck over every tracked shell script (it is preinstalled on the
+    # runner). Skips cleanly when a tree carries no scripts — the public export
+    # omits scripts/, so this is a no-op there and a real gate here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: shellcheck
+        run: |
+          mapfile -t files < <(git ls-files '*.sh')
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no shell scripts in this tree — nothing to check"
+            exit 0
+          fi
+          printf 'checking %s\n' "${files[@]}"
+          shellcheck "${files[@]}"
+
+  python-syntax:
+    # Syntax-checks the Python reference implementation and the conformance
+    # runner. The verifier core stays stdlib + PyYAML (Working rules), so this is
+    # a compile check, not a style pass.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: py_compile
+        run: python -m compileall -q ref conformance

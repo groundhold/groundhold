@@ -1,0 +1,24 @@
+# gitleaks configuration for the secret-scanning gate (.github/workflows/security.yml).
+#
+# Extends the upstream default ruleset. The allowlist below covers deliberate
+# NON-secret fixtures — fake credentials that exist precisely to exercise
+# redaction/parsing, and deterministic documentation values. Every entry names
+# why it is not a live secret. Real secrets never live in these paths by policy;
+# if that ever changes, tighten this file, do not widen it.
+title = "groundhold"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "test fixtures and documentation examples — verified non-secrets"
+paths = [
+  # Unit-test fixtures carry fake credentials on purpose: e.g.
+  # azure/mutation_leak_test.go asserts a password is NEVER echoed into a
+  # receipt, and importer_test.go feeds a state blob to prove the importer
+  # STRUCTURALLY EXCLUDES secrets. The values are placeholders, not creds.
+  '''.*_test\.go$''',
+  # Deterministic example plans/candidates in the spec — an idempotencyKey
+  # or sample value, never a credential.
+  '''spec/examples/.*''',
+]

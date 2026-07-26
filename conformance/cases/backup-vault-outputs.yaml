@@ -1,0 +1,203 @@
+# Backup vault outputs (F13 / D226 consumer proof): a capability.backup.vault
+# (AWS Backup / GCP Backup and DR / Azure Data Protection) now declares a typed
+# vault-name/id create output, so a capability.backup.plan candidate wires its
+# target vault as a structured {$ref:{capability,output}} instead of a
+# hand-pasted literal. This closes the live Acme finding: CreateBackupPlan 400s
+# ("A Backup vault does not exist") when the plan references a vault that the
+# plan itself has not yet created — the $ref forces create + dependsOn ordering.
+# Compile behaviour is Go-runtime (D24), so every case carries impl: go. The
+# verifier is untouched: the $ref lives in the implementation block (D26), which
+# the verifier ignores. Symmetric across all three clouds.
+suite: backup-vault-outputs
+cases:
+  - name: aws-backupplan-wires-target-vault-from-vaultName
+    impl: go
+    description: >
+      AWS: a backup.plan wires targetVaultName = $ref backupvault.vaultName —
+      the vault name is derived from the create's bkv:region:account:name pid, so
+      the plan resolves it at apply and orders create-before-plan.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: bkp-aws, environment: test, version: 1 }
+        capabilities:
+          - id: vault
+            type: capability.backup.vault
+          - id: plan
+            type: capability.backup.plan
+        constraints:
+          hard:
+            - id: c-vault-managed
+              subject: vault
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-plan-managed
+              subject: plan
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: bkp-aws
+        capabilities:
+          vault:
+            provider: aws
+            service: backupvault
+            attributes:
+              service.managed: true
+              location.region: eu-central-1
+          plan:
+            provider: aws
+            service: backupplan
+            attributes:
+              service.managed: true
+            implementation:
+              targetVaultName:
+                $ref: { capability: vault, output: vaultName }
+    expect:
+      actions:
+        a-create-vault:
+          operation: create
+        a-create-plan:
+          operation: create
+          dependsOn: [a-create-vault]
+          references:
+            - slot: targetVaultName
+              producerAction: a-create-vault
+              capability: vault
+              output: vaultName
+              kind: string
+
+  - name: gcp-backupplan-wires-target-vault-from-backupVault
+    impl: go
+    description: >
+      GCP: a backup.plan wires backupVault = $ref backupvault.backupVault — the
+      full resource name (projects/<p>/locations/<loc>/backupVaults/<v>) is
+      derived from the gbkv pid, so the plan resolves it at apply.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: bkp-gcp, environment: test, version: 1 }
+        capabilities:
+          - id: vault
+            type: capability.backup.vault
+          - id: plan
+            type: capability.backup.plan
+        constraints:
+          hard:
+            - id: c-vault-managed
+              subject: vault
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-plan-managed
+              subject: plan
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: bkp-gcp
+        capabilities:
+          vault:
+            provider: gcp
+            service: backupvault
+            attributes:
+              service.managed: true
+              location.region: europe-west1
+          plan:
+            provider: gcp
+            service: backupplan
+            attributes:
+              service.managed: true
+            implementation:
+              backupVault:
+                $ref: { capability: vault, output: backupVault }
+    expect:
+      actions:
+        a-create-vault:
+          operation: create
+        a-create-plan:
+          operation: create
+          dependsOn: [a-create-vault]
+          references:
+            - slot: backupVault
+              producerAction: a-create-vault
+              capability: vault
+              output: backupVault
+              kind: string
+
+  - name: azure-backuppolicy-wires-target-vault-from-vaultName
+    impl: go
+    description: >
+      Azure: a backup.plan (Data Protection backupPolicy) wires backupVaultName =
+      $ref backupvault.vaultName — the policy is a child of an existing vault, so
+      the vault name is derived from the backupvault:sub:rg:vault pid.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: bkp-az, environment: test, version: 1 }
+        capabilities:
+          - id: vault
+            type: capability.backup.vault
+          - id: plan
+            type: capability.backup.plan
+        constraints:
+          hard:
+            - id: c-vault-managed
+              subject: vault
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-plan-managed
+              subject: plan
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: bkp-az
+        capabilities:
+          vault:
+            provider: azure
+            service: backupvault
+            attributes:
+              service.managed: true
+              location.region: westeurope
+          plan:
+            provider: azure
+            service: backuppolicy
+            attributes:
+              service.managed: true
+            implementation:
+              backupVaultName:
+                $ref: { capability: vault, output: vaultName }
+    expect:
+      actions:
+        a-create-vault:
+          operation: create
+        a-create-plan:
+          operation: create
+          dependsOn: [a-create-vault]
+          references:
+            - slot: backupVaultName
+              producerAction: a-create-vault
+              capability: vault
+              output: vaultName
+              kind: string

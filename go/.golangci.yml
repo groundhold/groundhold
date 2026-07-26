@@ -1,0 +1,47 @@
+# Security + quality linting: gosec + staticcheck on top of golangci-lint's
+# default set (errcheck, staticcheck, unused, ineffassign, gosimple, govet).
+# BLOCKING in CI (.github/workflows/security.yml). Every exclusion below is a
+# deliberate, documented decision — not a way to hide a real defect.
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - gosec
+    - staticcheck
+
+linters-settings:
+  errcheck:
+    exclude-functions:
+      # Releasing an flock in a defer: the unlock error is unactionable (the fd
+      # is being closed regardless).
+      - syscall.Flock
+
+issues:
+  # keep golangci-lint's curated defaults (EXC0001..) and add ours.
+  exclude-use-default: true
+  exclude-rules:
+    # Test files are not the production security/error surface: httptest writers,
+    # fixture WriteFile, deterministic fuzz seeds (G404), self-signed httptest
+    # InsecureSkipVerify (G402), and 0644 tamper fixtures (G306) are all correct
+    # in tests.
+    - path: _test\.go
+      linters: [gosec, errcheck]
+    # The tool's PURPOSE is reading user-named files (contracts, candidates, state,
+    # ledgers, capsules) and running its OWN binary (the converge self-runner) or a
+    # user-configured notify command. Path/subprocess "taint" is inherent, not a bug.
+    - linters: [gosec]
+      text: "G304|G204"
+    # crypto/md5 is required by the S3 REST API (the Content-MD5 header), not used
+    # as a security primitive.
+    - linters: [gosec]
+      text: "G401|G501"
+    # secretManagerBaseURL is a public API endpoint URL, not a credential.
+    - path: internal/gcp/secretmanager\.go
+      linters: [gosec]
+      text: "G101"
+    # Bounded integer conversions: the pace backoff shift (attempt is a small,
+    # capped retry counter) and the canonicalizer (numeric values are already
+    # constrained to the JSON-safe range upstream — D66).
+    - linters: [gosec]
+      text: "G115"

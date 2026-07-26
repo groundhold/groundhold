@@ -1,0 +1,172 @@
+# groundhold suggest — the deterministic, cited best-practice advisor (D203,
+# docs/proposals/suggest-advisor.md). impl: go (Go-runtime, like cost/forecast).
+#
+# These cases are the source of truth (invariant #5) for: the ruleset's
+# determinism and sort order, each snippet + citation, scope filtering against
+# meta.environment, skip-already-constrained, and — critically — that suggest is
+# ADVISORY: the exit code is 0 whether it finds 6 suggestions or 0 (a finding
+# never gates). The advisor reads the vocab's `recommended` marker; the verifier
+# never does.
+
+cases:
+  - name: suggest-emits-sorted-cited-hardening
+    impl: go
+    description: >
+      A prod contract with a relational db (already enforcing TLS) and an object
+      bucket: recommended-but-absent hardenings are emitted, sorted by
+      (capability, path), each with its structured citation and a ready-to-paste
+      snippet. The already-enforced TLS constraint is skipped and COUNTED, never
+      silently dropped.
+    suggest:
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: shop, environment: prod, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+          - id: bucket
+            type: capability.storage.object
+        constraints:
+          hard:
+            - id: c-tls
+              subject: db
+              path: encryption.inTransit
+              op: equals
+              value: true
+              verify: { method: static }
+    expect:
+      exit: 0
+      suggested: 6
+      alreadyEnforced: 1
+      order:
+        - [bucket, encryption.customerManagedKeys]
+        - [bucket, network.publicExposure]
+        - [bucket, versioning.enabled]
+        - [db, encryption.customerManagedKeys]
+        - [db, network.publicExposure]
+        - [db, recovery.rpo]
+      suggestions:
+        - capability: db
+          path: network.publicExposure
+          op: equals
+          value: false
+          scope: all
+          ruleId: PV_R0001
+          controls:
+            FSBP: ["RDS.2"]
+            CIS-AWS_5.0.0: ["2.3.3"]
+            GDPR: ["Art.32"]
+          snippet: |-
+            - id: rec-db-network.publicExposure
+              subject: db
+              path: network.publicExposure
+              op: equals
+              value: false
+              verify: { method: static }
+        - capability: db
+          path: recovery.rpo
+          op: lte
+          value: 24h
+          scope: all
+          ruleId: PV_R0004
+          snippet: |-
+            - id: rec-db-recovery.rpo
+              subject: db
+              path: recovery.rpo
+              op: lte
+              value: 24h
+              verify: { method: static }
+        - capability: db
+          path: encryption.customerManagedKeys
+          op: equals
+          value: true
+          scope: prod
+          ruleId: PV_R0003
+        - capability: bucket
+          path: versioning.enabled
+          op: equals
+          value: true
+          scope: all
+          ruleId: PV_R0006
+          controls:
+            FSBP: ["S3.14"]
+            CIS-AWS_5.0.0: ["2.1.3"]
+
+  - name: suggest-scope-filters-by-environment
+    impl: go
+    description: >
+      The SAME two capabilities in a dev environment: prod-scoped recommendations
+      (customer-managed keys) are suppressed, only all-scoped ones remain. Scope
+      keys off meta.environment — no new contract field.
+    suggest:
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: shop, environment: dev, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+          - id: bucket
+            type: capability.storage.object
+        constraints:
+          hard:
+            - id: c-tls
+              subject: db
+              path: encryption.inTransit
+              op: equals
+              value: true
+              verify: { method: static }
+    expect:
+      exit: 0
+      suggested: 4
+      alreadyEnforced: 1
+      absent:
+        - [db, encryption.customerManagedKeys]
+        - [bucket, encryption.customerManagedKeys]
+
+  - name: suggest-advisory-exit-is-zero-with-no-findings
+    impl: go
+    description: >
+      A prod db that already enforces every applicable recommendation yields ZERO
+      suggestions and STILL exits 0 — paired with the 6-finding case above, this
+      pins that the exit code is independent of how many suggestions were found:
+      suggest is advisory, never gating.
+    suggest:
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: locked, environment: prod, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-nopublic
+              subject: db
+              path: network.publicExposure
+              op: equals
+              value: false
+              verify: { method: static }
+            - id: c-tls
+              subject: db
+              path: encryption.inTransit
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-cmek
+              subject: db
+              path: encryption.customerManagedKeys
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-rpo
+              subject: db
+              path: recovery.rpo
+              op: lte
+              value: 24h
+              verify: { method: static }
+    expect:
+      exit: 0
+      suggested: 0
+      alreadyEnforced: 4

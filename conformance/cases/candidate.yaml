@@ -1,0 +1,87 @@
+# Candidate-document semantics (spec/candidate.schema.json, D26).
+
+cases:
+  - name: candidate-apiversion-is-load-error
+    description: >
+      A candidate must declare apiVersion: candidate/v0.1 — same rule the
+      contract loader has always enforced. Found while writing the
+      candidate schema: the loaders checked kind but not apiVersion.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e15, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+    candidate:
+      kind: ImplementationCandidate
+      contract: e15
+      capabilities:
+        db:
+          attributes:
+            service.managed: true
+    expect:
+      error: candidate
+
+  - name: candidate-without-contract-is-load-error
+    description: >
+      D17 + D19: a candidate names the contract it implements; omitting the
+      binding is a structural error, refused at load rather than surfacing
+      as a mismatch at verify time.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e16, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      capabilities:
+        db:
+          attributes:
+            service.managed: true
+    expect:
+      error: candidate
+
+  - name: implementation-block-is-ignored-by-the-verifier
+    description: >
+      D26: provider detail rides in a free-form implementation block. The
+      verifier never reads it — verdicts depend on attributes only. The
+      compiler consumes it, and D18 guarantees it is not the source of
+      truth.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: c1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-encrypted
+            subject: db
+            path: encryption.atRest
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: c1
+      capabilities:
+        db:
+          provider: gcp
+          service: cloudsql
+          attributes:
+            encryption.atRest: true
+          implementation:
+            tier: db-custom-4-16384
+            disk_type: PD_SSD
+            flags:
+              max_connections: 500
+    expect:
+      executable: true
+      verdicts:
+        c-encrypted: satisfied

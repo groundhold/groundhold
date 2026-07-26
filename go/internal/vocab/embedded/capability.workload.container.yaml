@@ -1,0 +1,106 @@
+# Attribute vocabulary for capability.workload.container, spec v0.1
+# (D60). What an organization can REQUIRE of a containerized workload:
+# availability, exposure, supply-chain provenance, capacity FLOOR.
+# Image tags, pod templates and orchestrator flags are implementation
+# noise.
+#
+# First STATELESS vocabulary: a workload's instances are replaceable by
+# definition — retirement destroys no data, so delete_stateful gates do
+# not bind it and replacement needs no allow_replace_stateful consent.
+#
+# One capability TYPE, MANY services (D76): cloudrun, gke, cloudfunctions
+# (Gen2) all fulfil this — a function's source/runtime/no-image shape is
+# implementation noise; what an org contracts (residency, exposure,
+# capacity floor, TLS, cost) is identical. cloudfunctions v0 handles
+# HTTP-invoked functions; an event-driven trigger is candidate wiring, not
+# a contract attribute (the driver refuses it, fail-closed, until an
+# eventing capability is decided on its own merits — a future
+# invocation.protocol attribute if that need ever appears).
+
+capability: capability.workload.container
+version: 0.1
+stateful: false
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Primary region the workload runs in
+    mappings:
+      gcp.cloudrun: service region
+      gcp.cloudfunctions: function location
+      gcp.gke: cluster location
+      aws.ecs: region
+      aws.apprunner: region
+
+  availability.class:
+    kind: string
+    enum: [zonal, regional, multi-regional]
+    mappings:
+      gcp.cloudrun: regional by construction
+      gcp.cloudfunctions: regional by construction
+      gcp.gke: cluster topology
+
+  network.publicExposure:
+    kind: bool
+    description: Whether the workload is reachable from the internet
+    mappings:
+      gcp.cloudrun: ingress setting + IAM invoker
+      gcp.cloudfunctions: ingressSettings + invoker IAM on the backing Run service
+      gcp.gke: Service/Ingress type
+      aws.apprunner: NetworkConfiguration.IngressConfiguration.IsPubliclyAccessible
+
+  replicas.minimum:
+    kind: number
+    description: >
+      Capacity floor — the number of instances that must exist even at
+      zero load (cold-start and availability semantics)
+    mappings:
+      gcp.cloudrun: minInstances
+      gcp.cloudfunctions: serviceConfig.minInstanceCount
+      gcp.gke: HPA minReplicas
+      aws.apprunner: AutoScalingConfiguration MinSize (>=1; no scale-to-zero)
+
+  autoscaling.enabled:
+    kind: bool
+    mappings:
+      gcp.cloudrun: always true (maxInstances bounds it)
+      gcp.cloudfunctions: always true (maxInstanceCount bounds it)
+      gcp.gke: HPA present
+      aws.apprunner: always true (AutoScalingConfiguration MaxSize bounds it)
+
+  image.signedProvenance:
+    kind: bool
+    description: >
+      Only images with verified build provenance (signature/attestation)
+      may run — supply-chain gate
+    mappings:
+      gcp.cloudrun: Binary Authorization policy
+      gcp.gke: Binary Authorization
+    note: >
+      static verification proves the POLICY exists; an outcome probe
+      (attempt to deploy an unsigned image into a scratch revision)
+      proves it bites.
+
+  tls.enforced:
+    kind: bool
+    description: Plaintext ingress is refused
+    mappings:
+      gcp.cloudrun: HTTPS-only by construction
+      gcp.cloudfunctions: HTTPS-only by construction
+      gcp.gke: Ingress TLS + redirect
+      aws.apprunner: HTTPS-only by construction (managed endpoint)
+
+  service.managed:
+    kind: bool
+    description: Managed runtime vs self-operated cluster
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    verification: static against a pricing catalog; billing after deploy
+
+# Deliberately absent in v0.1 (implementation noise):
+# image tags/digests (the digest is the CANDIDATE's business), pod
+# templates, orchestrator flags, sidecar shapes, service mesh wiring,
+# cpu/memory requests (capacity tuning, not capability semantics).

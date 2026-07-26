@@ -1,0 +1,42 @@
+# Schema-driven mapping: ArgoCD Application (argoproj.io/v1alpha1) ->
+# capability.gitops.application. A GitOps reconciliation WITNESS — groundhold observes
+# whether the controller has synced+healthed its root application, and never
+# reconciles it (author-vs-witness). ArgoCD is ONE equal citizen of the neutral
+# capability; k8s.flux-kustomization maps Flux onto the SAME type with its own lens,
+# so no vendor is privileged. The sync/health enums are normalised by the lens
+# (ArgoCD's "OutOfSync"/"Degraded" -> the neutral drifted/degraded); source.repoURL
+# is a plain copy. Observe-only: there is no write lens — groundhold does not author
+# the Application.
+mapping: v0.1
+fieldpath: groundhold/fieldpath/v1
+service: argocd-application
+provider: k8s
+capability: capability.gitops.application
+vocab:
+  capability.gitops.application: "0.1"
+
+resource:
+  group: argoproj.io
+  version: v1alpha1
+  kind: Application
+  plural: applications
+  scope: Namespaced
+
+schema:
+  source: "argoproj.io/v1alpha1 Application CRD (spec.versions[].schema)"
+  mappedSurface: ""   # drift-guard PENDING CRD schema vendoring — a live-cluster
+                      # read emits a loud "drift UNCHECKED" diagnostic until pinned.
+
+lenses:
+  - k8s.gitops.argocdStatus
+
+attributes:
+  source.repoURL:
+    field: spec.source.repoURL
+    op: copy
+    type: string
+    derivation: measured
+  service.managed:
+    op: const
+    value: true
+    derivation: measured

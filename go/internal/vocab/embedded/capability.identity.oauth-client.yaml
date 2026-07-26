@@ -1,0 +1,86 @@
+# Attribute vocabulary for capability.identity.oauth-client, spec v0.1
+# (D55). An application's OAuth/OIDC client registration: enabled grant
+# types and token discipline materially change the attack surface, so
+# they are semantics; client ids, display names and consent-screen text
+# are noise.
+
+capability: capability.identity.oauth-client
+version: 0.1
+stateful: true   # issued credentials/tokens and the client registration
+                 # carry revocation and continuity state — deleting the
+                 # client invalidates every outstanding token at once
+
+attributes:
+
+  grants.authorizationCode:
+    kind: bool
+    description: Authorization-code grant enabled
+  grants.implicit:
+    kind: bool
+    description: >
+      Implicit grant enabled — contracts typically REQUIRE false
+      (deprecated by OAuth 2.1; tokens in fragments leak)
+  grants.clientCredentials:
+    kind: bool
+    description: Machine-to-machine client-credentials grant enabled
+
+  pkce.required:
+    kind: bool
+    description: PKCE demanded of every authorization-code exchange
+
+  client.authentication:
+    kind: string
+    enum: [none, client_secret_basic, client_secret_post,
+           private_key_jwt, mtls]
+    description: >
+      How the client authenticates to the token endpoint; `none` means
+      a public client — constraints usually forbid it server-side
+
+  redirects.exactMatch:
+    kind: bool
+    description: Redirect URIs match exactly — no path prefixes
+  redirects.wildcardsAllowed:
+    kind: bool
+    description: >
+      Wildcard redirect URIs allowed — contracts typically REQUIRE
+      false (an open redirect one typo away)
+
+  token.accessLifetime:
+    kind: duration
+    description: Upper bound on access-token lifetime
+  token.asymmetricSigning:
+    kind: bool
+    description: Tokens signed with asymmetric keys (verifiable without
+      the shared secret)
+
+  refreshToken.issued:
+    kind: bool
+    description: Refresh tokens are issued at all
+  refreshToken.rotation:
+    kind: bool
+    description: Refresh tokens rotate on use (replay of a used token
+      revokes the family)
+  refreshToken.lifetime:
+    kind: duration
+    description: Upper bound on refresh-token lifetime
+
+  audience.restricted:
+    kind: bool
+    description: Tokens carry an explicit audience restriction
+
+  scopes.granted:
+    kind: list
+    description: >
+      The scopes this client may request — contracts constrain with
+      subset-of against an allowlist
+
+  secret.maxAge:
+    kind: duration
+    description: Enforced upper bound on client-secret age
+    verification: >
+      semantic only where rotation is ENFORCED by the platform; where
+      it is a recommendation, this is a claim needing a probe
+
+# Deliberately absent in v0.1 (implementation noise):
+# client ids/names, consent screen text, logo assets, token endpoint
+# URLs, SDK choices.

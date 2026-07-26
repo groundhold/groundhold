@@ -1,0 +1,61 @@
+# Attribute vocabulary for capability.apigateway.http, spec v0.1 (D119).
+#
+# A managed HTTP API gateway — a routable front door that fronts backend
+# integrations. The twin is AWS API Gateway v2 (an HTTP/WebSocket API) and Azure
+# API Management.
+#
+# This is an HONEST TWO-CLOUD domain: GCP API Gateway is NOT a single resource — a
+# serving gateway is an api + apiConfig + gateway chain, and the apiConfig REQUIRES
+# an OpenAPI/Swagger document (opaque, out of the single-resource model). It cannot
+# be modelled as one gateway resource the way apigatewayv2 and APIM can, so a gcp
+# candidate is REFUSED by fail-closed dispatch, never faked (the search/streaming/
+# certificate/cdn stance, applied again).
+#
+# INVARIANT #4 (closed operator set): a gateway's ROUTES, integrations, authorizers,
+# request/response mappings and rate-limit policies are OPAQUE config carried under
+# `implementation:`, never vocabulary attributes. The vocabulary exposes only the
+# residency, the wire protocol and management.
+
+capability: capability.apigateway.http
+version: 0.1
+stateful: false   # a gateway is routing configuration, not stored data — retirement
+                  # stops serving but loses no records (no D47 data-loss friction).
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Region the gateway is served from
+    mappings:
+      aws.apigatewayv2: the provider region (an HTTP API is regional)
+      azure.apim: the API Management service location
+
+  protocol:
+    kind: string
+    enum: [http, websocket]
+    description: >
+      The wire protocol the gateway speaks. http is the two-cloud path; websocket is
+      honored ONLY on AWS (apigatewayv2 has a first-class WEBSOCKET API), and on
+      Azure APIM it is REFUSED (APIM has no service-level websocket-API primitive) —
+      refused rather than silently downgrading to http.
+    mappings:
+      aws.apigatewayv2: CreateApi ProtocolType (HTTP | WEBSOCKET)
+      azure.apim: HTTP gateway — websocket refused
+
+  service.managed:
+    kind: bool
+    description: Managed service vs self-operated
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost of the capability
+    verification: static against a pricing catalog; provider-api (billing) after deploy
+
+# Deliberately absent in v0.1:
+#   - routes, integrations, authorizers, request/response mappings, CORS policy,
+#     rate limits, custom domains, stages: all OPAQUE config under `implementation:`,
+#     never a vocabulary attribute (invariant #4 — a gateway's routing is config, not
+#     capability semantics).
+#   - the TLS certificate for a custom domain is a SEPARATE capability
+#     (capability.certificate.tls, D117), referenced by implementation, not inlined.

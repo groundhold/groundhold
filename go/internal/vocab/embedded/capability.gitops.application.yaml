@@ -1,0 +1,71 @@
+# Attribute vocabulary for capability.gitops.application, spec v0.1.
+#
+# A GitOps-reconciled application root, WITNESSED by groundhold — never reconciled by
+# it (author-vs-witness: the GitOps controller owns the app layer; groundhold owns the
+# platform substrate and observes whether the controller is doing its job). This is
+# the honest resolution of the bootstrap paradox: groundhold does not install or drive
+# the controller; it asserts, four-valued, that the controller is present and its
+# root application is synced and healthy. If the controller is absent, observe
+# yields nothing and a hard constraint is unknown/unverifiable — never a fake pass.
+#
+# CONTROLLER-AGNOSTIC by design (D76: one TYPE, many services). groundhold privileges
+# no GitOps vendor — every controller is an EQUAL, pluggable mapping onto the neutral
+# enums below, which are the COMMON DENOMINATOR every controller exposes. Each
+# mapping NORMALISES its controller's own vocabulary onto them (ArgoCD Application
+# status.sync.status "OutOfSync" -> drifted; Flux Kustomization Ready=false ->
+# degraded). ArgoCD (Application) and Flux (Kustomization) ship as equal first
+# citizens; Fleet, Jenkins X or any future controller is just another mapping + lens,
+# never a code change here. This is the k8s analog of the cloud parity matrix, on the
+# GitOps-controller axis.
+
+capability: capability.gitops.application
+version: 0.1
+stateful: false   # a reconciliation status, not a store — witnessing it never
+                  # deletes anything; the controller owns the managed resources
+
+attributes:
+
+  sync.status:
+    kind: string
+    enum: [synced, drifted, unknown]
+    description: >
+      Whether the cluster's live state is reconciled to the declared git source.
+      synced = live matches desired; drifted = the controller reports a divergence
+      (config drift or a pending/failed sync); unknown = the controller cannot say.
+      This is the drift axis — the truth an org governs when it requires "the
+      cluster must equal git".
+    mappings:
+      k8s.argocd: status.sync.status (Synced -> synced; OutOfSync -> drifted; else unknown)
+      k8s.flux: status Ready condition (True -> synced; False -> drifted; absent -> unknown)
+
+  health.status:
+    kind: string
+    enum: [healthy, progressing, degraded, unknown]
+    description: >
+      Whether the managed resources are healthy. healthy = all up; progressing = a
+      rollout in flight; degraded = one or more resources failing or missing;
+      unknown = not determinable. The failure axis, distinct from drift — an app can
+      be synced yet degraded (git is right, the pods are crashlooping).
+    mappings:
+      k8s.argocd: status.health.status (Healthy -> healthy; Progressing -> progressing; Degraded/Missing -> degraded; Suspended/Unknown -> unknown)
+      k8s.flux: status conditions (Ready True -> healthy; Reconciling True -> progressing; Ready False -> degraded; none -> unknown)
+
+  source.repoURL:
+    kind: string
+    description: >
+      The git source the root application reconciles from — provenance, so a
+      contract can pin WHICH repo governs the cluster. The exact revision and path
+      are implementation detail; a private-repo credential is a secret, never read
+      (D53).
+    mappings:
+      k8s.argocd: spec.source.repoURL
+      k8s.flux: spec.sourceRef (the GitRepository name; URL resolution is a future lens)
+
+  service.managed:
+    kind: bool
+    description: Managed by a first-class GitOps controller vs hand-rolled reconciliation
+
+# Deliberately absent in v0.1 (implementation noise or controller-specific):
+# the app-of-apps tree shape, per-resource health detail, sync waves/hooks, the
+# revision/path, RBAC of the controller (a separate identity capability), and the
+# controller's own deployment (app layer — groundhold witnesses, never authors it).

@@ -1,0 +1,52 @@
+# Permission preflight (D75). impl: go — the compiler is Go-only (D24), so
+# the DERIVATION of requiredPermissions is pinned here through the Go CLI.
+# The live executor check (Preflighter) is Go-only too (Python has no
+# executor) and is pinned by go/internal/apply and go/internal/gcp tests.
+#
+# Determinism boundary (as in plan-declares-outcomes / probe-measures): the
+# permission SET is deterministic compiler output that enters the plan hash;
+# the live IAM call happens only in apply, never at plan time (the compiler
+# makes no network calls — a closed decision, like D39's "no Terraform").
+
+cases:
+  - name: plan-emits-required-permissions-for-gcp-create
+    impl: go
+    description: >
+      D75: a gcp create action carries the full permission set its driver
+      call sequence needs — cloudsql.instances.create plus the quiet
+      instances.get (409 ownership classification + operation polling).
+      Sorted and deduped; omitting the quiet read would produce a false PASS.
+    plan:
+      at: "2026-07-12T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: pf1, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-region
+              subject: db
+              path: location.region
+              op: equals
+              value: europe-west1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: pf1
+        capabilities:
+          db:
+            provider: gcp
+            service: cloudsql
+            attributes:
+              location.region: europe-west1
+    expect:
+      actions:
+        a-create-db:
+          operation: create
+          requiredPermissions:
+            - cloudsql.instances.create
+            - cloudsql.instances.get

@@ -1,0 +1,61 @@
+# Attribute vocabulary for capability.vpn.gateway, spec v0.1 (D126).
+#
+# A managed site-to-site VPN GATEWAY — the honest 2-cloud twin is AWS VPN Gateway
+# (a virtual private gateway) and GCP Cloud VPN (an HA VPN gateway). It is a real
+# single resource (unlike an L7 load balancer's multi-resource composite), but almost
+# everything that makes a VPN WORK lives on the TUNNELS/connections hanging off the
+# gateway, not the gateway itself: the peer address, the IKE/IPsec parameters, the BGP
+# session, and above all the PRE-SHARED KEY. The PSK is a secret groundhold must never set
+# or read (D53), and the tunnel parameters are opaque impl (invariant #4). So this is a
+# THIN-envelope capability (the D121 / D123 precedent): what an organization can
+# meaningfully REQUIRE of the gateway itself is its residency and its IP stack.
+#
+# The one honest per-cloud gap: ip.stack=dual-stack is honored on GCP (an HA VPN
+# gateway's stackType is IPV4_ONLY or IPV4_IPV6) and REFUSED on AWS, whose virtual
+# private gateway is IPv4-only at the gateway level (IPv6 over a VPN is a per-connection
+# concern there, not a gateway property), so a dual-stack request is refused rather than
+# faked. ip.stack is also the domain's natural closed enum (the enum-guard dual case).
+
+capability: capability.vpn.gateway
+version: 0.1
+stateful: true   # not stored bytes but the dependency cliff (like network.private):
+                 # destroying an in-use gateway breaks every tunnel and route through
+                 # it, and a re-created AWS gateway gets a new server-assigned id that
+                 # breaks the peer's config — conservative-honest retirement (D47).
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Region the VPN gateway lives in.
+    mappings:
+      aws.vpngateway: derived from the provider region
+      gcp.vpngateway: the HA VPN gateway region
+
+  ip.stack:
+    kind: string
+    enum: [ipv4, dual-stack]
+    description: >
+      The IP stack the gateway terminates. Honored on GCP as the HA VPN gateway's
+      stackType (IPV4_ONLY / IPV4_IPV6); dual-stack is REFUSED on AWS, whose virtual
+      private gateway is IPv4-only at the gateway level.
+    mappings:
+      aws.vpngateway: ipv4 only (dual-stack refused — IPv6 is a per-connection concern)
+      gcp.vpngateway: stackType IPV4_ONLY (ipv4) / IPV4_IPV6 (dual-stack)
+
+  service.managed:
+    kind: bool
+    description: Managed VPN gateway service vs a self-operated VPN appliance.
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost (gateway-hours; data transfer billed after).
+    verification: static against a pricing catalog; billing after deploy
+
+# Deliberately absent in v0.1 (implementation detail / opaque tunnel config / secrets —
+# NOT gateway capability semantics): the customer/peer gateway address, the tunnels and
+# their IKE/IPsec parameters, the pre-shared key (a secret — D53, never set or read),
+# the BGP session and ASN, static vs dynamic routing, the attached VPC/network topology
+# (an impl substrate the gateway is created into), and the Cloud Router. A gateway's
+# genuine capability surface is residency and IP stack; everything else is the tunnel.

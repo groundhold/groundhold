@@ -1,0 +1,62 @@
+# Schema-driven mapping: k8s core/v1 ResourceQuota -> capability.compute.quota.
+#
+# The `resource:` block is MACHINE-authoritative — a projection of the k8s API
+# contract (GVK, plural, scope). Regenerate it; never hand-edit it. The
+# `attributes:` block is HUMAN-authored semantics: which fields are the budget
+# ceiling an org contracts, bound to vocabulary attributes with the closed op set.
+# The `absent:` block records what was deliberately left out (the vocab discipline,
+# made machine-readable). This mapping reproduces the hand-coded observeQuota
+# exactly; the differential test pins that byte-for-byte.
+mapping: v0.1
+fieldpath: groundhold/fieldpath/v1
+service: quota
+provider: k8s
+capability: capability.compute.quota
+vocab:
+  capability.compute.quota: "0.1"   # attribute not in this vocab -> load refusal
+
+resource:                            # machine-authoritative profile
+  group: ""                          # core group
+  version: v1
+  kind: ResourceQuota
+  plural: resourcequotas
+  scope: Namespaced
+
+schema:                              # the mapped-surface fingerprint pins the shape
+  source: "kubernetes /openapi/v3 api/v1 ResourceQuota"
+  # sha256 over the identity facts + each mapped field's terminal type signature.
+  # Drift INSIDE this surface (a mapped field changed type/enum or vanished) is a
+  # mapping-schema-drift refusal; drift outside it is tolerated. Authored against
+  # the vendored testdata/resourcequota-openapi.json schema.
+  mappedSurface: sha256:f536265d49d02293bc98d3c31e866ba9a6c4fee8aceb67609db0866788a72cf7
+
+ownership: k8s/v1                    # the engine's single strategy (labels + SSA); written once
+
+attributes:                          # human-authored semantics
+  cpu.limit:
+    field: 'spec.hard["limits.cpu"]'
+    op: copy
+    type: string
+    derivation: measured
+    change: mutable
+  memory.limit:
+    field: 'spec.hard["limits.memory"]'
+    op: copy
+    type: string
+    derivation: measured
+    change: mutable
+  pods.max:
+    field: 'spec.hard["pods"]'
+    op: quantity-int                 # k8s quantity string -> integer; non-integer -> diagnostic
+    derivation: measured
+    change: mutable
+  service.managed:
+    op: const
+    value: true
+    derivation: measured
+
+absent:                              # the vocab's "deliberately absent" made explicit
+  - field: 'spec.hard["services"]'
+    reason: per-object counts are operational noise, not budget semantics
+  - field: 'spec.hard["configmaps"]'
+    reason: per-object counts are operational noise, not budget semantics

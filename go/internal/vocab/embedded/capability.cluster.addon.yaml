@@ -1,0 +1,51 @@
+# Attribute vocabulary for capability.cluster.addon, spec v0.1 (D149).
+#
+# A managed CLUSTER ADDON — a platform component the cloud installs and versions
+# as a first-class cluster sub-resource (EKS managed addons: vpc-cni, coredns,
+# kube-proxy, aws-ebs-csi-driver, eks-pod-identity-agent). These are INFRASTRUCTURE,
+# not application workloads: without the EBS CSI driver there are no PersistentVolumes
+# (Loki/Prometheus never start), without vpc-cni no pod networking, without the
+# pod-identity-agent no workload identity — the cluster is dead before ArgoCD exists
+# (Acme D2: the boundary is coupling with cloud identity at cluster birth). What an
+# organization governs: which addon, at which VERSION (currency for CVE/EOL). The
+# addon's configuration and the role it assumes are operator OPERANDS (impl block,
+# D26): the cluster and an optional serviceRoleArn (for addons that assume a cloud
+# role, e.g. the EBS CSI driver) are passed in, not addon attributes.
+#
+# One TYPE, many services (D76): aws.eks-addon today; gcp/azure managed addons
+# fulfil the same contract. STATELESS: an addon is a replaceable component —
+# retirement destroys no durable data.
+
+capability: capability.cluster.addon
+version: 0.1
+stateful: false
+
+attributes:
+
+  addon.name:
+    kind: string
+    description: The managed addon (vpc-cni, coredns, kube-proxy, aws-ebs-csi-driver, eks-pod-identity-agent, ...)
+    mappings:
+      aws.eks-addon: DescribeAddon addonName
+      # GKE addons are cluster addonsConfig FLAGS, not versioned packages: the
+      # canonical name maps to an addonsConfig field (gce-pd-csi-driver ->
+      # gcePersistentDiskCsiDriverConfig, http-load-balancing -> httpLoadBalancing,
+      # network-policy -> networkPolicyConfig, ...).
+      gcp.gke-addon: cluster addonsConfig field (canonical name -> field + toggle)
+
+  addon.version:
+    kind: string
+    description: The addon version — governed for CVE/EOL currency, upgraded in place
+    mappings:
+      aws.eks-addon: DescribeAddon addonVersion
+      # HONEST REFUSAL: GKE does not version addons independently — they track the
+      # cluster version. gke-addon refuses a pinned addon.version rather than
+      # fabricate one; observe emits a managed-by-cluster diagnostic, never a value.
+      gcp.gke-addon: unsupported (versions track the cluster version)
+
+  service.managed:
+    kind: bool
+    description: Whether groundhold manages this addon
+    mappings:
+      aws.eks-addon: const true when observed through the driver
+      gcp.gke-addon: const true when observed through the driver

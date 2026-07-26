@@ -1,0 +1,45 @@
+# Attribute vocabulary for capability.observability.changefeed, spec v0.1.
+#
+# A governed change-event feed: cloud infrastructure MUTATIONS captured and
+# delivered to a target a consumer can drain, so a system can REACT to changes
+# instead of only polling for them. groundhold PROVISIONS the feed as infrastructure
+# — an AWS EventBridge rule on CloudTrail, a GCP Cloud Asset Inventory feed to
+# Pub/Sub, an Azure Event Grid subscription — squarely inside its Terraform-
+# replacement mandate. It is the OPT-IN path from the polling crawl (D141) to
+# real-time posture (D142): declare this capability, groundhold stands up the feed,
+# and `groundhold react` consumes it. The feed is groundhold's to own and audit; the
+# compute that drains it and runs react is operator glue (app deployment, out of
+# scope — the honest infra/deployment boundary).
+#
+# What an organization CONTRACTS is that changes ARE captured and delivered
+# somewhere consumable. The delivery target is the verifiable semantic; the
+# cloud-specific event schema, filter grammar and delivery internals are noise.
+
+capability: capability.observability.changefeed
+version: 0.1
+stateful: false   # a feed holds no data of its own — it forwards events. Removing
+                  # it loses no history (the events already delivered stay in the
+                  # target); it only stops future delivery, reverting to polling.
+
+attributes:
+
+  feed.target:
+    kind: string
+    description: >
+      The delivery destination change events land in — a queue or topic a
+      consumer drains (an SQS queue for EventBridge, a Pub/Sub topic for a Cloud
+      Asset feed, a storage queue for Event Grid). The feed's core semantic:
+      WHERE the changes go, so `react` (or any consumer) can pull them and act.
+      A feed with no reachable target captures nothing anyone can use.
+
+  service.managed:
+    kind: bool
+    description: A managed cloud change feed vs a self-operated log tailer.
+
+# Deliberately absent in v0.1 (add only when a real contract needs them):
+#   - feed.coverage / event-pattern filters (which resource types or API calls
+#     trigger) — the cloud grammars differ sharply; start by capturing broadly
+#     and filtering in `react`, add coverage semantics when an org governs it
+#   - delivery guarantees, ordering, dead-letter policy (delivery internals)
+#   - the target queue's OWN provisioning — a separate capability or an operand
+#     (D26): the feed references a target, it does not own the target's lifecycle

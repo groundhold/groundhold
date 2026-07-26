@@ -1,0 +1,94 @@
+# The SILENT-IGNORE GUARD: the candidate `implementation:` block is free-form
+# (D26), but an operand key no driver reads must be REFUSED LOUDLY at compile,
+# never silently dropped (the fail-closed rule the per-attribute allowlists
+# already enforce, applied to the operand half). Compile-time = Go-only (D24),
+# so impl: go.
+suite: operand-guard
+cases:
+  - name: unknown-operand-refuses-at-compile
+    impl: go
+    description: >
+      A lambda candidate whose implementation block carries a bogus `frobnicate`
+      operand (alongside the recognized image_uri/role_arn) refuses at `plan`
+      with code unknown-operand — before any plan is sealed — and the advisory
+      `next` is an EDIT pointing at exactly the offending operand slot.
+    plan:
+      at: "2026-07-12T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: og1, environment: test, version: 1 }
+        capabilities:
+          - id: fn
+            type: capability.function.serverless
+        constraints:
+          hard:
+            - id: c-region
+              subject: fn
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: og1
+        capabilities:
+          fn:
+            provider: aws
+            service: lambda
+            attributes:
+              location.region: eu-central-1
+              network.publicExposure: false
+            implementation:
+              image_uri: 123456789012.dkr.ecr.eu-central-1.amazonaws.com/fn:sha
+              role_arn: arn:aws:iam::123456789012:role/fn-exec
+              frobnicate: nonsense
+    expect:
+      error: plan
+      code: unknown-operand
+      next:
+        kind: edit
+        editPointer: capabilities.fn.implementation.frobnicate
+
+  - name: recognized-operands-still-plan
+    impl: go
+    description: >
+      Regression guard: a lambda candidate whose implementation block carries
+      ONLY operands the driver reads (image_uri, role_arn) is not touched by the
+      guard — it plans and emits the create action.
+    plan:
+      at: "2026-07-12T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: og2, environment: test, version: 1 }
+        capabilities:
+          - id: fn
+            type: capability.function.serverless
+        constraints:
+          hard:
+            - id: c-region
+              subject: fn
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: og2
+        capabilities:
+          fn:
+            provider: aws
+            service: lambda
+            attributes:
+              location.region: eu-central-1
+              network.publicExposure: false
+            implementation:
+              image_uri: 123456789012.dkr.ecr.eu-central-1.amazonaws.com/fn:sha
+              role_arn: arn:aws:iam::123456789012:role/fn-exec
+    expect:
+      actions:
+        a-create-fn:
+          operation: create

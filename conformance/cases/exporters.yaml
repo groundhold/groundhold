@@ -1,0 +1,202 @@
+# Ledger exporters + audit (D54): the ledger is the event source.
+# Audit evaluates constraints against RECORDED REALITY (verify asks
+# "does the proposal satisfy the contract"; audit asks "does the world
+# still"); export is a deterministic stateless fold to stdout. Go-only.
+suite: exporters
+cases:
+  - name: audit-detects-contract-drift-and-emits-violation
+    impl: go
+    description: >
+      D54: after adoption the world satisfies contract v1 (clean, exit
+      0). Against v2 — which now requires the opposite — audit reports
+      violated, appends violation.detected with everything an alert
+      needs (required op+value, observed value+time+derivation), exits
+      2; export streams exactly that event.
+    onboard:
+      contract: &exp-contract
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: exp-t, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-managed
+              subject: db
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate: &exp-candidate
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: exp-t
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T12:00:00Z"
+          map: { db: "fake:existing-db" }
+          expect: { exit: 0, status: adopted }
+        - cmd: audit
+          at: "2026-07-12T12:30:00Z"
+          expect:
+            exit: 0
+            status: clean
+            violations: 0
+        - cmd: audit
+          at: "2026-07-12T12:35:00Z"
+          record: true
+          contract:
+            apiVersion: contract/v0.1
+            kind: InfrastructureContract
+            meta: { id: exp-t, environment: test, version: 2 }
+            capabilities:
+              - id: db
+                type: capability.database.relational
+            constraints:
+              hard:
+                - id: c-unmanaged
+                  subject: db
+                  path: service.managed
+                  op: equals
+                  value: false
+                  verify: { method: static }
+          expect:
+            exit: 2
+            status: violations-found
+            violations: 1
+            events: [violation.detected]
+            reasonContains: "reality true fails equals false"
+        - cmd: export
+          types: [violation.detected]
+          expect:
+            exit: 0
+            eventTypes: [violation.detected]
+
+  - name: audit-stale-observation-is-unknown-never-satisfied
+    impl: go
+    description: >
+      D54 four-valued honesty: an observation past its TTL cannot
+      satisfy a hard constraint — the verdict is unknown (with the
+      stale reason), it counts as a violation for alerting, and it is
+      NEVER silently collapsed into satisfied or violated.
+    onboard:
+      contract: *exp-contract
+      candidate: *exp-candidate
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T12:00:00Z"
+          map: { db: "fake:existing-db" }
+          expect: { exit: 0, status: adopted }
+        - cmd: audit
+          at: "2026-09-01T00:00:00Z"
+          expect:
+            exit: 2
+            status: violations-found
+            violations: 1
+            reasonContains: "observation is stale"
+
+  - name: export-is-deterministic-and-resumable
+    impl: go
+    description: >
+      D54: the fold is stateless — the full stream pins the exact event
+      sequence adoption wrote; --since resumes mid-stream (the operator
+      owns the cursor); every record id is a unique canonical hash
+      (consumer-side dedup under at-least-once delivery).
+    onboard:
+      contract: *exp-contract
+      candidate: *exp-candidate
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T12:00:00Z"
+          map: { db: "fake:existing-db" }
+          expect: { exit: 0, status: adopted }
+        - cmd: export
+          expect:
+            exit: 0
+            eventTypes: [lease.acquired, binding.updated, lease.released,
+                         observation.recorded]
+        - cmd: export
+          since: 2
+          expect:
+            exit: 0
+            eventTypes: [lease.released, observation.recorded]
+        - cmd: export
+          types: [binding.updated]
+          expect:
+            exit: 0
+            eventTypes: [binding.updated]
+
+  - name: violations-record-transitions-not-heartbeats
+    impl: go
+    description: >
+      D54 (review verdict): re-running audit against an unchanged
+      failing world emits NOTHING new — polling frequency must not
+      become ledger semantics. The stale observation raises
+      violation.detected once; the second identical audit stays silent
+      (exit 2 remains the heartbeat); a fresh observation resolves the
+      alarm with violation.resolved; export streams exactly one
+      detected and one resolved.
+    onboard:
+      contract: *exp-contract
+      candidate: *exp-candidate
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T12:00:00Z"
+          map: { db: "fake:existing-db" }
+          expect: { exit: 0, status: adopted }
+        - cmd: audit
+          at: "2026-09-01T00:00:00Z"
+          record: true
+          expect:
+            exit: 2
+            status: violations-found
+            events: [violation.detected]
+        - cmd: audit
+          at: "2026-09-01T00:05:00Z"
+          record: true
+          expect:
+            exit: 2
+            status: violations-found
+            events: []
+        - cmd: observe
+          at: "2026-09-01T00:10:00Z"
+          expect: { exit: 0 }
+        - cmd: audit
+          at: "2026-09-01T00:11:00Z"
+          record: true
+          expect:
+            exit: 0
+            status: clean
+            violations: 0
+            events: [violation.resolved]
+        - cmd: export
+          types: [violation.detected, violation.resolved]
+          expect:
+            exit: 0
+            eventTypes: [violation.detected, violation.resolved]
+
+  - name: audit-without-at-is-refused-fail-closed
+    impl: go
+    description: >
+      N1 fail-closed: a time-sensitive verb must not default its clock
+      to the epoch (which would make every observation infinitely fresh
+      and silently disable the staleness gate). audit without --at is
+      refused with exit 1, never a "clean" verdict against dead reality.
+    onboard:
+      contract: *exp-contract
+      candidate: *exp-candidate
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T12:00:00Z"
+          map: { db: "fake:existing-db" }
+          expect: { exit: 0, status: adopted }
+        - cmd: audit
+          omitAt: true
+          expect:
+            exit: 1
+            stderrContains: "requires an explicit --at"

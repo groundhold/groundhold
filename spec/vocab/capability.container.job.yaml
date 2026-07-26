@@ -1,0 +1,77 @@
+# Attribute vocabulary for capability.container.job, spec v0.1 (D120).
+#
+# A managed RUN-TO-COMPLETION container job — a container that runs a task and
+# exits (batch/scheduled work), distinct from capability.workload.container (D60),
+# which is a long-running SERVICE. The twin is GCP Cloud Run Jobs and Azure
+# Container Apps Jobs.
+#
+# This is an HONEST TWO-CLOUD domain: AWS has no standalone managed-job resource.
+# AWS Batch is a job-definition + queue + compute-environment composite, and an ECS
+# RunTask is an ephemeral action (not a durable resource). Neither is a single job
+# resource the way Cloud Run Jobs and Container Apps Jobs are, so an aws candidate is
+# REFUSED by fail-closed dispatch, never faked (the GCP-gap stance, mirrored on the
+# AWS side this time).
+#
+# INVARIANT #4 (closed operator set): the schedule cron expression, environment
+# variables, command/args, resource limits and retry counts are OPAQUE config carried
+# under `implementation:`, never vocabulary attributes.
+
+capability: capability.container.job
+version: 0.1
+stateful: false   # a job is execution configuration, not stored data — retirement
+                  # stops future runs but loses no records (no D47 data-loss friction).
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Region the job runs in
+    mappings:
+      gcp.cloudrunjobs: the job location
+      azure.containerappsjobs: the job location
+
+  image:
+    kind: string
+    description: >
+      The container image the job runs (a fully-qualified image reference, e.g.
+      gcr.io/proj/worker:1.2 or myregistry.azurecr.io/worker:1.2).
+    mappings:
+      gcp.cloudrunjobs: template.template.containers[0].image
+      azure.containerappsjobs: template.containers[0].image
+
+  trigger.type:
+    kind: string
+    enum: [manual, schedule]
+    description: >
+      How the job is started. manual = run on demand (the two-cloud path). schedule
+      = run on a cron cadence; honored on Azure Container Apps Jobs (a native
+      Schedule trigger) but REFUSED on GCP Cloud Run Jobs (native jobs are manual-run;
+      scheduling requires a SEPARATE Cloud Scheduler resource, out of this single
+      resource's scope) — refused rather than silently dropping the schedule.
+    mappings:
+      gcp.cloudrunjobs: manual (native) — schedule refused (needs Cloud Scheduler)
+      azure.containerappsjobs: configuration.triggerType (Manual | Schedule)
+
+  timeout:
+    kind: duration
+    description: >
+      Maximum wall-clock time a single job execution may run before it is stopped.
+    mappings:
+      gcp.cloudrunjobs: template.template.timeout
+      azure.containerappsjobs: configuration.replicaTimeout
+
+  service.managed:
+    kind: bool
+    description: Managed service vs self-operated
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost of the capability
+    verification: static against a pricing catalog; provider-api (billing) after deploy
+
+# Deliberately absent in v0.1 (implementation detail / opaque config): the schedule
+# cron expression, environment variables, command/args, CPU/memory limits, task
+# count / parallelism, retry limit, the Container Apps managed-environment id (a
+# prerequisite substrate). A candidate may carry them under `implementation:`; the
+# verifier ignores them.

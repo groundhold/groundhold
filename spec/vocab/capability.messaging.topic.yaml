@@ -1,0 +1,74 @@
+# Attribute vocabulary for capability.messaging.topic, spec v0.1 (D94).
+# A fan-out publish address: messages published here reach every attached
+# consumer. The topic itself holds nothing the author owns — subscribers own
+# their copies — so its vocabulary is thin and honest. Subscriptions, push
+# endpoints, filters and fan-out wiring are the CONSUMER's concern (topology),
+# never the topic's.
+#
+# delivery.guarantee is deliberately ABSENT here: a topic's guarantee to its
+# subscriptions is always at-least-once on both clouds (a single-valued attribute
+# is not an attribute). ordering and retention are absent too — they live on the
+# subscription/queue side (Pub/Sub topics carry no ordering promise; SNS standard
+# topics retain nothing), so putting them on a topic would be provider-shaped.
+
+capability: capability.messaging.topic
+version: 0.1
+stateful: true   # Pub/Sub topics can retain; stay conservative (replace = data risk)
+
+attributes:
+
+  encryption.atRest:
+    kind: bool
+    description: Provider-side encryption of any retained message data. Only true is meaningful.
+    mappings:
+      aws.sns: server-side encryption (KmsMasterKeyId)
+      gcp.pubsub: topic default encryption
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: >
+      Retained message data is encrypted with a CUSTOMER-managed key (CMEK/KMS),
+      not the provider default. The key id is implementation detail
+      (implementation.kms_key_id / kms_key_name), never a capability path.
+    mappings:
+      aws.sns: KmsMasterKeyId (a customer key)
+      gcp.pubsub: topic kmsKeyName
+
+  location.region:
+    kind: string
+    description: >
+      Where message data is PERSISTED. NOTE gcp.pubsub is global by default — this
+      maps to the topic's message storage policy, NOT the API-call region; a
+      residency contract "satisfied" by a global topic would be a compliance lie.
+    mappings:
+      aws.sns: topic region
+      gcp.pubsub: messageStoragePolicy.allowedPersistenceRegions
+
+  network.publicExposure:
+    kind: bool
+    description: Whether any public/anonymous publish path exists.
+    mappings:
+      aws.sns: no Principal:"*" in the topic resource policy
+      gcp.pubsub: no allUsers/allAuthenticatedUsers IAM binding
+    note: >
+      static verification proves configuration intent; an anonymous-publish probe
+      proves the actual absence of a public path.
+
+  service.managed:
+    kind: bool
+    description: Managed service vs self-operated
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    verification: static against a pricing catalog; billing after deploy
+
+# Deliberately absent in v0.1 (belongs to the consumer/subscription, or noise):
+# subscriptions, push endpoint config, delivery protocol, subscription filters,
+# raw message delivery, fan-out wiring, ordering (subscription-side), retention
+# (subscription-side), topic names. delivery.guarantee: single-valued
+# (at-least-once) here, so not an attribute.
+#
+# Deferred, needs a cross-capability REFERENCE kind: which queues/consumers a topic
+# fans out to (that is the consumer declaring a source, not the topic sprouting
+# children).

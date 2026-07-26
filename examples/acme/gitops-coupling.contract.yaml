@@ -1,0 +1,89 @@
+# ACME — GITOPS CONTROLLER COUPLING (the AUTHOR half of couple+witness).
+#
+# groundhold AUTHORS the cloud-identity coupling the GitOps controller needs at cluster
+# birth — Pod Identity associations binding the controller's Kubernetes service
+# accounts to IAM roles, so its pods reach AWS (repo credentials in Secrets Manager,
+# image pulls from ECR) WITHOUT static keys. This is exactly "coupling with cloud
+# identity at cluster birth" the author-vs-witness doctrine assigns to groundhold.
+#
+# What groundhold does NOT do here: install ArgoCD, own its Helm release, or reconcile
+# any app. The `helm install` is app-layer (human/CI). groundhold authors the coupling
+# and (separately, see the gitops.application witness) observes that the controller
+# is synced+healthy — it never becomes the controller.
+#
+# Controller- AND cloud-AGNOSTIC: the coupling is capability.identity.podidentity
+# (neutral TYPE, D76), fulfilled by aws eks-podidentity / gcp gke-workloadidentity /
+# azure aks-workloadidentity. The service-account names are ArgoCD's here, but Flux's
+# (source-controller/kustomize-controller) or any controller's are the same shape —
+# no vendor is privileged.
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta:
+  id: acme-gitops-coupling
+  environment: production
+  version: 1
+
+capabilities:
+  # AUTHORED: the coupling groundhold creates — one Pod Identity per controller SA that
+  # needs AWS. repo-server reads repo credentials (Secrets Manager) and pulls images
+  # (ECR); application-controller manages resources that may reach cloud APIs.
+  - id: repo-server-identity
+    type: capability.identity.podidentity
+  - id: app-controller-identity
+    type: capability.identity.podidentity
+  # WITNESSED (D177): the controller itself. groundhold VERIFIES it is reconciled to git
+  # and healthy but NEVER authors it — the k8s driver has no write lens for the
+  # Application (observe-only). The compiler records it in the plan's `witnessed`
+  # block and emits NO create for it. So this ONE contract expresses the full
+  # couple+witness pattern: two authored Pod Identity couplings + one witnessed
+  # controller. Run it AFTER the controller is installed (app-layer/human) — an absent
+  # controller makes sync.status unknown, and a hard constraint on unknown makes the
+  # plan non-executable, which is correct (groundhold will not proceed blind).
+  - id: gitops-root
+    type: capability.gitops.application
+
+constraints:
+  hard:
+    - id: c-repo-ns
+      subject: repo-server-identity
+      path: workload.namespace
+      op: equals
+      value: argocd
+      verify: { method: static }
+    - id: c-repo-sa
+      subject: repo-server-identity
+      path: workload.serviceAccount
+      op: equals
+      value: argocd-repo-server
+      verify: { method: static }
+    - id: c-appctrl-ns
+      subject: app-controller-identity
+      path: workload.namespace
+      op: equals
+      value: argocd
+      verify: { method: static }
+    - id: c-appctrl-sa
+      subject: app-controller-identity
+      path: workload.serviceAccount
+      op: equals
+      value: argocd-application-controller
+      verify: { method: static }
+
+    # WITNESS: the controller must be reconciled to git and healthy — verified
+    # against the live observation, never authored (D177).
+    - id: c-gitops-synced
+      subject: gitops-root
+      path: sync.status
+      op: equals
+      value: synced
+      verify: { method: static }
+    - id: c-gitops-healthy
+      subject: gitops-root
+      path: health.status
+      op: equals
+      value: healthy
+      verify: { method: static }
+
+autonomy:
+  forbidden:
+    - delete_stateful: true

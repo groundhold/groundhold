@@ -1,0 +1,313 @@
+// Package plan implements Sealed Plan IR v0 loading + structural
+// validation (spec/sealed-plan.md, D36). Fail-closed (D19): unknown
+// operations, dangling or cyclic dependencies, unpinned writes and
+// missing report-executable preconditions are refused at load.
+package plan
+
+import (
+	"fmt"
+	"regexp"
+
+	"gopkg.in/yaml.v3"
+
+	"groundhold/internal/docio"
+)
+
+var Operations = map[string]bool{
+	"create": true, "update": true, "replace": true,
+	"delete": true, "adopt": true, "noop": true, "claim": true,
+}
+var PreconditionTypes = map[string]bool{
+	"report-executable": true, "no-assumed-basis": true, "within-autonomy": true,
+	"no-assumed-hard-basis": true, // D195: hard-only, assumed-only gate
+}
+var RiskLevels = map[string]bool{"none": true, "possible": true, "certain": true}
+var Reversibility = map[string]bool{
+	"R0": true, "R1": true, "R2": true, "R3": true, "R4": true,
+}
+
+var hashRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+func requireHash(v any, what string) error {
+	s, ok := v.(string)
+	if !ok || !hashRE.MatchString(s) {
+		return fmt.Errorf("%s must be a sha256:<hex> hash", what)
+	}
+	return nil
+}
+
+func checkRisk(aid string, riskAny any) error {
+	risk, ok := riskAny.(map[string]any)
+	if !ok {
+		return fmt.Errorf("action %s: risk vector is required (D33)", aid)
+	}
+	if r, _ := risk["reversibility"].(string); !Reversibility[r] {
+		return fmt.Errorf("action %s: invalid reversibility", aid)
+	}
+	for _, dim := range []string{"dataLoss", "downtime", "securityExposure"} {
+		if v, _ := risk[dim].(string); !RiskLevels[v] {
+			return fmt.Errorf("action %s: invalid risk dimension %s", aid, dim)
+		}
+	}
+	if _, ok := risk["identityReplacement"].(bool); !ok {
+		return fmt.Errorf("action %s: identityReplacement must be a bool", aid)
+	}
+	cd, ok := risk["costDelta"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("action %s: costDelta must be {amount, currency}", aid)
+	}
+	switch cd["amount"].(type) {
+	case int, int64, float64:
+	default:
+		return fmt.Errorf("action %s: costDelta must be {amount, currency}", aid)
+	}
+	if c, _ := cd["currency"].(string); c == "" {
+		return fmt.Errorf("action %s: costDelta must be {amount, currency}", aid)
+	}
+	return nil
+}
+
+func LoadPlan(path string) (map[string]any, error) {
+	raw, err := docio.ReadDoc(path)
+	if err != nil {
+		return nil, err
+	}
+	var docAny any
+	if err := yaml.Unmarshal(raw, &docAny); err != nil {
+		return nil, err
+	}
+	doc, ok := docAny.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("plan document is empty or not a mapping")
+	}
+	if s, _ := doc["kind"].(string); s != "SealedPlan" {
+		return nil, fmt.Errorf("kind must be SealedPlan")
+	}
+	if s, _ := doc["apiVersion"].(string); s != "plan/v0" {
+		return nil, fmt.Errorf("apiVersion must be plan/v0")
+	}
+	p, ok := doc["plan"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("plan block is required")
+	}
+	if c, _ := p["contract"].(string); c == "" {
+		return nil, fmt.Errorf("plan.contract is required")
+	}
+
+	reads, ok := p["reads"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("plan.reads is required (D28: pin the read-set)")
+	}
+	if err := requireHash(reads["contractHash"], "reads.contractHash"); err != nil {
+		return nil, err
+	}
+	if err := requireHash(reads["candidateHash"], "reads.candidateHash"); err != nil {
+		return nil, err
+	}
+	heads, ok := reads["heads"].(map[string]any)
+	if !ok || len(heads) == 0 {
+		return nil, fmt.Errorf("reads.heads must pin a head per capability")
+	}
+	for cap, h := range heads {
+		if s, _ := h.(string); s != "genesis" {
+			if err := requireHash(h, fmt.Sprintf("reads.heads[%s]", cap)); err != nil {
+				return nil, err
+			}
+		}
+	}
+	tc, ok := reads["toolchain"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("reads.toolchain must carry compiler and spec")
+	}
+	if c, _ := tc["compiler"].(string); c == "" {
+		return nil, fmt.Errorf("reads.toolchain must carry compiler and spec")
+	}
+	if s, _ := tc["spec"].(string); s == "" {
+		return nil, fmt.Errorf("reads.toolchain must carry compiler and spec")
+	}
+
+	writesAny, ok := p["writes"].([]any)
+	if !ok || len(writesAny) == 0 {
+		return nil, fmt.Errorf("plan.writes must be a non-empty list of ids")
+	}
+	writes := map[string]bool{}
+	for _, w := range writesAny {
+		s, ok := w.(string)
+		if !ok {
+			return nil, fmt.Errorf("plan.writes must be a non-empty list of ids")
+		}
+		if _, pinned := heads[s]; !pinned {
+			return nil, fmt.Errorf("write %q has no pinned head — you cannot "+
+				"write what you did not read (D28)", s)
+		}
+		writes[s] = true
+	}
+
+	actions, ok := p["actions"].([]any)
+	if !ok || len(actions) == 0 {
+		return nil, fmt.Errorf("plan.actions must be a non-empty list")
+	}
+	ids := map[string]bool{}
+	deps := map[string][]string{}
+	for _, it := range actions {
+		a, ok := it.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("action missing id")
+		}
+		aid, _ := a["id"].(string)
+		if aid == "" {
+			return nil, fmt.Errorf("action missing id")
+		}
+		if ids[aid] {
+			return nil, fmt.Errorf("duplicate action id: %s", aid)
+		}
+		ids[aid] = true
+		if cap, _ := a["capability"].(string); !writes[cap] {
+			return nil, fmt.Errorf("action %s: capability outside plan.writes", aid)
+		}
+		if op, _ := a["operation"].(string); !Operations[op] {
+			return nil, fmt.Errorf("action %s: unknown operation %q", aid,
+				a["operation"])
+		}
+		if k, _ := a["idempotencyKey"].(string); k == "" {
+			return nil, fmt.Errorf("action %s: idempotencyKey is required (D29)", aid)
+		}
+		if err := checkRisk(aid, a["risk"]); err != nil {
+			return nil, err
+		}
+		if op, _ := a["operation"].(string); op == "delete" {
+			// D47: a delete pins the exact identity it destroys — a
+			// rebind between seal and apply must not redirect it
+			if t, _ := a["targetProviderId"].(string); t == "" {
+				return nil, fmt.Errorf(
+					"action %s: delete requires targetProviderId", aid)
+			}
+			gen, ok := a["targetGeneration"].(int)
+			if !ok || gen < 1 {
+				return nil, fmt.Errorf(
+					"action %s: delete requires targetGeneration >= 1", aid)
+			}
+		}
+		if op, _ := a["operation"].(string); op == "update" {
+			// D46: an update is a reviewed change-set, never an implicit diff
+			changes, ok := a["changes"].([]any)
+			if !ok || len(changes) == 0 {
+				return nil, fmt.Errorf(
+					"action %s: update requires a non-empty changes list", aid)
+			}
+			for _, chAny := range changes {
+				ch, ok := chAny.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf(
+						"action %s: each change needs path and to", aid)
+				}
+				_, hasTo := ch["to"]
+				if p, _ := ch["path"].(string); p == "" || !hasTo {
+					return nil, fmt.Errorf(
+						"action %s: each change needs path and to", aid)
+				}
+			}
+		}
+		var ds []string
+		if dl, ok := a["dependsOn"].([]any); ok {
+			for _, d := range dl {
+				s, _ := d.(string)
+				ds = append(ds, s)
+			}
+		}
+		deps[aid] = ds
+	}
+	for aid, ds := range deps {
+		for _, d := range ds {
+			if !ids[d] {
+				return nil, fmt.Errorf("action %s: dependsOn unknown action %q",
+					aid, d)
+			}
+		}
+	}
+	// cycle check (Kahn)
+	indeg := map[string]int{}
+	rev := map[string][]string{}
+	for aid, ds := range deps {
+		indeg[aid] = len(ds)
+		for _, d := range ds {
+			rev[d] = append(rev[d], aid)
+		}
+	}
+	queue := []string{}
+	for aid, n := range indeg {
+		if n == 0 {
+			queue = append(queue, aid)
+		}
+	}
+	seen := 0
+	for len(queue) > 0 {
+		n := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		seen++
+		for _, m := range rev[n] {
+			indeg[m]--
+			if indeg[m] == 0 {
+				queue = append(queue, m)
+			}
+		}
+	}
+	if seen != len(deps) {
+		return nil, fmt.Errorf("action dependency graph has a cycle")
+	}
+
+	pre, ok := p["preconditions"].([]any)
+	if !ok || len(pre) == 0 {
+		return nil, fmt.Errorf("plan.preconditions must be a non-empty list")
+	}
+	hasExecutable := false
+	for _, it := range pre {
+		pc, _ := it.(map[string]any)
+		t, _ := pc["type"].(string)
+		if !PreconditionTypes[t] {
+			return nil, fmt.Errorf("unknown precondition type: %q", pc["type"])
+		}
+		if t == "report-executable" {
+			hasExecutable = true
+		}
+	}
+	if !hasExecutable {
+		return nil, fmt.Errorf("preconditions must include report-executable — " +
+			"a plan that does not require verification to pass contradicts " +
+			"the thesis")
+	}
+
+	// D177: witnessed capabilities are VERIFIED but not authored. Each must be
+	// well-formed, have a pinned head (verified => read, D28), and be DISJOINT from
+	// writes (a witness mutates nothing — being in writes would be a lie).
+	if wl, present := p["witnessed"]; present {
+		list, ok := wl.([]any)
+		if !ok {
+			return nil, fmt.Errorf("plan.witnessed must be a list")
+		}
+		for _, it := range list {
+			w, ok := it.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("witnessed entry must be a mapping")
+			}
+			capID, _ := w["capability"].(string)
+			if capID == "" {
+				return nil, fmt.Errorf("witnessed entry missing capability")
+			}
+			for _, k := range []string{"provider", "service", "reason"} {
+				if s, _ := w[k].(string); s == "" {
+					return nil, fmt.Errorf("witnessed %s: %s is required", capID, k)
+				}
+			}
+			if _, pinned := heads[capID]; !pinned {
+				return nil, fmt.Errorf("witnessed %s has no pinned head — a "+
+					"witnessed capability is verified, so it must be read (D28)", capID)
+			}
+			if writes[capID] {
+				return nil, fmt.Errorf("witnessed %s is also in plan.writes — a "+
+					"witness mutates nothing (D177)", capID)
+			}
+		}
+	}
+	return doc, nil
+}

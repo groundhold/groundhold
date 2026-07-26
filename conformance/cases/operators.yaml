@@ -1,0 +1,536 @@
+# Full coverage of the closed operator set (D4) and scalar kinds (D3, D15).
+# Before these cases, only lte/in/equals/compatible-with were pinned — a port
+# could implement the rest arbitrarily and still conform.
+
+cases:
+  - name: bytes-ordering-with-iec-units
+    description: >
+      D15: KiB/MiB/GiB/TiB are 1024-based, KB/MB/GB/TB are 1000-based.
+      200GiB satisfies gte 100GiB and lte 1TB (1000^4).
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t15, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-min-size
+            subject: db
+            path: storage.size
+            op: gte
+            value: 100GiB
+            verify: { method: static }
+          - id: c-max-size
+            subject: db
+            path: storage.size
+            op: lte
+            value: 1TB
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t15
+      capabilities:
+        db:
+          attributes:
+            storage.size: 200GiB
+    expect:
+      executable: true
+      verdicts:
+        c-min-size: satisfied
+        c-max-size: satisfied
+
+  - name: si-and-iec-byte-units-differ
+    description: >
+      D15: 100GB (10^11) is strictly less than 100GiB (100 * 2^30).
+      A port that treats them as equal does not conform.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t16, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-size
+            subject: db
+            path: storage.size
+            op: gte
+            value: 100GiB
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t16
+      capabilities:
+        db:
+          attributes:
+            storage.size: 100GB
+    expect:
+      executable: false
+      verdicts:
+        c-size: violated
+
+  - name: not-equals-operator
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t17, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-not-zonal
+            subject: db
+            path: availability.class
+            op: not-equals
+            value: zonal
+            verify: { method: static }
+          - id: c-not-regional
+            subject: db
+            path: availability.class
+            op: not-equals
+            value: regional
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t17
+      capabilities:
+        db:
+          attributes:
+            availability.class: regional
+    expect:
+      executable: false
+      verdicts:
+        c-not-zonal: satisfied
+        c-not-regional: violated
+
+  - name: not-in-with-comparable-elements
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t18, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-banned-us
+            subject: db
+            path: location.region
+            op: not-in
+            value: [us-east1, us-west1]
+            verify: { method: static }
+          - id: c-banned-eu
+            subject: db
+            path: location.region
+            op: not-in
+            value: [europe-west1, europe-west3]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t18
+      capabilities:
+        db:
+          attributes:
+            location.region: europe-west1
+    expect:
+      executable: false
+      verdicts:
+        c-banned-us: satisfied
+        c-banned-eu: violated
+
+  - name: subset-of-with-comparable-elements
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t19, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-allowed-certs
+            subject: db
+            path: compliance.certifications
+            op: subset-of
+            value: [gdpr, hipaa, soc2]
+            verify: { method: static }
+          - id: c-gdpr-only
+            subject: db
+            path: compliance.certifications
+            op: subset-of
+            value: [gdpr]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t19
+      capabilities:
+        db:
+          attributes:
+            compliance.certifications: [gdpr, soc2]
+    expect:
+      executable: false
+      verdicts:
+        c-allowed-certs: satisfied
+        c-gdpr-only: violated
+
+  - name: exists-and-absent-operators
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t20, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-monitored
+            subject: db
+            path: monitoring.endpoint
+            op: exists
+            verify: { method: static }
+          - id: c-no-public-ip
+            subject: db
+            path: network.publicIp
+            op: absent
+            verify: { method: static }
+          - id: c-backup-declared
+            subject: db
+            path: backup.schedule
+            op: exists
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t20
+      capabilities:
+        db:
+          attributes:
+            monitoring.endpoint: internal
+    expect:
+      executable: false
+      verdicts:
+        c-monitored: satisfied
+        c-no-public-ip: satisfied
+        c-backup-declared: violated
+
+  - name: percent-compares-with-percent-only
+    description: >
+      D3: 80% and 0.8 are different kinds. A ratio expressed as a bare
+      number never silently compares with a percent.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t21, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-slo
+            subject: db
+            path: availability.slo
+            op: gte
+            value: 99.9%
+            verify: { method: static }
+          - id: c-cpu
+            subject: db
+            path: utilization.cpuTarget
+            op: lte
+            value: 80%
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t21
+      capabilities:
+        db:
+          attributes:
+            availability.slo: 99.95%
+            utilization.cpuTarget: 0.8
+    expect:
+      executable: false
+      verdicts:
+        c-slo: satisfied
+        c-cpu: unverifiable
+
+  - name: number-ordering
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t22, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-connections
+            subject: db
+            path: connections.max
+            op: gte
+            value: 100
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t22
+      capabilities:
+        db:
+          attributes:
+            connections.max: 200
+    expect:
+      executable: true
+      verdicts:
+        c-connections: satisfied
+
+  - name: list-equality-compares-canonical-values
+    description: >
+      D25: equality is canonical, not lexical — 300s equals 5m inside a
+      list exactly as it does outside one. Found by the Go port; pinned so
+      no implementation can compare spellings instead of values.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t24, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-windows
+            subject: db
+            path: maintenance.windows
+            op: equals
+            value: [5m, 1h]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t24
+      capabilities:
+        db:
+          attributes:
+            maintenance.windows: [300s, 60m]
+    expect:
+      executable: true
+      verdicts:
+        c-windows: satisfied
+
+  - name: list-equality-is-positional
+    description: >
+      D21: lists are sequences — equals compares position by position.
+      Set semantics are expressed with subset-of (in both directions).
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t23, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-regions
+            subject: db
+            path: replication.regions
+            op: equals
+            value: [europe-west1, europe-west3]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t23
+      capabilities:
+        db:
+          attributes:
+            replication.regions: [europe-west3, europe-west1]
+    expect:
+      executable: false
+      verdicts:
+        c-regions: violated
+
+  - name: not-equals-across-kinds-is-unverifiable-not-true
+    description: >
+      not-equals is negate(equals) — the trap is a naive negation that turns a
+      TYPE MISMATCH into a satisfied ("they differ, so they are not equal"). They do
+      not differ in VALUE, they differ in KIND, which is undecidable, so the verdict
+      must be unverifiable, never a coerced satisfied. Pins that the negation
+      propagates the same-kind guard rather than swallowing it (invariant #2).
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: nek1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-ne
+            subject: db
+            path: encryption.atRest
+            op: not-equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: nek1
+      capabilities:
+        db:
+          attributes:
+            encryption.atRest: "true"
+    expect:
+      executable: false
+      verdicts:
+        c-ne: unverifiable
+
+  - name: not-equals-across-kinds-inside-a-list-is-unverifiable
+    description: >
+      The list form of the cross-kind trap (invariant #2). requireSameKind guards
+      the WHOLE-list kind (list vs list), but the mismatch is one level down: a list
+      of number vs a list of duration. A naive recursion swallows the element
+      mismatch into "not equal" and not-equals coerces it to satisfied, so a HARD
+      constraint that must block silently passes (fail-open). The elements are
+      cross-kind and undecidable, so the verdict is unverifiable — the same refusal
+      the scalar path makes, now enforced element-wise.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: lnek1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-lne
+            subject: db
+            path: backup.windows
+            op: not-equals
+            value: ["1h"]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: lnek1
+      capabilities:
+        db:
+          attributes:
+            backup.windows: [3600]
+    expect:
+      executable: false
+      verdicts:
+        c-lne: unverifiable
+
+  - name: equals-across-kinds-inside-a-list-is-unverifiable
+    description: >
+      The equals direction of the same list cross-kind trap: [number] equals
+      [duration] must be unverifiable (undecidable types), never a coerced violated
+      that a soft objective or a downstream not-equals could invert. Pins that the
+      element-wise same-kind guard refuses in both operator directions (invariant #2).
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: leqk1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-leq
+            subject: db
+            path: backup.windows
+            op: equals
+            value: ["1h"]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: leqk1
+      capabilities:
+        db:
+          attributes:
+            backup.windows: [3600]
+    expect:
+      executable: false
+      verdicts:
+        c-leq: unverifiable
+
+  - name: list-equality-length-mismatch-is-a-definite-inequality
+    description: >
+      Strong-Kleene list equality (D21): a length difference is a DEFINITE
+      structural inequality — no element is compared, so cross-kind elements are
+      irrelevant. [duration, duration] equals [number] must be violated (a definite
+      not-equal), NOT unverifiable. An earlier fix over-refused here (raised
+      unverifiable from an eager whole-prefix type check); Kleene returns the
+      definite verdict entailed by length alone. A false unverifiable needlessly
+      blocks a HARD constraint — a real cost, not free safety.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: llen1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-llen
+            subject: db
+            path: backup.windows
+            op: equals
+            value: ["1h", "2h"]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: llen1
+      capabilities:
+        db:
+          attributes:
+            backup.windows: [3600]
+    expect:
+      executable: false
+      verdicts:
+        c-llen: violated
+
+  - name: list-equality-definite-element-mismatch-dominates-illtyped
+    description: >
+      Strong-Kleene: in a conjunction (list equality is "all positions equal") a
+      definite F dominates ⊥. [number 1, duration 2] equals [number 9, number 5]:
+      position 0 is a well-typed definite mismatch (1 != 9 → F), position 1 is
+      cross-kind (⊥). The lists are DEFINITELY unequal (entailed without the
+      ill-typed comparison), so the verdict is violated — never unverifiable, and
+      never a coerced satisfied. Order-independent: the definite F wins wherever it sits.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: ldom1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-ldom
+            subject: db
+            path: backup.windows
+            op: equals
+            value: [9, 5]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: ldom1
+      capabilities:
+        db:
+          attributes:
+            backup.windows: [1, "2h"]
+    expect:
+      executable: false
+      verdicts:
+        c-ldom: violated

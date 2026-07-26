@@ -1,0 +1,193 @@
+# Brownfield onboarding (D52): discover -> draft -> adopt -> converge.
+# Reality is the first author, never the authority: adoption refuses to
+# lie, unadopt releases without deleting, and the takeover is proven by
+# a converged no-op run. The onboard steps are Go-only porcelain; the
+# discovery hash is pinned in BOTH implementations (document case).
+suite: onboarding
+cases:
+  - name: discovery-document-hash-is-canonical
+    description: >
+      D52: a discovery document records what enumeration SAW — raw
+      canonical tree under domain groundhold/canon/v1:discovery, hashed
+      identically in both implementations so drafts and adoptions can
+      cite the exact discovery they derive from.
+    document:
+      apiVersion: discovery/v0
+      kind: DiscoveryDocument
+      provider: fake
+      at: "2026-07-12T10:00:00Z"
+      resources:
+        - providerId: fake:existing-db
+          resourceType: capability.database.relational
+          observations:
+            - { path: service.managed, value: true, derivation: measured }
+          candidateSkeleton:
+            attributes:
+              service.managed: true
+    expect:
+      hash: sha256:f9bd6565ba66b3c3682ed84ee1df6c39e843905958f85d0778b30c1431b70bfd
+
+  - name: onboarding-full-loop-proves-takeover
+    impl: go
+    description: >
+      D52/D140: discover (read-only, deterministic hash), adopt citing the
+      discovery, then the FIRST converge APPLIES the one-time claim that
+      stamps groundhold's authorship on the adopted object ("applied"), and a
+      SECOND converge proves the converged-AND-owned state ("converged") —
+      the strengthened proof of takeover (a bare no-op hid an unclaimed
+      object). A second adoption of the same capability refuses.
+    onboard:
+      contract: &onb-contract
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: onb-t, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-managed
+              subject: db
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate: &onb-candidate
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: onb-t
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+      steps:
+        - cmd: discover
+          at: "2026-07-12T10:00:00Z"
+          expect:
+            exit: 0
+            discoveryHash: sha256:f9bd6565ba66b3c3682ed84ee1df6c39e843905958f85d0778b30c1431b70bfd
+        - cmd: adopt
+          at: "2026-07-12T10:05:00Z"
+          map: { db: "fake:existing-db" }
+          citeDiscovery: true
+          expect:
+            exit: 0
+            status: adopted
+            bindings: { db: "fake:existing-db" }
+            events: [lease.acquired, binding.updated, lease.released,
+                     observation.recorded]
+        - cmd: converge
+          at: "2026-07-12T10:10:00Z"
+          expect:
+            exit: 0
+            status: applied   # D140: stamps authorship (the claim) — not a bare no-op
+        - cmd: converge
+          at: "2026-07-12T10:12:00Z"
+          expect:
+            exit: 0
+            status: converged # now converged AND owned — takeover proven
+        - cmd: adopt
+          at: "2026-07-12T10:15:00Z"
+          map: { db: "fake:existing-db" }
+          expect:
+            exit: 2
+            status: refused
+            code: binding-conflict
+            reasonContains: "already bound"
+
+  - name: onboarding-adoption-records-non-observable-as-intent
+    impl: go
+    description: >
+      F-LC3 part 3 (owner-decided, reverses the earlier "non-observable
+      refuses" rule): a NON-OBSERVABLE declared attribute
+      (network.publicExposure — the fake driver never observes it) is
+      adopted with the candidate's OWN provenance (declared-intent,
+      source candidate-declared), NOT refused. Intent is not a lie and
+      provenance survives (invariant #3); the second observation.recorded
+      is the intent record. The PRESERVED honesty boundary — an
+      OBSERVABLE attribute whose value MISMATCHES reality still refuses —
+      is pinned by adopt Go tests (TestAdoptRefusesObservableMismatch);
+      the conformance fake observes only service.managed, so it cannot
+      express an observable mismatch here.
+    onboard:
+      contract: *onb-contract
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: onb-t
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+              network.publicExposure: false
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T10:00:00Z"
+          map: { db: "fake:existing-db" }
+          expect:
+            exit: 0
+            status: adopted
+            bindings: { db: "fake:existing-db" }
+            events: [lease.acquired, binding.updated, lease.released,
+                     observation.recorded, observation.recorded]
+
+  - name: onboarding-unadopt-releases-without-delete
+    impl: go
+    description: >
+      D52: unadopt reverses a mistaken adoption by removing the BINDING,
+      never the resource (contrast D47 retirement). The released
+      identity can be adopted again; unadopting an unbound capability
+      refuses.
+    onboard:
+      contract: *onb-contract
+      candidate: *onb-candidate
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T10:00:00Z"
+          map: { db: "fake:existing-db" }
+          expect: { exit: 0, status: adopted }
+        - cmd: unadopt
+          capability: db
+          at: "2026-07-12T10:05:00Z"
+          expect:
+            exit: 0
+            status: unadopted
+            events: [lease.acquired, binding.updated, lease.released]
+        - cmd: unadopt
+          capability: db
+          at: "2026-07-12T10:06:00Z"
+          expect:
+            exit: 2
+            status: refused
+            reasonContains: "nothing to unadopt"
+        - cmd: adopt
+          at: "2026-07-12T10:10:00Z"
+          map: { db: "fake:existing-db" }
+          expect:
+            exit: 0
+            status: adopted
+
+  - name: onboarding-claim-reaches-the-audit-stream
+    impl: go
+    description: >
+      D140: the takeover claim that stamps groundhold's authorship is a
+      first-class, AUDITABLE event — after adopt, the first converge applies
+      the claim and ownership.claimed reaches the export stream. An auditor
+      sees WHEN groundhold took ownership, not merely that a binding exists;
+      this is what makes the strengthened takeover proof honest.
+    onboard:
+      contract: *onb-contract
+      candidate: *onb-candidate
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T10:00:00Z"
+          map: { db: "fake:existing-db" }
+          expect: { exit: 0, status: adopted }
+        - cmd: converge
+          at: "2026-07-12T10:05:00Z"
+          expect: { exit: 0, status: applied }
+        - cmd: export
+          types: [ownership.claimed]
+          expect:
+            exit: 0
+            eventTypes: [ownership.claimed]

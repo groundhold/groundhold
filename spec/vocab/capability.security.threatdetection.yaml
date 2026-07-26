@@ -1,0 +1,72 @@
+# Attribute vocabulary for capability.security.threatdetection, spec v0.1 (D154).
+#
+# Continuous threat detection as a GOVERNED capability — the security posture of a
+# platform, not a deployment of an application (author-vs-witness: this is the
+# security SUBSTRATE groundhold provisions once per region, alongside VPC/CloudTrail,
+# never an app the platform hosts). Acme §7 requires it explicitly: "GuardDuty +
+# EKS Protection" — the detector ON per region, with Kubernetes audit-log
+# monitoring for the EKS control plane.
+#
+# What an organization GOVERNS (semantic, verifiable, org-required):
+#   - WHERE the detector runs (location.region — the service is per-region;
+#     detection in eu-central-1 says nothing about eu-west-1),
+#   - WHETHER detection is on at all (detection.enabled — the core switch),
+#   - the PROTECTION surface it covers (protection.kubernetes for EKS audit-log
+#     monitoring, protection.malware for EBS malware scanning).
+# The finding-publishing FREQUENCY is a tuning OPERAND (impl block, D26 —
+# implementation.findingPublishingFrequency), not a governed guarantee: it changes
+# how fast findings surface, not whether the posture holds. The findings EXPORT
+# destination (an S3/EventBridge sink) is a SEPARATE capability, never wired here.
+#
+# STATELESS. A detector is a posture SWITCH + configuration, not a data store: it
+# holds no durable customer data that a delete would lose. Findings live inside the
+# GuardDuty service (ephemeral service state, retained/exported by the service), so
+# tearing the detector down is a POSTURE change (detection off), not the loss of a
+# store groundhold is responsible for — hence stateful:false (no deletion-protection
+# friction, no replace-stateful consent). This mirrors ai.inference / cost.budget.
+#
+# One TYPE, many services (D76): aws.guardduty today. Singleton per account+region
+# (like an SES active rule set) — the driver honest-refuses a second, FOREIGN
+# detector rather than pretend it created one it cannot.
+
+capability: capability.security.threatdetection
+version: 0.1
+stateful: false
+
+attributes:
+
+  location.region:
+    kind: string
+    description: The region the detector protects (GuardDuty is per-region — one detector per account per region)
+    mappings:
+      aws.guardduty: the detector's region (the regional guardduty endpoint)
+
+  detection.enabled:
+    kind: bool
+    description: Whether continuous threat detection is ACTIVE — the core posture switch. Assert =true to require the platform's threat detector be on.
+    mappings:
+      aws.guardduty: get-detector Status == ENABLED
+
+  protection.kubernetes:
+    kind: bool
+    description: Whether EKS Protection (Kubernetes audit-log monitoring) is enabled — the control-plane threat surface Acme §7 requires for its EKS substrate.
+    mappings:
+      aws.guardduty: the EKS_AUDIT_LOGS feature Status == ENABLED
+
+  protection.malware:
+    kind: bool
+    description: Whether Malware Protection (EBS volume scanning on suspicious findings) is enabled — optional deepening of the posture.
+    mappings:
+      aws.guardduty: the EBS_MALWARE_PROTECTION feature Status == ENABLED
+
+  service.managed:
+    kind: bool
+    description: Whether groundhold manages this threat-detection configuration
+    mappings:
+      aws.guardduty: const true when observed through the driver
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost (GuardDuty bills on analyzed events/logs volume)
+    verification: static against a pricing catalog; billing after deploy

@@ -1,0 +1,40 @@
+{
+  "components": { "schemas": {
+    "io.k8s.api.rbac.v1.RoleBinding": {
+      "type": "object",
+      "x-kubernetes-group-version-kind": [{"group":"rbac.authorization.k8s.io","version":"v1","kind":"RoleBinding"}],
+      "properties": {
+        "metadata": {"$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"},
+        "roleRef": {"$ref": "#/components/schemas/io.k8s.api.rbac.v1.RoleRef"},
+        "subjects": {"type": "array", "items": {"$ref": "#/components/schemas/io.k8s.api.rbac.v1.Subject"}}
+      }
+    },
+    "io.k8s.api.rbac.v1.ClusterRoleBinding": {
+      "type": "object",
+      "x-kubernetes-group-version-kind": [{"group":"rbac.authorization.k8s.io","version":"v1","kind":"ClusterRoleBinding"}],
+      "properties": {
+        "metadata": {"$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"},
+        "roleRef": {"$ref": "#/components/schemas/io.k8s.api.rbac.v1.RoleRef"},
+        "subjects": {"type": "array", "items": {"$ref": "#/components/schemas/io.k8s.api.rbac.v1.Subject"}}
+      }
+    },
+    "io.k8s.api.rbac.v1.RoleRef": {
+      "type": "object",
+      "properties": {
+        "apiGroup": {"type": "string"},
+        "kind": {"type": "string"},
+        "name": {"type": "string"}
+      }
+    },
+    "io.k8s.api.rbac.v1.Subject": {
+      "type": "object",
+      "properties": {
+        "apiGroup": {"type": "string"},
+        "kind": {"type": "string"},
+        "name": {"type": "string"},
+        "namespace": {"type": "string"}
+      }
+    },
+    "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta": {"type": "object", "properties": {"name": {"type": "string"}}}
+  }}
+}

@@ -1,0 +1,159 @@
+# Attribute vocabulary for capability.database.relational, spec v0.1.
+#
+# This file IS the type system of the language. It defines which paths exist,
+# their scalar kind, and how each maps to real provider implementations.
+# Contracts constrain these paths; candidates declare them; the compiler
+# maps them to provider resources. Anything not in the vocabulary is
+# implementation noise, not capability semantics.
+
+capability: capability.database.relational
+version: 0.1
+stateful: true   # D47: retirement of a stateful capability is data loss;
+                 # autonomy.forbidden delete_stateful gates on this
+
+attributes:
+
+  engine.protocol:
+    kind: protocol
+    description: Wire-protocol compatibility, e.g. postgresql/16
+    mappings:
+      gcp.cloudsql: settings via database_version (POSTGRES_16)
+      aws.rds: engine + engine_version
+      azure.flexpostgres: version (PostgreSQL Flexible Server only —
+        Azure SQL Database is evergreen/TDS with no version to pin;
+        non-postgresql protocols refused)
+
+  location.region:
+    kind: string
+    description: Primary region of the instance
+    mappings:
+      gcp.cloudsql: region
+      aws.rds: derived from provider region / availability_zone
+      azure.flexpostgres: location
+
+  network.publicExposure:
+    kind: bool
+    description: Whether any public network path to the database exists
+    mappings:
+      gcp.cloudsql: ip_configuration.ipv4_enabled == false AND no authorized public networks
+      aws.rds: publicly_accessible == false AND subnet group is private
+      azure.flexpostgres: network.publicNetworkAccess (false => Disabled)
+    note: >
+      static verification proves configuration intent; the o-no-public
+      outcome probe proves the actual absence of public paths post-deploy.
+    recommended:
+      op: equals
+      value: false
+      scope: all
+      rationale: "A database reachable from the public internet widens the attack surface; keep it on private networking only."
+      ruleId: PV_R0001
+      ruleVersion: 1
+      controls:
+        FSBP: ["RDS.2"]
+        CIS-AWS_5.0.0: ["2.3.3"]
+        GDPR: ["Art.32"]
+
+  encryption.atRest:
+    kind: bool
+    mappings:
+      gcp.cloudsql: always true (CMEK optional via disk_encryption)
+      aws.rds: storage_encrypted
+      azure.flexpostgres: always true (Azure storage is always encrypted;
+        =false refused rather than pretended)
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: >
+      Data is encrypted with a CUSTOMER-managed key (CMEK/KMS), not merely
+      the provider's default key. The key id itself is implementation detail
+      (implementation.kms_key_name / implementation.kms_key_id), never a
+      capability path. The provider-default key does NOT satisfy this.
+    mappings:
+      gcp.cloudsql: settings.diskEncryptionConfiguration.kmsKeyName
+      aws.rds: KmsKeyId (a customer key, not the account-default aws/rds key)
+      azure.flexpostgres: dataEncryption via implementation.key_vault_key_uri
+    recommended:
+      op: equals
+      value: true
+      scope: prod
+      rationale: "In production, encrypt data at rest with a customer-managed key so key rotation and revocation stay under your control, not only the provider default key."
+      ruleId: PV_R0003
+      ruleVersion: 1
+      controls:
+        FSBP: ["RDS.17"]
+        GDPR: ["Art.32"]
+        ISO27001_2022: ["A.8.24"]
+
+  encryption.inTransit:
+    kind: bool
+    description: >
+      Connections to the database must be TLS-encrypted (SSL enforced), not
+      merely permitted. Provider-default "allow both cleartext and TLS" does
+      NOT satisfy it.
+    mappings:
+      gcp.cloudsql: settings.ipConfiguration.sslMode = ENCRYPTED_ONLY
+      aws.rds: not honored — enforcing TLS needs a DB parameter group
+        (rds.force_ssl=1), a separate binding; refused, probe-only for RDS
+      azure.flexpostgres: honored — require_secure_transport is enforced
+        by default on Flexible Server; =false refused
+    recommended:
+      op: equals
+      value: true
+      scope: all
+      rationale: "Force TLS on client connections; cleartext database traffic can be intercepted on the wire."
+      ruleId: PV_R0002
+      ruleVersion: 1
+      controls:
+        FSBP: ["RDS.16"]
+        CIS-AWS_5.0.0: ["2.3.1"]
+        GDPR: ["Art.32"]
+        ISO27001_2022: ["A.8.24"]
+
+  recovery.rpo:
+    kind: duration
+    description: Max data loss window, derived from backup/PITR configuration
+    mappings:
+      gcp.cloudsql: point_in_time_recovery_enabled + transaction_log_retention
+      aws.rds: backup_retention_period + PITR granularity
+      azure.flexpostgres: backup.backupRetentionDays (1-35 days; above
+        35 days refused)
+    recommended:
+      op: lte
+      value: 24h
+      scope: all
+      rationale: "Retain automated backups/PITR so at most a bounded window of data can be lost after a failure."
+      ruleId: PV_R0004
+      ruleVersion: 1
+      controls:
+        FSBP: ["RDS.11"]
+        GDPR: ["Art.32"]
+
+  recovery.rto:
+    kind: duration
+    evidence: probe           # D311: a claim until a restore test measures it
+    description: Time to restore service after failure
+    verification: probe-only — a value here is a claim until a restore test measures it
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost of the capability
+    verification: static against a pricing catalog; provider-api (billing) after deploy
+
+  service.managed:
+    kind: bool
+    description: Managed service vs self-operated
+
+  availability.class:
+    kind: string
+    enum: [zonal, regional, multi-regional]
+    mappings:
+      gcp.cloudsql: availability_type (ZONAL/REGIONAL)
+      aws.rds: multi_az
+      azure.flexpostgres: highAvailability ZoneRedundant (zonal/regional);
+        multi-regional refused (a failover group is a second server =
+        a second binding)
+
+# Deliberately absent in v0.1 (implementation detail, not capability semantics):
+# instance tier names, disk types, flags, maintenance windows, parameter groups.
+# A candidate may carry them under `implementation:` — the verifier ignores them.

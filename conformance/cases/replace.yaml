@@ -1,0 +1,304 @@
+# Replace as create-before-destroy composition (D48). impl: go.
+# The composition lives in the EXISTING action DAG: create the new
+# generation first, delete the old identity after — with the reviewed
+# reason (the immutable paths that forced it) on the create action.
+
+cases:
+  - name: plan-emits-replacement-composition
+    impl: go
+    description: >
+      D48: immutable drift (region, on gcp) + explicit contract consent
+      -> create g2 (carrying WHY: the immutable from/to) + delete g1
+      dependsOn create.
+    plan:
+      at: "2026-07-11T20:05:00Z"
+      bindings: { db: "acme:us-east1:db-old" }
+      observations:
+        - { capability: db, path: location.region, value: "us-east1",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T20:00:00Z", ttlSeconds: 900 }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: rp-demo, environment: test, version: 3 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-region
+              subject: db
+              path: location.region
+              op: equals
+              value: europe-west1
+              verify: { method: static }
+        autonomy:
+          allow_replace_stateful: [db]
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: rp-demo
+        capabilities:
+          db:
+            provider: gcp
+            service: cloudsql
+            attributes:
+              location.region: europe-west1
+            implementation:
+              tier: db-custom-2-8192
+    expect:
+      actions:
+        a-create-db-g2:
+          operation: create
+        a-delete-db-g1:
+          operation: delete
+
+  - name: plan-refuses-stateful-replacement-without-consent
+    impl: go
+    description: >
+      D48: a region typo must not quietly propose "create empty DB,
+      delete old DB" — stateful replacement needs explicit, scoped,
+      hash-pinned contract consent.
+    plan:
+      at: "2026-07-11T20:05:00Z"
+      bindings: { db: "acme:us-east1:db-old" }
+      observations:
+        - { capability: db, path: location.region, value: "us-east1",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T20:00:00Z", ttlSeconds: 900 }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: rp-demo2, environment: test, version: 3 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-region
+              subject: db
+              path: location.region
+              op: equals
+              value: europe-west1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: rp-demo2
+        capabilities:
+          db:
+            provider: gcp
+            service: cloudsql
+            attributes:
+              location.region: europe-west1
+            implementation:
+              tier: db-custom-2-8192
+    expect:
+      error: plan
+      code: consent-required
+
+  - name: apply-replaces-create-before-destroy
+    impl: go
+    description: >
+      D48 executor semantics: create-new runs first (binding moves to the
+      successor with lineage.replaces), delete-old acts on the PINNED
+      identity, and the final binding keeps the survivor while
+      tombstoning the old resource.
+    apply:
+      at: "2026-07-11T19:10:00Z"
+      ledger: &g1-seed
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: binding.updated
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+            body:
+              capability: db
+              environment: test
+              provider: { name: fake }
+              resources:
+                - { id: primary, type: t, providerId: "fake:db-1", generation: 1 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.released
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+      contract: &ra-contract
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: ra, environment: test, version: 3 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        autonomy:
+          allow_replace_stateful: [db]
+      candidate: &ra-candidate
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: ra
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+      plan: &replace-plan
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: ra
+          environment: test
+          reads:
+            contractHash: "sha256:c72c106a610afc7f1054c5cfd583828b8657edee6bd8e975891b8149b3b9f506"
+            candidateHash: "sha256:a5e04440d4c498032ad4737c04aa84823eb12cd4626a5a6bd661114de24dd16c"
+            heads: { db: "sha256:77ffa631b51360f022c62eb6d348b0680a108ddd0ebce924fe14d509b352e043" }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-create-db-g2
+              capability: db
+              operation: create
+              target: fake.svc/db
+              idempotencyKey: db-g2-key
+              targetGeneration: 2
+              replaces:
+                providerId: "fake:db-1"
+                generation: 1
+                because:
+                  - { path: location.region, from: us-east1, to: europe-west1 }
+              risk:
+                reversibility: R1
+                dataLoss: none
+                downtime: none
+                securityExposure: none
+                costDelta: { amount: 0, currency: EUR }
+                identityReplacement: true
+            - id: a-delete-db-g1
+              capability: db
+              operation: delete
+              target: fake.svc/db
+              idempotencyKey: db-g1-delete
+              dependsOn: [a-create-db-g2]
+              targetProviderId: "fake:db-1"
+              targetGeneration: 1
+              risk:
+                reversibility: R4
+                dataLoss: certain
+                downtime: certain
+                securityExposure: none
+                costDelta: { amount: 0, currency: EUR }
+                identityReplacement: true
+          preconditions:
+            - type: report-executable
+    expect:
+      exit: 0
+      status: applied
+      events: [lease.acquired, apply.started, operation.receipt,
+               binding.updated, operation.receipt, operation.receipt,
+               binding.updated, operation.receipt, apply.finished,
+               lease.released]
+      bindings: { db: "fake:db-g2-key" }
+
+  - name: apply-refuses-replacement-without-consent
+    impl: go
+    description: >
+      D48: the executor gate is unconditional — a hand-authored
+      composition cannot bypass the contract's missing consent.
+    apply:
+      at: "2026-07-11T19:10:00Z"
+      ledger: *g1-seed
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: rn, environment: test, version: 3 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: rn
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+      plan:
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: rn
+          environment: test
+          reads:
+            contractHash: "sha256:dddd29579a94f0e14d3e643e437d94a5dbef5eccad0bb6b0b27add1e180b1c6b"
+            candidateHash: "sha256:3e9a5ea244227afb99d78627086dcc72f9da1eb061fab9d1f6feea30267d7eea"
+            heads: { db: "sha256:77ffa631b51360f022c62eb6d348b0680a108ddd0ebce924fe14d509b352e043" }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-create-db-g2
+              capability: db
+              operation: create
+              target: fake.svc/db
+              idempotencyKey: db-g2-key
+              targetGeneration: 2
+              risk:
+                reversibility: R1
+                dataLoss: none
+                downtime: none
+                securityExposure: none
+                costDelta: { amount: 0, currency: EUR }
+                identityReplacement: true
+            - id: a-delete-db-g1
+              capability: db
+              operation: delete
+              target: fake.svc/db
+              idempotencyKey: db-g1-delete
+              dependsOn: [a-create-db-g2]
+              targetProviderId: "fake:db-1"
+              targetGeneration: 1
+              risk:
+                reversibility: R4
+                dataLoss: certain
+                downtime: certain
+                securityExposure: none
+                costDelta: { amount: 0, currency: EUR }
+                identityReplacement: true
+          preconditions:
+            - type: report-executable
+    expect:
+      exit: 2
+      status: refused
+      events: []
+
+  - name: forecast-replacement-composition
+    impl: go
+    description: >
+      D48: a generation-stamped create on a bound capability is
+      will-create (the name differs — no 409 continuation), and the
+      pinned delete is will-delete.
+    forecast:
+      at: "2026-07-11T19:10:00Z"
+      bindings: { db: "fake:db-1" }
+      heads: { db: "sha256:77ffa631b51360f022c62eb6d348b0680a108ddd0ebce924fe14d509b352e043" }
+      plan: *replace-plan
+      candidate: *ra-candidate
+    expect:
+      freshPlan: true
+      effects:
+        a-create-db-g2: will-create
+        a-delete-db-g1: will-delete

@@ -1,0 +1,228 @@
+# Executor v0 (D42, spec/executor.md). impl: go — single-implementation
+# per D24. The h1 contract/candidate/plan trio reuses the literal hashes
+# from cases/canonicalization.yaml. The fake provider is deterministic:
+# resource ids derive from idempotency keys.
+
+cases:
+  - name: apply-happy-path
+    impl: go
+    description: >
+      Full write-ahead sequence: lease, apply.started, pending receipt
+      BEFORE the provider call, then the full-projection binding, then the
+      terminal receipt that clears the pending intent (D180 — state before
+      the pending-clear so a crash leaves a recoverable receipt, not an
+      orphan), apply.finished, release.
+    apply:
+      at: "2026-07-11T14:00:00Z"
+      contract: &h1-contract
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: h1, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+            requirements:
+              engine.protocol:
+                op: compatible-with
+                value: postgresql/16
+        constraints:
+          hard:
+            - id: c-rpo
+              subject: db
+              path: recovery.rpo
+              op: lte
+              value: 5m
+              verify: { method: static }
+      candidate: &h1-candidate
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: h1
+        capabilities:
+          db:
+            attributes:
+              engine.protocol: postgresql/16.4
+              recovery.rpo: 5m
+      plan: &h1-plan
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: h1
+          environment: test
+          reads:
+            contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+            candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+            heads: { db: genesis }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-create
+              capability: db
+              operation: create
+              target: cloudsql.instance/primary
+              idempotencyKey: db-create-1
+              risk:
+                reversibility: R2
+                dataLoss: none
+                downtime: none
+                securityExposure: none
+                costDelta: { amount: 100, currency: EUR }
+                identityReplacement: false
+          preconditions:
+            - type: report-executable
+    expect:
+      exit: 0
+      status: applied
+      events: [lease.acquired, apply.started, operation.receipt,
+               binding.updated, operation.receipt, apply.finished,
+               lease.released]
+      bindings: { db: "fake:db-create-1" }
+
+  - name: apply-refuses-stale-plan
+    impl: go
+    description: >
+      D41 + D42: the pinned decision head does not match the (empty)
+      ledger's genesis — refuse before any mutation, exit 3.
+    apply:
+      at: "2026-07-11T14:00:00Z"
+      contract: *h1-contract
+      candidate: *h1-candidate
+      plan:
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: h1
+          environment: test
+          reads:
+            contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+            candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+            heads: { db: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-create
+              capability: db
+              operation: create
+              target: cloudsql.instance/primary
+              idempotencyKey: db-create-1
+              risk:
+                reversibility: R2
+                dataLoss: none
+                downtime: none
+                securityExposure: none
+                costDelta: { amount: 100, currency: EUR }
+                identityReplacement: false
+          preconditions:
+            - type: report-executable
+    expect:
+      exit: 3
+      status: refused
+      events: []
+
+  - name: apply-refuses-non-executable-pair
+    impl: go
+    description: >
+      A hand-sealed plan can pin the hashes of a FAILING pair — the
+      report-executable precondition catches it at apply time. The thesis
+      holds at the last gate too.
+    apply:
+      at: "2026-07-11T14:00:00Z"
+      contract: *h1-contract
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: h1
+        capabilities:
+          db:
+            attributes:
+              engine.protocol: postgresql/15.6
+              recovery.rpo: 5m
+      plan:
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: h1
+          environment: test
+          reads:
+            contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+            candidateHash: "sha256:34d2b657edced266eb0ca636617ad8e208b61eb11dca47d8a9f1a3ca38820953"
+            heads: { db: genesis }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-create
+              capability: db
+              operation: create
+              target: cloudsql.instance/primary
+              idempotencyKey: db-create-1
+              risk:
+                reversibility: R2
+                dataLoss: none
+                downtime: none
+                securityExposure: none
+                costDelta: { amount: 100, currency: EUR }
+                identityReplacement: false
+          preconditions:
+            - type: report-executable
+    expect:
+      exit: 2
+      status: refused
+      events: []
+
+  - name: apply-fails-midway-with-write-ahead-receipts
+    impl: go
+    description: >
+      Injected provider failure: the pending receipt is already durable
+      when the call fails, the terminal failed receipt follows, then
+      apply.failed and release. Exit 4.
+    apply:
+      at: "2026-07-11T14:00:00Z"
+      failKeys: [db-create-1]
+      contract: *h1-contract
+      candidate: *h1-candidate
+      plan: *h1-plan
+    expect:
+      exit: 4
+      status: failed
+      events: [lease.acquired, apply.started, operation.receipt,
+               operation.receipt, apply.failed, lease.released]
+
+  - name: apply-unknown-outcome-is-not-failure
+    impl: go
+    description: >
+      D29 + D43: a lost response after a mutating request is UNKNOWN, not
+      failed — the terminal-unknown receipt does not clear the pending
+      set, so the next apply refuses until reconciled. Status unknown,
+      exit 4.
+    apply:
+      at: "2026-07-11T14:00:00Z"
+      unknownKeys: [db-create-1]
+      contract: *h1-contract
+      candidate: *h1-candidate
+      plan: *h1-plan
+    expect:
+      exit: 4
+      status: unknown
+      events: [lease.acquired, apply.started, operation.receipt,
+               operation.receipt, apply.failed, lease.released]
+
+  - name: apply-throttled-is-retryable-not-reconcile
+    impl: go
+    description: >
+      D241: a throttled mutation (provider-again-later) provably did NOT
+      land — rejected at the rate limiter, not executed. Unlike a
+      lost-response unknown, it concludes as a `retryable` receipt that
+      CLEARS the pending set, so a re-plan+apply (converge's backoff) is
+      clean. The distinct machine code lets converge back off and retry
+      rather than routing to reconcile. Code provider-again-later, exit 4.
+    apply:
+      at: "2026-07-11T14:00:00Z"
+      retryableKeys: [db-create-1]
+      contract: *h1-contract
+      candidate: *h1-candidate
+      plan: *h1-plan
+    expect:
+      exit: 4
+      status: unknown
+      code: provider-again-later
+      events: [lease.acquired, apply.started, operation.receipt,
+               operation.receipt, apply.failed, lease.released]

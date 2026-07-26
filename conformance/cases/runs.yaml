@@ -1,0 +1,120 @@
+# Runs list (D231): `runs` lists EVERY run in the ledger with its derived state —
+# the "what needs my attention" dashboard. The handle set is the ledger (the sole
+# run truth, D229), not the detach registry. Ordered most-recent-first by start
+# clock; per-state counts are a projection of the closed four-valued run-state
+# set, never a green/red health rollup. --at is mandatory (N1 multiplied by N).
+# Go-runtime, impl: go.
+suite: runs
+cases:
+  - name: runs-lists-all-with-order-and-state-counts
+    impl: go
+    description: >
+      D231: three runs in one ledger — a done apply, a stalled apply (lease
+      lapsed), a running converge — list most-recent-first with a per-state
+      count line, all derived purely from the ledger + the explicit clock.
+    runs:
+      at: "2026-07-11T19:06:00Z"    # A/B lapsed (100s..), C converge lease live (300s)
+      ledger:
+        # run A: apply, started early, finished -> done
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: apply.started
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { applyRunId: run-a, plan: "sha256:p" }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: apply.finished
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:01:00Z"
+            actor: { id: seeder, type: human }
+            body: { applyRunId: run-a }
+        # run B: apply, started later, lease lapsed, no terminal -> stalled
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: apply.started
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:02:00Z"
+            actor: { id: seeder, type: human }
+            body: { applyRunId: run-b, plan: "sha256:p" }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:02:00Z"
+            actor: { id: seeder, type: human }
+            body: { applyRunId: run-b, ttlSeconds: 60 }
+        # run C: converge, started latest, lease live -> running
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: converge.started
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:05:00Z"
+            actor: { id: seeder, type: human }
+            body: { convergeRunId: run-c }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:05:00Z"
+            actor: { id: seeder, type: human }
+            body: { convergeRunId: run-c, ttlSeconds: 300 }
+    expect:
+      total: 3
+      order: [run-c, run-b, run-a]   # most-recent-first by start clock
+      byState:
+        running: 1
+        stalled: 1
+        done: 1
+
+  - name: runs-unions-registry-only-as-unknown
+    impl: go
+    description: >
+      D231: a handle in the detach registry with NO ledger events (launched, never
+      admitted — it may have died pre-admission) is unioned in as registry-only /
+      unknown, sorting after every ledger run. The ledger run is source=ledger; the
+      pointer contributes only to the question set, never the verdict.
+    runs:
+      at: "2026-07-11T19:05:00Z"
+      registryHandles: [ghost-run]
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: apply.started
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { applyRunId: real-run, plan: "sha256:p" }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: apply.finished
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:01:00Z"
+            actor: { id: seeder, type: human }
+            body: { applyRunId: real-run }
+    expect:
+      total: 2
+      order: [real-run, ghost-run]   # ledger run first, registry-only last
+      byState:
+        done: 1
+        unknown: 1
+      sources:
+        real-run: ledger
+        ghost-run: registry-only

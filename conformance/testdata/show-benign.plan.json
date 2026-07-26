@@ -1,0 +1,6 @@
+{"apiVersion":"plan/v0","kind":"SealedPlan","plan":{
+  "contract":"demo","environment":"test",
+  "reads":{"contractHash":"sha256:0000000000000000000000000000000000000000000000000000000000000001","candidateHash":"sha256:0000000000000000000000000000000000000000000000000000000000000002","heads":{"web":"sha256:0000000000000000000000000000000000000000000000000000000000000003"},"toolchain":{"compiler":"groundhold-go/0.1.0","spec":"contract/v0.1"},"provider":{"name":"fake"}},
+  "writes":["web"],
+  "actions":[{"id":"a-create-web","capability":"web","operation":"create","target":"fake.svc/web","idempotencyKey":"ik-web","risk":{"reversibility":"R1","dataLoss":"none","downtime":"none","securityExposure":"none","costDelta":{"amount":0,"currency":"EUR"},"identityReplacement":false}}],
+  "preconditions":[{"type":"report-executable"}]}}

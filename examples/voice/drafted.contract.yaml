@@ -1,0 +1,73 @@
+# DRAFT — produced by the transcript-to-contract skill from
+# meeting.transcript.md. A draft is a PROPOSAL: the human reviews the
+# fact table and assumptions below, then publishes. The runtime never
+# heard the meeting (D61) — a misheard word can only produce a wrong
+# draft that review catches, never a wrong apply.
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta:
+  id: orders-db
+  environment: production
+  version: 1
+capabilities:
+  - id: db
+    type: capability.database.relational
+constraints:
+  hard:
+    - id: c-region
+      subject: db
+      path: location.region
+      op: equals
+      value: europe-central2
+      verify: { method: static }
+    - id: c-engine
+      subject: db
+      path: engine.protocol
+      op: compatible-with
+      value: postgresql/16
+      verify: { method: static }
+    - id: c-private
+      subject: db
+      path: network.publicExposure
+      op: equals
+      value: false
+      verify: { method: static }
+    - id: c-rpo
+      subject: db
+      path: recovery.rpo
+      op: lte
+      value: 1m
+      verify: { method: static }
+    - id: c-rto
+      subject: db
+      path: recovery.rto
+      op: lte
+      value: 1h
+      verify: { method: probe }
+autonomy:
+  forbidden:
+    - delete_stateful: true
+assumptions:
+  - id: a-rpo-supersession
+    status: assumed
+    source: >
+      turn 00:06:44 (Marta), SUPERSEDING turn 00:04:31 (Tomek): "five
+      minutes" was explicitly revised to "one minute" citing the legal
+      retention memo. The later statement wins; the memo itself was
+      not shown in the meeting.
+    confidence: 0.9
+    affects: [c-rpo]
+  - id: a-engine-preference
+    status: assumed
+    source: >
+      turn 00:03:40 (Tomek): "Sixteen if we can" — a preference, not a
+      confirmed requirement; drafted as compatible-with postgresql/16.
+    confidence: 0.7
+    affects: [c-engine]
+# NOT drafted as constraints (implementation noise or non-intent):
+# - "500 gigs" (turn 00:05:19): a filler number ("like, 500") — spoken
+#   capacity estimates are approximations; belongs in the candidate's
+#   implementation block if anywhere. Flagged for the human, not
+#   encoded.
+# - "PITR then, not snapshots" (turn 00:07:01): implementation choice,
+#   explicitly waved off by the meeting owner at 00:07:15.

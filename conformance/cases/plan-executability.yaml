@@ -1,0 +1,47 @@
+# The thesis at the plan boundary (D39). impl: go — the compiler is Go-only (D24).
+#
+# "Probabilistic proposal, deterministic verification, sealed execution": a plan
+# is refused unless the candidate PROVES every hard constraint. This pins the
+# verify->plan compose at the gate — the many verify cases prove the verdict
+# algebra, but the *plan command's* refusal on a non-executable report (and its
+# machine-readable `not-executable` code, D65) had no case of its own. The
+# canonical `make plan` refusal (c-rto unproven) demonstrates it; a make target
+# is not the gate.
+
+cases:
+  - name: plan-refuses-a-candidate-that-does-not-prove-a-hard-constraint
+    impl: go
+    description: >
+      A hard constraint whose attribute the candidate never supplies verifies to
+      unknown (no basis, N1/four-valued). unknown on a hard constraint makes the
+      report non-executable, and a non-executable report is REFUSED at plan with
+      the not-executable code — no partial plan, no coercion of unknown to false.
+    plan:
+      at: "2026-07-19T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: ne1, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-avail
+              subject: db
+              path: availability.class
+              op: equals
+              value: regional
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: ne1
+        capabilities:
+          db:
+            provider: fake
+            attributes:
+              service.managed: true
+    expect:
+      error: not-executable
+      code: not-executable

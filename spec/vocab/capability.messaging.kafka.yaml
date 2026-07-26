@@ -1,0 +1,95 @@
+# Attribute vocabulary for capability.messaging.kafka, spec v0.1 (D115).
+#
+# A managed Apache KAFKA cluster — the wire protocol is Kafka, so an unmodified
+# Kafka client connects. A genuine THREE-CLOUD twin: AWS MSK (Managed Streaming
+# for Apache Kafka), GCP Managed Service for Apache Kafka, and Azure Event Hubs
+# with the Kafka endpoint enabled. Distinct from BOTH neighbours:
+#   - capability.messaging.topic (D60) is provider-native pub/sub (SNS/Pub/Sub/
+#     Service Bus) — a different protocol and delivery model.
+#   - capability.streaming.pipe (D114) is a provider-native record stream
+#     (Kinesis / Event Hubs native) — same idea, but NOT the Kafka wire protocol.
+# messaging.kafka is specifically "give me a Kafka broker my existing Kafka
+# tooling talks to".
+#
+# Broker count, instance/vCPU sizing, storage volume, partition defaults and
+# client-auth mechanism are implementation detail; residency, protocol,
+# availability and encryption are the capability.
+
+capability: capability.messaging.kafka
+version: 0.1
+stateful: true   # a Kafka cluster holds topic logs, offsets and consumer state;
+                 # destroying it loses them (rebuildable from producers, but a real
+                 # footprint — D47 delete friction).
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Primary region of the Kafka cluster
+    mappings:
+      aws.msk: provider region (the cluster is regional, brokers span AZs)
+      gcp.managedkafka: cluster location
+      azure.eventhubskafka: the namespace location
+
+  engine.protocol:
+    kind: protocol
+    description: >
+      The Kafka wire protocol, e.g. kafka/3. A non-kafka protocol is refused. The
+      minor version is honored where the provider exposes it (MSK KafkaVersion);
+      on the fully-managed twins (GCP / Azure) the broker version is provider-
+      managed and the value is validated but not pinned.
+    mappings:
+      aws.msk: KafkaVersion (e.g. 3.5.1)
+      gcp.managedkafka: managed broker version (validated, not pinned)
+      azure.eventhubskafka: Kafka 1.0+ protocol endpoint (validated, not pinned)
+
+  availability.class:
+    kind: string
+    enum: [zonal, regional]
+    description: >
+      Failure domain the cluster survives. regional = brokers replicated across
+      zones in the region (the twin path). zonal is honored ONLY on Azure (a
+      non-zone-redundant namespace); on AWS MSK and GCP Managed Kafka it is
+      REFUSED — those clusters are always multi-AZ, so a zonal claim would
+      misrepresent them.
+    mappings:
+      aws.msk: always multi-AZ (brokers across AZs) — zonal refused
+      gcp.managedkafka: always regional (spread across zones) — zonal refused
+      azure.eventhubskafka: zoneRedundant=true (regional) vs false (zonal)
+
+  encryption.inTransit:
+    kind: bool
+    description: >
+      Client-to-broker connections must be TLS-encrypted, not merely permitted.
+      Always enforced by all three twins; a candidate asserting false is refused.
+    mappings:
+      aws.msk: EncryptionInTransit.ClientBroker = TLS
+      gcp.managedkafka: TLS/mTLS to the bootstrap endpoint
+      azure.eventhubskafka: TLS-only Kafka endpoint (SASL_SSL)
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: >
+      Broker storage encrypted with a CUSTOMER-managed key (CMEK/KMS), not the
+      provider default. The key id is implementation detail (implementation.kms_*),
+      never a capability path.
+    mappings:
+      aws.msk: EncryptionInfo.EncryptionAtRest.DataVolumeKMSKeyId
+      gcp.managedkafka: gcpConfig.kmsKey
+      azure.eventhubskafka: namespace encryption keySource=Microsoft.KeyVault (Premium)
+
+  service.managed:
+    kind: bool
+    description: Managed service vs self-operated
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost of the capability
+    verification: static against a pricing catalog; provider-api (billing) after deploy
+
+# Deliberately absent in v0.1 (implementation detail / sizing, not capability
+# semantics): broker count, instance type / vCPU / memory, storage volume size,
+# default partition count, client-authentication mechanism (IAM / SASL / mTLS),
+# enhanced monitoring level, subnet/VPC placement (topology). A candidate may carry
+# them under `implementation:`; the verifier ignores them.

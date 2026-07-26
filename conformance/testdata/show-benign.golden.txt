@@ -1,0 +1,18 @@
+GROUNDHOLD SEALED PLAN  (preview only -- apply consumes the JSON)
+plan sha256:3ac75e5dd89516b6078b0842a6c6a38051ad8c4682cbe3aa27f383b3fa0a2e37
+contract demo @ env test
+reads  contract sha256:0000000..  candidate sha256:0000000..  heads 1  provider fake
+
+execution order -- 1 action
+
+[1] +  create web
+      target       fake.svc/web   idempotency ik-web
+      risk         reversibility R1 | dataLoss none | downtime none | exposure none | identity kept | cost +0.00 EUR/mo
+
+preconditions
+  report-executable
+
+--------------------------------------------------------------------------------
+1 actions: 1 create, 0 update, 0 replace, 0 delete | destructive: 0
+per-axis worst: reversibility R1; dataLoss none; downtime none; exposure none
+cost delta (sum of declared cost.monthly; unclaimed counted 0): +0.00 EUR/mo

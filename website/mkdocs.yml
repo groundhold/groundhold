@@ -1,0 +1,29 @@
+site_name: Groundhold
+site_url: https://groundhold.github.io/groundhold/
+site_description: >
+  AI should not write Terraform. It should emit verifiable contracts —
+  and a deterministic runtime should validate, gate, execute and prove
+  them.
+docs_dir: pages
+theme:
+  name: material
+  palette:
+    - scheme: default
+      toggle: { icon: material/brightness-7, name: dark }
+    - scheme: slate
+      toggle: { icon: material/brightness-4, name: light }
+  features: [navigation.sections, content.code.copy]
+nav:
+  - What is Groundhold: index.md
+  - Why Groundhold: why.md
+  - The honesty rules: honesty.md
+  - Quickstart: quickstart.md
+  - Reading the output: presentation.md
+  - The conformance suite: conformance.md
+  - CLI reference: cli.md
+  - Errors and exit codes: errors.md
+  - MCP server: mcp.md
+  - Providers and drivers: drivers.md
+  - Extending groundhold (dev guide): extending.md
+  - Versioning and licenses: versioning.md
+markdown_extensions: [admonition, pymdownx.superfences, tables]

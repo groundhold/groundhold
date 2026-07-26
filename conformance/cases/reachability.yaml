@@ -1,0 +1,383 @@
+# Post-apply REACHABILITY PROBE (Layer 1 of the org-boundary work). An
+# apply/converge that stands up a PUBLIC EDGE (a cdn.distribution domainName, a
+# function.serverless functionUrl — D316) must not report a bare "APPLIED" while
+# the edge silently 403s. This is Acme's confirmed "APPLIED != works" pain and
+# the OUTCOME half of closing the thesis loop.
+#
+# The probe is a NETWORK side-effect OUTSIDE the deterministic core: it is driven
+# here by GROUNDHOLD_REACHABILITY_FAKE (a status code or a named transport
+# failure) so the HTTPS GET is deterministic with no real network, and its result
+# folds in as a measured observation + a distinct exit/banner. Go-only: the probe
+# runs inside the Go converge porcelain.
+#
+# The honesty core never fakes success and never confidently accuses:
+#   2xx/3xx  -> reachable (the ONLY clean success)
+#   401/403  -> unknown   (an ANONYMOUS denial is AMBIGUOUS — a missing grant, an
+#                          auth-gated path, or an org guardrail — so it BLOCKS with
+#                          a multi-cause remediation, never a confident accusation)
+#   refused/dns/tls/timeout/other status -> unknown (unreachable/unconfirmed)
+#   no public output        -> nothing measured, nothing emitted
+suite: reachability
+cases:
+  - name: reachable-edge-is-confirmed-success
+    impl: go
+    description: >
+      Layer 1: a cdn.distribution stood up by converge whose edge GET returns 200
+      is CONFIRMED reachable end-to-end — the bare "APPLIED" becomes an evidenced
+      "reachable" (exit 0). The public path is proven, not merely applied.
+    converge:
+      contract: &edge-contract
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: rc-t, environment: test, version: 1 }
+        capabilities:
+          - id: edge
+            type: capability.cdn.distribution
+        constraints:
+          hard:
+            - id: c-managed
+              subject: edge
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate: &edge-candidate
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: rc-t
+        capabilities:
+          edge:
+            provider: fake
+            service: cloudfront
+            attributes:
+              service.managed: true
+      runs:
+        - at: "2026-07-25T10:00:00Z"
+          approve: true
+          reachabilityFake: "200"
+          expect:
+            exit: 0
+            status: applied
+            reachability: reachable
+            phases: [verify, plan, forecast, confirm, apply, observe,
+                     convergence-check, reachability]
+
+  - name: redirect-edge-is-reachable
+    impl: go
+    description: >
+      A 3xx from the edge IS a reachable public path (a redirect answered) — not
+      chased, not mistaken for a failure. Still exit 0, reachability reachable.
+    converge:
+      contract: *edge-contract
+      candidate: *edge-candidate
+      runs:
+        - at: "2026-07-25T10:00:00Z"
+          approve: true
+          reachabilityFake: "301"
+          expect:
+            exit: 0
+            status: applied
+            reachability: reachable
+
+  - name: anonymous-403-is-unknown-not-accused
+    impl: go
+    description: >
+      THE Acme case, corrected: the edge APPLIED but returns 403 to an anonymous
+      probe. That is genuinely AMBIGUOUS — the client's real cause was a MISSING
+      grant action (lambda:InvokeFunction, AWS Oct-2025), NOT an org RCP, and an
+      auth-gated public API 403s anonymous GETs by design. So Layer 1 reports
+      reachability=unknown (BLOCKED, exit 2) with a multi-cause, non-accusatory
+      remediation — it does NOT fake success and does NOT blame a cause. A real,
+      attributable violation belongs to a DECLARED constraint (Layer 2).
+    converge:
+      contract: *edge-contract
+      candidate: *edge-candidate
+      runs:
+        - at: "2026-07-25T10:00:00Z"
+          approve: true
+          reachabilityFake: "403"
+          expect:
+            exit: 2
+            status: applied
+            reachability: unknown
+            banner: BLOCKED
+
+  - name: anonymous-401-is-unknown-not-accused
+    impl: go
+    description: >
+      401 is the same ambiguous anonymous-denial class as 403 — the edge answered
+      and refused an unauthenticated probe. reachability=unknown (BLOCKED), never
+      a faked success and never a confident accusation.
+    converge:
+      contract: *edge-contract
+      candidate: *edge-candidate
+      runs:
+        - at: "2026-07-25T10:00:00Z"
+          approve: true
+          reachabilityFake: "401"
+          expect:
+            exit: 2
+            status: applied
+            reachability: unknown
+            banner: BLOCKED
+
+  - name: unreachable-from-here-is-unknown-not-denied
+    impl: go
+    description: >
+      A refused connection is unreachable-FROM-HERE (a firewalled CI runner, a
+      not-yet-live edge, DNS/edge propagation) — the confused case that cost Acme
+      hours. It is UNKNOWN, explicitly NOT a denial and NOT a failure. converge
+      reports reachability=unknown with the named cause and the BLOCKED banner —
+      never letting unreachable-from-here masquerade as a 403 denial.
+    converge:
+      contract: *edge-contract
+      candidate: *edge-candidate
+      runs:
+        - at: "2026-07-25T10:00:00Z"
+          approve: true
+          reachabilityFake: "refused"
+          expect:
+            exit: 2
+            status: applied
+            reachability: unknown
+            banner: BLOCKED
+
+  - name: dns-failure-is-unknown
+    impl: go
+    description: >
+      A DNS resolution failure is unreachable-from-here (edge name not yet
+      resolvable) — unknown with a named cause, never a denial.
+    converge:
+      contract: *edge-contract
+      candidate: *edge-candidate
+      runs:
+        - at: "2026-07-25T10:00:00Z"
+          approve: true
+          reachabilityFake: "dns"
+          expect:
+            exit: 2
+            status: applied
+            reachability: unknown
+            banner: BLOCKED
+
+  - name: server-error-is-unknown-not-success
+    impl: go
+    description: >
+      A 5xx means the edge answered but did not confirm the public path — neither
+      a proven success nor an org-boundary denial. Classified unknown, so a 500
+      can never be reported as clean success.
+    converge:
+      contract: *edge-contract
+      candidate: *edge-candidate
+      runs:
+        - at: "2026-07-25T10:00:00Z"
+          approve: true
+          reachabilityFake: "503"
+          expect:
+            exit: 2
+            status: applied
+            reachability: unknown
+            banner: BLOCKED
+
+  - name: no-reachability-skips-loudly
+    impl: go
+    description: >
+      --no-reachability opts out, but LOUDLY: reachability=skipped is set in the
+      machine result (and a "reachability skipped" line prints on the human
+      channel) — never a silent skip that lets an unprobed 403 read as success.
+      The apply itself stays clean (exit 0).
+    converge:
+      contract: *edge-contract
+      candidate: *edge-candidate
+      runs:
+        - at: "2026-07-25T10:00:00Z"
+          approve: true
+          noReachability: true
+          reachabilityFake: "403"
+          expect:
+            exit: 0
+            status: applied
+            reachability: skipped
+
+  - name: non-edge-capability-has-nothing-to-probe
+    impl: go
+    description: >
+      A capability with no public edge (a relational database) yields NO probe
+      target — nothing measured, nothing emitted, no reachability field. The probe
+      never fabricates a target it cannot derive from outputs.
+    converge:
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: rc-db, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-managed
+              subject: db
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: rc-db
+        capabilities:
+          db:
+            provider: fake
+            service: cloudsql
+            attributes:
+              service.managed: true
+      runs:
+        - at: "2026-07-25T10:00:00Z"
+          approve: true
+          reachabilityFake: "403"
+          expect:
+            exit: 0
+            status: applied
+            # no reachability field: a non-edge capability yields no probe target
+
+  - name: gcp-public-cloud-run-is-probed-on-its-uri
+    impl: go
+    description: >
+      D330/D336 GCP parity, cross-cloud: a PUBLIC Cloud Run
+      (capability.workload.container, network.publicExposure true) exposes its
+      edge as the `uri` output — a DIFFERENT output name than AWS's
+      functionUrl/domainName — and converge probes it. A 200 is CONFIRMED
+      reachable end-to-end (exit 0). Proves the probe recognizes the GCP edge type
+      + output name without any AWS-specific assumption.
+    converge:
+      contract: &cr-contract
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: rc-cr, environment: test, version: 1 }
+        capabilities:
+          - id: cr
+            type: capability.workload.container
+        constraints:
+          hard:
+            - id: c-managed
+              subject: cr
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: rc-cr
+        capabilities:
+          cr:
+            provider: fake
+            service: cloudrun
+            attributes:
+              service.managed: true
+              network.publicExposure: true
+      runs:
+        - at: "2026-07-25T10:00:00Z"
+          approve: true
+          reachabilityFake: "200"
+          expect:
+            exit: 0
+            status: applied
+            reachability: reachable
+            phases: [verify, plan, forecast, confirm, apply, observe,
+                     convergence-check, reachability]
+
+  - name: gcp-internal-cloud-run-has-nothing-to-probe
+    impl: go
+    description: >
+      An INTERNAL Cloud Run (network.publicExposure false) is deliberately
+      private: its uri output still EXISTS (a service always has a *.run.app URL),
+      but the probe emits NO target — nothing measured, no reachability field —
+      the exact mirror of AWS's no-public-output "nothing measured", never a false
+      unknown. Even a 403 fake never surfaces, because no target is built.
+    converge:
+      contract: *cr-contract
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: rc-cr
+        capabilities:
+          cr:
+            provider: fake
+            service: cloudrun
+            attributes:
+              service.managed: true
+              network.publicExposure: false
+      runs:
+        - at: "2026-07-25T10:00:00Z"
+          approve: true
+          reachabilityFake: "403"
+          expect:
+            exit: 0
+            status: applied
+            # no reachability field: an internal container yields no probe target
+
+  - name: azure-external-containerapp-is-probed-on-its-fqdn
+    impl: go
+    description: >
+      Azure parity, cross-cloud: a PUBLIC Azure Container App
+      (capability.workload.container, network.publicExposure true) exposes its
+      edge as the `fqdn` output — a DIFFERENT output name+shape than GCP Cloud
+      Run's `uri` and AWS's functionUrl/domainName (a BARE host the probe wraps
+      into https://<host>/) — and converge probes it. A 200 is CONFIRMED
+      reachable end-to-end (exit 0). Proves the D330 probe recognizes the Azure
+      edge output name with NO reach-core change beyond the existing
+      workload.container candidate list.
+    converge:
+      contract: *cr-contract
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: rc-cr
+        capabilities:
+          cr:
+            provider: fake
+            service: containerapps
+            attributes:
+              service.managed: true
+              network.publicExposure: true
+      runs:
+        - at: "2026-07-25T10:00:00Z"
+          approve: true
+          reachabilityFake: "200"
+          expect:
+            exit: 0
+            status: applied
+            reachability: reachable
+            phases: [verify, plan, forecast, confirm, apply, observe,
+                     convergence-check, reachability]
+
+  - name: azure-internal-containerapp-has-nothing-to-probe
+    impl: go
+    description: >
+      An INTERNAL Azure Container App (network.publicExposure false) is
+      deliberately private: its fqdn output still EXISTS (an ingress app always
+      has a host), but the probe emits NO target — nothing measured, no
+      reachability field — the exact mirror of internal Cloud Run, never a false
+      unknown. Even a 403 fake never surfaces, because no target is built.
+    converge:
+      contract: *cr-contract
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: rc-cr
+        capabilities:
+          cr:
+            provider: fake
+            service: containerapps
+            attributes:
+              service.managed: true
+              network.publicExposure: false
+      runs:
+        - at: "2026-07-25T10:00:00Z"
+          approve: true
+          reachabilityFake: "403"
+          expect:
+            exit: 0
+            status: applied
+            # no reachability field: an internal container yields no probe target

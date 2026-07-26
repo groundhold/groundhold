@@ -1,0 +1,125 @@
+# Attribute vocabulary for capability.backup.plan, spec v0.1 (D153).
+#
+# A managed BACKUP PLAN — the DR-policy layer that sits ON TOP of a backup vault.
+# The honest 2-cloud twin is AWS Backup (a backup plan + selection) and GCP Backup
+# and DR (a backup plan). Where capability.backup.vault answers "where do recovery
+# points live and how long are they guaranteed kept" (the STORE and its retention
+# lock), a backup plan answers the complementary, operationally sharper questions an
+# RPO/RTO policy is actually written against:
+#   - HOW OFTEN a backup is taken (schedule.frequency) — this is what determines the
+#     Recovery Point Objective. It is first-class capability semantics, not a knob.
+#   - HOW LONG each recovery point the plan creates is kept (retention.duration) —
+#     the compliance/cost dimension of the plan's own lifecycle rule.
+#   - WHETHER recovery points are copied to another region (copy.crossRegion) and to
+#     WHICH region (copy.destinationRegion) — the multi-region DR posture. For an
+#     EU-only platform this is load-bearing: a cross-region copy whose destination is
+#     outside the EU is a residency violation a contract must be able to CATCH.
+#
+# stateful: FALSE. This is the deliberate, argued split from the vault. A backup plan
+# does NOT itself hold data — the recovery points live in the VAULT (a separate,
+# stateful capability). Deleting a plan STOPS future backups; it does NOT delete the
+# recovery points already written (they age out under the vault's retention, or the
+# vault's lock). So a plan is safe to retire without the data-loss friction a vault
+# demands: destroying it loses a SCHEDULE, not RECOVERABILITY. (The driver still
+# refuses to delete a plan it does not own, and deletes the plan's selection before
+# the plan — but that is ownership/ordering discipline, not statefulness.)
+#
+# One honest boundary with the vault, to avoid duplication: IMMUTABILITY / WORM is
+# NOT a plan attribute. Whether recovery points are legally undeletable is enforced
+# by the VAULT's retention lock (capability.backup.vault retention.lockMode), not by
+# the plan. A plan's Lifecycle.DeleteAfterDays only says when the plan WOULD expire a
+# recovery point; a compliance-locked vault overrides that downward-never. Modelling
+# a "retention.locked" here would duplicate — and could contradict — the vault. So it
+# is deliberately absent: ask the vault about WORM, ask the plan about cadence.
+
+capability: capability.backup.plan
+version: 0.1
+stateful: false   # a plan is a SCHEDULE, not a store; deleting it stops future
+                  # backups but never deletes recovery points already in the vault
+                  # (they persist under the vault's retention/lock) — so no
+                  # data-loss friction on retirement (contrast capability.backup.vault).
+
+attributes:
+
+  schedule.frequency:
+    kind: duration
+    description: >
+      How OFTEN a backup is taken — the cadence of the plan's backup rule. This is
+      the attribute that DETERMINES the Recovery Point Objective (RPO): a 24h cadence
+      means at most 24h of data can be lost. Expressed as a duration so an RPO
+      constraint (recovery point objective <= 4h) can be verified directly with no
+      coercion. The exact cron the driver programs is implementation detail (the
+      operand implementation.scheduleExpression); the PROMISE is this frequency.
+    mappings:
+      aws.backup: Backup plan Rule ScheduleExpression (cron), derived from the cadence
+      gcp.backupdr: backup plan schedule (the rule's recurrence)
+
+  retention.duration:
+    kind: duration
+    description: >
+      How long each recovery point THIS PLAN creates is kept before the plan's
+      lifecycle expires it. The plan's own cost/compliance dimension. Note: a
+      compliance-locked vault (capability.backup.vault retention.lockMode) can hold a
+      recovery point LONGER than this — the vault lock always wins upward; this is the
+      plan's intended lifecycle, not a guarantee against a stronger vault lock.
+    mappings:
+      aws.backup: Rule Lifecycle.DeleteAfterDays
+      gcp.backupdr: backup rule retention period
+
+  copy.crossRegion:
+    kind: bool
+    description: >
+      Whether the plan copies each recovery point to a SECOND region (a cross-region
+      copy action) for multi-region DR. When true, the destination is
+      copy.destinationRegion (and the destination vault ARN is an operand).
+    mappings:
+      aws.backup: presence of a Rule CopyAction with a destination vault in another region
+      gcp.backupdr: cross-region backup copy configuration
+
+  copy.destinationRegion:
+    kind: string
+    description: >
+      The region recovery points are COPIED to when copy.crossRegion is true — the
+      RESIDENCY of the disaster-recovery copy. First-class semantics for an EU-only
+      platform: a cross-region copy to a non-EU region is a residency violation, and a
+      contract must be able to constrain this region to an approved (e.g. EU) set.
+      Absent when copy.crossRegion is false.
+    mappings:
+      aws.backup: region parsed from the CopyAction DestinationBackupVaultArn
+      gcp.backupdr: the copy rule's destination location
+
+  location.region:
+    kind: string
+    description: Region the plan (and the primary recovery points it creates) live in.
+    mappings:
+      aws.backup: derived from the provider region
+      gcp.backupdr: the backup plan location
+
+  service.managed:
+    kind: bool
+    description: Managed backup service vs a self-operated backup scheduler.
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost (per-plan backup job + inter-region copy egress).
+    verification: static against a pricing catalog; billing after deploy
+
+# Deliberately absent in v0.1 (implementation detail / operand — NOT plan capability
+# semantics, D26):
+#  - the exact cron (implementation.scheduleExpression) — the semantics is the CADENCE
+#    (schedule.frequency); the precise minute/hour a job fires is an operand.
+#  - the target vault (implementation.targetVaultName) and the backup role
+#    (implementation.iamRoleArn) — each is a reference to a SEPARATE capability
+#    (capability.backup.vault / an IAM role), never inlined here.
+#  - the resource SELECTION (implementation.selectionTags / selectionResources) —
+#    WHICH resources are backed up is placement/operand, not a verifiable promise
+#    about the plan's DR posture.
+#  - the start/completion windows (implementation.startWindowMinutes / ...) — job
+#    scheduling slack, operational noise.
+#  - the copy DESTINATION VAULT ARN (implementation.copyDestinationVaultArn) — a
+#    reference to another vault; the SEMANTIC fact is copy.destinationRegion.
+#  - IMMUTABILITY / WORM — a VAULT concern (capability.backup.vault retention.lockMode),
+#    never duplicated here.
+#  - the individual recovery points — they are the DATA (they live in the vault), not
+#    the plan.

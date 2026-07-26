@@ -1,0 +1,46 @@
+# Deep static analysis (SAST) via CodeQL. Complements gosec/staticcheck
+# (security.yml) with dataflow-aware queries; results land in the Security tab.
+# Two languages: the Go runtime, and `actions` — CodeQL scans the workflow
+# files themselves for injection and token-scope issues.
+name: codeql
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  schedule:
+    - cron: "0 7 * * 1" # weekly, alongside the govulncheck advisory sweep
+
+permissions:
+  contents: read
+  security-events: write # upload SARIF to the Security tab
+
+jobs:
+  analyze:
+    # Code scanning is free on public repos; on a private repo it needs GitHub
+    # Advanced Security. This repo is private pre-launch, so the job skips
+    # (green, not red) until it is made public — then it runs automatically.
+    if: github.event.repository.visibility == 'public'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [go, actions]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: matrix.language == 'go'
+        with:
+          go-version: "1.26.5"
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@3b0bd1d116c0bde30213346b22d4f634d96a2fb0 # v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+      - name: Build Go
+        if: matrix.language == 'go'
+        run: cd go && go build ./...
+      - name: Analyze
+        uses: github/codeql-action/analyze@3b0bd1d116c0bde30213346b22d4f634d96a2fb0 # v3
+        with:
+          category: "/language:${{ matrix.language }}"

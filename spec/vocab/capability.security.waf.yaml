@@ -1,0 +1,73 @@
+# Attribute vocabulary for capability.security.waf, spec v0.1 (D116).
+#
+# A managed Web Application Firewall policy — a managed-rule-set + enforcement-mode
+# edge policy that inspects HTTP(S) traffic. A genuine THREE-CLOUD twin: AWS WAFv2
+# (a CLOUDFRONT-scope WebACL), Azure Front Door WAF policy, and GCP Cloud Armor
+# security policy. Distinct from capability.network.private (a VPC/firewall at L3/L4):
+# a WAF operates at L7 on request content.
+#
+# INVARIANT #4 (closed operator set): a WAF's rule DEFINITIONS are OPAQUE data. This
+# vocabulary never carries a rule expression language — it exposes only which
+# PROVIDER-MANAGED rule sets are enabled and the enforcement mode. Bespoke custom
+# rules ride under `implementation:` as opaque config the verifier passes through,
+# never parses or interprets.
+
+capability: capability.security.waf
+version: 0.1
+stateful: false   # a WAF policy is configuration, not data — retirement removes
+                  # protection but loses no stored records (no D47 data-loss friction).
+
+attributes:
+
+  policy.mode:
+    kind: string
+    enum: [prevention, detection]
+    description: >
+      What the policy does on a match. prevention = matched requests are BLOCKED;
+      detection = matches are only logged/counted (the policy runs in observe-only
+      mode, useful for tuning before enforcement).
+    mappings:
+      aws.wafv2: managed rule group OverrideAction None (prevention) vs Count (detection)
+      azure.frontdoorwaf: policySettings.mode = Prevention | Detection
+      gcp.cloudarmor: rule preview=false (prevention) vs preview=true (detection)
+
+  managed.ruleset:
+    kind: bool
+    description: >
+      A provider-managed baseline rule set (OWASP/common web exploits — SQLi, XSS,
+      etc.) is enabled. The exact rules are the provider's, opaque here; the flag is
+      "am I protected by the managed baseline".
+    mappings:
+      aws.wafv2: AWSManagedRulesCommonRuleSet managed rule group
+      azure.frontdoorwaf: managedRuleSets = Microsoft_DefaultRuleSet
+      gcp.cloudarmor: a preconfigured WAF rule (e.g. sqli/xss expression sets)
+
+  bot.protection:
+    kind: bool
+    description: >
+      Provider-managed bot-mitigation / adaptive-protection rules are enabled
+      (automated-traffic and L7-DDoS heuristics). The heuristics are the provider's;
+      the flag is "is managed bot mitigation on".
+    mappings:
+      aws.wafv2: AWSManagedRulesBotControlRuleSet managed rule group
+      azure.frontdoorwaf: Microsoft_BotManagerRuleSet
+      gcp.cloudarmor: adaptiveProtectionConfig.layer7DdosDefenseConfig.enable
+
+  service.managed:
+    kind: bool
+    description: Managed service vs self-operated
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost of the capability
+    verification: static against a pricing catalog; provider-api (billing) after deploy
+
+# Deliberately absent in v0.1:
+#   - location.region: a WAF policy here is an EDGE/GLOBAL resource (CloudFront-scope
+#     WebACL / Front Door WAF / global Cloud Armor), so there is no residency knob —
+#     the same stance as capability.dns.zone. A regional WAF (ALB-scope WAFv2 /
+#     Application Gateway WAF / regional Cloud Armor) is a later slice.
+#   - custom rule definitions, rate-limit thresholds, IP allow/deny lists, rule
+#     priorities, per-rule actions: all OPAQUE config carried under `implementation:`,
+#     never a vocabulary attribute (invariant #4 — no rule expression language).

@@ -1,0 +1,143 @@
+# Attribute vocabulary for capability.messaging.queue, spec v0.1 (D94).
+# A durable work backlog: messages submitted here are held until ONE consumer
+# processes each (destructive, competing-consumer consumption). The store is the
+# semantic. This is NOT the SQS-vs-SNS split by coincidence — it is the honest cut
+# by what an author can require to be TRUE. Throughput, batch size, visibility
+# timeout, long-poll, filters and DLQ *targets* are implementation noise.
+#
+# STRUCTURAL HONESTY BOUNDARY (D94): a queue's most valuable truths —
+# exactly-once, ordering — are properties of the producer->broker->consumer PATH,
+# and the bound resource contributes only half (SQS FIFO dedups nothing unless
+# producers send dedup ids; Pub/Sub delivers unordered unless publishers set
+# ordering keys). Static verification proves the BROKER's guarantee, never the
+# end-to-end outcome. The o-messaging outcome probe (publish duplicates, verify
+# single-consume) proves the rest. Each such attribute says so, like recovery.rto.
+
+capability: capability.messaging.queue
+version: 0.1
+stateful: true   # a queue holds in-flight data; retirement/replacement drops it
+
+attributes:
+
+  delivery.guarantee:
+    kind: string
+    enum: [at-least-once, exactly-once]
+    description: >
+      The BROKER's minimum delivery guarantee. at-least-once is the baseline both
+      clouds provide. exactly-once asserts the broker will not re-deliver a message
+      already acknowledged — but the mechanisms differ (SQS FIFO content/id-based
+      dedup within a 5-minute window vs Pub/Sub subscription exactly-once delivery),
+      and it is NECESSARY, NOT SUFFICIENT for exactly-once PROCESSING: that also
+      needs producer dedup ids and correct consumer ack. A value here is a claim
+      about the broker until an outcome probe measures the end-to-end behavior.
+    mappings:
+      aws.sqs: exactly-once => FIFO queue + dedup (content-based or explicit id)
+      gcp.pubsub: exactly-once => subscription enableExactlyOnceDelivery
+
+  ordering.enabled:
+    kind: bool
+    description: >
+      Messages are delivered in order WITHIN a sender-chosen group/ordering key
+      (never a global total order — neither cloud offers that). Create-time and
+      immutable on both clouds, so a change is a replacement (D48), gated by
+      allow_replace_stateful.
+    mappings:
+      aws.sqs: FIFO queue (MessageGroupId ordering)
+      gcp.pubsub: subscription enableMessageOrdering (ordering key)
+
+  retention.minimum:
+    kind: duration
+    description: >
+      An unconsumed message survives at least this long (a data-loss floor). A
+      value outside the provider's envelope is REFUSED loudly, never clamped.
+    mappings:
+      aws.sqs: MessageRetentionPeriod (60s–14d)
+      gcp.pubsub: subscription messageRetentionDuration (10m–31d)
+
+  reliability.deadLetter:
+    kind: bool
+    description: >
+      Unprocessed messages are CAPTURED, not lost: a message that fails handling
+      the configured number of times is moved to a dead-letter queue instead of
+      being retried forever or dropped. This is a POSTURE bool — it asserts a DLQ
+      is wired, NOT that the DLQ itself is a governed capability binding (routing
+      failures to a SPECIFIC tracked queue is the deferred cross-capability
+      REFERENCE below). The DLQ target and the retry threshold are implementation
+      operands (implementation.dead_letter_target_arn / max_receive_count), never
+      capability paths — mirroring encryption.customerManagedKeys + kms_key_id.
+    mappings:
+      aws.sqs: RedrivePolicy {deadLetterTargetArn, maxReceiveCount}
+      gcp.pubsub: subscription deadLetterPolicy {deadLetterTopic, maxDeliveryAttempts}
+
+  encryption.atRest:
+    kind: bool
+    description: Provider-side encryption of held messages. Only true is meaningful.
+    mappings:
+      aws.sqs: SSE (SSE-SQS or SSE-KMS)
+      gcp.pubsub: encrypted backlog (default; CMEK via the constitutive topic)
+    recommended:
+      op: equals
+      value: true
+      scope: all
+      rationale: "Encrypt queued messages at rest; queues frequently buffer sensitive payloads."
+      ruleId: PV_R0010
+      ruleVersion: 1
+      controls:
+        FSBP: ["SQS.1"]
+        GDPR: ["Art.32"]
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: >
+      Held messages are encrypted with a CUSTOMER-managed key (CMEK/KMS), not the
+      provider default. The key id is implementation detail
+      (implementation.kms_key_id / kms_key_name), never a capability path.
+    mappings:
+      aws.sqs: KmsMasterKeyId (a customer key)
+      gcp.pubsub: kmsKeyName on the constitutive topic (same create sequence)
+
+  location.region:
+    kind: string
+    description: >
+      Where message data is PERSISTED. NOTE gcp.pubsub is global by default — this
+      maps to the message storage policy, NOT the API-call region; a residency
+      contract "satisfied" by a global topic would be a compliance lie.
+    mappings:
+      aws.sqs: queue region
+      gcp.pubsub: messageStoragePolicy.allowedPersistenceRegions (constitutive topic)
+
+  network.publicExposure:
+    kind: bool
+    description: Whether any public/anonymous producer or consumer path exists.
+    mappings:
+      aws.sqs: no Principal:"*" in the queue resource policy
+      gcp.pubsub: no allUsers/allAuthenticatedUsers IAM binding
+    note: >
+      static verification proves configuration intent; an anonymous-access probe
+      proves the actual absence of a public path.
+
+  service.managed:
+    kind: bool
+    description: Managed service vs self-operated
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    verification: static against a pricing catalog; billing after deploy
+
+# Deliberately absent in v0.1 (implementation noise / topology):
+# visibility timeout, ack deadline, long-poll wait, max message size, batch size,
+# delivery delay, retry/backoff, content-based-dedup toggle (the MECHANISM;
+# delivery.guarantee is the semantic), subscription filters (routing logic — one
+# step from an expression language), raw message delivery, queue names.
+#
+# reliability.deadLetter (above) is the POSTURE bool — "failures are captured to a
+# DLQ, not lost" — with the DLQ target as an implementation operand. What remains
+# deferred, needing a cross-capability REFERENCE kind the engine does not yet have,
+# is the GOVERNED form: routing failures to ANOTHER messaging.queue BINDING (so the
+# DLQ is itself a tracked, verified capability, not just an ARN string). Until that
+# kind exists the ARN operand is an ungoverned edge — honestly narrower than a
+# binding reference, but no longer silently absent.
+#   - governed dead-letter reference -> route failures to a tracked messaging.queue binding
+#   - source topic / fan-out (SNS->SQS, topic->subscription wiring)
+# These are the designated first users of a future binding-reference mechanism.

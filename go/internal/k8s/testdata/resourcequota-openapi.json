@@ -1,0 +1,21 @@
+{
+  "components": { "schemas": {
+    "io.k8s.api.core.v1.ResourceQuota": {
+      "type": "object",
+      "x-kubernetes-group-version-kind": [{"group":"","version":"v1","kind":"ResourceQuota"}],
+      "properties": {
+        "spec": {"$ref": "#/components/schemas/io.k8s.api.core.v1.ResourceQuotaSpec"},
+        "metadata": {"$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"}
+      }
+    },
+    "io.k8s.api.core.v1.ResourceQuotaSpec": {
+      "type": "object",
+      "properties": {
+        "hard": {"type":"object","additionalProperties":{"$ref":"#/components/schemas/io.k8s.apimachinery.pkg.api.resource.Quantity"}},
+        "scopes": {"type":"array","items":{"type":"string"}}
+      }
+    },
+    "io.k8s.apimachinery.pkg.api.resource.Quantity": {"type":"string"},
+    "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta": {"type":"object","properties":{"name":{"type":"string"}}}
+  }}
+}

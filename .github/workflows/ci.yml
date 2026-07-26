@@ -1,0 +1,99 @@
+# The project gate on every PR and push (D25): vet + BOTH conformance suites
+# (Go runtime + Python reference) must pass. "Conformance is the source of
+# truth" — no contribution merges until it proves it against the suite, in both
+# implementations. Hermetic: no cloud credentials, no network beyond the action
+# runners (the runtime itself makes zero network calls here).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: go/go.sum
+
+      # The reference implementation is Python 3.12, stdlib + PyYAML only.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install the one Python dependency (PyYAML)
+        run: python -m pip install --disable-pip-version-check pyyaml
+
+      - name: Gate (make check — vet + Go and Python conformance + differential-safe)
+        run: make check
+
+      # Seeded cross-implementation fuzzing (D38): random docs through both
+      # CLIs must agree. A robustness gate on top of the fixed conformance set.
+      - name: Differential (cross-impl fuzz)
+        run: make differential
+
+      # Coverage of the Go runtime — reported, not yet gated on a threshold.
+      - name: Coverage
+        working-directory: go
+        run: |
+          go test -coverprofile=cover.out ./... >/dev/null
+          go tool cover -func=cover.out | tail -1
+
+  # The race detector: the runtime is concurrency-heavy (lease acquisition, the
+  # ledger, the scenario engine). Kept as its own job so a data race is a distinct,
+  # legible failure rather than hidden in the gate.
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: go/go.sum
+      - name: go test -race
+        run: make race
+
+  # Portability: the release cross-builds darwin/arm64 but never tested it. macos-latest
+  # is arm64, so this exercises the exact platform that only ever compiled. Go-only (no
+  # Python) — the conformance source-of-truth still runs in `gate`.
+  portability:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: go/go.sum
+      - name: build + test
+        working-directory: go
+        run: go build ./... && go test ./...
+
+  # go.mod/go.sum stay minimal and correct: a drift (a stray require, a mislabeled
+  # // indirect) fails here instead of rotting.
+  tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: go/go.sum
+      - name: go mod tidy is a no-op
+        working-directory: go
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+      - name: go mod verify
+        working-directory: go
+        run: go mod verify

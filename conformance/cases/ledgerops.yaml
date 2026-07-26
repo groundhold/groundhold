@@ -1,0 +1,235 @@
+# Repair + anchor (D69/D70): the corruption half of the state model.
+# Repair never rewrites history — diagnosis is read-only, quarantine is
+# fingerprint-gated two-step consent that renames the corrupt file
+# aside and restores the valid prefix. The anchor closes the D68
+# boundary: the last line of a chain has no successor to pin it, so its
+# protection lives OUTSIDE the file. Go-only.
+suite: ledgerops
+cases:
+  - name: repair-diagnoses-a-healthy-ledger
+    impl: go
+    description: >
+      D69: repair on a clean ledger is a free no-op — status healthy,
+      no findings, the whole file is the valid prefix.
+    ledgerops:
+      ledger: &lo-seed
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: binding.updated
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+            body:
+              capability: db
+              environment: test
+              provider: { name: fake }
+              resources:
+                - { id: primary, type: t, providerId: "fake:db-1", generation: 1 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.released
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+      steps:
+        - repair: {}
+          expect: { exit: 0, status: healthy, findingKinds: [], validPrefix: 3 }
+
+  - name: repair-quarantines-a-torn-final-line
+    impl: go
+    description: >
+      D69: a write that died mid-line is diagnosed (torn-final-line,
+      valid prefix = every complete line), quarantine restores the
+      prefix, and the repaired ledger replays clean. History is
+      preserved verbatim in the quarantined file, never deleted.
+    ledgerops:
+      ledger: *lo-seed
+      steps:
+        - tamper: { tearBytes: 15 }
+        - replay: {}
+          expect: { exit: 5 }
+        - repair: {}
+          expect: { exit: 5, status: corrupt,
+                    findingKinds: [torn-final-line], validPrefix: 2 }
+        - repair: { quarantine: true, fingerprint: "@last" }
+          expect: { exit: 0, status: repaired, keptLines: 2 }
+        - replay: {}
+          expect: { exit: 0 }
+
+  - name: repair-quarantines-a-chain-break
+    impl: go
+    description: >
+      D69: a dropped middle line breaks the successor's prev (C2/D68);
+      repair names the exact line, the valid prefix stops before it,
+      and quarantine brings the ledger back to a replayable state.
+    ledgerops:
+      ledger: *lo-seed
+      steps:
+        - tamper: { dropLine: 2 }
+        - replay: {}
+          expect: { exit: 5 }
+        - repair: {}
+          expect: { exit: 5, status: corrupt,
+                    findingKinds: [chain-broken], validPrefix: 1 }
+        - repair: { quarantine: true, fingerprint: "@last" }
+          expect: { exit: 0, status: repaired, keptLines: 1 }
+        - replay: {}
+          expect: { exit: 0 }
+
+  - name: repair-diagnoses-a-pre-d67-fork
+    impl: go
+    description: >
+      D69 closes D67's future work: a ledger where two writers both
+      won a lease (the pre-D67 stale-snapshot race) replays fail-closed
+      forever. Repair names the fork (rule-rejected, active lease
+      exists), and quarantine — never a silent tolerance — restores
+      operability. The quarantined half may have mutated the cloud:
+      the remediation says re-observe, not trust.
+    ledgerops:
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: writer-1, type: runtime }
+            body: { ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:01Z"
+            actor: { id: writer-2, type: runtime }
+            body: { ttlSeconds: 300 }
+      steps:
+        - replay: {}
+          expect: { exit: 5 }
+        - repair: {}
+          expect: { exit: 5, status: corrupt,
+                    findingKinds: [rule-rejected], validPrefix: 1,
+                    detailContains: "active lease exists" }
+        - repair: { quarantine: true, fingerprint: "@last" }
+          expect: { exit: 0, status: repaired, keptLines: 1 }
+        - replay: {}
+          expect: { exit: 0 }
+
+  - name: repair-refuses-a-stale-fingerprint
+    impl: go
+    description: >
+      D69: quarantine is consent to cut a SPECIFIC diagnosed state —
+      a wrong or missing fingerprint refuses (confirmation-required)
+      and the file is untouched, still corrupt, still refusing.
+    ledgerops:
+      ledger: *lo-seed
+      steps:
+        - tamper: { tearBytes: 15 }
+        - repair: { quarantine: true, fingerprint: "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+          expect: { exit: 2, status: refused, code: confirmation-required }
+        - replay: {}
+          expect: { exit: 5 }
+
+  - name: anchor-detects-tail-truncation
+    impl: go
+    description: >
+      D70 closes D68's boundary: dropping the LAST line replays CLEAN —
+      no successor pins it — but the anchor, stored outside the file,
+      catches the cut. The check is positional; exit 5 on truncation.
+    ledgerops:
+      ledger: *lo-seed
+      steps:
+        - anchor: {}
+          expect: { exit: 0, events: 3 }
+        - anchor: { check: true }
+          expect: { exit: 0, status: verified }
+        - tamper: { keepLines: 2 }
+        - replay: {}
+          expect: { exit: 0 }          # the chain alone cannot see it
+        - anchor: { check: true }
+          expect: { exit: 5, status: truncated }
+
+  - name: anchor-detects-a-rewritten-tail
+    impl: go
+    description: >
+      D70: same length, different content — the hash at the anchored
+      position differs, so the check reports divergence, not a clean
+      extension. Positional matching defeats drop-and-append games.
+    ledgerops:
+      ledger: *lo-seed
+      steps:
+        - anchor: {}
+          expect: { exit: 0, events: 3 }
+        - tamper:
+            reseedEvents:
+              - apiVersion: state/v0
+                kind: LedgerEvent
+                event:
+                  type: lease.acquired
+                  environment: test
+                  capabilities: [db]
+                  occurredAt: "2026-07-11T19:00:00Z"
+                  actor: { id: seeder, type: human }
+                  body: { ttlSeconds: 300 }
+              - apiVersion: state/v0
+                kind: LedgerEvent
+                event:
+                  type: binding.updated
+                  environment: test
+                  capabilities: [db]
+                  occurredAt: "2026-07-11T19:00:00Z"
+                  actor: { id: seeder, type: human }
+                  fencingToken: 1
+                  body:
+                    capability: db
+                    environment: test
+                    provider: { name: fake }
+                    resources:
+                      - { id: primary, type: t, providerId: "fake:db-666", generation: 1 }
+              - apiVersion: state/v0
+                kind: LedgerEvent
+                event:
+                  type: lease.released
+                  environment: test
+                  capabilities: [db]
+                  occurredAt: "2026-07-11T19:00:00Z"
+                  actor: { id: seeder, type: human }
+                  fencingToken: 1
+        - replay: {}
+          expect: { exit: 0 }
+        - anchor: { check: true }
+          expect: { exit: 5, status: diverged }
+
+  - name: anchor-verifies-an-honest-extension
+    impl: go
+    description: >
+      D70: anchoring a prefix and then appending honestly must verify —
+      the anchor is a floor, not a freeze. Events after the last anchor
+      stay unprotected until re-anchored; that boundary is documented,
+      not hidden.
+    ledgerops:
+      ledger: *lo-seed
+      steps:
+        - tamper: { keepLines: 2 }
+        - anchor: {}
+          expect: { exit: 0, events: 2 }
+        - tamper: { reseedEvents: *lo-seed }   # the honest full history
+        - anchor: { check: true }
+          expect: { exit: 0, status: verified }

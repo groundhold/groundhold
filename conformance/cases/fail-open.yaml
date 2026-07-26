@@ -1,0 +1,261 @@
+# Fail-closed semantics pinned by design decisions D14, D16, D17.
+# These cases were written BEFORE the fixes they pin — the suite is the
+# spec (D9); the implementation follows.
+
+cases:
+  - name: in-with-no-comparable-element-is-unverifiable
+    description: >
+      D14: a duration tested for membership in a list of numbers is a
+      typing error in one of the documents. The verdict must be
+      unverifiable, never a silent violated.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t8, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-rpo
+            subject: db
+            path: recovery.rpo
+            op: in
+            value: [300, 600]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t8
+      capabilities:
+        db:
+          attributes:
+            recovery.rpo: 5m
+    expect:
+      executable: false
+      verdicts:
+        c-rpo: unverifiable
+
+  - name: in-with-empty-list-is-unverifiable
+    description: >
+      D14: an empty membership list is degenerate — nothing in it is
+      comparable with anything.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t9, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-residency
+            subject: db
+            path: location.region
+            op: in
+            value: []
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t9
+      capabilities:
+        db:
+          attributes:
+            location.region: europe-west1
+    expect:
+      executable: false
+      verdicts:
+        c-residency: unverifiable
+
+  - name: in-mixed-list-with-comparable-element-still-compares
+    description: >
+      D14: mixed-kind lists are allowed as long as at least one comparable
+      element exists; comparison proceeds over the comparable subset.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t10, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-residency
+            subject: db
+            path: location.region
+            op: in
+            value: [europe-west1, 5m]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t10
+      capabilities:
+        db:
+          attributes:
+            location.region: europe-west1
+    expect:
+      executable: true
+      verdicts:
+        c-residency: satisfied
+
+  - name: not-in-with-no-comparable-element-is-unverifiable
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t11, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-region
+            subject: db
+            path: location.region
+            op: not-in
+            value: [300, 600]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t11
+      capabilities:
+        db:
+          attributes:
+            location.region: europe-west1
+    expect:
+      executable: false
+      verdicts:
+        c-region: unverifiable
+
+  - name: subset-of-with-incomparable-element-is-unverifiable
+    description: >
+      D14: every element of the left list must have at least one comparable
+      element on the right; a duration among required string certifications
+      is a typing error.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t12, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-certs
+            subject: db
+            path: compliance.certifications
+            op: subset-of
+            value: [gdpr, hipaa]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t12
+      capabilities:
+        db:
+          attributes:
+            compliance.certifications: [gdpr, 30d]
+    expect:
+      executable: false
+      verdicts:
+        c-certs: unverifiable
+
+  - name: objective-on-absent-path-is-unknown
+    description: >
+      D16: an objective whose path the candidate does not declare has
+      nothing to score. satisfied would be a claim without an observation.
+      Objectives are soft, so unknown does not block.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t13, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        soft:
+          - id: s-cost
+            subject: db
+            path: cost.monthly
+            objective: minimize
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t13
+      capabilities:
+        db:
+          attributes: {}
+    expect:
+      executable: true
+      verdicts:
+        s-cost: unknown
+
+  - name: candidate-for-wrong-contract-blocks
+    description: >
+      D17: a candidate that names a different contract cannot be executable
+      against this one, even when every verdict is satisfied.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t14, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-managed
+            subject: db
+            path: service.managed
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: some-other-contract
+      capabilities:
+        db:
+          attributes:
+            service.managed: true
+    expect:
+      executable: false
+      verdicts:
+        c-managed: satisfied
+
+  - name: not-in-with-a-comparable-nonmatch-and-an-incomparable-is-unverifiable
+    description: >
+      The membership fail-open (strong-Kleene ∨). `x in L` is a disjunction of
+      `x == element`. When one element is a comparable NON-match (F) and another is
+      ill-typed (⊥), the disjunction is F ∨ ⊥ = ⊥ — the incomparable element could
+      have been the match, so `in` is undecidable and `not-in` must be unverifiable,
+      never a coerced satisfied. The pre-fix rule skipped the incomparable element
+      and returned "not found", so a HARD not-in constraint fell open to satisfied.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: nimix1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-nimix
+            subject: db
+            path: availability.class
+            op: not-in
+            value: ["2h", "regional"]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: nimix1
+      capabilities:
+        db:
+          attributes:
+            availability.class: "zonal"
+    expect:
+      executable: false
+      verdicts:
+        c-nimix: unverifiable

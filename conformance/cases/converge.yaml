@@ -1,0 +1,189 @@
+# Converge porcelain (D51). Porcelain hides keystrokes, never
+# information: refusals pass through verbatim, "nothing to change" is
+# SUCCESS, --yes never covers destruction, --json is non-interactive.
+# Go-only: the porcelain composes Go-only lifecycle commands.
+suite: converge
+cases:
+  - name: converge-full-loop-then-converged
+    impl: go
+    description: >
+      D51: one verb runs verify, plan, forecast, confirm, apply, observe
+      and a convergence check; a second run against the ledger the first
+      one wrote reports "converged" without touching the executor.
+    converge:
+      contract: &cv-contract
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: cv-t, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-managed
+              subject: db
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate: &cv-candidate
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: cv-t
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+      runs:
+        - at: "2026-07-11T22:00:00Z"
+          approve: true
+          expect:
+            exit: 0
+            status: applied
+            convergence: verified
+            banner: CONVERGED
+            phases: [verify, plan, forecast, confirm, apply, observe,
+                     convergence-check]
+        - at: "2026-07-11T22:10:00Z"
+          approve: true
+          expect:
+            exit: 0
+            status: converged
+            banner: CONVERGED
+            phases: [verify, plan]
+
+  - name: converge-yes-does-not-cover-destruction
+    impl: go
+    description: >
+      D51 double friction: --yes skips prompts for already-permitted
+      actions only. A plan carrying dataLoss=certain refuses under plain
+      --yes and executes only with the explicit --allow-data-loss; the
+      confirm phase runs BEFORE apply ever appears.
+    converge:
+      contract: *cv-contract
+      candidate: *cv-candidate
+      runs:
+        - at: "2026-07-11T22:00:00Z"
+          approve: true
+          expect: { exit: 0, status: applied }
+        - at: "2026-07-11T22:20:00Z"
+          approve: true
+          contract: &cv-contract-retired
+            apiVersion: contract/v0.1
+            kind: InfrastructureContract
+            meta: { id: cv-t, environment: test, version: 2 }
+            capabilities:
+              - id: db
+                type: capability.database.relational
+                state: retired
+          candidate: &cv-candidate-empty
+            apiVersion: candidate/v0.1
+            kind: ImplementationCandidate
+            contract: cv-t
+            capabilities: {}
+          expect:
+            exit: 2
+            status: refused
+            code: consent-required
+            phases: [verify, plan, forecast, confirm]
+            reasonContains: "--yes does not cover destruction"
+        - at: "2026-07-11T22:21:00Z"
+          approve: true
+          allowDataLoss: true
+          contract: *cv-contract-retired
+          candidate: *cv-candidate-empty
+          expect:
+            exit: 0
+            status: applied
+        - at: "2026-07-11T22:30:00Z"
+          approve: true
+          contract: *cv-contract-retired
+          candidate: *cv-candidate-empty
+          expect:
+            exit: 0
+            status: converged
+
+  - name: converge-json-is-noninteractive
+    impl: go
+    description: >
+      D51: --json cannot prompt — without --yes the confirm gate refuses
+      instead of silently proceeding or corrupting the JSON stream.
+    converge:
+      contract: *cv-contract
+      candidate: *cv-candidate
+      runs:
+        - at: "2026-07-11T22:00:00Z"
+          expect:
+            exit: 2
+            status: refused
+            code: confirmation-required
+            phases: [verify, plan, forecast, confirm]
+            reasonContains: "confirmation required"
+
+  - name: converge-passes-refusals-through-verbatim
+    impl: go
+    description: >
+      D49/D51: porcelain never converts a refusal into advice. A
+      non-executable candidate stops at verify with the blocking reasons
+      verbatim, exit 2.
+    converge:
+      contract: *cv-contract
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: cv-t
+        capabilities:
+          db:
+            attributes: {}
+      runs:
+        - at: "2026-07-11T22:00:00Z"
+          approve: true
+          expect:
+            exit: 2
+            status: refused
+            phases: [verify]
+            reasonContains: "hard constraint not proven: c-managed"
+
+  - name: converge-inconclusive-check-banners-applied
+    impl: go
+    description: >
+      D136: CONVERGED is a claim about verified reality — when the
+      post-apply convergence check cannot cover every declared
+      attribute (observation-required), the run reports exactly what it
+      proved: APPLIED, with convergence: inconclusive in the machine
+      result. A green word never claims more than was checked.
+    converge:
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: cv-inc, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-region
+              subject: db
+              path: location.region
+              op: equals
+              value: europe-central2
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: cv-inc
+        capabilities:
+          db:
+            attributes:
+              location.region: europe-central2
+              service.managed: true
+      runs:
+        - at: "2026-07-11T22:00:00Z"
+          approve: true
+          expect:
+            exit: 0
+            status: applied
+            convergence: inconclusive
+            banner: APPLIED
+            phases: [verify, plan, forecast, confirm, apply, observe,
+                     convergence-check]

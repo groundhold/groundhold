@@ -1,0 +1,163 @@
+# Terraform/pulumi state import (D53): state parses into ADOPTION
+# HINTS — mapping suggestions and expected attributes to verify against
+# live discovery — never a contract, never observations. Values cross
+# only through the explicit per-path allowlist; secrets are
+# structurally excluded. Go-only (importer is runtime porcelain).
+suite: state-import
+cases:
+  - name: tfstate-maps-to-adoption-hints
+    impl: go
+    description: >
+      D53: a tfstate v4 google_sql_database_instance maps through the
+      SAME enum tables as the API observe mapper; tier stays out
+      (implementation noise); the secret in google_sql_user never
+      crosses; deletion_protection=false surfaces as a note; data
+      sources and unmapped types become diagnostics.
+    hints:
+      state:
+        version: 4
+        terraform_version: "1.5.7"
+        serial: 42
+        lineage: 0b7bd93d-conf
+        resources:
+          - mode: managed
+            type: google_sql_database_instance
+            name: legacy
+            instances:
+              - schema_version: 0
+                attributes:
+                  name: legacy-db
+                  project: acme-prod
+                  region: europe-central2
+                  database_version: MYSQL_8_0
+                  deletion_protection: false
+                  settings:
+                    - tier: db-f1-micro
+                      availability_type: ZONAL
+                      ip_configuration:
+                        - ipv4_enabled: false
+                      backup_configuration:
+                        - enabled: true
+                          point_in_time_recovery_enabled: false
+          - mode: managed
+            type: google_sql_user
+            name: app
+            instances:
+              - attributes: { name: app, password: SUPER-SECRET }
+          - mode: data
+            type: google_project
+            name: current
+            instances: []
+          - mode: managed
+            type: google_compute_network
+            name: vpc
+            instances: []
+    expect:
+      source: { format: tfstate, serial: 42, lineage: 0b7bd93d-conf }
+      hints:
+        - address: google_sql_database_instance.legacy
+          resourceType: capability.database.relational
+          providerId: "acme-prod:europe-central2:legacy-db"
+          expected:
+            engine.protocol: mysql/8.0
+            location.region: europe-central2
+            availability.class: zonal
+            network.publicExposure: false
+            recovery.rpo: 24h
+            service.managed: true
+          notes:
+            - "deletion_protection is OFF in state — Groundhold defaults
+              protection ON at first update/replace"
+      diagnosticsContain:
+        - "google_sql_user.app: composite child"
+        - "data.google_project.current: data source, skipped"
+        - "google_compute_network.vpc: no vocabulary mapping"
+      outputNeverContains: [SUPER-SECRET, db-f1-micro]
+
+  - name: pulumi-checkpoint-maps-to-adoption-hints
+    impl: go
+    description: >
+      D53: pulumi OUTPUTS (the last state pulumi saw — API-shaped) feed
+      the mapping, not inputs (desires). PITR yields a diagnostic, never
+      a fabricated recovery.rpo; the user secret never crosses.
+    hints:
+      state:
+        version: 3
+        deployment:
+          resources:
+            - urn: "urn:pulumi:prod::app::pulumi:pulumi:Stack::app-prod"
+              type: "pulumi:pulumi:Stack"
+            - urn: "urn:pulumi:prod::app::gcp:sql/databaseInstance:DatabaseInstance::legacy"
+              type: "gcp:sql/databaseInstance:DatabaseInstance"
+              inputs:
+                settings: { tier: db-f1-micro }
+              outputs:
+                name: legacy-db
+                project: acme-prod
+                region: europe-central2
+                databaseVersion: POSTGRES_16
+                deletionProtection: true
+                settings:
+                  availabilityType: REGIONAL
+                  ipConfiguration: { ipv4Enabled: true }
+                  backupConfiguration:
+                    enabled: true
+                    pointInTimeRecoveryEnabled: true
+            - urn: "urn:pulumi:prod::app::gcp:sql/user:User::app"
+              type: "gcp:sql/user:User"
+              outputs: { password: PULUMI-SECRET }
+    expect:
+      source: { format: pulumi }
+      hints:
+        - address: "urn:pulumi:prod::app::gcp:sql/databaseInstance:DatabaseInstance::legacy"
+          resourceType: capability.database.relational
+          providerId: "acme-prod:europe-central2:legacy-db"
+          expected:
+            engine.protocol: postgresql/16
+            location.region: europe-central2
+            availability.class: regional
+            network.publicExposure: true
+            service.managed: true
+      diagnosticsContain:
+        - "PITR enabled"
+        - "gcp:sql/user:User::app: composite child"
+      outputNeverContains: [PULUMI-SECRET, db-f1-micro]
+
+  - name: unknown-state-format-refuses
+    impl: go
+    description: >
+      D53: an unrecognizable state document is an error, never a guess —
+      silently mis-parsing someone's state would seed wrong adoptions.
+    hints:
+      state: { foo: 1 }
+    expect:
+      error: state
+
+  - name: identity-disagreement-refuses-the-hint
+    impl: go
+    description: >
+      D53 (review blocker): when state's connection_name disagrees with
+      the composed project:region:name, the hint is refused with a
+      diagnostic — a mis-seeded adoption is worse than no suggestion,
+      and the importer never guesses which field is right.
+    hints:
+      state:
+        version: 4
+        serial: 1
+        lineage: x
+        resources:
+          - mode: managed
+            type: google_sql_database_instance
+            name: legacy
+            instances:
+              - attributes:
+                  name: legacy-db
+                  project: acme-prod
+                  region: europe-central2
+                  connection_name: "other-project:europe-central2:legacy-db"
+                  database_version: MYSQL_8_0
+    expect:
+      hints: []
+      diagnosticsContain:
+        - "identity disagreement"
+        - "hint refused"

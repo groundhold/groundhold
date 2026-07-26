@@ -1,0 +1,605 @@
+package contract
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"groundhold/internal/scalars"
+	"groundhold/internal/vocab"
+)
+
+func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+// mustParse is a test helper: scalar Parse that fails the test on error.
+func mustParse(t *testing.T, v any) *scalars.Scalar {
+	t.Helper()
+	s, err := scalars.Parse(v)
+	if err != nil {
+		t.Fatalf("Parse(%v): %v", v, err)
+	}
+	return s
+}
+
+// --- idIsClean: control characters are rejected in stable ids (D179) ---
+
+func TestIdIsClean(t *testing.T) {
+	cases := []struct {
+		name string
+		id   string
+		want bool
+	}{
+		{"ordinary", "db-primary_1.eu", true},
+		{"empty", "", true}, // empty has no chars; emptiness is caught elsewhere
+		{"nul", "a\x00b", false},
+		{"del", "a\x7fb", false},
+		{"tab", "a\tb", false},
+		{"newline", "a\nb", false},
+		{"unit-separator", "a\x1fb", false},
+		{"space-ok", "a b", true}, // 0x20 is the first allowed rune
+		{"high-unicode-ok", "café", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := idIsClean(c.id); got != c.want {
+				t.Errorf("idIsClean(%q)=%v want %v", c.id, got, c.want)
+			}
+		})
+	}
+}
+
+// --- toFloat: only int/int64/float64 are numbers; strings/bools are not ---
+
+func TestToFloat(t *testing.T) {
+	cases := []struct {
+		name  string
+		in    any
+		want  float64
+		wantK bool
+	}{
+		{"int", 7, 7, true},
+		{"float", 1.5, 1.5, true},
+		{"string", "3", 0, false},
+		{"bool", true, 0, false},
+		{"nil", nil, 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := toFloat(c.in)
+			if got != c.want || ok != c.wantK {
+				t.Errorf("toFloat(%v)=(%v,%v) want (%v,%v)", c.in, got, ok, c.want, c.wantK)
+			}
+		})
+	}
+}
+
+// --- newConstraint: the richest validator in the package ---
+
+func TestNewConstraintErrors(t *testing.T) {
+	cases := []struct {
+		name     string
+		raw      map[string]any
+		severity string
+		errSub   string // substring expected in the error
+	}{
+		{"missing id", map[string]any{"op": "equals", "value": 1}, "hard",
+			"constraint missing id"},
+		{"control-char id", map[string]any{"id": "a\x00b", "op": "equals", "value": 1}, "hard",
+			"control character"},
+		{"invalid severity", map[string]any{"id": "c", "op": "equals", "value": 1}, "critical",
+			"invalid severity"},
+		{"unknown op", map[string]any{"id": "c", "op": "matches", "value": 1}, "hard",
+			"unknown operator"},
+		{"op requires value", map[string]any{"id": "c", "op": "equals"}, "hard",
+			"requires a value"},
+		{"unknown verify method", map[string]any{"id": "c", "op": "equals", "value": 1,
+			"verify": map[string]any{"method": "guess"}}, "hard", "unknown verify method"},
+		{"ill-typed value (nil)", map[string]any{"id": "c", "op": "equals", "value": nil}, "hard",
+			"ill-typed value"},
+		{"in requires list", map[string]any{"id": "c", "op": "in", "value": "eu"}, "hard",
+			"requires a list value"},
+		{"compatible-with requires protocol", map[string]any{"id": "c",
+			"op": "compatible-with", "value": "eu"}, "hard", "requires a protocol value"},
+		{"lte non-orderable", map[string]any{"id": "c", "op": "lte", "value": "eu"}, "hard",
+			"not orderable"},
+		// objective rules
+		{"invalid objective", map[string]any{"id": "c", "objective": "flatten"}, "soft",
+			"invalid objective"},
+		{"objective on hard", map[string]any{"id": "c", "objective": "minimize"}, "hard",
+			"only valid on soft"},
+		{"objective + op mutually exclusive", map[string]any{"id": "c",
+			"objective": "minimize", "op": "equals", "value": 1}, "soft",
+			"mutually exclusive"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := newConstraint(c.raw, c.severity)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", c.errSub)
+			}
+			if !contains(err.Error(), c.errSub) {
+				t.Errorf("error %q does not contain %q", err.Error(), c.errSub)
+			}
+		})
+	}
+}
+
+func TestNewConstraintOK(t *testing.T) {
+	t.Run("equals parses expected eagerly (D19)", func(t *testing.T) {
+		c, err := newConstraint(map[string]any{"id": "rpo", "op": "lte", "value": "5m"}, "hard")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if c.Expected == nil || c.Expected.Kind != scalars.Duration {
+			t.Fatalf("expected duration scalar, got %+v", c.Expected)
+		}
+		if c.Severity != "hard" || c.Op != "lte" || c.ID != "rpo" {
+			t.Errorf("field mismatch: %+v", c)
+		}
+	})
+
+	t.Run("presence op leaves Expected nil and ignores value", func(t *testing.T) {
+		// SURPRISING: an "exists" op with a spurious value is accepted, and the
+		// value is silently ignored (Expected stays nil). Pinned to document it.
+		c, err := newConstraint(map[string]any{"id": "e", "op": "exists",
+			"value": "ignored"}, "hard")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if c.Expected != nil {
+			t.Errorf("presence op should not parse an expected scalar, got %+v", c.Expected)
+		}
+	})
+
+	t.Run("soft objective is valid without op/value", func(t *testing.T) {
+		c, err := newConstraint(map[string]any{"id": "cost", "objective": "minimize"}, "soft")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if c.Objective != "minimize" || c.Expected != nil {
+			t.Errorf("unexpected constraint: %+v", c)
+		}
+	})
+
+	t.Run("default verify method is static", func(t *testing.T) {
+		c, err := newConstraint(map[string]any{"id": "x", "op": "equals", "value": 1}, "hard")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if c.VerifyMethod != "static" {
+			t.Errorf("default method=%q want static", c.VerifyMethod)
+		}
+	})
+}
+
+// --- provenanced: provenance survives (invariant #3), unknown may be valueless ---
+
+func TestProvenanced(t *testing.T) {
+	t.Run("bare scalar defaults to declared", func(t *testing.T) {
+		p, err := provenanced("5m")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.Status != "declared" || p.Scalar == nil || p.Scalar.Kind != scalars.Duration {
+			t.Errorf("unexpected provenanced: %+v", p)
+		}
+	})
+
+	t.Run("unknown status may omit value", func(t *testing.T) {
+		p, err := provenanced(map[string]any{"status": "unknown"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.Status != "unknown" || p.Scalar != nil {
+			t.Errorf("unknown must carry nil scalar, got %+v", p)
+		}
+	})
+
+	t.Run("non-unknown status requires a value", func(t *testing.T) {
+		_, err := provenanced(map[string]any{"status": "assumed"})
+		if err == nil || !contains(err.Error(), "requires a value") {
+			t.Fatalf("want requires-a-value error, got %v", err)
+		}
+	})
+
+	t.Run("invalid status refused", func(t *testing.T) {
+		_, err := provenanced(map[string]any{"status": "guessed", "value": 1})
+		if err == nil || !contains(err.Error(), "invalid provenance status") {
+			t.Fatalf("want invalid-status error, got %v", err)
+		}
+	})
+
+	t.Run("confidence out of range refused", func(t *testing.T) {
+		_, err := provenanced(map[string]any{"status": "assumed", "value": 1,
+			"confidence": 1.5})
+		if err == nil || !contains(err.Error(), "confidence") {
+			t.Fatalf("want confidence error, got %v", err)
+		}
+	})
+
+	t.Run("confidence and source survive", func(t *testing.T) {
+		p, err := provenanced(map[string]any{"status": "inferred", "value": "5m",
+			"confidence": 0.75, "source": "code:db.go"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.Confidence == nil || *p.Confidence != 0.75 || p.Source != "code:db.go" {
+			t.Errorf("provenance fields lost: %+v", p)
+		}
+	})
+
+	t.Run("map with value but no status is treated as a scalar object, not provenance",
+		func(t *testing.T) {
+			// SURPRISING but by-design: the provenance branch requires a "status"
+			// key. A {value, source} map without status falls through to scalar
+			// parsing, which cannot type it -> error. Pinned.
+			_, err := provenanced(map[string]any{"value": "5m", "source": "x"})
+			if err == nil || !contains(err.Error(), "cannot type object value") {
+				t.Fatalf("want cannot-type error, got %v", err)
+			}
+		})
+}
+
+// --- LoadContractDoc: structural validation, fail-closed (D19) ---
+
+// baseContract returns a minimal valid contract document; tests mutate a clone.
+func baseContract() map[string]any {
+	return map[string]any{
+		"kind":       "InfrastructureContract",
+		"apiVersion": "contract/v0.1",
+		"meta":       map[string]any{"id": "ctr-1", "environment": "prod", "version": 2},
+		"capabilities": []any{
+			map[string]any{"id": "db", "type": "capability.database.relational"},
+		},
+	}
+}
+
+func TestLoadContractDocErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(map[string]any)
+		errSub string
+	}{
+		{"wrong kind", func(d map[string]any) { d["kind"] = "Nope" }, "kind must be"},
+		{"wrong apiVersion", func(d map[string]any) { d["apiVersion"] = "contract/v9" },
+			"apiVersion must be"},
+		{"missing meta id", func(d map[string]any) { d["meta"] = map[string]any{} },
+			"meta.id is required"},
+		{"capability missing id", func(d map[string]any) {
+			d["capabilities"] = []any{map[string]any{"type": "capability.database.relational"}}
+		}, "capability missing id"},
+		{"control-char cap id", func(d map[string]any) {
+			d["capabilities"] = []any{map[string]any{"id": "a\x00b",
+				"type": "capability.database.relational"}}
+		}, "control character"},
+		{"unknown cap type", func(d map[string]any) {
+			d["capabilities"] = []any{map[string]any{"id": "db", "type": "capability.bogus"}}
+		}, "unknown capability type"},
+		{"duplicate cap id", func(d map[string]any) {
+			d["capabilities"] = []any{
+				map[string]any{"id": "db", "type": "capability.database.relational"},
+				map[string]any{"id": "db", "type": "capability.storage.object"},
+			}
+		}, "duplicate capability id"},
+		{"invalid cap state", func(d map[string]any) {
+			d["capabilities"] = []any{map[string]any{"id": "db",
+				"type": "capability.database.relational", "state": "paused"}}
+		}, "invalid state"},
+		{"retired cap with requirements", func(d map[string]any) {
+			d["capabilities"] = []any{map[string]any{"id": "db",
+				"type": "capability.database.relational", "state": "retired",
+				"requirements": map[string]any{"engine": map[string]any{"value": "x"}}}}
+		}, "retired capability cannot carry requirements"},
+		{"duplicate constraint id", func(d map[string]any) {
+			d["constraints"] = map[string]any{"hard": []any{
+				map[string]any{"id": "c1", "subject": "db", "op": "equals", "value": 1},
+				map[string]any{"id": "c1", "subject": "db", "op": "equals", "value": 2},
+			}}
+		}, "duplicate constraint ids"},
+		{"unknown subject", func(d map[string]any) {
+			d["constraints"] = map[string]any{"hard": []any{
+				map[string]any{"id": "c1", "subject": "ghost", "op": "equals", "value": 1},
+			}}
+		}, "unknown subject"},
+		{"constraint targets retired cap", func(d map[string]any) {
+			d["capabilities"] = []any{
+				map[string]any{"id": "db", "type": "capability.database.relational",
+					"state": "retired"},
+			}
+			d["constraints"] = map[string]any{"hard": []any{
+				map[string]any{"id": "c1", "subject": "db", "op": "equals", "value": 1},
+			}}
+		}, "targets retired capability"},
+		{"assumption unknown affects", func(d map[string]any) {
+			d["assumptions"] = []any{map[string]any{"id": "a1", "status": "assumed",
+				"affects": []any{"nope"}}}
+		}, "affects unknown constraint"},
+		{"assumption bad status", func(d map[string]any) {
+			d["assumptions"] = []any{map[string]any{"id": "a1", "status": "hunch"}}
+		}, "invalid status"},
+		{"autonomy forbidden unknown constraint", func(d map[string]any) {
+			d["autonomy"] = map[string]any{"forbidden": []any{
+				map[string]any{"disable": "ghost"}}}
+		}, "unknown constraint"},
+		{"autonomy allow_replace unknown cap", func(d map[string]any) {
+			d["autonomy"] = map[string]any{"allow_replace_stateful": []any{"ghost"}}
+		}, "unknown capability"},
+		{"autonomy no_assumed_hard_basis non-bool", func(d map[string]any) {
+			d["autonomy"] = map[string]any{"no_assumed_hard_basis": "yes"}
+		}, "must be a boolean"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			doc := baseContract()
+			c.mutate(doc)
+			_, err := LoadContractDoc(doc)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", c.errSub)
+			}
+			if !contains(err.Error(), c.errSub) {
+				t.Errorf("error %q does not contain %q", err.Error(), c.errSub)
+			}
+		})
+	}
+}
+
+func TestLoadContractDocOK(t *testing.T) {
+	t.Run("minimal valid contract, version parsed", func(t *testing.T) {
+		c, err := LoadContractDoc(baseContract())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if c.ID != "ctr-1" || c.Environment != "prod" || c.Version != 2 {
+			t.Errorf("meta not carried: %+v", c)
+		}
+	})
+
+	t.Run("version defaults to 1 when absent", func(t *testing.T) {
+		doc := baseContract()
+		doc["meta"] = map[string]any{"id": "ctr-1"}
+		c, err := LoadContractDoc(doc)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if c.Version != 1 {
+			t.Errorf("version=%d want default 1", c.Version)
+		}
+	})
+
+	t.Run("requirements desugar into deterministic hard constraints (D8)", func(t *testing.T) {
+		doc := baseContract()
+		doc["capabilities"] = []any{map[string]any{"id": "db",
+			"type": "capability.database.relational",
+			"requirements": map[string]any{
+				"engine": map[string]any{"op": "compatible-with", "value": "postgresql/16"},
+				"region": map[string]any{"value": "eu-west1"}, // op defaults to equals
+			}}}
+		c, err := LoadContractDoc(doc)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		got := map[string]bool{}
+		for _, ct := range c.Constraints {
+			got[ct.ID] = true
+			if ct.Subject != "db" || ct.Severity != "hard" {
+				t.Errorf("desugared constraint wrong shape: %+v", ct)
+			}
+		}
+		for _, want := range []string{"req-db-engine", "req-db-region"} {
+			if !got[want] {
+				t.Errorf("missing desugared constraint %q; have %v", want, got)
+			}
+		}
+	})
+
+	t.Run("budget block defaults to hard severity", func(t *testing.T) {
+		doc := baseContract()
+		doc["budget"] = []any{
+			map[string]any{"id": "b1", "subject": "db", "op": "lte", "value": "100 USD"},
+			map[string]any{"id": "b2", "subject": "db", "op": "lte", "value": "50 USD",
+				"severity": "soft"},
+		}
+		c, err := LoadContractDoc(doc)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		sev := map[string]string{}
+		for _, ct := range c.Constraints {
+			sev[ct.ID] = ct.Severity
+		}
+		if sev["b1"] != "hard" {
+			t.Errorf("budget default severity=%q want hard", sev["b1"])
+		}
+		if sev["b2"] != "soft" {
+			t.Errorf("budget explicit severity=%q want soft", sev["b2"])
+		}
+	})
+}
+
+// --- vocabCheck: D23 kind/enum gating, numeric 3.0==3 canonical equality ---
+
+func TestVocabCheck(t *testing.T) {
+	newContract := func() *Contract {
+		return &Contract{Capabilities: map[string]map[string]any{
+			"db": {"type": "capability.database.relational"}}}
+	}
+	vocabs := map[string]vocab.Vocabulary{
+		"capability.database.relational": {
+			Attributes: map[string]map[string]any{
+				"engine":   {"kind": "protocol"},
+				"replicas": {"kind": "number", "enum": []any{1, 3, 5}},
+				"tier":     {"kind": "string", "enum": []any{"gp2", "gp3"}},
+			},
+		},
+	}
+	check := func(attr string, v any) error {
+		cand := &Candidate{Capabilities: map[string]map[string]Provenanced{
+			"db": {attr: {Scalar: mustParse(t, v), Status: "declared"}}}}
+		return vocabCheck(cand, newContract(), vocabs)
+	}
+
+	t.Run("kind mismatch refused", func(t *testing.T) {
+		// engine declared as a duration, vocab says protocol
+		err := check("engine", "5m")
+		if err == nil || !contains(err.Error(), "vocabulary defines kind protocol") {
+			t.Fatalf("want kind-mismatch error, got %v", err)
+		}
+	})
+
+	t.Run("matching protocol passes", func(t *testing.T) {
+		if err := check("engine", "postgresql/16"); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("numeric enum: 3.0 matches int enum member 3", func(t *testing.T) {
+		if err := check("replicas", 3.0); err != nil {
+			t.Errorf("3.0 should match enum [1 3 5]: %v", err)
+		}
+	})
+
+	t.Run("numeric enum miss refused", func(t *testing.T) {
+		err := check("replicas", 4)
+		if err == nil || !contains(err.Error(), "not in vocabulary enum") {
+			t.Fatalf("want enum-miss error, got %v", err)
+		}
+	})
+
+	t.Run("string enum hit passes", func(t *testing.T) {
+		if err := check("tier", "gp3"); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("string enum miss refused", func(t *testing.T) {
+		err := check("tier", "gp99")
+		if err == nil || !contains(err.Error(), "not in vocabulary enum") {
+			t.Fatalf("want enum-miss error, got %v", err)
+		}
+	})
+
+	t.Run("attribute outside the vocabulary is legal", func(t *testing.T) {
+		if err := check("some_provider_flag", "whatever"); err != nil {
+			t.Errorf("non-vocabulary path should be allowed: %v", err)
+		}
+	})
+}
+
+// --- LoadContract / LoadCandidate: file paths, extras, provenance survival ---
+
+func writeFile(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s: %v", p, err)
+	}
+	return p
+}
+
+func TestLoadContractAndCandidateRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	contractYAML := `
+kind: InfrastructureContract
+apiVersion: contract/v0.1
+meta:
+  id: ctr-db
+  environment: prod
+capabilities:
+  - id: db
+    type: capability.database.relational
+constraints:
+  hard:
+    - id: c-rpo
+      subject: db
+      op: lte
+      value: "5m"
+`
+	cpath := writeFile(t, dir, "contract.yaml", contractYAML)
+	c, err := LoadContract(cpath)
+	if err != nil {
+		t.Fatalf("LoadContract: %v", err)
+	}
+	if c.ID != "ctr-db" || len(c.Constraints) != 1 {
+		t.Fatalf("unexpected contract: %+v", c)
+	}
+
+	candidateYAML := `
+kind: ImplementationCandidate
+apiVersion: candidate/v0.1
+contract: ctr-db
+capabilities:
+  db:
+    provider: gcp
+    service: cloudsql
+    attributes:
+      engine:
+        status: inferred
+        value: "postgresql/16"
+        source: "code:db.go"
+      rpo: "5m"
+`
+	candPath := writeFile(t, dir, "candidate.yaml", candidateYAML)
+	cand, err := LoadCandidate(candPath, nil, nil)
+	if err != nil {
+		t.Fatalf("LoadCandidate: %v", err)
+	}
+	if cand.ContractID != "ctr-db" {
+		t.Errorf("contract id=%q", cand.ContractID)
+	}
+	// Provenance survives (invariant #3): inferred status + source preserved.
+	eng := cand.Capabilities["db"]["engine"]
+	if eng.Status != "inferred" || eng.Source != "code:db.go" {
+		t.Errorf("provenance lost: %+v", eng)
+	}
+	// A bare scalar attribute defaults to declared.
+	if cand.Capabilities["db"]["rpo"].Status != "declared" {
+		t.Errorf("bare scalar should default to declared: %+v", cand.Capabilities["db"]["rpo"])
+	}
+	// Extras: non-attribute keys are captured for identity, not verified.
+	extra := cand.Extras["db"]
+	if extra["provider"] != "gcp" || extra["service"] != "cloudsql" {
+		t.Errorf("extras not captured: %+v", extra)
+	}
+	if _, leaked := extra["attributes"]; leaked {
+		t.Errorf("attributes must not leak into extras: %+v", extra)
+	}
+}
+
+func TestLoadCandidateErrors(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name, body, errSub string
+	}{
+		{"wrong kind", "kind: Nope\napiVersion: candidate/v0.1\ncontract: x\n",
+			"kind must be"},
+		{"wrong apiVersion",
+			"kind: ImplementationCandidate\napiVersion: candidate/v9\ncontract: x\n",
+			"apiVersion must be"},
+		{"missing contract",
+			"kind: ImplementationCandidate\napiVersion: candidate/v0.1\n",
+			"must name its contract"},
+		{"bad provenance status",
+			"kind: ImplementationCandidate\napiVersion: candidate/v0.1\ncontract: x\n" +
+				"capabilities:\n  db:\n    attributes:\n      e:\n        status: hunch\n        value: 1\n",
+			"invalid provenance status"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := writeFile(t, dir, "cand.yaml", c.body)
+			_, err := LoadCandidate(p, nil, nil)
+			if err == nil || !contains(err.Error(), c.errSub) {
+				t.Fatalf("want error containing %q, got %v", c.errSub, err)
+			}
+		})
+	}
+}
+
+func TestLoadContractRejectsNonMapping(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "list.yaml", "- just\n- a\n- list\n")
+	if _, err := LoadContract(p); err == nil ||
+		!contains(err.Error(), "empty or not a mapping") {
+		t.Fatalf("want not-a-mapping error, got %v", err)
+	}
+}

@@ -1,0 +1,48 @@
+# AWS candidate for acme-gitops-coupling: groundhold AUTHORS the Pod Identity
+# couplings (eks-podidentity) and WITNESSES the controller (argocd-application).
+# The IAM roles and cluster are operands (D26 — separate identity capabilities own
+# the roles; the cluster is the EKS substrate). The gitops-root attributes are
+# INFERRED from the live controller — a real emit reads them via observe; here they
+# are the target state a plan/verify checks.
+apiVersion: candidate/v0.1
+kind: ImplementationCandidate
+contract: acme-gitops-coupling
+
+capabilities:
+
+  repo-server-identity:
+    provider: aws
+    service: eks-podidentity
+    attributes:
+      workload.namespace: argocd
+      workload.serviceAccount: argocd-repo-server
+      service.managed: true
+    implementation:
+      clusterName: acme-eks
+      roleArn: arn:aws:iam::000000000000:role/acme-argocd-repo-server
+
+  app-controller-identity:
+    provider: aws
+    service: eks-podidentity
+    attributes:
+      workload.namespace: argocd
+      workload.serviceAccount: argocd-application-controller
+      service.managed: true
+    implementation:
+      clusterName: acme-eks
+      roleArn: arn:aws:iam::000000000000:role/acme-argocd-app-controller
+
+  # WITNESSED — groundhold verifies this, never authors it (D177). The values are
+  # inferred from the live controller; a real emit reads them via observe.
+  gitops-root:
+    provider: k8s
+    service: argocd-application
+    attributes:
+      sync.status:
+        value: synced
+        status: inferred
+        source: argocd:application.status.sync
+      health.status:
+        value: healthy
+        status: inferred
+        source: argocd:application.status.health

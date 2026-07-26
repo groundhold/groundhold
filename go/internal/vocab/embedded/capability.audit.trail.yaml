@@ -1,0 +1,102 @@
+# Attribute vocabulary for capability.audit.trail, spec v0.1.
+#
+# A managed AUDIT TRAIL — the durable, tamper-evident record of every control-plane
+# API call in an account. The honest per-cloud twin is AWS CloudTrail (a trail), GCP
+# Cloud Audit Logs (a log sink), Azure Activity Log (a diagnostic setting). This is a
+# compliance-grade capability an EU platform genuinely audits before production
+# (Acme): who did what, when, from where — and PROOF the record was not altered.
+#
+# stateful: true — a trail HOLDS the audit history; losing the trail is losing the
+# ability to prove what happened, the compliance-equivalent of data loss. (The
+# delivered log OBJECTS live in a separate capability.storage.object bucket, so
+# deleting the trail config does not erase the past — but it ends the record. The
+# retirement gates therefore treat it conservatively, D47.)
+#
+# What an organization GOVERNS about a trail (verifiable, org REQUIRES it):
+#  - residency: WHERE the trail is homed (EU-only mandates it)
+#  - scope: whether it spans ALL regions (a single-region trail is a blind spot)
+#  - integrity: whether the logs are cryptographically tamper-evident (the property a
+#    compliance auditor is written against — a trail without it cannot PROVE integrity)
+#  - encryption: SSE-KMS with a customer key vs the provider default
+#  - delivery: whether the trail is actually LOGGING (a configured-but-stopped trail is
+#    a silent audit gap — worse than no trail, because it looks covered)
+#
+# Deliberately absent (implementation detail / operand, NOT trail capability semantics):
+# the trail NAME, the destination S3 bucket, the KMS key id, the SNS topic and the
+# CloudWatch Logs group + delivery role (each a separate capability the operator owns,
+# passed in the implementation: block, D26); event selectors / data-event filters and
+# insight selectors (opaque config); the individual log objects (they are the data).
+
+capability: capability.audit.trail
+version: 0.1
+stateful: true
+
+attributes:
+
+  location.region:
+    kind: string
+    description: >
+      The home region the trail lives in (residency). A multi-region trail has a single
+      home region; EU-only compliance mandates it be an EU region.
+    mappings:
+      aws.cloudtrail: the trail's HomeRegion (the region CreateTrail ran in)
+
+  scope.multiRegion:
+    kind: bool
+    description: >
+      Whether the trail captures events across ALL regions (a shadow in every region)
+      rather than only its home region. A single-region trail is an audit blind spot
+      for activity elsewhere; EU platforms that must account for cross-region access
+      require it true.
+    mappings:
+      aws.cloudtrail: IsMultiRegionTrail
+
+  integrity.logValidation:
+    kind: bool
+    description: >
+      Whether log-file integrity validation is enabled — CloudTrail writes a signed
+      digest so any tampering with delivered logs is cryptographically detectable. The
+      property a compliance auditor demands: without it a trail cannot PROVE its record
+      was not altered.
+    mappings:
+      aws.cloudtrail: EnableLogFileValidation / LogFileValidationEnabled
+    recommended:
+      op: equals
+      value: true
+      scope: all
+      rationale: "Enable log-file integrity validation so tampering with the audit trail is detectable."
+      ruleId: PV_R0016
+      ruleVersion: 1
+      controls:
+        CIS-AWS_5.0.0: ["3.2"]
+        FSBP: ["CloudTrail.4"]
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: >
+      Log objects are encrypted at rest with a CUSTOMER-managed KMS key (SSE-KMS), not
+      merely the provider's default key. The key ARN is implementation detail
+      (implementation.kmsKeyArn), never a capability path.
+    mappings:
+      aws.cloudtrail: KmsKeyId set to a customer key
+
+  delivery.assured:
+    kind: bool
+    description: >
+      Whether the trail is actually LOGGING (delivering events), not merely configured.
+      A configured-but-stopped trail is a silent audit gap — measured from the live
+      logging status, never assumed from the configuration.
+    mappings:
+      aws.cloudtrail: GetTrailStatus IsLogging (StartLogging/StopLogging)
+
+  service.managed:
+    kind: bool
+    description: Managed audit-trail service vs a self-operated log pipeline.
+    mappings:
+      aws.cloudtrail: const true when observed through the driver
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost (event delivery + log storage in the sink bucket).
+    verification: static against a pricing catalog; billing after deploy

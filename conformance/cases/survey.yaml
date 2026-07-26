@@ -1,0 +1,187 @@
+# Code-survey coverage (D93). impl: go — single-implementation per D24.
+# The survey is a commit-pinned witness of what the code needs;
+# `groundhold survey` compares it to the contract. Absence of evidence is
+# never drift unless the survey set is declared --complete.
+
+contract: &sys1
+  apiVersion: contract/v0.1
+  kind: InfrastructureContract
+  meta: { id: sys1, environment: test, version: 1 }
+  capabilities:
+    - id: db
+      type: capability.database.relational
+  constraints:
+    hard:
+      - id: c-enc
+        subject: db
+        path: encryption.atRest
+        op: equals
+        value: true
+        verify: { method: static }
+
+cases:
+  - name: covered-required-dependency-passes
+    impl: go
+    survey:
+      contract: *sys1
+      surveys:
+        - apiVersion: survey/v0.1
+          kind: CodeSurvey
+          repo: { name: orders-api, commit: abc123 }
+          service: orders-api
+          generatedAt: "2026-07-14T00:00:00Z"
+          findings:
+            - dependency: psycopg
+              class: required
+              capabilityHint: capability.database.relational
+              evidence: ["app/db.py:12"]
+    expect:
+      exit: 0
+      coverage: { psycopg: covered }
+      orphans: {}
+
+  - name: uncovered-required-dependency-is-drift
+    impl: go
+    survey:
+      contract: *sys1
+      surveys:
+        - apiVersion: survey/v0.1
+          kind: CodeSurvey
+          repo: { name: orders-api, commit: abc123 }
+          generatedAt: "2026-07-14T00:00:00Z"
+          findings:
+            - dependency: kafka-client
+              class: required
+              capabilityHint: capability.messaging.queue
+              evidence: ["app/events.py:3"]
+    expect:
+      exit: 2
+      code: survey-drift
+      coverage: { kafka-client: uncovered }
+
+  - name: unwitnessed-capability-is-not-drift-by-default
+    impl: go
+    survey:
+      contract: *sys1
+      surveys:
+        - apiVersion: survey/v0.1
+          kind: CodeSurvey
+          repo: { name: billing-api, commit: def456 }
+          generatedAt: "2026-07-14T00:00:00Z"
+          findings: []
+    expect:
+      exit: 0
+      orphans: { db: unwitnessed }
+
+  - name: orphaned-capability-is-drift-when-complete
+    impl: go
+    survey:
+      contract: *sys1
+      complete: true
+      surveys:
+        - apiVersion: survey/v0.1
+          kind: CodeSurvey
+          repo: { name: billing-api, commit: def456 }
+          generatedAt: "2026-07-14T00:00:00Z"
+          findings: []
+    expect:
+      exit: 2
+      code: survey-drift
+      orphans: { db: orphaned }
+
+  - name: dev-test-dependency-never-drifts
+    impl: go
+    survey:
+      contract: *sys1
+      surveys:
+        - apiVersion: survey/v0.1
+          kind: CodeSurvey
+          repo: { name: orders-api, commit: abc123 }
+          generatedAt: "2026-07-14T00:00:00Z"
+          findings:
+            - dependency: psycopg
+              class: required
+              capabilityHint: capability.database.relational
+              evidence: ["app/db.py:12"]
+            - dependency: redis
+              class: dev-test
+              capabilityHint: capability.cache.memory
+              evidence: ["docker-compose.dev.yml:9"]
+    expect:
+      exit: 0
+      coverage: { psycopg: covered, redis: ignored }
+
+  - name: required-without-hint-is-a-gap-not-drift
+    impl: go
+    survey:
+      contract: *sys1
+      surveys:
+        - apiVersion: survey/v0.1
+          kind: CodeSurvey
+          repo: { name: orders-api, commit: abc123 }
+          generatedAt: "2026-07-14T00:00:00Z"
+          findings:
+            - dependency: psycopg
+              class: required
+              capabilityHint: capability.database.relational
+              evidence: ["app/db.py:12"]
+            - dependency: mystery-sdk
+              class: required
+              evidence: ["app/vendor.py:1"]
+    expect:
+      exit: 0
+      coverage: { psycopg: covered, mystery-sdk: gap }
+
+  - name: two-repos-witness-one-contract
+    impl: go
+    survey:
+      contract: *sys1
+      complete: true
+      surveys:
+        - apiVersion: survey/v0.1
+          kind: CodeSurvey
+          repo: { name: orders-api, commit: abc123 }
+          generatedAt: "2026-07-14T00:00:00Z"
+          findings: []
+        - apiVersion: survey/v0.1
+          kind: CodeSurvey
+          repo: { name: billing-api, commit: def456 }
+          generatedAt: "2026-07-14T00:00:00Z"
+          findings:
+            - dependency: pgx
+              class: required
+              capabilityHint: capability.database.relational
+              evidence: ["internal/db/db.go:20"]
+    expect:
+      exit: 0
+      coverage: { pgx: covered }
+      orphans: {}
+
+  - name: unpinned-survey-is-a-load-error
+    impl: go
+    survey:
+      contract: *sys1
+      surveys:
+        - apiVersion: survey/v0.1
+          kind: CodeSurvey
+          repo: { name: orders-api }
+          generatedAt: "2026-07-14T00:00:00Z"
+          findings: []
+    expect:
+      error: true
+
+  - name: unknown-finding-class-is-a-load-error
+    impl: go
+    survey:
+      contract: *sys1
+      surveys:
+        - apiVersion: survey/v0.1
+          kind: CodeSurvey
+          repo: { name: orders-api, commit: abc123 }
+          generatedAt: "2026-07-14T00:00:00Z"
+          findings:
+            - dependency: psycopg
+              class: probably-required
+              evidence: ["app/db.py:12"]
+    expect:
+      error: true

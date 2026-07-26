@@ -1,0 +1,44 @@
+# Schema-driven mapping: k8s rbac.authorization.k8s.io/v1 Role -> capability.authorization.role.
+#
+# A Role is a policy document (rules[] = apiGroups x resources x verbs) — an
+# expression the closed op set cannot flatten. The reverse-map (flat permission set
+# + derived mutating/privileged signals) and its inverse live in a NAMED LENS
+# (k8s.rbac.roleRules), an in-tree Go function reviewed like any driver code. It
+# emits role.permissions/access.mutating/access.privileged/service.managed; there
+# are no plain-op attributes. Reproduces the hand-coded observeRole/buildRole
+# byte-for-byte. cost.monthly is unmapped (roles are free) and simply ignored.
+mapping: v0.1
+fieldpath: groundhold/fieldpath/v1
+service: rbac-role
+provider: k8s
+capability: capability.authorization.role
+vocab:
+  capability.authorization.role: "0.1"
+
+resource:
+  group: rbac.authorization.k8s.io
+  version: v1
+  kind: Role
+  plural: roles
+  scope: Namespaced
+
+schema:
+  source: "kubernetes /openapi/v3 apis/rbac.authorization.k8s.io/v1 Role"
+  mappedSurface: sha256:ca733f607cd9c59fe716d9fc15ebd185b6ec40a11eb70ef56936b1f8183a8596
+
+lenses:
+  - k8s.rbac.roleRules               # policy-document flatten + derivations
+
+classify:
+  role.permissions:
+    change: mutable
+  access.mutating:
+    change: mutable
+  access.privileged:
+    change: mutable
+  service.managed:
+    change: mutable
+  cost.monthly:
+    change: mutable
+
+attributes: {}

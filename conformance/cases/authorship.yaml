@@ -1,0 +1,66 @@
+# Authorship (D74): the ledger records WHO published a contract, not
+# only that the runtime executed it. `publish` appends contract.published
+# with the canonical hash and a HUMAN actor; it refuses without one,
+# because unattributed authorship is not authorship. Go-only.
+suite: authorship
+cases:
+  - name: publish-records-authorship-then-audit-runs
+    impl: go
+    description: >
+      D74: publish appends a contract.published event carrying the
+      contract hash and a named human actor; a following export shows
+      the event in the stream, and the ordinary audit loop still works
+      over the same ledger (publish mutates only the ledger).
+    onboard:
+      contract: &auth-contract
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: auth-t, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-managed
+              subject: db
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate: &auth-candidate
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: auth-t
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+      steps:
+        - cmd: publish
+          at: "2026-07-12T09:00:00Z"
+          actor: "alice@example"
+          expect:
+            exit: 0
+            status: published
+        - cmd: export
+          types: [contract.published]
+          expect:
+            exit: 0
+            eventTypes: [contract.published]
+
+  - name: publish-refuses-without-an-actor
+    impl: go
+    description: >
+      D74: authorship must be attributed — publish with no --actor
+      refuses (consent-required), it does not record an anonymous
+      contract.published.
+    onboard:
+      contract: *auth-contract
+      candidate: *auth-candidate
+      steps:
+        - cmd: publish
+          at: "2026-07-12T09:00:00Z"
+          expect:
+            exit: 2
+            status: refused
+            code: consent-required

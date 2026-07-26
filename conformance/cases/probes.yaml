@@ -1,0 +1,223 @@
+# Outcome probes (D59): measured reality into the SAME observation
+# stream — verify/audit unchanged. A hard verify.method:probe
+# constraint blocks builds (the thesis: you may not deploy what you
+# cannot prove); its enforcement home is AUDIT against measured
+# reality, entering the contract by VERSION once the capability is
+# bound. Go-only.
+suite: probes
+cases:
+  - name: probe-closes-the-thesis-loop
+    impl: go
+    description: >
+      D59, the founding demo: adopt under v1; audit against v2 (which
+      adds hard c-rto, verify.method probe) alarms with unknown; the
+      intrusive restore-test runs ONLY under the double consent
+      (operator flag + contract allow_intrusive_probes) and measures
+      rto; the next audit judges the measurement satisfied and resolves
+      the alarm. A claim became a measurement.
+    onboard:
+      contract: &pv1
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: pr-t, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-managed
+              subject: db
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate: &pcand
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: pr-t
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T16:00:00Z"
+          map: { db: "fake:existing-db" }
+          expect: { exit: 0, status: adopted }
+        - cmd: audit
+          at: "2026-07-12T16:05:00Z"
+          record: true
+          contract: &pv2
+            apiVersion: contract/v0.1
+            kind: InfrastructureContract
+            meta: { id: pr-t, environment: test, version: 2 }
+            capabilities:
+              - id: db
+                type: capability.database.relational
+            constraints:
+              hard:
+                - id: c-managed
+                  subject: db
+                  path: service.managed
+                  op: equals
+                  value: true
+                  verify: { method: static }
+                - id: c-rto
+                  subject: db
+                  path: recovery.rto
+                  op: lte
+                  value: 1h
+                  verify: { method: probe }
+            autonomy:
+              allow_intrusive_probes: [db]
+          expect:
+            exit: 2
+            status: violations-found
+            events: [violation.detected]
+        - cmd: probe
+          at: "2026-07-12T16:08:00Z"
+          contract: *pv2
+          expect:
+            exit: 0
+            status: probed
+            measurements:
+              - capability: db
+                path: network.publicExposure
+                value: false
+                method: tcp-connect
+                evidence: "0 open paths from 3 external vantage points"
+            failures: []
+        - cmd: probe
+          at: "2026-07-12T16:10:00Z"
+          contract: *pv2
+          allowIntrusive: true
+          expect:
+            exit: 0
+            status: probed
+            measurements:
+              - capability: db
+                path: network.publicExposure
+                value: false
+                method: tcp-connect
+                evidence: "0 open paths from 3 external vantage points"
+              - capability: db
+                path: recovery.rto
+                value: 35m
+                method: restore-test
+                evidence: "scratch restore completed in 35m"
+                intrusive: true
+            failures: []
+        - cmd: audit
+          at: "2026-07-12T16:15:00Z"
+          record: true
+          contract: *pv2
+          expect:
+            exit: 0
+            status: clean
+            violations: 0
+            events: [violation.resolved]
+
+  - name: probe-method-refuses-provider-api-evidence
+    impl: go
+    description: >
+      D190: a hard verify.method:probe constraint is the author's demand that
+      the outcome be MEASURED. An observe reading (source provider-api) — even
+      one whose value matches — is insufficient evidence: audit reports
+      unknown (probe first) and BLOCKS, honoring the bar the contract
+      declared. Contrast the static-method exporters flow where observe
+      resolves the alarm; here the probe-method constraint stays unknown after
+      observe. Before the fix the weaker evidence read satisfied — the false
+      PASS the method field exists to prevent.
+    onboard:
+      contract: *pv1
+      candidate: *pcand
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T16:00:00Z"
+          map: { db: "fake:existing-db" }
+          expect: { exit: 0, status: adopted }
+        - cmd: observe
+          at: "2026-07-12T16:05:00Z"
+          expect: { exit: 0 }
+        # a probe-method constraint enters by VERSION (like c-rto above); the
+        # observe reading is provider-api, insufficient for a probe bar
+        - cmd: audit
+          at: "2026-07-12T16:10:00Z"
+          record: true
+          contract:
+            apiVersion: contract/v0.1
+            kind: InfrastructureContract
+            meta: { id: pr-t, environment: test, version: 2 }
+            capabilities:
+              - id: db
+                type: capability.database.relational
+            constraints:
+              hard:
+                - id: c-managed-probe
+                  subject: db
+                  path: service.managed
+                  op: equals
+                  value: true
+                  verify: { method: probe }
+          expect:
+            exit: 2
+            status: violations-found
+            events: [violation.detected]
+
+  - name: intrusive-probe-needs-contract-consent-too
+    impl: go
+    description: >
+      D59 (review verdict): the operator flag alone must not authorize
+      a restore test — without autonomy.allow_intrusive_probes the
+      intrusive measurement does not run, and no error hides that: the
+      probe simply reports only non-intrusive results.
+    onboard:
+      contract: *pv1
+      candidate: *pcand
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T16:00:00Z"
+          map: { db: "fake:existing-db" }
+          expect: { exit: 0, status: adopted }
+        - cmd: probe
+          at: "2026-07-12T16:10:00Z"
+          allowIntrusive: true
+          expect:
+            exit: 0
+            status: probed
+            measurements:
+              - capability: db
+                path: network.publicExposure
+                value: false
+                method: tcp-connect
+                evidence: "0 open paths from 3 external vantage points"
+            failures: []
+
+  - name: probe-crash-is-not-an-observation
+    impl: go
+    description: >
+      D59 (review verdict): a probe that crashes measured NOTHING — it
+      records probe.failed, never observation.recorded, and the failing
+      path stays unknown to audit.
+    onboard:
+      contract: *pv1
+      candidate: *pcand
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T16:00:00Z"
+          map: { db: "fake:existing-db" }
+          expect: { exit: 0, status: adopted }
+        - cmd: probe
+          at: "2026-07-12T16:10:00Z"
+          failKeys: ["probe:db"]
+          expect:
+            exit: 0
+            status: probed
+            measurements: []
+            failures:
+              - capability: db
+                path: network.publicExposure
+                method: tcp-connect
+                reason: injected probe crash
+                retryable: true
+            events: [probe.failed]

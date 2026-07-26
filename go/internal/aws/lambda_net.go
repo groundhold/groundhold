@@ -1,0 +1,800 @@
+// AWS Lambda network shell — the SigV4-signed, REST-JSON half of the AWS
+// capability.function.serverless driver. The function NAME is deterministic, so
+// the providerId is knowable BEFORE the create response and rides every
+// lost/5xx/garbled outcome (D29). Ownership is TAGS (returned inline by
+// GetFunction). The create LRO polls the OBSERVABLE state — GetFunction's
+// Configuration.State (Active=done, Failed=failed) — never an operation-by-id
+// path (a container-image function is Pending after CreateFunction, then Active).
+//
+// Public exposure is a Function URL. The url_auth operand REFINES it: "none" is
+// the anonymous mode — a URL with AuthType NONE AND a resource-based
+// lambda:InvokeFunctionUrl grant to principal * (both gates, or the function is
+// not truly world-invocable). "iam" is the edge mode — a URL with AuthType
+// AWS_IAM and NO anonymous grant; the invoke grant for cloudfront.amazonaws.com
+// (scoped by SourceArn to one distribution) is added by the CloudFront driver
+// when it fronts this URL with an Origin Access Control (Model 2, the
+// distribution grants itself access to its origin). A create that cannot
+// complete its gates NEVER reports succeeded — it would lie about the exposure
+// the contract exists for.
+package aws
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"regexp"
+	"strings"
+	"time"
+
+	"groundhold/internal/provider"
+)
+
+const (
+	lambdaFnPath       = "/2015-03-31/functions"    // CreateFunction / GetFunction / DeleteFunction / AddPermission
+	lambdaURLPath      = "/2021-10-31/functions"    // CreateFunctionUrlConfig / GetFunctionUrlConfig
+	lambdaReadAttempts = 4                          // bounded transient-read retry (D260 read-storm gate)
+	lambdaPublicStmtID = "groundhold-public-invoke" // deterministic AddPermission statement id
+
+	// reserved operand observation paths (F-LC3): the VpcConfig, Environment and
+	// container image observe records back and the compiler compares the DECLARED
+	// operands against. Not vocab attributes (invariant #4) — implementation
+	// config the driver governs, namespaced under provider.OperandPrefix.
+	lambdaVpcOperand = provider.OperandPrefix + "vpcConfig"
+	lambdaEnvOperand = provider.OperandPrefix + "environment"
+	lambdaPkgOperand = provider.OperandPrefix + "package"
+)
+
+// lambdaNameOK bounds a Lambda function name before path interpolation.
+var lambdaNameOK = regexp.MustCompile(`^[a-zA-Z0-9-_]{1,64}$`)
+
+// lambdaArnOK bounds a Lambda function ARN (the grant target the cdn driver
+// AddPermissions on) before it is trusted from a candidate operand.
+var lambdaArnOK = regexp.MustCompile(`^arn:aws:lambda:[a-z0-9-]+:[0-9]{12}:function:[a-zA-Z0-9-_]{1,64}$`)
+
+func (d *Driver) lambdaBase(region string) string {
+	if d.LambdaBaseURL != "" {
+		return d.LambdaBaseURL
+	}
+	return "https://lambda." + region + ".amazonaws.com"
+}
+
+func lambdaProviderID(region, account, name string) string {
+	return "lambda:" + region + ":" + account + ":" + name
+}
+
+func splitLambdaProviderID(providerID string) (region, account, name string, err error) {
+	parts := strings.Split(providerID, ":")
+	if len(parts) != 4 || parts[0] != "lambda" {
+		return "", "", "", fmt.Errorf("providerId %q is not lambda:region:account:name", providerID)
+	}
+	if !regionOK.MatchString(parts[1]) {
+		return "", "", "", fmt.Errorf("providerId region %q is invalid", parts[1])
+	}
+	if !account12.MatchString(parts[2]) {
+		return "", "", "", fmt.Errorf("providerId account %q is invalid", parts[2])
+	}
+	if !lambdaNameOK.MatchString(parts[3]) {
+		return "", "", "", fmt.Errorf("providerId function %q is invalid", parts[3])
+	}
+	return parts[1], parts[2], parts[3], nil
+}
+
+// splitLambdaArn parses region + function name out of a Lambda function ARN
+// (arn:aws:lambda:<region>:<account>:function:<name>) so a cross-driver caller
+// (the cdn driver's invoke grant) can reach the function's own regional endpoint.
+func splitLambdaArn(arn string) (region, name string, err error) {
+	if !lambdaArnOK.MatchString(arn) {
+		return "", "", fmt.Errorf("%q is not a Lambda function ARN", arn)
+	}
+	parts := strings.Split(arn, ":")
+	// arn:aws:lambda:region:account:function:name
+	return parts[3], parts[6], nil
+}
+
+func (d *Driver) lambdaDo(method, region, path string, body []byte) (int, []byte, error) {
+	return d.doSigned(method, d.lambdaBase(region)+path, "lambda", region,
+		map[string]string{"Content-Type": "application/json"}, body)
+}
+
+// lambdaGet issues a signed Lambda GET and retries a bounded number of times on a
+// TRANSIENT failure (transport error / 429 / 5xx) — the read layer's answer to the
+// D260 read-storm class; a definitive 2xx/4xx/404 returns at once.
+func (d *Driver) lambdaGet(region, path string) (int, []byte, error) {
+	var st int
+	var body []byte
+	var err error
+	for attempt := 0; attempt < lambdaReadAttempts; attempt++ {
+		st, body, err = d.lambdaDo("GET", region, path, nil)
+		if err == nil && st != http.StatusTooManyRequests && st < 500 {
+			return st, body, err
+		}
+		if attempt < lambdaReadAttempts-1 {
+			time.Sleep(d.PollInterval)
+		}
+	}
+	return st, body, err
+}
+
+func lambdaErr(body []byte) string {
+	var e struct {
+		Message string `json:"message"`
+		Msg     string `json:"Message"`
+		Type    string `json:"Type"`
+	}
+	_ = json.Unmarshal(body, &e)
+	switch {
+	case e.Message != "":
+		return boundMsg(e.Message)
+	case e.Msg != "":
+		return boundMsg(e.Msg)
+	default:
+		return "" // D309: never the raw body — this string reaches a persisted receipt
+	}
+}
+
+// lambdaConfig is the machine-authoritative projection this driver governs.
+type lambdaConfig struct {
+	State       string `json:"State"`
+	StateReason string `json:"StateReason"`
+	Timeout     int    `json:"Timeout"`
+	// FunctionArn is the live identity GetFunction reports. Claim (takeover) checks
+	// it against the ARN built from the providerId so a name that resolves to a
+	// DIFFERENT function (a foreign resource in the acting account) is refused
+	// rather than tagged as ours.
+	FunctionArn string `json:"FunctionArn"`
+	// LastUpdateStatus tracks an in-flight UpdateFunctionConfiguration:
+	// InProgress -> Successful|Failed. A second config call before Successful
+	// is rejected with a 409 ResourceConflictException, so the update path
+	// polls this to Successful before concluding (and before any exposure step).
+	LastUpdateStatus       string `json:"LastUpdateStatus"`
+	LastUpdateStatusReason string `json:"LastUpdateStatusReason"`
+	// operand state (F-LC3): the live VpcConfig + Environment observe reads back
+	// so a change to these IMPLEMENTATION operands on a bound function is drift,
+	// not a silent no-op. VpcConfig/Environment ride Configuration; the container
+	// image rides the sibling Code.ImageUri, set by getLambdaFunction manually.
+	VpcConfig struct {
+		SubnetIds        []string `json:"SubnetIds"`
+		SecurityGroupIds []string `json:"SecurityGroupIds"`
+	} `json:"VpcConfig"`
+	Environment struct {
+		Variables map[string]string `json:"Variables"`
+	} `json:"Environment"`
+	ImageUri string `json:"-"`
+}
+
+// getLambdaFunction reads GetFunction (Configuration + inline Tags). (config,
+// tags, found, err): a 404 is found=false with a NIL error (a real absence); a
+// transport/HTTP/parse failure returns a typed read error that NAMES the cause
+// (the HTTP status + Lambda's own error code) — never a fabricated absence (D296).
+func (d *Driver) getLambdaFunction(region, name string) (cfg lambdaConfig, tags map[string]string, found bool, err error) {
+	const op = "GetFunction"
+	st, resp, rerr := d.lambdaGet(region, lambdaFnPath+"/"+name)
+	if rerr != nil {
+		return lambdaConfig{}, nil, false, readTransport(op, rerr)
+	}
+	if st == http.StatusNotFound {
+		return lambdaConfig{}, nil, false, nil
+	}
+	if st != http.StatusOK {
+		return lambdaConfig{}, nil, false, readHTTP(op, st, lambdaErr(resp))
+	}
+	var out struct {
+		Configuration lambdaConfig `json:"Configuration"`
+		Code          struct {
+			ImageUri string `json:"ImageUri"`
+		} `json:"Code"`
+		Tags map[string]string `json:"Tags"`
+	}
+	if json.Unmarshal(resp, &out) != nil {
+		return lambdaConfig{}, nil, false, readBody(op, st)
+	}
+	cfg = out.Configuration
+	cfg.ImageUri = out.Code.ImageUri
+	return cfg, out.Tags, true, nil
+}
+
+func (d *Driver) createLambda(region, account, environment, capability string,
+	attrs, impl map[string]any, generation int) provider.CreateResult {
+	plan, err := BuildLambda(account, environment, capability, attrs, impl, generation)
+	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	// the function name is deterministic, so the providerId is knowable BEFORE the
+	// response — a lost/garbled outcome (D29) must carry it so a function that may
+	// have landed is never orphaned (handle never lost).
+	pid := lambdaProviderID(region, account, plan.Name)
+
+	// ownership pre-read: refuse to touch a foreign function already at our name.
+	if _, tags, found, rerr := d.getLambdaFunction(region, plan.Name); rerr == nil && found {
+		if !groundholdTagsMatch(tags, capability, environment) {
+			return provider.CreateResult{Status: "failed",
+				Reason: "a function with this name exists and is not ours (tags do not match) — " +
+					"refusing to adopt it; run `groundhold discover` then `adopt` to take over a foreign function"}
+		}
+		// ours already — ensure exposure and conclude (idempotent repair).
+		if res := d.ensureLambdaExposure(region, pid, plan); res != nil {
+			return *res
+		}
+		return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
+	} else if rerr != nil {
+		return provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: "function ownership pre-read failed: " + rerr.Error() + " — reconcile"}
+	}
+
+	body, _ := json.Marshal(plan.createBody(capability, environment))
+	st, resp, err := d.lambdaDo("POST", region, lambdaFnPath, body)
+	switch {
+	case err != nil:
+		return provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("CreateFunction outcome unknown (may have landed): %v", err)}
+	case st == http.StatusCreated || st == http.StatusOK:
+		// creating — fall through to poll the observable state.
+	case st == http.StatusConflict:
+		return provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: "CreateFunction says the name now exists — reconcile ownership"}
+	case st >= 500:
+		return provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("CreateFunction HTTP %d (server error — may have landed): %s", st, lambdaErr(resp))}
+	default:
+		if r := provider.MutationResult(st, lambdaErr(resp), nil, "", "create"); r != nil {
+			return *r
+		}
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("CreateFunction HTTP %d: %s", st, lambdaErr(resp))}
+	}
+
+	if res := d.waitLambdaActive(region, pid, plan.Name); res != nil {
+		return *res
+	}
+	if res := d.ensureLambdaExposure(region, pid, plan); res != nil {
+		return *res
+	}
+	return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
+}
+
+// waitLambdaActive polls GetFunction until Configuration.State is Active (a
+// container-image function is Pending right after CreateFunction). Failed is a
+// failed create WITH the pid (the function object exists); the poll timeout is
+// unknown WITH the pid. NEVER polls an operation-by-id path. Returns nil once Active.
+func (d *Driver) waitLambdaActive(region, pid, name string) *provider.CreateResult {
+	deadline := d.Now().Add(d.PollTimeout)
+	for {
+		cfg, _, found, rerr := d.getLambdaFunction(region, name)
+		if rerr == nil && found {
+			switch cfg.State {
+			case "Active":
+				return nil
+			case "Failed":
+				return &provider.CreateResult{ProviderID: pid, Status: "failed",
+					Reason: "function entered Failed during create: " + cfg.StateReason}
+			}
+			// Pending / "" -> keep polling
+		}
+		if d.Now().After(deadline) {
+			return &provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "function still Pending at poll timeout — reconcile via GetFunction"}
+		}
+		d.progress("function provisioning — waiting for Active")
+		time.Sleep(d.PollInterval)
+	}
+}
+
+// ensureLambdaExposure realises the desired public/private exposure. Public =
+// a Function URL whose AuthType is derived from plan.URLAuth: "none" -> NONE +
+// a resource-based lambda:InvokeFunctionUrl grant to principal * (the anonymous
+// mode, both gates); "iam" -> AWS_IAM + NO anonymous grant (the edge mode — the
+// invoke grant is CloudFront's, added by the cdn driver). A create that cannot
+// complete its gates never reports succeeded (nil = done; a non-nil result is
+// the honest unknown/failed WITH pid). Private needs no wiring (no Function URL).
+// Returns nil on success.
+func (d *Driver) ensureLambdaExposure(region, pid string, plan LambdaPlan) *provider.CreateResult {
+	if !plan.Public {
+		return nil
+	}
+	authType := "NONE"
+	if plan.URLAuth == "iam" {
+		authType = "AWS_IAM"
+	}
+	// gate 1: the Function URL with the derived AuthType.
+	urlBody, _ := json.Marshal(map[string]any{"AuthType": authType})
+	st, resp, err := d.lambdaDo("POST", region, lambdaURLPath+"/"+plan.Name+"/url", urlBody)
+	switch {
+	case err != nil:
+		return &provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("CreateFunctionUrlConfig outcome unknown: %v", err)}
+	case st == http.StatusCreated || st == http.StatusOK:
+		// created
+	case st == http.StatusConflict:
+		// a URL config already exists — confirm its AuthType matches what we want,
+		// else the existing exposure does not match and cannot be repaired here.
+		if existing, ok := d.getLambdaURLAuthType(region, plan.Name); ok && existing != authType {
+			return &provider.CreateResult{ProviderID: pid, Status: "failed", Reason: fmt.Sprintf(
+				"an existing Function URL uses AuthType %q, not %q — refusing to claim a mismatched exposure", existing, authType)}
+		}
+	case st >= 500:
+		return &provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("CreateFunctionUrlConfig HTTP %d (server error): %s", st, lambdaErr(resp))}
+	default:
+		return &provider.CreateResult{ProviderID: pid, Status: "failed",
+			Reason: fmt.Sprintf("CreateFunctionUrlConfig HTTP %d: %s", st, lambdaErr(resp))}
+	}
+
+	// The IAM (edge) mode adds NO anonymous grant — that is the whole point:
+	// the org RCP forbids Principal:* invoke, and CloudFront (OAC) supplies a
+	// SigV4-signed, SourceArn-scoped grant instead. The URL is the only gate here.
+	if plan.URLAuth == "iam" {
+		return nil
+	}
+
+	// gate 2 (anonymous mode only): the resource-based grant
+	// (lambda:InvokeFunctionUrl, principal *).
+	permBody, _ := json.Marshal(map[string]any{
+		"StatementId":         lambdaPublicStmtID,
+		"Action":              "lambda:InvokeFunctionUrl",
+		"Principal":           "*",
+		"FunctionUrlAuthType": "NONE",
+	})
+	st, resp, err = d.lambdaDo("POST", region, lambdaFnPath+"/"+plan.Name+"/policy", permBody)
+	switch {
+	case err != nil:
+		return &provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("AddPermission outcome unknown: %v", err)}
+	case st == http.StatusCreated || st == http.StatusOK:
+		return nil
+	case st == http.StatusConflict:
+		return nil // the statement already exists — idempotent
+	case st >= 500:
+		return &provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("AddPermission HTTP %d (server error): %s", st, lambdaErr(resp))}
+	default:
+		return &provider.CreateResult{ProviderID: pid, Status: "failed",
+			Reason: fmt.Sprintf("AddPermission HTTP %d: %s", st, lambdaErr(resp))}
+	}
+}
+
+// getLambdaURLAuthType reads the Function URL config's AuthType. ok=false when it
+// is absent or unreadable (never a default-safe value).
+func (d *Driver) getLambdaURLAuthType(region, name string) (authType string, ok bool) {
+	st, resp, err := d.lambdaGet(region, lambdaURLPath+"/"+name+"/url")
+	if err != nil || st != http.StatusOK {
+		return "", false
+	}
+	var out struct {
+		AuthType string `json:"AuthType"`
+	}
+	if json.Unmarshal(resp, &out) != nil || out.AuthType == "" {
+		return "", false
+	}
+	return out.AuthType, true
+}
+
+// lambdaArn renders a function ARN from the pid parts — fully derivable, no read.
+func lambdaArn(region, account, name string) string {
+	return "arn:aws:lambda:" + region + ":" + account + ":function:" + name
+}
+
+// functionURLHost strips the scheme and any trailing slash from a Function URL,
+// yielding the bare host a CloudFront origin's DomainName needs.
+func functionURLHost(url string) string {
+	h := strings.TrimPrefix(strings.TrimPrefix(url, "https://"), "http://")
+	return strings.TrimRight(h, "/")
+}
+
+// getLambdaFunctionURL reads the Function URL (the server-assigned host is NOT in
+// the pid). (url, found, err): a 404 is found=false with a NIL error (the
+// function has no URL — a private function); a transport/HTTP/parse failure
+// returns a typed read error (never a fabricated absence, D296).
+func (d *Driver) getLambdaFunctionURL(region, name string) (url string, found bool, err error) {
+	const op = "GetFunctionUrlConfig"
+	st, resp, rerr := d.lambdaGet(region, lambdaURLPath+"/"+name+"/url")
+	if rerr != nil {
+		return "", false, readTransport(op, rerr)
+	}
+	if st == http.StatusNotFound {
+		return "", false, nil
+	}
+	if st != http.StatusOK {
+		return "", false, readHTTP(op, st, lambdaErr(resp))
+	}
+	var out struct {
+		FunctionUrl string `json:"FunctionUrl"`
+	}
+	if json.Unmarshal(resp, &out) != nil || out.FunctionUrl == "" {
+		return "", false, readBody(op, st)
+	}
+	return out.FunctionUrl, true, nil
+}
+
+// observeLambda reverse-maps a live function to capability.function.serverless.
+// publicExposure is measured from the Function URL config's AuthType (NONE=public);
+// an absent URL is private; an unreadable URL surface emits a diagnostic and NOTHING.
+func (d *Driver) observeLambda(capability, providerID string) ([]provider.Observation, []string, error) {
+	region, _, name, err := splitLambdaProviderID(providerID)
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg, _, found, rerr := d.getLambdaFunction(region, name)
+	if rerr != nil {
+		// a READ ERROR (transport/HTTP/parse) is unknown, never an absence — the
+		// four-valued discipline. It stays a returned error the caller blocks on;
+		// only a readable 404 (found=false, nil error) is an authoritative absence.
+		return nil, nil, rerr
+	}
+	if !found {
+		// F-LC3 part 2: a BOUND function that GetFunction authoritatively 404s is
+		// GONE (e.g. deleted out-of-band). Emit the reserved absence marker so the
+		// compiler re-creates it, rather than a bare diagnostic that leaves the
+		// binding a no-op forever.
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"function not found — bound resource is gone (will re-create)"}, nil
+	}
+	obs := []provider.Observation{
+		// present: toggle the absence marker back off (F-LC3), so a stale "gone"
+		// reading from a prior observe never lingers after a recreate.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
+		{Path: "location.region", Value: region, Derivation: "measured"},
+		{Path: "service.managed", Value: true, Derivation: "measured"},
+		{Path: "tls.enforced", Value: true, Derivation: "config-intent"}, // a Function URL is HTTPS-only
+	}
+	// operand state (F-LC3): the live VpcConfig, Environment and image, canonicalized
+	// exactly as OperandTargets renders the DECLARED operands, so the compiler's
+	// operand-drift step compares like for like.
+	obs = append(obs,
+		provider.Observation{Path: lambdaVpcOperand,
+			Value: canonSubnetsSGs(cfg.VpcConfig.SubnetIds, cfg.VpcConfig.SecurityGroupIds), Derivation: "measured"},
+		provider.Observation{Path: lambdaEnvOperand,
+			Value: canonEnv(cfg.Environment.Variables), Derivation: "measured"},
+		provider.Observation{Path: lambdaPkgOperand,
+			Value: cfg.ImageUri, Derivation: "measured"})
+	if cfg.Timeout > 0 {
+		obs = append(obs, provider.Observation{Path: "timeout.maximum",
+			Value: fmt.Sprintf("%ds", cfg.Timeout), Derivation: "measured"})
+	}
+	var diags []string
+	// publicExposure: read the Function URL config. 404 -> no URL -> private.
+	st, _, uerr := d.lambdaGet(region, lambdaURLPath+"/"+name+"/url")
+	switch {
+	case uerr == nil && st == http.StatusNotFound:
+		obs = append(obs, provider.Observation{Path: "network.publicExposure", Value: false, Derivation: "measured"})
+	case uerr == nil && st == http.StatusOK:
+		// A Function URL exists — the function is exposed (has a reachable HTTPS
+		// endpoint) whether its AuthType is NONE (anonymous) or AWS_IAM (edge/SigV4
+		// only). AuthType is the url_auth IMPLEMENTATION operand, not a vocabulary
+		// attribute (invariant #4), so it is not observed as a vocab path.
+		obs = append(obs, provider.Observation{Path: "network.publicExposure",
+			Value: true, Derivation: "measured"})
+	default:
+		diags = append(diags, fmt.Sprintf(
+			"network.publicExposure not observed: Function URL config read failed (HTTP %d: %v)", st, uerr))
+	}
+	return obs, diags, nil
+}
+
+// deleteLambda: ownership pre-read (tags), then DeleteFunction. 404 is idempotent
+// success; a foreign function is never deleted.
+func (d *Driver) deleteLambda(capability, environment, providerID string) provider.CreateResult {
+	region, _, name, err := splitLambdaProviderID(providerID)
+	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	_, tags, found, rerr := d.getLambdaFunction(region, name)
+	if rerr != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-delete read failed: " + rerr.Error() + " — reconcile"}
+	}
+	if !found {
+		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // idempotent
+	}
+	if !groundholdTagsMatch(tags, capability, environment) {
+		return provider.CreateResult{Status: "failed",
+			Reason: "function tags do not match — refusing to delete a resource that is not ours"}
+	}
+	st, resp, e := d.lambdaDo("DELETE", region, lambdaFnPath+"/"+name, nil)
+	switch {
+	case e != nil:
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: fmt.Sprintf("DeleteFunction outcome unknown: %v", e)}
+	case st == http.StatusNotFound:
+		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // idempotent
+	case st == http.StatusNoContent || st == http.StatusOK || st == http.StatusAccepted:
+		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	case st >= 500:
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: fmt.Sprintf("DeleteFunction HTTP %d (server error) — reconcile", st)}
+	default:
+		if r := provider.MutationResult(st, lambdaErr(resp), nil, providerID, "delete"); r != nil {
+			return *r
+		}
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("DeleteFunction HTTP %d: %s", st, lambdaErr(resp))}
+	}
+}
+
+// classifyLambdaChange (D46): PURE — can this capability.function.serverless
+// transition be honored IN PLACE? timeout.maximum patches online via
+// UpdateFunctionConfiguration; network.publicExposure toggles the Function URL
+// + resource grant (no replacement). location.region is fixed at creation.
+// tls.enforced / service.managed / replicas.minimum are platform properties a
+// create already gated — nothing to patch here (they never differ on a bound
+// function). VpcConfig + Environment are IMPLEMENTATION operands, not attribute
+// paths, so they do not reach ClassifyChange; when any mutable attribute routes
+// to an update, updateLambda re-pushes the full derivable config (Role, Timeout,
+// VpcConfig, Environment), keeping those operands consistent too.
+func classifyLambdaChange(path string) (string, string) {
+	switch path {
+	case "timeout.maximum":
+		return "mutable", "patched online via UpdateFunctionConfiguration"
+	case "network.publicExposure":
+		return "mutable", "the Function URL + resource grant is added/removed in place (no replacement)"
+	case "location.region":
+		return "immutable", "a Lambda function's region is fixed at creation — a change is a replacement"
+	case lambdaVpcOperand, lambdaEnvOperand:
+		// F-LC3: VpcConfig / Environment drift patches online via the full
+		// UpdateFunctionConfiguration (updateConfigBody re-pushes both).
+		return "mutable", "operand patched online via UpdateFunctionConfiguration"
+	case lambdaPkgOperand:
+		// F-LC3: a container-image swap patches online via UpdateFunctionCode
+		// (no replacement — the function identity survives).
+		return "mutable", "container image patched online via UpdateFunctionCode"
+	case "tls.enforced", "service.managed", "replicas.minimum":
+		return "unsupported", "platform/projection property — nothing to patch in place"
+	default:
+		return "unsupported", "no Lambda in-place mapping for " + path
+	}
+}
+
+// observedAbsent reports whether an observation set carries the reserved
+// absence marker set true (F-LC3): the resource is authoritatively gone.
+func observedAbsent(obs []provider.Observation) bool {
+	for _, o := range obs {
+		if o.Path == provider.ResourceAbsentPath {
+			present, _ := o.Value.(bool)
+			return present
+		}
+	}
+	return false
+}
+
+// OperandTargets (F-LC3, provider.OperandDrifter): the canonical operand values
+// this capability's DECLARED implementation should hold, keyed by reserved
+// observation path — the desired side the compiler compares against observe's
+// recorded operand state. PURE (no network). A build refusal (e.g. a partial
+// VpcConfig) surfaces as an error the compiler isolates per capability.
+func (d *Driver) OperandTargets(service string, attrs, impl map[string]any) ([]provider.OperandTarget, error) {
+	if service != "lambda" {
+		return nil, nil
+	}
+	// account/environment/generation do not affect the operand canon; use
+	// placeholders that satisfy BuildLambda's shape.
+	plan, err := BuildLambda("000000000000", "", "", attrs, impl, 1)
+	if err != nil {
+		return nil, err
+	}
+	vpc, env, pkg := plan.operandCanon()
+	// sorted by Path (determinism): implementation.environment < .package < .vpcConfig
+	return []provider.OperandTarget{
+		{Path: lambdaEnvOperand, Desired: env},
+		{Path: lambdaPkgOperand, Desired: pkg},
+		{Path: lambdaVpcOperand, Desired: vpc},
+	}, nil
+}
+
+// lambdaPatchOutcome folds one Lambda patch call into the four-valued shape:
+// nil means "keep going" (2xx accepted); non-nil is terminal. Ambiguous
+// (transport / 5xx) or a 409 (a concurrent update in flight) is unknown WITH
+// the providerId; any other 4xx/3xx is failed (never a silent success).
+func lambdaPatchOutcome(what, providerID string, st int, resp []byte, err error) *provider.CreateResult {
+	switch {
+	case err != nil:
+		return &provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: fmt.Sprintf("%s outcome unknown (may have landed) — reconcile: %v", what, err)}
+	case st >= 500:
+		return &provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: fmt.Sprintf("%s HTTP %d (server error) — reconcile", what, st)}
+	case st == http.StatusConflict:
+		return &provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: fmt.Sprintf("%s conflicted (a concurrent update is in progress) — reconcile", what)}
+	case st < 200 || st >= 300:
+		return &provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("%s failed: HTTP %d: %s", what, st, lambdaErr(resp))}
+	default:
+		return nil
+	}
+}
+
+// updateLambda patches a function IN PLACE (D46). Ownership (tags) is re-checked
+// before any mutation. timeout.maximum rides the full-config
+// UpdateFunctionConfiguration (which also re-pushes Role, VpcConfig and
+// Environment, keeping the declared operands consistent); network.publicExposure
+// reconciles the Function URL. A config update is async — the driver waits for
+// LastUpdateStatus=Successful before the exposure step (a second call in flight
+// would 409). Four-valued per D29/D87.
+func (d *Driver) updateLambda(capability, environment, providerID string,
+	attrs, impl map[string]any, changes []string) provider.CreateResult {
+	region, account, name, err := splitLambdaProviderID(providerID)
+	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	_, tags, found, rerr := d.getLambdaFunction(region, name)
+	if rerr != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update read gave no answer — reconcile: " + rerr.Error()}
+	}
+	if !found {
+		return provider.CreateResult{Status: "failed",
+			Reason: "function no longer exists — re-observe and re-plan"}
+	}
+	if !groundholdTagsMatch(tags, capability, environment) {
+		return provider.CreateResult{Status: "failed",
+			Reason: "function tags do not match — refusing to patch a resource that is not ours"}
+	}
+	// rebuild the desired config from the resolved attrs+impl (references already
+	// resolved by apply); the account rides in the pid, not the create scope.
+	plan, berr := BuildLambda(account, environment, capability, attrs, impl, 1)
+	if berr != nil {
+		return provider.CreateResult{Status: "failed", Reason: berr.Error()}
+	}
+
+	wantConfig, wantExposure, wantCode := false, false, false
+	for _, path := range changes {
+		switch path {
+		case "timeout.maximum", lambdaVpcOperand, lambdaEnvOperand:
+			// timeout + VpcConfig + Environment all ride the full-config
+			// UpdateFunctionConfiguration (updateConfigBody re-pushes them, F-LC3).
+			wantConfig = true
+		case "network.publicExposure":
+			wantExposure = true
+		case lambdaPkgOperand:
+			wantCode = true // F-LC3: a container-image swap via UpdateFunctionCode
+		default:
+			return provider.CreateResult{Status: "failed",
+				Reason: fmt.Sprintf("lambda path %s is not patchable in place", path)}
+		}
+	}
+
+	if wantConfig {
+		body, _ := json.Marshal(plan.updateConfigBody())
+		st, resp, uerr := d.lambdaDo("PUT", region, lambdaFnPath+"/"+name+"/configuration", body)
+		if r := lambdaPatchOutcome("UpdateFunctionConfiguration", providerID, st, resp, uerr); r != nil {
+			return *r
+		}
+		if r := d.waitLambdaUpdated(region, providerID, name); r != nil {
+			return *r
+		}
+	}
+	if wantCode {
+		// UpdateFunctionCode is async like the config patch — a second call before
+		// LastUpdateStatus=Successful would 409, so wait it out afterwards.
+		body, _ := json.Marshal(plan.updateCodeBody())
+		st, resp, uerr := d.lambdaDo("PUT", region, lambdaFnPath+"/"+name+"/code", body)
+		if r := lambdaPatchOutcome("UpdateFunctionCode", providerID, st, resp, uerr); r != nil {
+			return *r
+		}
+		if r := d.waitLambdaUpdated(region, providerID, name); r != nil {
+			return *r
+		}
+	}
+	if wantExposure {
+		if plan.Public {
+			if r := d.ensureLambdaExposure(region, providerID, plan); r != nil {
+				return *r
+			}
+		} else if r := d.removeLambdaExposure(region, providerID, name); r != nil {
+			return *r
+		}
+	}
+	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+}
+
+// waitLambdaUpdated polls GetFunction until Configuration.LastUpdateStatus is
+// Successful (the config patch landed). Failed is a failed update WITH the pid;
+// the poll timeout is unknown WITH the pid. Returns nil once Successful.
+func (d *Driver) waitLambdaUpdated(region, pid, name string) *provider.CreateResult {
+	deadline := d.Now().Add(d.PollTimeout)
+	for {
+		cfg, _, found, rerr := d.getLambdaFunction(region, name)
+		if rerr == nil && found {
+			switch cfg.LastUpdateStatus {
+			case "Successful", "":
+				// "" = a function that reports no in-flight update (already settled).
+				return nil
+			case "Failed":
+				return &provider.CreateResult{ProviderID: pid, Status: "failed",
+					Reason: "UpdateFunctionConfiguration entered Failed: " + cfg.LastUpdateStatusReason}
+			}
+			// InProgress -> keep polling
+		}
+		if d.Now().After(deadline) {
+			return &provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "function still updating at poll timeout — reconcile via GetFunction"}
+		}
+		d.progress("function updating — waiting for LastUpdateStatus Successful")
+		time.Sleep(d.PollInterval)
+	}
+}
+
+// removeLambdaExposure tears down public exposure (going private): delete the
+// Function URL config and remove the resource-based grant. Both are idempotent
+// (a 404 is success). Returns nil on success.
+func (d *Driver) removeLambdaExposure(region, pid, name string) *provider.CreateResult {
+	st, resp, err := d.lambdaDo("DELETE", region, lambdaURLPath+"/"+name+"/url", nil)
+	switch {
+	case err != nil:
+		return &provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("DeleteFunctionUrlConfig outcome unknown: %v", err)}
+	case st == http.StatusNotFound, st == http.StatusNoContent, st == http.StatusOK, st == http.StatusAccepted:
+		// gone or removed — idempotent
+	case st >= 500:
+		return &provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("DeleteFunctionUrlConfig HTTP %d (server error): %s", st, lambdaErr(resp))}
+	default:
+		return &provider.CreateResult{ProviderID: pid, Status: "failed",
+			Reason: fmt.Sprintf("DeleteFunctionUrlConfig HTTP %d: %s", st, lambdaErr(resp))}
+	}
+	st, resp, err = d.lambdaDo("DELETE", region, lambdaFnPath+"/"+name+"/policy/"+lambdaPublicStmtID, nil)
+	switch {
+	case err != nil:
+		return &provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("RemovePermission outcome unknown: %v", err)}
+	case st == http.StatusNotFound, st == http.StatusNoContent, st == http.StatusOK, st == http.StatusAccepted:
+		return nil // idempotent
+	case st >= 500:
+		return &provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("RemovePermission HTTP %d (server error): %s", st, lambdaErr(resp))}
+	default:
+		return &provider.CreateResult{ProviderID: pid, Status: "failed",
+			Reason: fmt.Sprintf("RemovePermission HTTP %d: %s", st, lambdaErr(resp))}
+	}
+}
+
+// discoverLambda enumerates functions in the region (ListFunctions) as
+// capability.function.serverless — the SAME reverse map observe uses.
+func (d *Driver) discoverLambda(region string) ([]provider.Discovered, []string, error) {
+	st, body, err := d.lambdaGet(region, lambdaFnPath+"/")
+	if err != nil {
+		return nil, nil, err
+	}
+	if st != http.StatusOK {
+		return nil, nil, fmt.Errorf("lambda ListFunctions: HTTP %d: %s", st, lambdaErr(body))
+	}
+	account, err := d.resolveAccount()
+	if err != nil {
+		return nil, nil, err
+	}
+	var lf struct {
+		Functions []struct {
+			FunctionName string `json:"FunctionName"`
+		} `json:"Functions"`
+	}
+	if json.Unmarshal(body, &lf) != nil {
+		return nil, nil, fmt.Errorf("lambda ListFunctions: unparseable response")
+	}
+	var out []provider.Discovered
+	var diags []string
+	for _, f := range lf.Functions {
+		if !lambdaNameOK.MatchString(f.FunctionName) {
+			continue
+		}
+		pid := lambdaProviderID(region, account, f.FunctionName)
+		obs, odiags, oerr := d.observeLambda("", pid)
+		if oerr != nil {
+			diags = append(diags, f.FunctionName+": observe: "+oerr.Error())
+			continue
+		}
+		if observedAbsent(obs) {
+			// listed then 404'd on read — a mid-enumeration race; the absence
+			// marker (F-LC3) is meaningful for a BOUND resource, not a discovery.
+			continue
+		}
+		for _, dg := range odiags {
+			diags = append(diags, f.FunctionName+": "+dg)
+		}
+		out = append(out, provider.Discovered{
+			ProviderID:   pid,
+			ResourceType: "capability.function.serverless",
+			Observations: obs,
+		})
+	}
+	return out, diags, nil
+}

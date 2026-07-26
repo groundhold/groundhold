@@ -1,0 +1,39 @@
+# Attribute vocabulary for capability.cluster.namespace, spec v0.1.
+#
+# A governed tenancy boundary in a cluster: a Kubernetes namespace and the
+# security POSTURE it enforces. A namespace is mostly a scope, but the posture
+# it declares is a real, verifiable governance intent — "this boundary enforces
+# the restricted Pod Security Standard" is exactly the kind of guardrail a
+# platform team contracts. The name and arbitrary labels are identity/scope, not
+# capability semantics; the enforced pod-security level is.
+
+capability: capability.cluster.namespace
+version: 0.1
+stateful: false   # the namespace object holds no data of its own (workloads
+                  # inside it are separate capabilities); deleting an EMPTY
+                  # governed namespace loses none. (A namespace with live
+                  # workloads is a cascade the delete gate still guards.)
+
+attributes:
+
+  security.podSecurity:
+    kind: string
+    enum: [restricted, baseline, privileged]
+    description: >
+      The Pod Security Standard the namespace ENFORCES (the
+      pod-security.kubernetes.io/enforce label). restricted is the hardened
+      default a governed namespace targets; privileged is the escape hatch and
+      the sharpest least-privilege signal.
+    mappings:
+      k8s.namespace: metadata.labels["pod-security.kubernetes.io/enforce"]
+
+  service.managed:
+    kind: bool
+    description: Managed platform namespace vs a self-operated boundary
+
+# Deliberately absent in v0.1 (identity/scope or operational noise, not
+# capability semantics):
+#   - the namespace name and arbitrary labels/annotations (scope/identity)
+#   - finalizers, resourceVersion, status.phase (lifecycle mechanics)
+#   - warn/audit pod-security levels (enforce is the binding one; warn/audit
+#     are advisory and left out until an org needs to contract them)

@@ -1,0 +1,727 @@
+# Resume + deposed (D57/D58): the recovery half of the executor. An
+# unknown outcome is never guessed — resume asks the provider
+# (read-only), concludes receipts, completes the interrupted
+# projection; deposed surfaces the orphans of failed replacements.
+# Go-only.
+suite: resilience
+cases:
+  - name: resume-concludes-an-unknown-create
+    impl: go
+    description: >
+      D57: an apply whose create outcome was lost leaves a pending
+      receipt; every retry refuses (D29). Resume while the provider
+      still cannot answer keeps it pending (exit 3, never guessed);
+      once the provider answers, resume writes the terminal receipt AND
+      the binding (causally linked), and converge proves the world is
+      what the contract wanted all along.
+    onboard:
+      contract: &res-contract
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: res-t, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-managed
+              subject: db
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate: &res-candidate
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: res-t
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+      steps:
+        - cmd: plan
+          at: "2026-07-12T14:00:00Z"
+          expect: { exit: 0 }
+        - cmd: apply
+          at: "2026-07-12T14:05:00Z"
+          unknownKeysFromPlan: [a-create-db]
+          expect:
+            exit: 4
+            status: unknown
+            code: reconcile-required
+        - cmd: apply
+          at: "2026-07-12T14:06:00Z"
+          expect:
+            exit: 3
+            status: refused
+            code: reconcile-required
+            reasonContains: "must be reconciled first"
+        - cmd: resume
+          at: "2026-07-12T14:10:00Z"
+          unknownKeysFromPlan: [a-create-db]
+          expect:
+            exit: 3
+            status: still-unknown
+            code: reconcile-pending
+        - cmd: resume
+          at: "2026-07-12T14:15:00Z"
+          expect:
+            exit: 0
+            status: resumed
+            events: [lease.acquired, binding.updated, operation.receipt,
+                     lease.released]
+        - cmd: converge
+          at: "2026-07-12T14:20:00Z"
+          expect:
+            exit: 0
+            status: converged
+
+  - name: resume-with-nothing-pending-is-a-no-op
+    impl: go
+    description: >
+      D57: resume on a clean ledger reports nothing-to-resume, exit 0 —
+      running it defensively is free.
+    onboard:
+      contract: *res-contract
+      candidate: *res-candidate
+      steps:
+        - cmd: resume
+          at: "2026-07-12T14:00:00Z"
+          expect:
+            exit: 0
+            status: nothing-to-resume
+
+  - name: failed-replacement-delete-leaves-a-deposed-resource
+    impl: go
+    description: >
+      D58: create-before-destroy where the delete FAILS terminally —
+      the successor is bound, the predecessor survives unbound and
+      alive. `deposed` names it; a later binding-body overwrite must
+      not hide it (the projection accumulates full history).
+    apply:
+      at: "2026-07-11T19:10:00Z"
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: binding.updated
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+            body:
+              capability: db
+              environment: test
+              provider: { name: fake }
+              resources:
+                - { id: primary, type: t, providerId: "fake:db-1", generation: 1 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.released
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+      contract: &dep-contract
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: ra, environment: test, version: 3 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        autonomy:
+          allow_replace_stateful: [db]
+      candidate: &dep-candidate
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: ra
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+      plan: &dep-plan
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: ra
+          environment: test
+          reads:
+            contractHash: "sha256:c72c106a610afc7f1054c5cfd583828b8657edee6bd8e975891b8149b3b9f506"
+            candidateHash: "sha256:a5e04440d4c498032ad4737c04aa84823eb12cd4626a5a6bd661114de24dd16c"
+            heads: { db: "sha256:77ffa631b51360f022c62eb6d348b0680a108ddd0ebce924fe14d509b352e043" }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-create-db-g2
+              capability: db
+              operation: create
+              target: fake.svc/db
+              idempotencyKey: db-g2-key
+              targetGeneration: 2
+              replaces:
+                providerId: "fake:db-1"
+                generation: 1
+                because:
+                  - { path: location.region, from: us-east1, to: europe-west1 }
+              risk:
+                reversibility: R1
+                dataLoss: none
+                downtime: none
+                securityExposure: none
+                costDelta: { amount: 0, currency: EUR }
+                identityReplacement: true
+            - id: a-delete-db-g1
+              capability: db
+              operation: delete
+              target: fake.svc/db
+              idempotencyKey: db-g1-delete
+              dependsOn: [a-create-db-g2]
+              targetProviderId: "fake:db-1"
+              targetGeneration: 1
+              risk:
+                reversibility: R4
+                dataLoss: certain
+                downtime: certain
+                securityExposure: none
+                costDelta: { amount: 0, currency: EUR }
+                identityReplacement: true
+          preconditions:
+            - type: report-executable
+      failKeys: [db-g1-delete]
+    expect:
+      exit: 4
+      status: failed
+      thenDeposed:
+        - { capability: db, providerId: "fake:db-1", generation: 1,
+            status: deposed }
+      thenDeposedAll:
+        - { capability: db, providerId: "fake:db-1", generation: 1,
+            status: deposed }
+
+  - name: pending-delete-is-not-deposed-by-default
+    impl: go
+    description: >
+      D58 (review verdict): a delete with an UNKNOWN outcome is
+      resume's territory — the default deposed list must not invite
+      manual cleanup of something an outstanding reconciliation may
+      own. --all shows it with status pending-delete.
+    apply:
+      at: "2026-07-11T19:10:00Z"
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: binding.updated
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+            body:
+              capability: db
+              environment: test
+              provider: { name: fake }
+              resources:
+                - { id: primary, type: t, providerId: "fake:db-1", generation: 1 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.released
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+      contract: *dep-contract
+      candidate: *dep-candidate
+      plan: *dep-plan
+      unknownKeys: [db-g1-delete]
+    expect:
+      exit: 4
+      status: unknown
+      thenDeposed: []
+      thenDeposedAll:
+        - { capability: db, providerId: "fake:db-1", generation: 1,
+            status: pending-delete }
+
+  - name: adopt-refuses-over-pending-receipts
+    impl: go
+    description: >
+      Review pin: adoption over a capability with in-flight operations
+      would let resume later conclude the hung create and clobber the
+      adopted binding — adopt refuses until resume settles the world.
+    onboard:
+      contract: *res-contract
+      candidate: *res-candidate
+      steps:
+        - cmd: plan
+          at: "2026-07-12T14:00:00Z"
+          expect: { exit: 0 }
+        - cmd: apply
+          at: "2026-07-12T14:05:00Z"
+          unknownKeysFromPlan: [a-create-db]
+          expect: { exit: 4, status: unknown }
+        - cmd: adopt
+          at: "2026-07-12T14:10:00Z"
+          map: { db: "fake:existing-db" }
+          expect:
+            exit: 2
+            status: refused
+            code: reconcile-required
+            reasonContains: "must be reconciled first"
+
+  - name: deposed-orphan-cleanup-end-to-end
+    impl: go
+    description: >
+      D71: the orphan of a failed replacement gets a PINNED delete plan
+      (plan --deposed) — identity and generation from ledger history,
+      validated against a fresh deposed projection at apply, tombstoned
+      on success. The successor's binding survives; the deposed list
+      drains to empty.
+    apply:
+      at: "2026-07-11T19:10:00Z"
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: binding.updated
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+            body:
+              capability: db
+              environment: test
+              provider: { name: fake }
+              resources:
+                - { id: primary, type: t, providerId: "fake:db-1", generation: 1 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.released
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+      contract: *dep-contract
+      candidate: *dep-candidate
+      plan: *dep-plan
+      failKeys: [db-g1-delete]
+    expect:
+      exit: 4
+      status: failed
+    then:
+      - planDeposed: { at: "2026-07-11T19:20:00Z" }
+        expect:
+          exit: 0
+          actions:
+            a-delete-deposed-db-g1:
+              operation: delete
+              targetProviderId: "fake:db-1"
+              targetGeneration: 1
+              deposed: true
+      - applySaved: { at: "2026-07-11T19:25:00Z" }
+        expect:
+          exit: 0
+          status: applied
+          events: [lease.acquired, apply.started, operation.receipt,
+                   binding.updated, operation.receipt, apply.finished,
+                   lease.released]
+      - deposed: {}
+        expect: { list: [] }
+      - deposed: { all: true }
+        expect: { list: [] }
+
+  - name: deposed-plan-checks-consent-now-not-then
+    impl: go
+    description: >
+      D71: the orphan is the destroy half of a replacement arriving
+      late — deleting a stateful one requires allow_replace_stateful
+      AT PLAN TIME. Consent granted for the original replacement and
+      revoked since does not carry over; fail-closed means checking
+      now, not remembering then.
+    apply:
+      at: "2026-07-11T19:10:00Z"
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: binding.updated
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+            body:
+              capability: db
+              environment: test
+              provider: { name: fake }
+              resources:
+                - { id: primary, type: t, providerId: "fake:db-1", generation: 1 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.released
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+      contract: *dep-contract
+      candidate: *dep-candidate
+      plan: *dep-plan
+      failKeys: [db-g1-delete]
+    expect:
+      exit: 4
+      status: failed
+    then:
+      - planDeposed:
+          at: "2026-07-11T19:20:00Z"
+          contract:
+            apiVersion: contract/v0.1
+            kind: InfrastructureContract
+            meta: { id: ra, environment: test, version: 4 }
+            capabilities:
+              - id: db
+                type: capability.database.relational
+        expect:
+          exit: 2
+          code: consent-required
+
+  - name: apply-refuses-a-delete-pinned-to-a-non-deposed-id
+    impl: go
+    description: >
+      D71: a deposed delete validates its pin against the FRESH deposed
+      projection — an id the ledger does not record as deposed (a typo,
+      a stale plan after someone else cleaned up) refuses with
+      stale-decision, before any provider call.
+    apply:
+      at: "2026-07-11T19:10:00Z"
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: binding.updated
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+            body:
+              capability: db
+              environment: test
+              provider: { name: fake }
+              resources:
+                - { id: primary, type: t, providerId: "fake:db-1", generation: 1 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.released
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+      contract: *dep-contract
+      candidate: *dep-candidate
+      plan:
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: ra
+          environment: test
+          reads:
+            contractHash: "sha256:c72c106a610afc7f1054c5cfd583828b8657edee6bd8e975891b8149b3b9f506"
+            candidateHash: "sha256:a5e04440d4c498032ad4737c04aa84823eb12cd4626a5a6bd661114de24dd16c"
+            heads: { db: "sha256:77ffa631b51360f022c62eb6d348b0680a108ddd0ebce924fe14d509b352e043" }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-delete-deposed-db-g1
+              capability: db
+              operation: delete
+              target: fake.svc/db
+              idempotencyKey: db-g1-ghost-delete
+              targetProviderId: "fake:db-9"
+              targetGeneration: 1
+              deposed: true
+              risk:
+                reversibility: R4
+                dataLoss: certain
+                downtime: certain
+                securityExposure: none
+                costDelta: { amount: 0, currency: EUR }
+                identityReplacement: true
+          preconditions:
+            - type: report-executable
+    expect:
+      exit: 3
+      status: refused
+      code: stale-decision
+
+  - name: resume-concludes-an-unknown-update
+    impl: go
+    description: >
+      D72 closes D57's v0 boundary: update receipts now carry a
+      verifiable target shape (pinned identity + desired values), so a
+      lost update outcome concludes like a create — while the provider
+      cannot answer it stays pending (never guessed), and the concluded
+      update completes the projection exactly as apply would have:
+      identity survives, generation increments.
+    apply:
+      at: "2026-07-11T14:00:00Z"
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T13:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { ttlSeconds: 3600 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: binding.updated
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T13:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+            body:
+              capability: db
+              environment: test
+              provider: { name: fake }
+              resources:
+                - { id: primary, type: t, providerId: "fake:db-1", generation: 1 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.released
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T13:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+      contract: &upd-contract
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: u1, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-avail
+              subject: db
+              path: availability.class
+              op: equals
+              value: regional
+              verify: { method: static }
+      candidate: &upd-candidate
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: u1
+        capabilities:
+          db:
+            attributes:
+              availability.class: regional
+      plan:
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: u1
+          environment: test
+          reads:
+            contractHash: "sha256:a54f0da760d75d4a3a11a271f03c78693f5166fcbbfd9b6bebb893ac8a0f36f5"
+            candidateHash: "sha256:70963f22a0503d3b017f15ec8ff343dc844ec4a58fdc8900ff36979633f7e6f6"
+            heads: { db: "sha256:4fcc19a6147159f4133d849e9b4e984013507e4239c4cb2a13fad50254d97ff2" }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-update-db
+              capability: db
+              operation: update
+              target: fake.svc/db
+              idempotencyKey: db-update-1
+              changes:
+                - { path: availability.class, from: zonal, to: regional }
+              risk:
+                reversibility: R1
+                dataLoss: none
+                downtime: possible
+                securityExposure: none
+                costDelta: { amount: 0, currency: EUR }
+                identityReplacement: false
+          preconditions:
+            - type: report-executable
+      unknownKeys: [db-update-1]
+    expect:
+      exit: 4
+      status: unknown
+      code: reconcile-required
+    then:
+      - resume:
+          at: "2026-07-11T14:10:00Z"
+          unknownKeys: [db-update-1]
+        expect:
+          exit: 3
+          status: still-unknown
+          code: reconcile-pending
+      - resume: { at: "2026-07-11T14:15:00Z" }
+        expect:
+          exit: 0
+          status: resumed
+          events: [lease.acquired, binding.updated, operation.receipt,
+                   lease.released]
+          bindings: { db: "fake:db-1" }
+
+  - name: resume-refuses-a-legacy-update-receipt
+    impl: go
+    description: >
+      D72's honest edge: an update receipt written before receipts
+      carried the pinned target has NO verifiable shape — resume
+      refuses it by name (unsupported-operation, reconcile manually)
+      instead of guessing, and apply keeps refusing over it (D29).
+    apply:
+      at: "2026-07-11T14:00:00Z"
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T13:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { ttlSeconds: 3600 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: binding.updated
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T13:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+            body:
+              capability: db
+              environment: test
+              provider: { name: fake }
+              resources:
+                - { id: primary, type: t, providerId: "fake:db-1", generation: 1 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.released
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T13:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: operation.receipt
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T13:30:00Z"
+            actor: { id: legacy-runtime, type: runtime }
+            body:
+              operationId: op-legacy-update
+              status: pending
+              operation: update
+              target: fake.svc/db
+      contract: *upd-contract
+      candidate: *upd-candidate
+      plan:
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: u1
+          environment: test
+          reads:
+            contractHash: "sha256:a54f0da760d75d4a3a11a271f03c78693f5166fcbbfd9b6bebb893ac8a0f36f5"
+            candidateHash: "sha256:70963f22a0503d3b017f15ec8ff343dc844ec4a58fdc8900ff36979633f7e6f6"
+            heads: { db: "sha256:4fcc19a6147159f4133d849e9b4e984013507e4239c4cb2a13fad50254d97ff2" }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-update-db
+              capability: db
+              operation: update
+              target: fake.svc/db
+              idempotencyKey: db-update-1
+              changes:
+                - { path: availability.class, from: zonal, to: regional }
+              risk:
+                reversibility: R1
+                dataLoss: none
+                downtime: possible
+                securityExposure: none
+                costDelta: { amount: 0, currency: EUR }
+                identityReplacement: false
+          preconditions:
+            - type: report-executable
+    expect:
+      exit: 3
+      status: refused
+      code: reconcile-required
+    then:
+      - resume: { at: "2026-07-11T14:10:00Z" }
+        expect:
+          exit: 2
+          status: refused
+          code: unsupported-operation
+          reasonContains: "predates update-resume support"

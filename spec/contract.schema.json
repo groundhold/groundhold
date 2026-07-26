@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "groundhold://schemas/contract/v0.1",
+  "title": "InfrastructureContract v0.1",
+  "type": "object",
+  "required": ["apiVersion", "kind", "meta", "capabilities"],
+  "properties": {
+    "apiVersion": { "const": "contract/v0.1" },
+    "kind": { "const": "InfrastructureContract" },
+    "meta": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "owner": { "type": "string" },
+        "environment": { "type": "string" },
+        "version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "type"],
+        "properties": {
+          "id": { "$ref": "#/$defs/identifier" },
+          "type": {
+            "enum": [
+              "capability.database.relational",
+              "capability.storage.object",
+              "capability.network.private",
+              "capability.workload.container",
+              "capability.identity.sso",
+              "capability.identity.oauth-client"
+            ]
+          },
+          "state": {
+            "enum": ["active", "retired"],
+            "description": "D47: retirement is explicit, never absence"
+          },
+          "requirements": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "required": ["op", "value"],
+              "properties": {
+                "op": { "$ref": "#/$defs/operator" },
+                "value": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "properties": {
+        "hard": { "type": "array", "items": { "$ref": "#/$defs/constraint" } },
+        "soft": { "type": "array", "items": { "$ref": "#/$defs/softConstraint" } }
+      }
+    },
+    "budget": { "type": "array", "items": { "$ref": "#/$defs/constraint" } },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "statement", "status"],
+        "properties": {
+          "id": { "$ref": "#/$defs/identifier" },
+          "statement": { "type": "string" },
+          "status": { "enum": ["declared", "inferred", "assumed", "unknown"] },
+          "source": { "type": "string" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "affects": { "type": "array", "items": { "$ref": "#/$defs/identifier" } }
+        }
+      }
+    },
+    "autonomy": { "type": "object" },
+    "outcomes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "probe"],
+        "properties": {
+          "id": { "$ref": "#/$defs/identifier" },
+          "probe": { "enum": ["tcp-connect", "http", "metric", "provider-api"] }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9\\-\\.]*$",
+      "maxLength": 128
+    },
+    "operator": {
+      "enum": ["equals", "not-equals", "lte", "gte", "in", "not-in",
+               "exists", "absent", "compatible-with", "subset-of"]
+    },
+    "verify": {
+      "type": "object",
+      "properties": {
+        "method": { "enum": ["static", "provider-api", "probe"] }
+      }
+    },
+    "constraint": {
+      "type": "object",
+      "required": ["id", "subject", "path", "op"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "subject": { "$ref": "#/$defs/identifier" },
+        "path": { "type": "string" },
+        "op": { "$ref": "#/$defs/operator" },
+        "value": {},
+        "verify": { "$ref": "#/$defs/verify" }
+      }
+    },
+    "softConstraint": {
+      "type": "object",
+      "required": ["id", "subject"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "subject": { "$ref": "#/$defs/identifier" },
+        "path": { "type": "string" },
+        "op": { "$ref": "#/$defs/operator" },
+        "value": {},
+        "objective": { "enum": ["minimize", "maximize"] },
+        "verify": { "$ref": "#/$defs/verify" }
+      }
+    }
+  }
+}

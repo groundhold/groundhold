@@ -1,0 +1,62 @@
+# Attribute vocabulary for capability.email.sending, spec v0.1 (D148).
+#
+# Authenticated outbound email as a governed capability — the sending side of a
+# product whose invoices and statutory demands (the Egzekutor, Directive 2011/7)
+# MUST be deliverable and MUST have their bounces return to the record. What an
+# organization contracts about a sending identity: residency, authentication
+# posture (DKIM signing — the proof a domain is authorized to send), and whether
+# bounces/complaints are TRACKED (an event destination feeds delivery failures
+# back to the system, not the void). The sending domain, the bounce sink and the
+# configuration-set name are operator OPERANDS (implementation: block, D26) — a
+# domain is an identity the operator owns, a bounce topic is a separate capability
+# (messaging.topic), not a sending attribute.
+#
+# One capability TYPE, many services (D76): aws.ses-sending today; a future
+# gcp/azure/postmark sender fulfils the same contract. This is the OUTBOUND half;
+# the deal-mailbox INBOUND pipeline is capability.email.inbound (a separate slice).
+#
+# STATELESS: a sending identity holds no durable data — retirement destroys
+# nothing, so the delete_stateful gates do not bind it.
+
+capability: capability.email.sending
+version: 0.1
+stateful: false
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Region the sending identity + configuration set live in (residency)
+    mappings:
+      aws.ses-sending: SES region
+
+  authentication.dkim:
+    kind: bool
+    description: Whether the sending domain is DKIM-signed (Easy DKIM) — the authentication posture that keeps statutory mail out of spam
+    mappings:
+      aws.ses-sending: email identity DkimAttributes SigningEnabled + Status SUCCESS
+
+  bounce.tracked:
+    kind: bool
+    description: Whether bounces and complaints are captured to a durable sink (an event destination) so a failed demand returns to the record, never the void
+    mappings:
+      aws.ses-sending: configuration set event destination for BOUNCE + COMPLAINT
+
+  sending.productionAccess:
+    kind: bool
+    description: >
+      Whether the sending account is OUT of the sandbox (may send to arbitrary
+      recipients, not only verified addresses). MANUAL-GATE: observed, never
+      provisioned — leaving the SES sandbox is a manual request in the AWS
+      console, not an API create, so groundhold OBSERVES the gate state and refuses
+      to fake it. A contract may assert productionAccess == true; a sandboxed
+      account observes false and the plan is REFUSED until a human obtains
+      production access.
+    mappings:
+      aws.ses-sending: SESv2 GetAccount ProductionAccessEnabled (account-level, observed only — groundhold NEVER sets it)
+
+  service.managed:
+    kind: bool
+    description: Whether groundhold manages this sending identity
+    mappings:
+      aws.ses-sending: const true when observed through the driver

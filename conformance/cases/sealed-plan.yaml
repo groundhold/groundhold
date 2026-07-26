@@ -1,0 +1,313 @@
+# Sealed Plan IR v0 (spec/sealed-plan.md, D36). The reads block of the
+# pinned case reuses the literal contract/candidate hashes from
+# cases/canonicalization.yaml — the artifacts chain together.
+
+cases:
+  - name: sealed-plan-hash-is-pinned
+    document:
+      apiVersion: plan/v0
+      kind: SealedPlan
+      plan:
+        contract: h1
+        environment: test
+        reads:
+          contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+          candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+          heads: { db: genesis }
+          toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+        writes: [db]
+        actions:
+          - id: a-create
+            capability: db
+            operation: create
+            target: cloudsql.instance/primary
+            idempotencyKey: db-create-1
+            risk:
+              reversibility: R2
+              dataLoss: none
+              downtime: none
+              securityExposure: none
+              costDelta: { amount: 100, currency: EUR }
+              identityReplacement: false
+        preconditions:
+          - type: report-executable
+    expect:
+      hash: sha256:09781f7e9db2fd7822745f6f548e43ba5bb56812f48fd8affafcd62586b352d2
+
+  - name: plan-with-unknown-operation-is-load-error
+    document:
+      apiVersion: plan/v0
+      kind: SealedPlan
+      plan:
+        contract: h1
+        reads:
+          contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+          candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+          heads: { db: genesis }
+          toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+        writes: [db]
+        actions:
+          - id: a-nuke
+            capability: db
+            operation: destroy
+            target: cloudsql.instance/primary
+            idempotencyKey: db-nuke-1
+            risk:
+              reversibility: R4
+              dataLoss: certain
+              downtime: certain
+              securityExposure: none
+              costDelta: { amount: 0, currency: EUR }
+              identityReplacement: true
+        preconditions:
+          - type: report-executable
+    expect:
+      error: document
+
+  - name: plan-with-dependency-cycle-is-load-error
+    document:
+      apiVersion: plan/v0
+      kind: SealedPlan
+      plan:
+        contract: h1
+        reads:
+          contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+          candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+          heads: { db: genesis }
+          toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+        writes: [db]
+        actions:
+          - id: a-one
+            capability: db
+            operation: create
+            target: t1
+            idempotencyKey: k1
+            dependsOn: [a-two]
+            risk:
+              reversibility: R1
+              dataLoss: none
+              downtime: none
+              securityExposure: none
+              costDelta: { amount: 0, currency: EUR }
+              identityReplacement: false
+          - id: a-two
+            capability: db
+            operation: update
+            target: t2
+            idempotencyKey: k2
+            dependsOn: [a-one]
+            risk:
+              reversibility: R1
+              dataLoss: none
+              downtime: none
+              securityExposure: none
+              costDelta: { amount: 0, currency: EUR }
+              identityReplacement: false
+        preconditions:
+          - type: report-executable
+    expect:
+      error: document
+
+  - name: plan-with-dangling-dependency-is-load-error
+    document:
+      apiVersion: plan/v0
+      kind: SealedPlan
+      plan:
+        contract: h1
+        reads:
+          contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+          candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+          heads: { db: genesis }
+          toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+        writes: [db]
+        actions:
+          - id: a-one
+            capability: db
+            operation: create
+            target: t1
+            idempotencyKey: k1
+            dependsOn: [a-ghost]
+            risk:
+              reversibility: R1
+              dataLoss: none
+              downtime: none
+              securityExposure: none
+              costDelta: { amount: 0, currency: EUR }
+              identityReplacement: false
+        preconditions:
+          - type: report-executable
+    expect:
+      error: document
+
+  - name: plan-writing-unpinned-capability-is-load-error
+    description: >
+      D28 + D36: writes must be a subset of pinned heads — you cannot
+      write what you did not read.
+    document:
+      apiVersion: plan/v0
+      kind: SealedPlan
+      plan:
+        contract: h1
+        reads:
+          contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+          candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+          heads: { db: genesis }
+          toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+        writes: [db, cache]
+        actions:
+          - id: a-create
+            capability: db
+            operation: create
+            target: t1
+            idempotencyKey: k1
+            risk:
+              reversibility: R1
+              dataLoss: none
+              downtime: none
+              securityExposure: none
+              costDelta: { amount: 0, currency: EUR }
+              identityReplacement: false
+        preconditions:
+          - type: report-executable
+    expect:
+      error: document
+
+  - name: plan-without-report-executable-precondition-is-load-error
+    description: >
+      D36: a plan that does not require verification to pass contradicts
+      the thesis.
+    document:
+      apiVersion: plan/v0
+      kind: SealedPlan
+      plan:
+        contract: h1
+        reads:
+          contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+          candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+          heads: { db: genesis }
+          toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+        writes: [db]
+        actions:
+          - id: a-create
+            capability: db
+            operation: create
+            target: t1
+            idempotencyKey: k1
+            risk:
+              reversibility: R1
+              dataLoss: none
+              downtime: none
+              securityExposure: none
+              costDelta: { amount: 0, currency: EUR }
+              identityReplacement: false
+        preconditions:
+          - type: within-autonomy
+    expect:
+      error: document
+
+  - name: plan-with-invalid-risk-vector-is-load-error
+    description: D33 - the risk vector is complete or the plan is refused.
+    document:
+      apiVersion: plan/v0
+      kind: SealedPlan
+      plan:
+        contract: h1
+        reads:
+          contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+          candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+          heads: { db: genesis }
+          toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+        writes: [db]
+        actions:
+          - id: a-create
+            capability: db
+            operation: create
+            target: t1
+            idempotencyKey: k1
+            risk:
+              reversibility: R9
+              dataLoss: none
+              downtime: none
+              securityExposure: none
+              costDelta: { amount: 0, currency: EUR }
+              identityReplacement: false
+        preconditions:
+          - type: report-executable
+    expect:
+      error: document
+
+  # D177: a witnessed capability is verified but not authored. The plan carries an
+  # explicit `witnessed` record (omission-resistance for a signed artifact) alongside
+  # the authored action; it is loadable and hashes deterministically in BOTH impls.
+  - name: sealed-plan-with-a-witnessed-capability-is-loadable-and-hashed
+    document:
+      apiVersion: plan/v0
+      kind: SealedPlan
+      plan:
+        contract: h1
+        environment: test
+        reads:
+          contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+          candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+          heads: { coupling: genesis, controller: genesis }
+          toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+        writes: [coupling]
+        actions:
+          - id: a-create
+            capability: coupling
+            operation: create
+            target: aws.eks-podidentity/coupling
+            idempotencyKey: coupling-create-1
+            risk:
+              reversibility: R1
+              dataLoss: none
+              downtime: none
+              securityExposure: none
+              costDelta: { amount: 0, currency: EUR }
+              identityReplacement: false
+        witnessed:
+          - capability: controller
+            provider: k8s
+            service: argocd-application
+            reason: not-authorable
+        preconditions:
+          - type: report-executable
+    expect:
+      hash: sha256:21f27758c1fdd7283465a7c788ea76e351a7d95247efe2982539af657e7dbe62
+
+  # A witnessed capability that is ALSO in writes is a lie (a witness mutates
+  # nothing) — refused at load in both impls.
+  - name: witnessed-capability-in-writes-is-load-error
+    document:
+      apiVersion: plan/v0
+      kind: SealedPlan
+      plan:
+        contract: h1
+        reads:
+          contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+          candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+          heads: { coupling: genesis }
+          toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+        writes: [coupling]
+        actions:
+          - id: a-create
+            capability: coupling
+            operation: create
+            target: aws.eks-podidentity/coupling
+            idempotencyKey: coupling-create-1
+            risk:
+              reversibility: R1
+              dataLoss: none
+              downtime: none
+              securityExposure: none
+              costDelta: { amount: 0, currency: EUR }
+              identityReplacement: false
+        witnessed:
+          - capability: coupling
+            provider: k8s
+            service: argocd-application
+            reason: not-authorable
+        preconditions:
+          - type: report-executable
+    expect:
+      error: document

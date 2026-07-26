@@ -1,0 +1,25 @@
+{
+  "components": { "schemas": {
+    "io.k8s.api.networking.v1.NetworkPolicy": {
+      "type": "object",
+      "x-kubernetes-group-version-kind": [{"group":"networking.k8s.io","version":"v1","kind":"NetworkPolicy"}],
+      "properties": {
+        "spec": {"$ref": "#/components/schemas/io.k8s.api.networking.v1.NetworkPolicySpec"},
+        "metadata": {"$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"}
+      }
+    },
+    "io.k8s.api.networking.v1.NetworkPolicySpec": {
+      "type": "object",
+      "properties": {
+        "podSelector": {"$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.LabelSelector"},
+        "policyTypes": {"type":"array","items":{"type":"string"}},
+        "ingress": {"type":"array","items":{"$ref":"#/components/schemas/io.k8s.api.networking.v1.NetworkPolicyIngressRule"}},
+        "egress": {"type":"array","items":{"$ref":"#/components/schemas/io.k8s.api.networking.v1.NetworkPolicyEgressRule"}}
+      }
+    },
+    "io.k8s.apimachinery.pkg.apis.meta.v1.LabelSelector": {"type":"object"},
+    "io.k8s.api.networking.v1.NetworkPolicyIngressRule": {"type":"object"},
+    "io.k8s.api.networking.v1.NetworkPolicyEgressRule": {"type":"object"},
+    "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta": {"type":"object"}
+  }}
+}

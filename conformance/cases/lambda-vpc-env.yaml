@@ -1,0 +1,165 @@
+# Lambda VPC-attach + environment via $ref (D226 consumer proof, AWS): a
+# capability.function.serverless candidate reaches a private Aurora the honest
+# way — subnets wired to a vpc's privateSubnetIds (a LIST output) and an env var
+# (DATABASE_HOST) wired to an Aurora writerEndpoint (a string output NESTED in
+# the environment MAP operand), never a hand-pasted literal. This exercises both
+# list-$ref (into a top-level slot) and map-value-$ref (into an env map value).
+# The Aurora connection endpoint output is what makes the DATABASE_URL host
+# travel by reference (the PASSWORD is NOT an output — it stays off-ledger).
+# Compile behaviour is Go-runtime (D24), so every case carries impl: go. The
+# verifier is untouched: the $ref lives in the implementation block (D26).
+suite: lambda-vpc-env
+cases:
+  - name: lambda-wires-subnets-and-db-host-by-ref
+    impl: go
+    description: >
+      A lambda wires subnets = $ref vpc.privateSubnetIds (list) and
+      environment.DATABASE_HOST = $ref aurora.writerEndpoint (a $ref nested in
+      the env map); the aurora itself wires subnetIds = $ref vpc.privateSubnetIds.
+      The plan emits create-vpc + create-aurora + create-lambda, with dependsOn
+      edges and references entries — the compiler orders the graph and resolves
+      each operand at apply from the producer's receipt.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: lve-aws, environment: test, version: 1 }
+        capabilities:
+          - id: vpc
+            type: capability.network.private
+          - id: db
+            type: capability.database.relational
+          - id: fn
+            type: capability.function.serverless
+        constraints:
+          hard:
+            - id: c-vpc-managed
+              subject: vpc
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-db-managed
+              subject: db
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-fn-managed
+              subject: fn
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: lve-aws
+        capabilities:
+          vpc:
+            provider: aws
+            service: vpc
+            attributes:
+              service.managed: true
+              location.region: eu-central-1
+          db:
+            provider: aws
+            service: aurora
+            attributes:
+              service.managed: true
+              location.region: eu-central-1
+            implementation:
+              subnetIds:
+                $ref: { capability: vpc, output: privateSubnetIds }
+          fn:
+            provider: aws
+            service: lambda
+            attributes:
+              service.managed: true
+              location.region: eu-central-1
+            implementation:
+              image_uri: 123456789012.dkr.ecr.eu-central-1.amazonaws.com/fn:sha
+              role_arn: arn:aws:iam::123456789012:role/fn-exec
+              security_groups: [sg-0abc1234]
+              subnets:
+                $ref: { capability: vpc, output: privateSubnetIds }
+              environment:
+                LOG_LEVEL: info
+                DATABASE_HOST:
+                  $ref: { capability: db, output: writerEndpoint }
+    expect:
+      actions:
+        a-create-vpc:
+          operation: create
+        a-create-db:
+          operation: create
+          dependsOn: [a-create-vpc]
+          references:
+            - slot: subnetIds
+              producerAction: a-create-vpc
+              capability: vpc
+              output: privateSubnetIds
+              kind: list
+        a-create-fn:
+          operation: create
+          dependsOn: [a-create-db, a-create-vpc]
+          references:
+            - slot: environment.DATABASE_HOST
+              producerAction: a-create-db
+              capability: db
+              output: writerEndpoint
+              kind: string
+            - slot: subnets
+              producerAction: a-create-vpc
+              capability: vpc
+              output: privateSubnetIds
+              kind: list
+
+  - name: lambda-vpc-env-operands-not-unknown
+    impl: go
+    description: >
+      Regression (D307): a lambda whose implementation block carries only
+      operands the driver reads — subnets, security_groups and an environment
+      map (all literals here) alongside image_uri/role_arn — is NOT tripped by
+      the unknown-operand guard; it plans and emits the create action. Proves
+      the new operands are registered in the driver's ConsumedOperands.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: lve-reg, environment: test, version: 1 }
+        capabilities:
+          - id: fn
+            type: capability.function.serverless
+        constraints:
+          hard:
+            - id: c-region
+              subject: fn
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: lve-reg
+        capabilities:
+          fn:
+            provider: aws
+            service: lambda
+            attributes:
+              location.region: eu-central-1
+              network.publicExposure: false
+            implementation:
+              image_uri: 123456789012.dkr.ecr.eu-central-1.amazonaws.com/fn:sha
+              role_arn: arn:aws:iam::123456789012:role/fn-exec
+              subnets: [subnet-0aaa1111, subnet-0bbb2222]
+              security_groups: [sg-0abc1234]
+              environment:
+                LOG_LEVEL: info
+    expect:
+      actions:
+        a-create-fn:
+          operation: create

@@ -1,0 +1,206 @@
+# Identity vocabularies (D55): SSO and OAuth-client as capability
+# types. Dual-implemented — identity constraints ride the same
+# four-valued verifier as databases; nothing identity-specific lives in
+# the engine, which is the point: the vocabulary IS the feature.
+
+cases:
+  - name: identity-sso-contract-verifies
+    description: >
+      D55: a workforce-SSO contract — SAML 2 compatibility, enforced
+      SSO, MFA, bounded sessions, SCIM offboarding — verifies green
+      against a compliant candidate; the protocol operator treats
+      saml/2.0 as compatible-with saml/2.
+    vocab: &identity-vocab
+      - capability: capability.identity.sso
+        version: 0.1
+        stateful: true
+        attributes:
+          federation.protocol: { kind: protocol }
+          sso.enforced: { kind: bool }
+          mfa.required: { kind: bool }
+          session.maxDuration: { kind: duration }
+          provisioning.scim: { kind: bool }
+    contract: &sso-contract
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: sso-1, environment: production, version: 1 }
+      capabilities:
+        - id: workforce-sso
+          type: capability.identity.sso
+      constraints:
+        hard:
+          - id: c-saml
+            subject: workforce-sso
+            path: federation.protocol
+            op: compatible-with
+            value: saml/2
+            verify: { method: static }
+          - id: c-enforced
+            subject: workforce-sso
+            path: sso.enforced
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-mfa
+            subject: workforce-sso
+            path: mfa.required
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-session
+            subject: workforce-sso
+            path: session.maxDuration
+            op: lte
+            value: 8h
+            verify: { method: static }
+          - id: c-scim
+            subject: workforce-sso
+            path: provisioning.scim
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: sso-1
+      capabilities:
+        workforce-sso:
+          attributes:
+            federation.protocol: saml/2.0
+            sso.enforced: true
+            mfa.required: true
+            session.maxDuration: 4h
+            provisioning.scim: true
+    expect:
+      executable: true
+      verdicts:
+        c-saml: satisfied
+        c-enforced: satisfied
+        c-mfa: satisfied
+        c-session: satisfied
+        c-scim: satisfied
+      pathInVocabulary:
+        c-saml: true
+
+  - name: identity-sso-undeclared-mfa-blocks
+    description: >
+      D55/D2: a candidate silent about mfa.required leaves the hard
+      constraint unknown — and unknown BLOCKS. Identity contracts fail
+      closed exactly like databases.
+    vocab: *identity-vocab
+    contract: *sso-contract
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: sso-1
+      capabilities:
+        workforce-sso:
+          attributes:
+            federation.protocol: saml/2.0
+            sso.enforced: true
+            session.maxDuration: 4h
+            provisioning.scim: true
+    expect:
+      executable: false
+      verdicts:
+        c-mfa: unknown
+
+  - name: identity-oauth-implicit-grant-violates
+    description: >
+      D55: the contract forbids the implicit grant and public clients;
+      a candidate declaring grants.implicit true and client
+      authentication none violates both. Also: scopes constrained with
+      subset-of against an allowlist.
+    vocab:
+      - capability: capability.identity.oauth-client
+        version: 0.1
+        stateful: true
+        attributes:
+          grants.implicit: { kind: bool }
+          pkce.required: { kind: bool }
+          client.authentication:
+            kind: string
+            enum: [none, client_secret_basic, client_secret_post,
+                   private_key_jwt, mtls]
+          scopes.granted: { kind: list }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: oauth-1, environment: production, version: 1 }
+      capabilities:
+        - id: app-client
+          type: capability.identity.oauth-client
+      constraints:
+        hard:
+          - id: c-no-implicit
+            subject: app-client
+            path: grants.implicit
+            op: equals
+            value: false
+            verify: { method: static }
+          - id: c-pkce
+            subject: app-client
+            path: pkce.required
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-confidential
+            subject: app-client
+            path: client.authentication
+            op: not-in
+            value: [none]
+            verify: { method: static }
+          - id: c-scopes
+            subject: app-client
+            path: scopes.granted
+            op: subset-of
+            value: [openid, profile, email]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: oauth-1
+      capabilities:
+        app-client:
+          attributes:
+            grants.implicit: true
+            pkce.required: true
+            client.authentication: none
+            scopes.granted: [openid, profile, email, admin.directory]
+    expect:
+      executable: false
+      verdicts:
+        c-no-implicit: violated
+        c-pkce: satisfied
+        c-confidential: violated
+        c-scopes: violated
+
+  - name: identity-oauth-enum-violation-is-load-error
+    description: >
+      D55/D19: client.authentication outside the vocabulary enum is
+      ill-typed authorship — refused at load, before any verdict.
+    vocab:
+      - capability: capability.identity.oauth-client
+        version: 0.1
+        attributes:
+          client.authentication:
+            kind: string
+            enum: [none, client_secret_basic, client_secret_post,
+                   private_key_jwt, mtls]
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: oauth-2, environment: test, version: 1 }
+      capabilities:
+        - id: app-client
+          type: capability.identity.oauth-client
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: oauth-2
+      capabilities:
+        app-client:
+          attributes:
+            client.authentication: basic-auth
+    expect:
+      error: candidate

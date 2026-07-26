@@ -1,0 +1,48 @@
+# Schema-driven mapping: k8s rbac.authorization.k8s.io/v1 RoleBinding -> capability.authorization.grant.
+#
+# A RoleBinding confers a NAMED role (roleRef) on principals (subjects) within a
+# namespace. That structure — a role reference + a subject list, with the curated
+# privilege classification and the multi-subject/custom-role caveats — is beyond the
+# closed op set, so the reverse-map and its inverse live in a NAMED LENS
+# (k8s.rbac.grant). access.scope is `resource` (namespace-bounded); grant.role and
+# access.scope are IMMUTABLE (a roleRef change is a replacement). Reproduces the
+# hand-coded observeRoleBinding/buildGrant byte-for-byte.
+mapping: v0.1
+fieldpath: groundhold/fieldpath/v1
+service: rbac-grant
+provider: k8s
+capability: capability.authorization.grant
+vocab:
+  capability.authorization.grant: "0.1"
+
+resource:
+  group: rbac.authorization.k8s.io
+  version: v1
+  kind: RoleBinding
+  plural: rolebindings
+  scope: Namespaced
+
+schema:
+  source: "kubernetes /openapi/v3 apis/rbac.authorization.k8s.io/v1 RoleBinding"
+  mappedSurface: sha256:7fcf441960455719918819cf05d60dc9f9ffc7cf3184ff36d2ace6d572389edb
+
+lenses:
+  - k8s.rbac.grant                   # role reference + subjects + privilege classification
+
+classify:
+  grant.role:
+    change: immutable
+    reason: "roleRef/scope of a RoleBinding is immutable in k8s — change is a replacement"
+  access.scope:
+    change: immutable
+    reason: "roleRef/scope of a RoleBinding is immutable in k8s — change is a replacement"
+  grant.principal:
+    change: mutable
+  access.privileged:
+    change: mutable
+  service.managed:
+    change: mutable
+  cost.monthly:
+    change: mutable
+
+attributes: {}

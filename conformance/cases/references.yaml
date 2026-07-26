@@ -1,0 +1,274 @@
+# Intra-plan output references (D226/F13): a resource created THIS plan feeds
+# another action in the SAME plan, without an expression language. A structured
+# {$ref:{capability,output}} operand becomes a symbolic reference + a DependsOn
+# edge on the producer's create; the consumer resolves it from the producer's
+# receipt at apply (refuse-before-mutate). Compile behaviour is Go-runtime, so
+# every case carries impl: go. The verifier is untouched — references live in
+# the implementation block (D26), which the verifier ignores.
+suite: references
+cases:
+  - name: plan-wires-intra-plan-output-reference
+    impl: go
+    description: >
+      D226: a db whose subnetIds is $ref network.privateSubnetIds compiles to
+      two creates; the consumer carries a symbolic reference and a DependsOn on
+      the producer's create. Only the symbolic structure is in the plan — no
+      runtime value — so the plan stays restart-stable.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract: &ref-contract
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: ref-t, environment: test, version: 1 }
+        capabilities:
+          - id: network
+            type: capability.network.private
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-net-managed
+              subject: network
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-db-managed
+              subject: db
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate: &ref-candidate
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: ref-t
+        capabilities:
+          network:
+            attributes:
+              service.managed: true
+          db:
+            attributes:
+              service.managed: true
+            implementation:
+              subnetIds:
+                $ref: { capability: network, output: privateSubnetIds }
+    expect:
+      actions:
+        a-create-network:
+          operation: create
+        a-create-db:
+          operation: create
+          dependsOn: [a-create-network]
+          references:
+            - slot: subnetIds
+              producerAction: a-create-network
+              capability: network
+              output: privateSubnetIds
+              kind: list
+
+  - name: plan-refuses-unknown-output
+    impl: go
+    description: >
+      D226: a $ref to an output the producer's driver does not declare refuses
+      at compile (reference-invalid), never at apply — the typed OutputsFor
+      contract is the gate.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract: *ref-contract
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: ref-t
+        capabilities:
+          network:
+            attributes: { service.managed: true }
+          db:
+            attributes: { service.managed: true }
+            implementation:
+              subnetIds:
+                $ref: { capability: network, output: bogusOutput }
+    expect:
+      error: plan
+      code: reference-invalid
+
+  - name: plan-refuses-unknown-capability
+    impl: go
+    description: >
+      D226: a $ref to a capability not in the candidate refuses at compile —
+      you cannot wire an output of something the plan never produces.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract: *ref-contract
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: ref-t
+        capabilities:
+          network:
+            attributes: { service.managed: true }
+          db:
+            attributes: { service.managed: true }
+            implementation:
+              subnetIds:
+                $ref: { capability: ghost, output: privateSubnetIds }
+    expect:
+      error: plan
+      code: reference-invalid
+
+  - name: plan-refuses-malformed-ref
+    impl: go
+    description: >
+      D226: the anti-interpolation wall — $ref must be the operand's sole key,
+      its body only capability+output. An extra key is malformed, refused, not
+      parsed as a mini-language.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract: *ref-contract
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: ref-t
+        capabilities:
+          network:
+            attributes: { service.managed: true }
+          db:
+            attributes: { service.managed: true }
+            implementation:
+              subnetIds:
+                $ref: { capability: network, output: privateSubnetIds, transform: join }
+    expect:
+      error: plan
+      code: reference-invalid
+
+  - name: converge-resolves-intra-plan-reference-end-to-end
+    impl: go
+    description: >
+      D275 (the apply slice of D226): converge compiles the $ref plan, the
+      producer's terminal receipt carries its declared typed outputs, the
+      consumer's operand resolves from that receipt in the SAME run — before
+      its write-ahead intent — and the loop converges. A second run replans
+      against the bound world and reports converged without re-wiring
+      anything: no create actions, no references to resolve.
+    converge:
+      contract: *ref-contract
+      candidate: *ref-candidate
+      runs:
+        - at: "2026-07-22T10:00:00Z"
+          approve: true
+          expect:
+            exit: 0
+            status: applied
+            convergence: verified
+            banner: CONVERGED
+            phases: [verify, plan, forecast, confirm, apply, observe,
+                     convergence-check]
+        - at: "2026-07-22T10:10:00Z"
+          approve: true
+          expect:
+            exit: 0
+            status: converged
+            banner: CONVERGED
+            phases: [verify, plan]
+
+  - name: plan-folds-reference-to-bound-producer
+    impl: go
+    description: >
+      D283 (the fold branch of D226): the producer is already BOUND, so the
+      $ref folds at compile to a LITERAL from a fresh "outputs.<name>"
+      observation — no symbolic reference, no dependsOn edge, no producer
+      action. The literal is part of the sealed decision and enters the plan
+      hash; apply re-checks the backing observation pre-lease.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      bindings: { network: "fake:net-1" }
+      observations:
+        - { capability: network, path: service.managed, value: true,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-22T09:55:00Z", ttlSeconds: 900 }
+        - { capability: network, path: outputs.privateSubnetIds,
+            value: [subnet-net-1-a, subnet-net-1-b],
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-22T09:55:00Z", ttlSeconds: 900 }
+      contract: *ref-contract
+      candidate: *ref-candidate
+    expect:
+      actions:
+        a-create-db:
+          operation: create
+          dependsOn: []
+          folds:
+            - slot: subnetIds
+              capability: network
+              output: privateSubnetIds
+              value: [subnet-net-1-a, subnet-net-1-b]
+              observedAt: "2026-07-22T09:55:00Z"
+              ttlSeconds: 900
+      absentActions: [a-create-network]
+
+  - name: plan-refuses-fold-without-outputs-observation
+    impl: go
+    description: >
+      D283: a bound producer with NO "outputs.<name>" observation refuses
+      observation-required — run observe (which records a bound resource's
+      declared outputs); never a symbolic fallback, never the candidate's old
+      literal.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      bindings: { network: "fake:net-1" }
+      observations:
+        - { capability: network, path: service.managed, value: true,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-22T09:55:00Z", ttlSeconds: 900 }
+      contract: *ref-contract
+      candidate: *ref-candidate
+    expect:
+      error: plan
+      code: observation-required
+
+  - name: plan-refuses-fold-on-stale-outputs-observation
+    impl: go
+    description: >
+      D283: a fold judges freshness against the explicit --at (N1) with the
+      observation's own TTL — a stale outputs reading refuses
+      observation-required rather than sealing a literal the world may have
+      left behind.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      bindings: { network: "fake:net-1" }
+      observations:
+        - { capability: network, path: service.managed, value: true,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-22T09:55:00Z", ttlSeconds: 900 }
+        - { capability: network, path: outputs.privateSubnetIds,
+            value: [subnet-net-1-a, subnet-net-1-b],
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-22T09:00:00Z", ttlSeconds: 900 }
+      contract: *ref-contract
+      candidate: *ref-candidate
+    expect:
+      error: plan
+      code: observation-required
+
+  - name: plan-refuses-when-a-bound-capability-is-known-only-by-wiring
+    impl: go
+    description: >
+      D286: "outputs.<name>" is a WIRING fact (an identity to reference), not
+      a capability SEMANTIC fact. A bound capability whose only knowledge is
+      wiring has NOT been observed — the reconcile must still refuse
+      observation-required. Counting the two together let a wiring record
+      answer "has this been observed?", silently reclassifying every declared
+      attribute as non-observable and letting the plan proceed unchecked.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      bindings: { network: "fake:net-1" }
+      observations:
+        - { capability: network, path: outputs.privateSubnetIds,
+            value: [subnet-net-1-a, subnet-net-1-b],
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-22T09:55:00Z", ttlSeconds: 900 }
+      contract: *ref-contract
+      candidate: *ref-candidate
+    expect:
+      error: plan
+      code: observation-required

@@ -1,0 +1,288 @@
+# Event signatures (D102). impl: go — single-implementation per D24 (the
+# Python reference never writes production ledgers). The cross-language
+# semantic kernel — the `sig` envelope is EXCLUDED from event identity —
+# is pinned as a dual hash case in canonicalization.yaml; the envelope's
+# well-formedness as a dual load case there too. These cases pin the
+# runtime mechanics: signing is opt-in, --trust is all-or-nothing over
+# the file, and refusals share the corruption channel (exit 5).
+
+cases:
+  - name: signed-history-verifies-under-trust
+    description: >
+      A ledger written with --sign-key replays and exports cleanly when
+      the verifier trusts the matching public key. Verification is free
+      to demand because signing wrote the proof in advance.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - replay: { trust: "@pub" }
+          expect: { exit: 0 }
+        - export: { trust: "@pub" }
+          expect: { exit: 0 }
+
+  - name: foreign-signature-is-refused
+    description: >
+      --trust names exactly one author. A file signed by a DIFFERENT
+      key refuses like a broken chain — a valid signature by the wrong
+      key is not partial credit, it is someone else's ledger.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - replay:
+            trust: "0000000000000000000000000000000000000000000000000000000000000000"
+          expect: { exit: 5, stderrContains: "FOREIGN key" }
+        - export:
+            trust: "0000000000000000000000000000000000000000000000000000000000000000"
+          expect: { exit: 5, stderrContains: "FOREIGN key" }
+
+  - name: unsigned-line-under-trust-is-refused
+    description: >
+      Under --trust, an unsigned event is tamper evidence, not a
+      tolerated legacy: stripping the envelope from a signed file must
+      not yield a file that still verifies (signature-stripping attack).
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - stripSig: {}
+        - replay: { trust: "@pub" }
+          expect: { exit: 5, stderrContains: "unsigned event but --trust" }
+
+  - name: altered-event-invalidates-its-signature
+    description: >
+      The signature covers the canonical event hash: change one byte of
+      what was said and the signature no longer verifies — even though
+      the envelope itself is intact. Export refuses too, one check
+      earlier (D134): altering the genesis event changes the stream's
+      identity, so the signature's ledger claim mismatches before the
+      signature itself is even tested. Different message, same loud
+      refusal, same exit.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - tamper: { find: "ops@example.test", replace: "eve@evil.test0" }
+        - replay: { trust: "@pub" }
+          expect: { exit: 5, stderrContains: "signature does not verify" }
+        - export: { trust: "@pub" }
+          expect: { exit: 5, stderrContains: "FOREIGN ledger" }
+
+  - name: unsigned-history-stays-valid-without-trust
+    description: >
+      Signing is opt-in (D102): a ledger written without --sign-key
+      replays and exports exactly as before when no --trust is given.
+      Existing deployments owe nothing.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: false }
+        - replay: {}
+          expect: { exit: 0 }
+        - export: {}
+          expect: { exit: 0 }
+
+  # ---- key rotation as receiver policy (D133) ----
+
+  - name: mixed-era-history-verifies-with-both-keys-trusted
+    description: >
+      D133: rotation is operational, not in-ledger — start signing with
+      the new key, trust BOTH during the overlap. --trust is repeatable;
+      every line must verify by ANY key in the set, exact match.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - publish: { signed: true, key: 2, version: 2 }
+        - replay: { trust: ["@pub", "@pub2"] }
+          expect: { exit: 0 }
+        - export: { trust: ["@pub", "@pub2"] }
+          expect: { exit: 0 }
+
+  - name: retired-key-is-no-longer-accepted
+    description: >
+      D133: revocation = remove the key from YOUR set. History signed
+      by a key the receiver no longer trusts refuses — the ledger does
+      not get a vote in the receiver's trust policy.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - publish: { signed: true, key: 2, version: 2 }
+        - replay: { trust: "@pub2" }
+          expect: { exit: 5, stderrContains: "FOREIGN key" }
+
+  - name: trust-from-tolerates-the-unsigned-prefix
+    description: >
+      D133: --trust-from EVENTHASH is the pinned boundary for ledgers
+      that predate signing: lines before the named event may be
+      unsigned; from it (inclusive) every line must verify. The hash is
+      the receiver's out-of-band knowledge — an attacker cannot slide a
+      boundary they do not control.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: false }
+        - publish: { signed: true, version: 2 }
+        - captureHash: { index: 1 }
+        - replay: { trust: "@pub", trustFrom: "@h" }
+          expect: { exit: 0 }
+        - export: { trust: "@pub", trustFrom: "@h" }
+          expect: { exit: 0 }
+        - replay: { trust: "@pub" }
+          expect: { exit: 5, stderrContains: "unsigned event but --trust" }
+
+  - name: trust-from-boundary-must-itself-be-signed
+    description: >
+      D133: the boundary is INCLUSIVE — if the event the receiver pinned
+      as "signing starts here" is itself unsigned, the file does not
+      honor the boundary and refuses. A tolerant boundary would be a
+      sliding one.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: false }
+        - publish: { signed: false, version: 2 }
+        - captureHash: { index: 1 }
+        - replay: { trust: "@pub", trustFrom: "@h" }
+          expect: { exit: 5, stderrContains: "unsigned event but --trust" }
+
+  - name: absent-trust-boundary-refuses
+    description: >
+      D133: --trust-from names an event the verified stream must
+      CONTAIN. A file (or a fold, or a capsule) that lacks the boundary
+      hash cannot claim the trust boundary — absence is refusal, not
+      tolerance; otherwise truncating the file would erase the
+      obligation to be signed.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - replay:
+            trust: "@pub"
+            trustFrom: "sha256:00000000000000000000000000000000000000000000000000000000deadbeef"
+          expect: { exit: 5, stderrContains: "boundary" }
+
+  # ---- ledger identity in the signed statement (D134) ----
+
+  - name: signature-claims-a-foreign-ledger-and-refuses
+    description: >
+      D134: the signed message binds the ledger's identity (the genesis
+      event's canonical hash), and the envelope carries the claim. A
+      line whose signature claims a DIFFERENT ledger refuses before any
+      key question — the same event verbatim can no longer be presented
+      as attesting some other ledger's history.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - publish: { signed: true, version: 2 }
+        - tamperLedgerClaim: { line: 2 }
+        - replay: { trust: "@pub" }
+          expect: { exit: 5, stderrContains: "FOREIGN ledger" }
+
+  # ---- trust policy travels in the anchor (D135) ----
+
+  - name: anchor-carries-and-arms-the-trust-policy
+    description: >
+      D135: an anchor emitted by a process armed with --trust embeds
+      the policy it actually verified. From then on, ANY path that
+      checks the anchor arms signature verification automatically — a
+      receiver who forgets --trust is still protected: stripping the
+      signatures refuses on anchor --check with no flags at all.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - anchorEmit: { trust: "@pub" }
+        - anchorCheck: {}
+          expect: { exit: 0 }
+        - stripSig: {}
+        - anchorCheck: {}
+          expect: { exit: 5, stderrContains: "unsigned event but --trust" }
+
+  - name: conflicting-trust-policies-refuse
+    description: >
+      D135: when both CLI flags and the anchor carry trust policy they
+      must AGREE — no silent union, no precedence. Two sources of truth
+      that disagree are an operator error to resolve, not a choice the
+      tool makes quietly.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - anchorEmit: { trust: "@pub" }
+        - anchorCheck: { trust: "@pub2" }
+          expect: { exit: 1, stderrContains: "disagree" }
+        - anchorCheck: { trust: "@pub" }
+          expect: { exit: 0 }
+
+  - name: execution-path-enforces-the-anchored-trust
+    description: >
+      D135: the anchor beside the ledger already guards the execution
+      path (D70/D74); with embedded trust policy the guard extends to
+      signatures. A writing verb over a signature-stripped ledger
+      refuses BEFORE mutating anything — the downgrade attack dies on
+      the very path it was aimed at.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - anchorEmit: { trust: "@pub" }
+        - writeAnchorBeside: {}
+        - publish: { signed: true, version: 2 }
+          expect: { exit: 0 }
+        - anchorEmit: { trust: "@pub" }
+        - writeAnchorBeside: {}
+        - stripSig: {}
+        - publish: { signed: true, version: 3 }
+          expect: { exit: 5 }
+
+  - name: anchor-trust-is-a-receipt-of-verification
+    description: >
+      D135: an anchor may embed only a policy the emitting process
+      ACTUALLY verified — emitting over an unsigned ledger with --trust
+      armed refuses at replay, so a trust-carrying anchor can never be
+      a forged receipt for verification that did not happen.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: false }
+        - anchorEmit: { trust: "@pub" }
+          expect: { exit: 5 }
+
+  - name: export-is-as-strict-as-replay-about-continuity
+    description: >
+      Review fix: a signature covers only its own event, so deleting a
+      middle signed event or reordering the tail leaves every remaining
+      signature valid. export must therefore verify the hash CHAIN like
+      replay, not only signatures — otherwise `export --trust | siem`
+      would stream doctored history (a censored security event) that
+      ReplayFile refuses. Both a dropped middle line and a reordered
+      tail must refuse.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - publish: { signed: true, version: 2 }
+        - publish: { signed: true, version: 3 }
+        - export: { trust: "@pub" }
+          expect: { exit: 0 }
+        - dropLine: { line: 2 }
+        - export: { trust: "@pub" }
+          expect: { exit: 5, stderrContains: "hash chain broken" }
+
+  - name: export-refuses-a-reordered-tail
+    description: >
+      Review fix: reordering already-signed lines keeps every signature
+      valid but breaks the chain — export refuses like replay.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - publish: { signed: true, version: 2 }
+        - publish: { signed: true, version: 3 }
+        - reorderTail: {}
+        - export: { trust: "@pub" }
+          expect: { exit: 5, stderrContains: "hash chain broken" }

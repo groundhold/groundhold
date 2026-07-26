@@ -1,0 +1,89 @@
+# Integrity attestation (D139). impl: go — the console's data source.
+# attest reports PROVENANCE FACTS (identity, compaction, signature
+# self-verification, anchor position), never a trust verdict. Every
+# counted signature verifies against its OWN claimed key; a present-but-
+# invalid envelope is its own fact, never laundered into coverage.
+
+cases:
+  - name: attest-reports-full-signature-coverage
+    description: >
+      A fully signed, anchored ledger: every tail event self-verifies
+      against the one signing key, the anchor re-checks positionally as
+      verified. Facts of presence and math — no "trusted" anywhere.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - publish: { signed: true, version: 2 }
+        - anchorEmit: {}
+        - attest:
+            expect:
+              exit: 0
+              fields:
+                signatures.selfVerified: 2
+                signatures.unsigned: 0
+                signatures.envelopePresentButInvalid: 0
+                anchor.status: verified
+
+  - name: attest-counts-an-invalid-envelope-as-invalid-not-signed
+    description: >
+      D139 honesty core: a present signature that does NOT verify
+      against its own key is EnvelopePresentButInvalid, never counted
+      as coverage. Tamper cannot inflate the signed number.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - publish: { signed: false, version: 2 }
+        - tamperEventSig: { line: 1 }
+        - attest:
+            expect:
+              exit: 0
+              fields:
+                signatures.selfVerified: 0
+                signatures.envelopePresentButInvalid: 1
+                signatures.unsigned: 1
+
+  - name: attest-sees-compaction-and-scopes-to-the-tail
+    description: >
+      D139/D137: after a snapshot the signature window is the TAIL; the
+      compacted prefix is archivedBase (represented by the receipt, not
+      re-inspected). The snapshot receipt's facts are reported: present,
+      its mode, whether its own signature self-verifies.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - publish: { signed: true, version: 2 }
+        - snapshot: { signed: true }
+        - publish: { signed: true, version: 3 }
+        - attest:
+            expect:
+              exit: 0
+              fields:
+                baseEvents: 2
+                tailEvents: 1
+                totalEvents: 3
+                signatures.archivedBase: 2
+                signatures.selfVerified: 1
+                snapshot.present: true
+                snapshot.signatureSelfVerifies: true
+                snapshot.ledgerIdMatches: true
+
+  - name: attest-of-a-plain-unsigned-ledger-claims-nothing
+    description: >
+      D139: an unsigned, unanchored ledger reports exactly that — every
+      tail event unsigned, zero coverage, no snapshot or anchor object.
+      attest never manufactures a provenance it cannot see.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: false }
+        - publish: { signed: false, version: 2 }
+        - attest:
+            expect:
+              exit: 0
+              fields:
+                signatures.selfVerified: 0
+                signatures.unsigned: 2
+                signatures.envelopePresentButInvalid: 0

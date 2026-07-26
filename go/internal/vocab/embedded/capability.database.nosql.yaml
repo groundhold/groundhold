@@ -1,0 +1,101 @@
+# Attribute vocabulary for capability.database.nosql, spec v0.1 (D112).
+#
+# A managed, regional NoSQL document/key-value database — the 3-cloud twin is
+# AWS DynamoDB, Azure Cosmos DB, and GCP Firestore (a NAMED database; Firestore
+# now supports multiple named databases per project, so it is a first-class
+# creatable resource). The sibling of capability.database.relational and
+# capability.cache.keyvalue: a managed stateful data service, so it carries the
+# same residency / encryption / durability semantics and refuses the same
+# implementation noise (partition-key schema, throughput/RU/RCU capacity, index
+# definitions — all sizing/modelling, never capability semantics).
+#
+# One honest per-cloud GAP this domain forces (documented, never faked):
+#   - deletion.protection=true is REFUSED on Azure Cosmos DB — Cosmos has no
+#     account-level deletion-protection property (deletion is guarded by a
+#     SEPARATE Microsoft.Authorization management lock, out of this single
+#     resource's scope). DynamoDB (DeletionProtectionEnabled) and Firestore
+#     (deleteProtectionState) expose it as a flag on the resource itself.
+#
+# availability.class=multi-regional is refused in v0 across ALL three (global
+# replication — DynamoDB global tables / Cosmos multi-region writes / Firestore
+# multi-region locations — is a heavier multi-resource setup); regional is the
+# 3-cloud path. An honest "not yet", never a faked single-region pretending to
+# span regions.
+
+capability: capability.database.nosql
+version: 0.1
+stateful: true   # the database IS the data; retirement is data loss (D47 friction)
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Primary region of the database
+    mappings:
+      aws.dynamodb: provider region (the table is regional)
+      azure.cosmos: locations[0].locationName
+      gcp.firestore: locationId
+
+  availability.class:
+    kind: string
+    enum: [regional, multi-regional]
+    description: >
+      Failure domain the database survives. regional = replicated across zones in
+      one region (the 3-cloud path). multi-regional (cross-region replication) is
+      refused in v0 — a heavier setup, never faked.
+    mappings:
+      aws.dynamodb: single-region table (regional); global tables (multi-regional, refused v0)
+      azure.cosmos: single write region (regional); multi-region (refused v0)
+      gcp.firestore: regional location (regional); nam5/eur3 (multi-regional, refused v0)
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: >
+      Data encrypted with a CUSTOMER-managed key (CMEK/KMS), not the provider
+      default. The key id is implementation detail (implementation.kms_key_*),
+      never a capability path.
+    mappings:
+      aws.dynamodb: SSESpecification KMSMasterKeyId (SSEType KMS)
+      azure.cosmos: keyVaultKeyUri
+      gcp.firestore: cmekConfig.kmsKeyName
+
+  backup.pointInTimeRecovery:
+    kind: bool
+    description: >
+      Continuous backup / point-in-time restore is enabled — the database can be
+      restored to any instant in a retention window, not merely to periodic
+      snapshots. A real durability guarantee, honored on all three.
+    mappings:
+      aws.dynamodb: PointInTimeRecoveryEnabled (UpdateContinuousBackups)
+      azure.cosmos: backupPolicy type = Continuous
+      gcp.firestore: pointInTimeRecoveryEnablement = POINT_IN_TIME_RECOVERY_ENABLED
+
+  deletion.protection:
+    kind: bool
+    description: >
+      The database cannot be destroyed while the flag is set — a guard against
+      accidental retirement of a stateful store. Honored on aws/gcp; on azure
+      REFUSED (Cosmos has no account-level flag — see the header gap note).
+    mappings:
+      aws.dynamodb: DeletionProtectionEnabled
+      gcp.firestore: deleteProtectionState = DELETE_PROTECTION_ENABLED
+      azure.cosmos: no account property — REFUSED (a management lock is separate)
+
+  service.managed:
+    kind: bool
+    description: Managed service vs self-operated
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost of the capability
+    verification: static against a pricing catalog; provider-api (billing) after deploy
+
+# Deliberately absent in v0.1 (implementation detail / modelling, not capability
+# semantics): partition/sort key schema, secondary indexes, throughput mode &
+# capacity (RCU/WCU, RU/s, autoscale), TTL attribute, item size. A candidate may
+# carry them under `implementation:` — the verifier ignores them.
+#   - consistency model: DEFERRED. The three expose fundamentally different knobs
+#     (DynamoDB per-read eventual/strong, Cosmos five levels, Firestore strong),
+#     so no honest uniform enum exists yet — added later with per-cloud honesty
+#     rather than a lowest-common-denominator that lies.

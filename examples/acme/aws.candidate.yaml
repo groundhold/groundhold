@@ -1,0 +1,244 @@
+# ACME — AWS IMPLEMENTATION CANDIDATE for acme-platform (profile S, HA kept).
+#
+# This is what an agent emits INSTEAD of Terraform. The verifier reads only the
+# `attributes` (re-derived from live observation after apply); the `implementation`
+# blocks (D26 operands — ARNs, ids, placement) are consumed by the compiler and are
+# NEVER the source of truth. Operand ARNs below are the platform's own dependency
+# graph (separate capabilities: the KMS key, IAM roles, subnet group, dependency
+# buckets/topics); a real emit resolves them from the bound resources.
+apiVersion: candidate/v0.1
+kind: ImplementationCandidate
+contract: acme-platform
+
+capabilities:
+
+  net:
+    provider: aws
+    service: vpc
+    attributes:
+      location.region: eu-central-1
+      ingress.public: false
+      egress.internet: nat
+      serviceAccess.private: true
+    implementation:
+      cidr: 10.20.0.0/16
+      public_subnet_cidr: 10.20.0.0/24
+      # VPC endpoints (private AWS-service path) — the canonical Acme set.
+      vpc_endpoints: [s3, ecr.api, ecr.dkr, sts, secretsmanager, logs, sqs, bedrock-runtime, kms]
+
+  cluster:
+    provider: aws
+    service: eks
+    attributes:
+      location.region: eu-central-1
+      cluster.version: "1.30"
+      network.apiExposure: private
+      encryption.secrets: true
+      availability.class: regional
+      service.managed: true
+    implementation:
+      clusterRoleArn: arn:aws:iam::000000000000:role/acme-eks-cluster
+      subnetIds: [subnet-0aaaa1111, subnet-0bbbb2222, subnet-0cccc3333]
+      nodeRoleArn: arn:aws:iam::000000000000:role/acme-eks-nodes
+      kmsKeyArn: arn:aws:kms:eu-central-1:000000000000:key/acme-platform
+      nodeGroup:
+        instanceTypes: [m7g.large]
+        min: 3
+        desired: 3
+        max: 6
+
+  db:
+    provider: aws
+    service: aurora
+    attributes:
+      engine.protocol: postgresql/16.4
+      location.region: eu-central-1
+      network.publicExposure: false
+      encryption.atRest: true
+      encryption.customerManagedKeys: true
+      recovery.rpo: 5m
+      availability.class: regional
+      service.managed: true
+      cost.monthly:
+        value: 120 EUR
+        status: inferred
+        source: "pricing catalog aws-eu 2026-07 (Aurora Sv2 min ACU, profile S)"
+        confidence: 0.6
+    implementation:
+      subnetGroupName: acme-aurora-subnets
+      serverlessMinACU: 0.5
+      serverlessMaxACU: 8
+      kmsKeyArn: arn:aws:kms:eu-central-1:000000000000:key/acme-platform
+      vpcSecurityGroupIds: [sg-0data111]
+      deletion_protection: true
+
+  assets:
+    provider: aws
+    service: s3
+    attributes:
+      location.region: eu-central-1
+      durability.class: regional
+      versioning.enabled: true
+      encryption.atRest: true
+      encryption.customerManagedKeys: true
+      network.publicExposure: false
+      replication.enabled: true
+      replication.destinationRegion:
+        value: eu-west-1
+        status: inferred
+        source: s3:get-bucket-location
+      service.managed: true
+    implementation:
+      kms_key_id: arn:aws:kms:eu-central-1:000000000000:key/acme-platform
+      replication_destination_bucket_arn: arn:aws:s3:::acme-assets-dr-euw1
+      replication_role_arn: arn:aws:iam::000000000000:role/acme-s3-replication
+
+  audit-store:
+    provider: aws
+    service: s3
+    attributes:
+      location.region: eu-central-1
+      durability.class: regional
+      versioning.enabled: true
+      encryption.atRest: true
+      network.publicExposure: false
+      retention.minimum: 2160h        # 90-day WORM floor
+      retention.locked: true          # COMPLIANCE mode Object Lock
+      service.managed: true
+    implementation:
+      kms_key_id: arn:aws:kms:eu-central-1:000000000000:key/acme-audit
+
+  mail-out:
+    provider: aws
+    service: ses-sending
+    attributes:
+      location.region: eu-central-1
+      authentication.dkim: true
+      bounce.tracked: true
+      sending.productionAccess:
+        value: true
+        status: inferred
+        source: "ses:get-account ProductionAccessEnabled — target state; observed at apply (manual-gate)"
+      service.managed: true
+    implementation:
+      domain: mail.acme.example
+      bounceTopicArn: arn:aws:sns:eu-central-1:000000000000:acme-ses-bounces
+
+  mail-in:
+    provider: aws
+    service: ses-inbound
+    attributes:
+      location.region: eu-central-1
+      spam.filtered: true
+      delivery.sink: true
+      service.managed: true
+    implementation:
+      recipientDomain: in.acme.example
+      ruleSetName: acme-inbound
+      s3BucketName: acme-inbound-mime
+      s3ObjectKeyPrefix: raw/
+      snsTopicArn: arn:aws:sns:eu-central-1:000000000000:acme-inbound
+
+  ai:
+    provider: aws
+    service: bedrock
+    attributes:
+      location.region: eu-central-1
+      inference.destinationRegions:
+        value: [eu-central-1, eu-west-1, eu-west-3, eu-south-2]
+        status: inferred
+        source: bedrock:get-inference-profile
+      model.provider: anthropic
+      service.managed: true
+    implementation:
+      inferenceProfile: eu.anthropic.claude-sonnet-4
+
+  platform-key:
+    provider: aws
+    service: kms
+    attributes:
+      location.region: eu-central-1
+      rotation.period: 8760h
+      protection.level: software
+      service.managed: true
+
+  audit-trail:
+    provider: aws
+    service: cloudtrail
+    attributes:
+      location.region: eu-central-1
+      scope.multiRegion: true
+      integrity.logValidation: true
+      delivery.assured: true
+      service.managed: true
+    implementation:
+      s3BucketName: acme-cloudtrail
+      kmsKeyArn: arn:aws:kms:eu-central-1:000000000000:key/acme-audit
+
+  budget:
+    provider: aws
+    service: budgets
+    attributes:
+      budget.limit: 700 USD
+      budget.period: monthly
+      alert.threshold: 80
+      service.managed: true
+    implementation:
+      notificationTopicArn: arn:aws:sns:us-east-1:000000000000:acme-budget-alerts
+
+  queue-parse:
+    provider: aws
+    service: sqs
+    attributes:
+      location.region: eu-central-1
+      reliability.deadLetter: true
+      service.managed: true
+    implementation:
+      deadLetterTargetArn: arn:aws:sqs:eu-central-1:000000000000:acme-parse-dlq
+      maxReceiveCount: 5
+
+  backup-plan:
+    provider: aws
+    service: backupplan
+    attributes:
+      location.region: eu-central-1
+      schedule.frequency: 24h
+      retention.duration: 2160h
+      copy.crossRegion: true
+      copy.destinationRegion: eu-west-1
+      service.managed: true
+    implementation:
+      targetVaultName: acme-vault
+      iamRoleArn: arn:aws:iam::000000000000:role/acme-backup
+      scheduleExpression: "cron(0 3 * * ? *)"
+      copyDestinationVaultArn: arn:aws:backup:eu-west-1:000000000000:backup-vault:acme-vault-dr
+
+  registry:
+    provider: aws
+    service: ecr
+    attributes:
+      location.region: eu-central-1
+      security.scanOnPush: true
+      service.managed: true
+
+  threat:
+    provider: aws
+    service: guardduty
+    attributes:
+      location.region: eu-central-1
+      detection.enabled: true
+      protection.kubernetes: true
+      protection.malware: true
+      service.managed: true
+    implementation:
+      findingPublishingFrequency: SIX_HOURS
+
+  app-logs:
+    provider: aws
+    service: cwlogs
+    attributes:
+      location.region: eu-central-1
+      retention.days: 365d
+      service.managed: true
+    implementation:
+      log_group: /acme/platform

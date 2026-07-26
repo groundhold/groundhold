@@ -1,0 +1,1072 @@
+# Update end to end (D46). impl: go — single-implementation per D24.
+# The compiler classifies bound capabilities against FRESH observations;
+# updates carry reviewed change-sets; the executor patches in place and
+# increments the binding generation.
+
+cases:
+  - name: plan-emits-update-for-mutable-drift
+    impl: go
+    description: >
+      D46: bound + fresh observations + drift in a mutable attribute ->
+      ONE update action per capability with an explicit changes list;
+      converged attributes stay out of it.
+    plan:
+      at: "2026-07-11T17:05:00Z"
+      bindings: { db: "fake:db-1" }
+      observations:
+        - { capability: db, path: availability.class, value: "zonal",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+        - { capability: db, path: service.managed, value: true,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+      contract: &u-contract
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: u1, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-avail
+              subject: db
+              path: availability.class
+              op: equals
+              value: regional
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: u1
+        capabilities:
+          db:
+            attributes:
+              availability.class: regional
+              service.managed: true
+    expect:
+      actions:
+        a-update-db:
+          operation: update
+          changes: [availability.class]
+
+  - name: plan-protocol-major-satisfied-by-observed-minor
+    impl: go
+    description: >
+      F16-B: a bound engine.protocol declared at MAJOR granularity
+      (postgresql/16) is satisfied by any observed minor of that major
+      (postgresql/16.11) — no perpetual update toward a minor the operator
+      never pinned. A genuinely drifted mutable attribute still updates, and
+      engine.protocol stays OUT of the change-set (had it compared by equals,
+      it would appear).
+    plan:
+      at: "2026-07-11T17:05:00Z"
+      bindings: { db: "fake:db-1" }
+      observations:
+        - { capability: db, path: engine.protocol, value: "postgresql/16.11",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+        - { capability: db, path: availability.class, value: "zonal",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+        - { capability: db, path: service.managed, value: true,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: u1, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-avail
+              subject: db
+              path: availability.class
+              op: equals
+              value: regional
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: u1
+        capabilities:
+          db:
+            attributes:
+              engine.protocol: "postgresql/16"
+              availability.class: regional
+              service.managed: true
+    expect:
+      actions:
+        a-update-db:
+          operation: update
+          changes: [availability.class]
+
+  - name: plan-refuses-stale-observations
+    impl: go
+    description: >
+      D46: sealing a change-set derived from stale knowledge contradicts
+      the read-set's honesty — re-observe first.
+    plan:
+      at: "2026-07-11T17:05:00Z"
+      bindings: { db: "fake:db-1" }
+      observations:
+        - { capability: db, path: availability.class, value: "zonal",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T10:00:00Z", ttlSeconds: 900 }
+      contract: *u-contract
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: u1
+        capabilities:
+          db:
+            attributes:
+              availability.class: regional
+    expect:
+      error: plan
+      code: observation-required
+
+  - name: plan-refuses-immutable-drift
+    impl: go
+    description: >
+      D46: region drift on Cloud SQL means replacement — a diagnosis, not
+      a paper plan.
+    plan:
+      at: "2026-07-11T17:05:00Z"
+      bindings: { db: "acme:europe-west1:db-x" }
+      observations:
+        - { capability: db, path: location.region, value: "us-east1",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: u2, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-region
+              subject: db
+              path: location.region
+              op: equals
+              value: europe-west1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: u2
+        capabilities:
+          db:
+            provider: gcp
+            service: cloudsql
+            attributes:
+              location.region: europe-west1
+    expect:
+      error: plan
+      code: consent-required
+
+  - name: plan-refuses-when-converged
+    impl: go
+    description: D46 - converged means no plan should exist.
+    plan:
+      at: "2026-07-11T17:05:00Z"
+      bindings: { db: "fake:db-1" }
+      observations:
+        - { capability: db, path: availability.class, value: "regional",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+        - { capability: db, path: service.managed, value: true,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+      contract: *u-contract
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: u1
+        capabilities:
+          db:
+            attributes:
+              availability.class: regional
+              service.managed: true
+    expect:
+      error: plan
+      code: nothing-to-change
+
+  - name: apply-updates-a-bound-capability
+    impl: go
+    description: >
+      D46: update patches in place under the same gating as create —
+      write-ahead receipts, fencing, binding generation increments,
+      identity survives.
+    apply:
+      at: "2026-07-11T14:00:00Z"
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T13:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { ttlSeconds: 3600 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: binding.updated
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T13:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+            body:
+              capability: db
+              environment: test
+              provider: { name: fake }
+              resources:
+                - { id: primary, type: t, providerId: "fake:db-1", generation: 1 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.released
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T13:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+      contract: *u-contract
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: u1
+        capabilities:
+          db:
+            attributes:
+              availability.class: regional
+      plan:
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: u1
+          environment: test
+          reads:
+            contractHash: "sha256:a54f0da760d75d4a3a11a271f03c78693f5166fcbbfd9b6bebb893ac8a0f36f5"
+            candidateHash: "sha256:70963f22a0503d3b017f15ec8ff343dc844ec4a58fdc8900ff36979633f7e6f6"
+            heads: { db: "sha256:4fcc19a6147159f4133d849e9b4e984013507e4239c4cb2a13fad50254d97ff2" }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-update-db
+              capability: db
+              operation: update
+              target: fake.svc/db
+              idempotencyKey: db-update-1
+              changes:
+                - { path: availability.class, from: zonal, to: regional }
+              risk:
+                reversibility: R1
+                dataLoss: none
+                downtime: possible
+                securityExposure: none
+                costDelta: { amount: 0, currency: EUR }
+                identityReplacement: false
+          preconditions:
+            - type: report-executable
+    expect:
+      exit: 0
+      status: applied
+      events: [lease.acquired, apply.started, operation.receipt,
+               binding.updated, operation.receipt, apply.finished,
+               lease.released]
+      bindings: { db: "fake:db-1" }
+
+  - name: forecast-will-update
+    impl: go
+    description: D46 - a fresh update plan on a bound capability forecasts will-update.
+    forecast:
+      at: "2026-07-11T17:05:00Z"
+      bindings: { db: "fake:db-1" }
+      observations:
+        - { capability: db, path: availability.class, value: "zonal",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+      plan:
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: u1
+          environment: test
+          reads:
+            contractHash: "sha256:a54f0da760d75d4a3a11a271f03c78693f5166fcbbfd9b6bebb893ac8a0f36f5"
+            candidateHash: "sha256:70963f22a0503d3b017f15ec8ff343dc844ec4a58fdc8900ff36979633f7e6f6"
+            heads: { db: genesis }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-update-db
+              capability: db
+              operation: update
+              target: fake.svc/db
+              idempotencyKey: db-update-1
+              changes:
+                - { path: availability.class, from: zonal, to: regional }
+              risk:
+                reversibility: R1
+                dataLoss: none
+                downtime: possible
+                securityExposure: none
+                costDelta: { amount: 0, currency: EUR }
+                identityReplacement: false
+          preconditions:
+            - type: report-executable
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: u1
+        capabilities:
+          db:
+            attributes:
+              availability.class: regional
+    expect:
+      freshPlan: true
+      effects:
+        a-update-db: will-update
+      attributes:
+        a-update-db:
+          availability.class: differ
+
+  - name: aws-s3-plan-emits-update-for-mutable-drift
+    impl: go
+    description: >
+      D46/D86: a bound S3 bucket with fresh observations and drift in a
+      MUTABLE attribute (versioning) compiles to ONE update action carrying
+      exactly that path — the AWS analogue of the Cloud SQL mutable case,
+      proving ClassifyChange dispatches per service.
+    plan:
+      at: "2026-07-11T17:05:00Z"
+      bindings: { obj: "s3:eu-central-1:pv-assets-abcd1234" }
+      observations:
+        - { capability: obj, path: versioning.enabled, value: false,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+      contract: &aws-s3-contract
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: s3u, environment: prod, version: 1 }
+        capabilities:
+          - id: obj
+            type: capability.storage.object
+        constraints:
+          hard:
+            - id: c-ver
+              subject: obj
+              path: versioning.enabled
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: s3u
+        capabilities:
+          obj:
+            provider: aws
+            service: s3
+            attributes:
+              versioning.enabled: true
+    expect:
+      actions:
+        a-update-obj:
+          operation: update
+          changes: [versioning.enabled]
+
+  - name: aws-s3-plan-refuses-immutable-drift
+    impl: go
+    description: >
+      D46/D86: region drift on an S3 bucket is create-time-only — a
+      replacement, refused at plan (consent-required), never a paper patch.
+    plan:
+      at: "2026-07-11T17:05:00Z"
+      bindings: { obj: "s3:us-east-1:pv-assets-abcd1234" }
+      observations:
+        - { capability: obj, path: location.region, value: "us-east-1",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: s3u2, environment: prod, version: 1 }
+        capabilities:
+          - id: obj
+            type: capability.storage.object
+        constraints:
+          hard:
+            - id: c-region
+              subject: obj
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: s3u2
+        capabilities:
+          obj:
+            provider: aws
+            service: s3
+            attributes:
+              location.region: eu-central-1
+    expect:
+      error: plan
+      code: consent-required
+
+  - name: update-without-changes-is-load-error
+    description: >
+      D46: an update is a reviewed change-set, never an implicit diff.
+      A document case — BOTH implementations enforce it.
+    document:
+      apiVersion: plan/v0
+      kind: SealedPlan
+      plan:
+        contract: u1
+        environment: test
+        reads:
+          contractHash: "sha256:a54f0da760d75d4a3a11a271f03c78693f5166fcbbfd9b6bebb893ac8a0f36f5"
+          candidateHash: "sha256:70963f22a0503d3b017f15ec8ff343dc844ec4a58fdc8900ff36979633f7e6f6"
+          heads: { db: genesis }
+          toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+        writes: [db]
+        actions:
+          - id: a-update-db
+            capability: db
+            operation: update
+            target: fake.svc/db
+            idempotencyKey: db-update-1
+            risk:
+              reversibility: R1
+              dataLoss: none
+              downtime: possible
+              securityExposure: none
+              costDelta: { amount: 0, currency: EUR }
+              identityReplacement: false
+        preconditions:
+          - type: report-executable
+    expect:
+      error: document
+
+  - name: gcs-plan-emits-update-for-mutable-drift
+    impl: go
+    description: >
+      D46/D77: a bound GCS bucket with fresh observations and drift in a MUTABLE
+      attribute (versioning) compiles to ONE update action carrying exactly that
+      path — the GCP twin of the S3 mutable case, closing the object-storage
+      update asymmetry (S3 had update, GCS did not).
+    plan:
+      at: "2026-07-11T17:05:00Z"
+      bindings: { obj: "gcs:acme-prod:pv-assets-abcd1234" }
+      observations:
+        - { capability: obj, path: versioning.enabled, value: false,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: gcsu, environment: prod, version: 1 }
+        capabilities:
+          - id: obj
+            type: capability.storage.object
+        constraints:
+          hard:
+            - id: c-ver
+              subject: obj
+              path: versioning.enabled
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: gcsu
+        capabilities:
+          obj:
+            provider: gcp
+            service: gcs
+            attributes:
+              versioning.enabled: true
+    expect:
+      actions:
+        a-update-obj:
+          operation: update
+          changes: [versioning.enabled]
+
+  - name: gcs-plan-refuses-immutable-drift
+    impl: go
+    description: >
+      D46/D77: location drift on a GCS bucket is create-time-only — a replacement,
+      refused at plan (consent-required), never a paper patch. Symmetric with the
+      S3 immutable case.
+    plan:
+      at: "2026-07-11T17:05:00Z"
+      bindings: { obj: "gcs:acme-prod:pv-assets-abcd1234" }
+      observations:
+        - { capability: obj, path: location.region, value: "us",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: gcsu2, environment: prod, version: 1 }
+        capabilities:
+          - id: obj
+            type: capability.storage.object
+        constraints:
+          hard:
+            - id: c-region
+              subject: obj
+              path: location.region
+              op: equals
+              value: eu
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: gcsu2
+        capabilities:
+          obj:
+            provider: gcp
+            service: gcs
+            attributes:
+              location.region: eu
+    expect:
+      error: plan
+      code: consent-required
+  - name: pubsub-plan-emits-update-for-mutable-exposure
+    impl: go
+    description: >
+      D46/D94: a bound Pub/Sub topic with fresh observations and drift in a MUTABLE
+      attribute (network.publicExposure) compiles to ONE update action carrying
+      exactly that path — the GCP twin of the SNS mutable case, closing the
+      messaging.topic update asymmetry (SNS could update in place, Pub/Sub could not).
+    plan:
+      at: "2026-07-11T17:05:00Z"
+      bindings: { evt: "pubsub:acme-prod:pv-events-abcd1234" }
+      observations:
+        - { capability: evt, path: network.publicExposure, value: false,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: psu, environment: prod, version: 1 }
+        capabilities:
+          - id: evt
+            type: capability.messaging.topic
+        constraints:
+          hard:
+            - id: c-pub
+              subject: evt
+              path: network.publicExposure
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: psu
+        capabilities:
+          evt:
+            provider: gcp
+            service: pubsub-topic
+            attributes:
+              network.publicExposure: true
+    expect:
+      actions:
+        a-update-evt:
+          operation: update
+          changes: [network.publicExposure]
+  - name: pubsub-queue-plan-emits-update-for-mutable-retention
+    impl: go
+    description: >
+      D46/D95: a bound Pub/Sub subscription with fresh observations and drift in a
+      MUTABLE attribute (retention.minimum) compiles to ONE update action carrying
+      exactly that path — the GCP twin of the SQS mutable case, closing the
+      messaging.queue update asymmetry (SQS could update in place, Pub/Sub could not).
+    plan:
+      at: "2026-07-11T17:05:00Z"
+      bindings: { q: "pubsub:acme-prod:pv-orders-abcd1234" }
+      observations:
+        - { capability: q, path: retention.minimum, value: "600s",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: pqu, environment: prod, version: 1 }
+        capabilities:
+          - id: q
+            type: capability.messaging.queue
+        constraints:
+          hard:
+            - id: c-retain
+              subject: q
+              path: retention.minimum
+              op: gte
+              value: 86400s
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: pqu
+        capabilities:
+          q:
+            provider: gcp
+            service: pubsub-queue
+            attributes:
+              retention.minimum: 86400s
+    expect:
+      actions:
+        a-update-q:
+          operation: update
+          changes: [retention.minimum]
+  - name: gcp-secret-plan-emits-update-for-mutable-exposure
+    impl: go
+    description: >
+      D46/D97: a bound GCP secret with fresh observations and drift in a MUTABLE
+      attribute (network.publicExposure) compiles to ONE update action carrying
+      exactly that path — the GCP twin of the Secrets Manager mutable case, closing
+      the capability.secret update asymmetry (ASM could update in place, GCP could not).
+    plan:
+      at: "2026-07-11T17:05:00Z"
+      bindings: { s: "gsecret:acme-prod:pv-dbcreds-abcd1234" }
+      observations:
+        - { capability: s, path: network.publicExposure, value: true,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: gsu, environment: prod, version: 1 }
+        capabilities:
+          - id: s
+            type: capability.secret
+        constraints:
+          hard:
+            - id: c-priv
+              subject: s
+              path: network.publicExposure
+              op: equals
+              value: false
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: gsu
+        capabilities:
+          s:
+            provider: gcp
+            service: secretmanager
+            attributes:
+              network.publicExposure: false
+    expect:
+      actions:
+        a-update-s:
+          operation: update
+          changes: [network.publicExposure]
+
+  - name: gitops-witness-capability-is-not-authored
+    impl: go
+    description: >
+      D177: author-vs-witness in the plan. A candidate binding an observe-only k8s
+      WITNESS (a GitOps controller Application — no write lens) plans NO create for
+      it: groundhold verifies it, never authors it. The authored Pod Identity coupling
+      alongside DOES get a create. The witness is recorded in the plan's `witnessed`
+      block instead (an explicit fact, not silence).
+    plan:
+      at: "2026-07-19T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: gw1, environment: production, version: 1 }
+        capabilities:
+          - id: repo-identity
+            type: capability.identity.podidentity
+          - id: gitops-root
+            type: capability.gitops.application
+        constraints:
+          hard:
+            - id: c-ns
+              subject: repo-identity
+              path: workload.namespace
+              op: equals
+              value: argocd
+              verify: { method: static }
+            - id: c-synced
+              subject: gitops-root
+              path: sync.status
+              op: equals
+              value: synced
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: gw1
+        capabilities:
+          repo-identity:
+            provider: aws
+            service: eks-podidentity
+            attributes:
+              workload.namespace: argocd
+              workload.serviceAccount: argocd-repo-server
+              service.managed: true
+            implementation:
+              clusterName: acme-eks
+              roleArn: "arn:aws:iam::000000000000:role/r"
+          gitops-root:
+            provider: k8s
+            service: argocd-application
+            attributes:
+              sync.status: synced
+    expect:
+      actions:
+        a-create-repo-identity:
+          operation: create
+      absentActions:
+        - a-create-gitops-root
+
+  - name: aws-dns-record-plan-emits-update-for-repoint
+    impl: go
+    description: >
+      D263: repointing a bound Route 53 record (dns.target drift) compiles to ONE
+      update action carrying exactly dns.target — an UPSERT in place, never a
+      delete+recreate resolution gap.
+    plan:
+      at: "2026-07-23T10:00:00Z"
+      bindings: { connect: "r53rec:Z123ABC:CNAME:connect.example.com." }
+      observations:
+        - { capability: connect, path: dns.target, value: old.example.net,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-23T09:55:00Z", ttlSeconds: 900 }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d263aws, environment: prod, version: 1 }
+        capabilities:
+          - id: connect
+            type: capability.dns.record
+        constraints:
+          hard:
+            - id: c-target
+              subject: connect
+              path: dns.target
+              op: equals
+              value: origin.example.net
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d263aws
+        capabilities:
+          connect:
+            provider: aws
+            service: route53record
+            attributes:
+              dns.type: CNAME
+              dns.target: origin.example.net
+              service.managed: true
+            implementation:
+              zone_id: Z123ABC
+              record_name: connect.example.com
+    expect:
+      actions:
+        a-update-connect:
+          operation: update
+          changes: [dns.target]
+
+  - name: gcp-dns-record-plan-emits-update-for-repoint
+    impl: go
+    description: >
+      D263: the GCP twin — repointing a bound Cloud DNS record compiles to one
+      update action (an atomic delete+add change under the hood), not a replace.
+    plan:
+      at: "2026-07-23T10:00:00Z"
+      bindings: { connect: "gdnsrec:acme-prod:example-com:CNAME:connect.example.com." }
+      observations:
+        - { capability: connect, path: dns.target, value: old.example.net,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-23T09:55:00Z", ttlSeconds: 900 }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d263gcp, environment: prod, version: 1 }
+        capabilities:
+          - id: connect
+            type: capability.dns.record
+        constraints:
+          hard:
+            - id: c-target
+              subject: connect
+              path: dns.target
+              op: equals
+              value: origin.example.net
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d263gcp
+        capabilities:
+          connect:
+            provider: gcp
+            service: clouddnsrecord
+            attributes:
+              dns.type: CNAME
+              dns.target: origin.example.net
+              service.managed: true
+            implementation:
+              zone: example-com
+              record_name: connect.example.com
+    expect:
+      actions:
+        a-update-connect:
+          operation: update
+          changes: [dns.target]
+
+  - name: azure-dns-record-plan-emits-update-for-repoint
+    impl: go
+    description: >
+      D263: the Azure twin — repointing a bound Azure DNS record compiles to one
+      update action (an idempotent record-child PUT), not a replace.
+    plan:
+      at: "2026-07-23T10:00:00Z"
+      bindings: { connect: "adnsrec:00000000-0000-0000-0000-000000000000:rg1:example.com:CNAME:connect" }
+      observations:
+        - { capability: connect, path: dns.target, value: old.example.net,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-23T09:55:00Z", ttlSeconds: 900 }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d263az, environment: prod, version: 1 }
+        capabilities:
+          - id: connect
+            type: capability.dns.record
+        constraints:
+          hard:
+            - id: c-target
+              subject: connect
+              path: dns.target
+              op: equals
+              value: origin.example.net
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d263az
+        capabilities:
+          connect:
+            provider: azure
+            service: dnsrecord
+            attributes:
+              dns.type: CNAME
+              dns.target: origin.example.net
+              service.managed: true
+            implementation:
+              zone: example.com
+              resourceGroup: rg1
+              record_name: connect
+    expect:
+      actions:
+        a-update-connect:
+          operation: update
+          changes: [dns.target]
+
+  - name: plan-does-not-freeze-a-bound-but-blind-observer-capability
+    impl: go
+    description: >
+      F16/F25 residual: a BOUND capability whose observer reads cleanly but
+      yields ZERO observable attributes must NOT freeze the compile. The
+      observation.recorded event (empty) marks it OBSERVED, so the compiler
+      isolates its non-observable declared attributes as unverifiable (D249)
+      rather than demanding a re-observe that can never help. Contrast the
+      never-observed control below.
+    plan:
+      at: "2026-07-11T17:05:00Z"
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T17:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: binding.updated
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T17:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+            body:
+              capability: db
+              environment: test
+              provider: { name: fake }
+              resources:
+                - { id: primary, type: t, providerId: "empty:db-1", generation: 1 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: observation.recorded
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T17:00:30Z"
+            actor: { id: groundhold-observe, type: agent }
+            body:
+              provider: { name: fake }
+              resource: { providerId: "empty:db-1" }
+              observations: []
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: u-blind, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: u-blind
+        capabilities:
+          db:
+            attributes:
+              availability.class: regional
+    expect:
+      unverified: [db]
+
+  - name: plan-refuses-a-never-observed-bound-capability
+    impl: go
+    description: >
+      Control for the residual fix: with NO observation.recorded event the
+      capability was never observed, so re-observe IS the recoverable remedy —
+      the compile still refuses observation-required. The fix narrows the freeze
+      to exactly this case, it does not remove it.
+    plan:
+      at: "2026-07-11T17:05:00Z"
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T17:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: binding.updated
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T17:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+            body:
+              capability: db
+              environment: test
+              provider: { name: fake }
+              resources:
+                - { id: primary, type: t, providerId: "fake:db-1", generation: 1 }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: u-blind2, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: u-blind2
+        capabilities:
+          db:
+            attributes:
+              availability.class: regional
+    expect:
+      error: plan
+      code: observation-required
+
+  - name: plan-advisory-attr-does-not-block-lambda-update
+    impl: go
+    description: >
+      Acme field regression (D311): a BOUND lambda declaring an ADVISORY
+      attribute (cost.monthly, evidence: projection) alongside a real mutable
+      change (network.publicExposure) must still plan the update. The advisory
+      attr maps to no provider setting BY DESIGN and must neither drift nor
+      block. Before the fix the operand builder refused "cost.monthly has no
+      Lambda mapping", the capability was isolated (D249), and the legal update
+      silently collapsed to a SEALED plan with zero actions.
+    plan:
+      at: "2026-07-12T10:00:00Z"
+      # cost.monthly must be marked evidence: projection here — the harness runs
+      # with the embedded vocabulary disabled, so the projection marker (what the
+      # fix keys off) only exists if the case ships it.
+      vocab:
+        - capability: capability.function.serverless
+          version: 0.1
+          stateful: false
+          attributes:
+            location.region: { kind: string }
+            network.publicExposure: { kind: bool }
+            cost.monthly: { kind: money, evidence: projection }
+      bindings: { fn: "lambda:eu-central-1:123456789012:fn" }
+      observations:
+        - { capability: fn, path: location.region, value: "eu-central-1",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-12T09:55:00Z", ttlSeconds: 900 }
+        - { capability: fn, path: network.publicExposure, value: false,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-12T09:55:00Z", ttlSeconds: 900 }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: adv1, environment: test, version: 1 }
+        capabilities:
+          - id: fn
+            type: capability.function.serverless
+        constraints:
+          hard:
+            - id: c-region
+              subject: fn
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: adv1
+        capabilities:
+          fn:
+            provider: aws
+            service: lambda
+            attributes:
+              location.region: eu-central-1
+              network.publicExposure: true
+              cost.monthly: 2 USD
+            implementation:
+              image_uri: 123456789012.dkr.ecr.eu-central-1.amazonaws.com/fn:sha
+              role_arn: arn:aws:iam::123456789012:role/fn-exec
+              url_auth: iam
+    expect:
+      actions:
+        a-update-fn:
+          operation: update
+          changes: [network.publicExposure]

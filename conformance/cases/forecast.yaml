@@ -1,0 +1,318 @@
+# Forecast v0 (D40, spec/forecast.md). impl: go — the compiler onward is
+# single-implementation (D24); these cases run only against the Go binary
+# and are skipped elsewhere. The plan documents pin the literal candidate
+# hash from cases/canonicalization.yaml — the artifacts chain together.
+
+cases:
+  - name: forecast-will-create-with-provenance
+    impl: go
+    forecast:
+      at: "2026-07-11T12:00:00Z"
+      plan:
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: h1
+          environment: test
+          reads:
+            contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+            candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+            heads: { db: genesis }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-create
+              capability: db
+              operation: create
+              target: cloudsql.instance/primary
+              idempotencyKey: db-create-1
+              risk:
+                reversibility: R2
+                dataLoss: none
+                downtime: none
+                securityExposure: none
+                costDelta: { amount: 100, currency: EUR }
+                identityReplacement: false
+          preconditions:
+            - type: report-executable
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: h1
+        capabilities:
+          db:
+            attributes:
+              engine.protocol: postgresql/16.4
+              recovery.rpo: 5m
+    expect:
+      freshPlan: true
+      effects:
+        a-create: will-create
+
+  - name: forecast-detects-stale-plan
+    impl: go
+    description: >
+      D41: the plan pinned db at genesis; the supplied decision head has
+      moved — every action forecasts stale-plan, nothing is predicted.
+    forecast:
+      at: "2026-07-11T12:00:00Z"
+      heads:
+        db: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      plan:
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: h1
+          environment: test
+          reads:
+            contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+            candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+            heads: { db: genesis }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-create
+              capability: db
+              operation: create
+              target: cloudsql.instance/primary
+              idempotencyKey: db-create-1
+              risk:
+                reversibility: R2
+                dataLoss: none
+                downtime: none
+                securityExposure: none
+                costDelta: { amount: 100, currency: EUR }
+                identityReplacement: false
+          preconditions:
+            - type: report-executable
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: h1
+        capabilities:
+          db:
+            attributes:
+              engine.protocol: postgresql/16.4
+              recovery.rpo: 5m
+    expect:
+      freshPlan: false
+      effects:
+        a-create: stale-plan
+
+  - name: forecast-refuses-mismatched-candidate
+    impl: go
+    description: >
+      D40: the plan pins the candidate by identity — forecasting a
+      different candidate under a sealed plan is refused, not guessed.
+    forecast:
+      at: "2026-07-11T12:00:00Z"
+      plan:
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: h1
+          environment: test
+          reads:
+            contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+            candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+            heads: { db: genesis }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-create
+              capability: db
+              operation: create
+              target: cloudsql.instance/primary
+              idempotencyKey: db-create-1
+              risk:
+                reversibility: R2
+                dataLoss: none
+                downtime: none
+                securityExposure: none
+                costDelta: { amount: 100, currency: EUR }
+                identityReplacement: false
+          preconditions:
+            - type: report-executable
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: h1
+        capabilities:
+          db:
+            attributes:
+              engine.protocol: postgresql/15.6
+              recovery.rpo: 5m
+    expect:
+      error: forecast
+
+  - name: forecast-consumes-observations
+    impl: go
+    description: >
+      D45: bound create is no-effect (the executor would 409-continue);
+      drift and evidence quality live at attribute level. Canonical
+      equality compares (300s matches 5m); a missing observation is
+      unknown/missing-observation.
+    forecast:
+      at: "2026-07-11T17:05:00Z"
+      bindings: { db: "acme:europe-west1:db-x" }
+      observations:
+        - { capability: db, path: engine.protocol, value: "postgresql/16.4",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+      plan:
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: h1
+          environment: test
+          reads:
+            contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+            candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+            heads: { db: genesis }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-create
+              capability: db
+              operation: create
+              target: cloudsql.instance/primary
+              idempotencyKey: db-create-1
+              risk:
+                reversibility: R2
+                dataLoss: none
+                downtime: none
+                securityExposure: none
+                costDelta: { amount: 100, currency: EUR }
+                identityReplacement: false
+          preconditions:
+            - type: report-executable
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: h1
+        capabilities:
+          db:
+            attributes:
+              engine.protocol: postgresql/16.4
+              recovery.rpo: 5m
+    expect:
+      freshPlan: true
+      effects:
+        a-create: no-effect
+      attributes:
+        a-create:
+          engine.protocol: match
+          recovery.rpo: { prediction: unknown, reason: missing-observation }
+
+  - name: forecast-four-valued-attribute-predictions
+    impl: go
+    description: >
+      D45: the D3/D6 discipline at prediction level — drift is differ,
+      a kind mismatch (money observed where a duration is desired) is
+      unverifiable, a stale observation is unknown/stale-observation.
+    forecast:
+      at: "2026-07-11T17:05:00Z"
+      bindings: { db: "acme:europe-west1:db-x" }
+      observations:
+        - { capability: db, path: engine.protocol, value: "postgresql/15.6",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+        - { capability: db, path: recovery.rpo, value: "5 EUR",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T17:00:00Z", ttlSeconds: 900 }
+      plan:
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: h1
+          environment: test
+          reads:
+            contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+            candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+            heads: { db: genesis }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-create
+              capability: db
+              operation: create
+              target: cloudsql.instance/primary
+              idempotencyKey: db-create-1
+              risk:
+                reversibility: R2
+                dataLoss: none
+                downtime: none
+                securityExposure: none
+                costDelta: { amount: 100, currency: EUR }
+                identityReplacement: false
+          preconditions:
+            - type: report-executable
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: h1
+        capabilities:
+          db:
+            attributes:
+              engine.protocol: postgresql/16.4
+              recovery.rpo: 5m
+    expect:
+      freshPlan: true
+      effects:
+        a-create: no-effect
+      attributes:
+        a-create:
+          engine.protocol: differ
+          recovery.rpo: { prediction: unverifiable, reason: kind-mismatch }
+
+  - name: forecast-says-unknown-for-unmodeled-operations
+    impl: go
+    description: >
+      D40: operations the forecaster does not model yield unknown with
+      reason unsupported-effect-model — never a guess. (The carrier
+      operation has moved as the effect models grew: update -> D46,
+      delete -> D47; adopt remains unmodeled.)
+    forecast:
+      at: "2026-07-11T12:00:00Z"
+      plan:
+        apiVersion: plan/v0
+        kind: SealedPlan
+        plan:
+          contract: h1
+          environment: test
+          reads:
+            contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+            candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+            heads: { db: genesis }
+            toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+          writes: [db]
+          actions:
+            - id: a-adopt
+              capability: db
+              operation: adopt
+              target: cloudsql.instance/primary
+              idempotencyKey: db-adopt-1
+              risk:
+                reversibility: R1
+                dataLoss: none
+                downtime: none
+                securityExposure: none
+                costDelta: { amount: 0, currency: EUR }
+                identityReplacement: false
+          preconditions:
+            - type: report-executable
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: h1
+        capabilities:
+          db:
+            attributes:
+              engine.protocol: postgresql/16.4
+              recovery.rpo: 5m
+    expect:
+      freshPlan: true
+      effects:
+        a-adopt: unknown
+      reasons:
+        a-adopt: unsupported-effect-model

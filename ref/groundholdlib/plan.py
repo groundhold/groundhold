@@ -1,0 +1,196 @@
+"""Sealed Plan IR v0 — loading + structural validation
+(spec/sealed-plan.md, D36). Fail-closed (D19): unknown operations,
+dangling or cyclic dependencies, unpinned writes and missing
+report-executable preconditions are refused at load.
+"""
+from __future__ import annotations
+import re
+from typing import Any
+
+import yaml
+
+from .yamlcompat import safe_load as _core12_load
+
+from .contract import ContractError, read_document
+
+OPERATIONS = {"create", "update", "replace", "delete", "adopt", "noop"}
+PRECONDITION_TYPES = {"report-executable", "no-assumed-basis", "within-autonomy",
+                      "no-assumed-hard-basis"}  # D195: hard-only, assumed-only gate
+RISK_LEVELS = {"none", "possible", "certain"}
+REVERSIBILITY = {"R0", "R1", "R2", "R3", "R4"}
+_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _require_hash(v: Any, what: str) -> None:
+    if not isinstance(v, str) or not _HASH_RE.match(v):
+        raise ContractError(f"{what} must be a sha256:<hex> hash")
+
+
+def _check_risk(aid: str, risk: Any) -> None:
+    if not isinstance(risk, dict):
+        raise ContractError(f"action {aid}: risk vector is required (D33)")
+    if risk.get("reversibility") not in REVERSIBILITY:
+        raise ContractError(f"action {aid}: invalid reversibility")
+    for dim in ("dataLoss", "downtime", "securityExposure"):
+        if risk.get(dim) not in RISK_LEVELS:
+            raise ContractError(f"action {aid}: invalid risk dimension {dim}")
+    if not isinstance(risk.get("identityReplacement"), bool):
+        raise ContractError(f"action {aid}: identityReplacement must be a bool")
+    cd = risk.get("costDelta")
+    if not isinstance(cd, dict) or isinstance(cd.get("amount"), bool) \
+            or not isinstance(cd.get("amount"), (int, float)) \
+            or not cd.get("currency"):
+        raise ContractError(
+            f"action {aid}: costDelta must be {{amount, currency}}")
+
+
+def load_plan(path: str) -> dict[str, Any]:
+    doc = _core12_load(read_document(path))
+    if not isinstance(doc, dict):
+        raise ContractError("plan document is empty or not a mapping")
+    if doc.get("kind") != "SealedPlan":
+        raise ContractError("kind must be SealedPlan")
+    if doc.get("apiVersion") != "plan/v0":
+        raise ContractError("apiVersion must be plan/v0")
+    p = doc.get("plan")
+    if not isinstance(p, dict):
+        raise ContractError("plan block is required")
+    if not p.get("contract"):
+        raise ContractError("plan.contract is required")
+
+    reads = p.get("reads")
+    if not isinstance(reads, dict):
+        raise ContractError("plan.reads is required (D28: pin the read-set)")
+    _require_hash(reads.get("contractHash"), "reads.contractHash")
+    _require_hash(reads.get("candidateHash"), "reads.candidateHash")
+    heads = reads.get("heads")
+    if not isinstance(heads, dict) or not heads:
+        raise ContractError("reads.heads must pin a head per capability")
+    for cap, h in heads.items():
+        if h != "genesis":
+            _require_hash(h, f"reads.heads[{cap}]")
+    tc = reads.get("toolchain")
+    if not isinstance(tc, dict) or not tc.get("compiler") or not tc.get("spec"):
+        raise ContractError("reads.toolchain must carry compiler and spec")
+
+    writes = p.get("writes")
+    if not isinstance(writes, list) or not writes \
+            or not all(isinstance(w, str) for w in writes):
+        raise ContractError("plan.writes must be a non-empty list of ids")
+    for w in writes:
+        if w not in heads:
+            raise ContractError(
+                f"write {w!r} has no pinned head — you cannot write "
+                "what you did not read (D28)")
+
+    actions = p.get("actions")
+    if not isinstance(actions, list) or not actions:
+        raise ContractError("plan.actions must be a non-empty list")
+    ids: set[str] = set()
+    deps: dict[str, list[str]] = {}
+    for a in actions:
+        if not isinstance(a, dict) or not a.get("id"):
+            raise ContractError("action missing id")
+        aid = a["id"]
+        if aid in ids:
+            raise ContractError(f"duplicate action id: {aid}")
+        ids.add(aid)
+        if a.get("capability") not in writes:
+            raise ContractError(
+                f"action {aid}: capability outside plan.writes")
+        if a.get("operation") not in OPERATIONS:
+            raise ContractError(
+                f"action {aid}: unknown operation {a.get('operation')!r}")
+        if not a.get("idempotencyKey"):
+            raise ContractError(f"action {aid}: idempotencyKey is required (D29)")
+        _check_risk(aid, a.get("risk"))
+        if a.get("operation") == "delete":
+            # D47: a delete pins the exact identity it destroys — a rebind
+            # between seal and apply must not redirect it
+            if not a.get("targetProviderId"):
+                raise ContractError(
+                    f"action {aid}: delete requires targetProviderId")
+            gen = a.get("targetGeneration")
+            if isinstance(gen, bool) or not isinstance(gen, int) or gen < 1:
+                raise ContractError(
+                    f"action {aid}: delete requires targetGeneration >= 1")
+        if a.get("operation") == "update":
+            # D46: an update is a reviewed change-set, never an implicit diff
+            changes = a.get("changes")
+            if not isinstance(changes, list) or not changes:
+                raise ContractError(
+                    f"action {aid}: update requires a non-empty changes list")
+            for ch in changes:
+                if not isinstance(ch, dict) or not ch.get("path") \
+                        or "to" not in ch:
+                    raise ContractError(
+                        f"action {aid}: each change needs path and to")
+        deps[aid] = list(a.get("dependsOn") or [])
+    for aid, ds in deps.items():
+        for d in ds:
+            if d not in ids:
+                raise ContractError(
+                    f"action {aid}: dependsOn unknown action {d!r}")
+    # cycle check (Kahn)
+    indeg = {aid: 0 for aid in deps}
+    for ds in deps.values():
+        for d in ds:
+            indeg[d] += 0  # d exists (checked above)
+    for aid, ds in deps.items():
+        indeg[aid] = len(ds)
+    queue = [a for a, n in indeg.items() if n == 0]
+    seen = 0
+    rev: dict[str, list[str]] = {aid: [] for aid in deps}
+    for aid, ds in deps.items():
+        for d in ds:
+            rev[d].append(aid)
+    while queue:
+        n = queue.pop()
+        seen += 1
+        for m in rev[n]:
+            indeg[m] -= 1
+            if indeg[m] == 0:
+                queue.append(m)
+    if seen != len(deps):
+        raise ContractError("action dependency graph has a cycle")
+
+    pre = p.get("preconditions")
+    if not isinstance(pre, list) or not pre:
+        raise ContractError("plan.preconditions must be a non-empty list")
+    types = set()
+    for pc in pre:
+        t = pc.get("type") if isinstance(pc, dict) else None
+        if t not in PRECONDITION_TYPES:
+            raise ContractError(f"unknown precondition type: {t!r}")
+        types.add(t)
+    if "report-executable" not in types:
+        raise ContractError(
+            "preconditions must include report-executable — a plan that "
+            "does not require verification to pass contradicts the thesis")
+
+    # D177: witnessed capabilities are VERIFIED but not authored. Each must be
+    # well-formed, have a pinned head (verified => read, D28), and be DISJOINT from
+    # writes (a witness mutates nothing — being in writes would be a lie).
+    witnessed = p.get("witnessed")
+    if witnessed is not None:
+        if not isinstance(witnessed, list):
+            raise ContractError("plan.witnessed must be a list")
+        writes_set = set(writes)
+        for w in witnessed:
+            if not isinstance(w, dict):
+                raise ContractError("witnessed entry must be a mapping")
+            cap = w.get("capability")
+            if not cap:
+                raise ContractError("witnessed entry missing capability")
+            for k in ("provider", "service", "reason"):
+                if not w.get(k):
+                    raise ContractError(f"witnessed {cap}: {k} is required")
+            if cap not in heads:
+                raise ContractError(
+                    f"witnessed {cap} has no pinned head — a witnessed capability "
+                    "is verified, so it must be read (D28)")
+            if cap in writes_set:
+                raise ContractError(
+                    f"witnessed {cap} is also in plan.writes — a witness mutates "
+                    "nothing (D177)")
+    return doc

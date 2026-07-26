@@ -1,0 +1,42 @@
+# Attribute vocabulary for capability.cost.budget, spec v0.1 (D151).
+#
+# A cost guardrail as a governed capability — Acme's architecture requires
+# "budgets with alerts from day 1" and a per-tenant inference cost limit (a defence
+# against LLM runaway loops). What an organization governs: the spend LIMIT, the
+# period, and the alert THRESHOLD at which a notification fires. The notification
+# sink is an operator OPERAND (impl block, D26): the SNS topic is a separate
+# capability (messaging.topic).
+#
+# One TYPE, many services (D76): aws.budgets today; gcp/azure budget alerts fulfil
+# the same contract. STATELESS: a budget holds no durable data.
+
+capability: capability.cost.budget
+version: 0.1
+stateful: false
+
+attributes:
+
+  budget.limit:
+    kind: money
+    description: The spend ceiling for the period (a money value, e.g. "700 EUR") — governed for cost control
+    mappings:
+      aws.budgets: BudgetLimit Amount + Unit
+
+  budget.period:
+    kind: string
+    enum: [daily, monthly, quarterly, annually]
+    description: The recurrence the limit applies over
+    mappings:
+      aws.budgets: TimeUnit
+
+  alert.threshold:
+    kind: number
+    description: Percent of the limit (0-100) at which a notification fires
+    mappings:
+      aws.budgets: Notification Threshold (PERCENTAGE)
+
+  service.managed:
+    kind: bool
+    description: Whether groundhold manages this budget
+    mappings:
+      aws.budgets: const true when observed through the driver

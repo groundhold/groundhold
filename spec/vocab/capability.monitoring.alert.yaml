@@ -1,0 +1,100 @@
+# Attribute vocabulary for capability.monitoring.alert, spec v0.1 (D106).
+#
+# A METRIC ALERT: fire when a named metric crosses a threshold. This is the first
+# OBSERVABILITY domain — every capability before it provisions a resource that DOES
+# something; an alert watches one. The 3-cloud twin is the GCP Monitoring alerting
+# policy, the AWS CloudWatch alarm, and the Azure Monitor metric alert. The vertical
+# slice is deliberately ONE metric crossing ONE threshold, and that single-condition
+# shape is not just simplicity — it is invariant #4 again. A COMPOUND alert (several
+# conditions joined by AND/OR) is a logical expression, so it is REFUSED; complexity
+# is more alerts, never a boolean expression inside one. Anomaly-detection / dynamic
+# thresholds are refused too (there is no static threshold to verify).
+#
+# The verifiable core is small and universal: which metric, which threshold, which
+# direction, and — the safety property that catches the most common misconfiguration
+# — whether the alert actually NOTIFIES anyone. The concrete notification target (a
+# channel / SNS topic / action group) is a handle in the implementation block (D26);
+# a future slice may let an alert reference a capability.messaging.topic declared in
+# the same contract (cross-capability composition), noted, not built.
+
+capability: capability.monitoring.alert
+version: 0.1
+stateful: false  # an alert holds no data and removing it loses none — it is
+                 # re-creatable from its definition. The risk an alert carries is a
+                 # SILENT one (fires but notifies nobody), which alert.notify makes
+                 # verifiable, not on delete.
+
+attributes:
+
+  alert.metric:
+    kind: string
+    description: >
+      The metric the alert watches — the semantic "what is monitored". A single
+      named metric; the precise cloud selector is the driver's concern.
+    mappings:
+      gcp.monitoring: the condition filter's metric.type
+      aws.cloudwatch: Namespace + MetricName
+      azure.monitor: the criteria's metricName (+ metricNamespace)
+
+  alert.threshold:
+    kind: number
+    description: >
+      The value the metric must cross to fire. A plain number (the unit is the
+      metric's); a contract constrains it (e.g. threshold lte 90 to ensure the alert
+      is sensitive enough).
+    mappings:
+      gcp.monitoring: conditionThreshold.thresholdValue
+      aws.cloudwatch: Threshold
+      azure.monitor: the criteria threshold
+
+  alert.comparison:
+    kind: string
+    enum: [greater-than, less-than]
+    description: >
+      The direction that fires the alert — the metric ABOVE (greater-than) or BELOW
+      (less-than) the threshold. A closed enum; the compound/anomaly comparators are
+      out of scope.
+    mappings:
+      gcp.monitoring: COMPARISON_GT / COMPARISON_LT
+      aws.cloudwatch: GreaterThanThreshold / LessThanThreshold
+      azure.monitor: GreaterThan / LessThan
+
+  alert.notify:
+    kind: bool
+    description: >
+      Whether a notification action is configured — an alert that fires but notifies
+      NOBODY is the single most common alerting misconfiguration, and this makes
+      "someone is actually told" a verifiable guarantee. notify=true requires a
+      concrete channel (implementation.notification_channel); the driver refuses
+      notify=true with no channel rather than creating a silent alert that claims to
+      notify.
+    mappings:
+      gcp.monitoring: notificationChannels is non-empty
+      aws.cloudwatch: AlarmActions is non-empty
+      azure.monitor: the actions array is non-empty
+
+  service.managed:
+    kind: bool
+    description: Managed cloud monitoring vs a self-operated system
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: >
+      Projected monthly cost — alerts are near-free (a small per-alarm charge on some
+      clouds); the figure exists for symmetry.
+    verification: static against a pricing catalog; billing after deploy
+
+# Deliberately absent in v0.1 — REFUSED, and the refusal is the point:
+#   - COMPOUND conditions (multiple metrics joined by AND/OR): a logical expression
+#     (invariant #4). One alert = one metric crossing one threshold; more conditions
+#     = more alerts.
+#   - anomaly detection / dynamic (ML) thresholds: there is no static threshold to
+#     verify — a claim that needs a probe, not a config assertion.
+#   - evaluation window / period / datapoints-to-alarm / severity / auto-resolve:
+#     tuning, not capability semantics (they ride in the implementation block).
+#   - the notification TARGET's identity: a channel / SNS topic / action group is a
+#     separate resource; the alert REFERENCES one (implementation.notification_channel),
+#     it does not own it. Cross-capability composition is a later slice.
+#   - dashboards / log-based metrics / uptime checks / SLOs: sibling observability
+#     capabilities, each its own future domain.

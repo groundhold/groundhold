@@ -1,0 +1,116 @@
+# Attribute vocabulary for capability.authorization.grant, spec v0.1 (D104).
+#
+# A GRANT: a named role conferred on a principal, at a scope. This is the
+# authorization half of the IAM story capability.identity.workload (D103) opened —
+# there we built the PRINCIPAL (who a workload is); here we grant it access (what it
+# may do). It is the FIRST relational capability: unlike every domain before it,
+# which describes ONE resource's own attributes, a grant COMPOSES two other subjects
+# — a principal and a scope — into a binding. The 3-cloud twin is the GCP IAM policy
+# binding, the AWS IAM role-policy attachment, and the Azure RBAC role assignment.
+#
+# The design constraint that shapes everything: authorization must enter the
+# vocabulary as a reference to a NAMED ROLE, never as an inline policy document. A
+# policy language (actions, resources, conditions, effects) is exactly the
+# expression language invariant #4 forbids — logical connectives and interpolation
+# by another name. So a grant names a role the provider already defines
+# (roles/storage.objectViewer, arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess,
+# "Reader") and the vocabulary describes the VERIFIABLE SEMANTIC PROPERTIES of the
+# grant — its breadth (scope) and its danger (privileged) — which is what a
+# least-privilege review actually checks. Authoring a custom role (a permission set)
+# is a DIFFERENT capability, deferred, and is where the expression-language pressure
+# would live; keeping it out is deliberate.
+#
+# The concrete OPERANDS the binding needs at apply time — the principal's provider
+# handle and, for a resource-scoped grant, the scope resource id — ride in the
+# free-form implementation block (D26): implementation.principal / implementation.scope.
+# The vocabulary carries the SEMANTIC facts (which role, how broad, how privileged);
+# the impl carries the concrete handles. v0 references a principal by its handle; a
+# future slice may let a grant reference an identity capability declared in the same
+# contract (cross-capability composition) — noted, not built.
+
+capability: capability.authorization.grant
+version: 0.1
+stateful: false  # a grant holds no data and removing it loses none — it narrows
+                 # access and is re-grantable. The risk a grant carries is on
+                 # CREATE (privilege escalation), which access.privileged makes
+                 # verifiable, NOT on delete — so no retirement friction (contrast
+                 # identity.workload, stateful for its dependency cliff).
+
+attributes:
+
+  grant.role:
+    kind: string
+    description: >
+      The NAMED role/policy the grant confers — a reference to a role the provider
+      already defines, never an inline policy document. This is the grant's semantic
+      identity.
+    mappings:
+      gcp.iam: an IAM role id, e.g. roles/storage.objectViewer (predefined or custom)
+      aws.iam: a managed policy ARN, e.g. arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+      azure.authorization: a role definition, e.g. the "Reader" built-in role
+
+  grant.principal:
+    kind: string
+    description: >
+      The principal (identity) the grant confers access to — the WHO. Its concrete
+      form is provider-specific but it is a declared, verifiable value: observe
+      confirms the live binding names exactly this principal.
+    mappings:
+      gcp.iam: an IAM member, e.g. serviceAccount:name@project.iam.gserviceaccount.com
+      aws.iam: the role NAME the managed policy is attached to
+      azure.authorization: the principal object id (the managed identity's principalId)
+
+  access.scope:
+    kind: string
+    enum: [resource, account]
+    description: >
+      The BREADTH of authority the grant confers — a grant at account breadth is far
+      more dangerous than one at a single resource, and that difference is
+      verifiable. resource = the binding applies to ONE named resource
+      (implementation.scope); account = it applies account/project/subscription-wide.
+      On AWS a managed-policy attachment is principal-scoped with the resource set
+      INSIDE the policy, so account is the honest breadth and resource is REFUSED
+      (resource-scoping there needs an inline policy — the expression language v0
+      excludes), an honest one-cloud gap.
+    mappings:
+      gcp.iam: resource=setIamPolicy on implementation.scope; account=on the project
+      aws.iam: account=AttachRolePolicy (principal-attached); resource REFUSED
+      azure.authorization: resource=assignment at implementation.scope; account=at the subscription
+
+  access.privileged:
+    kind: bool
+    description: >
+      Whether grant.role confers ADMINISTRATIVE / broadly-privileged access (owner,
+      admin, broad write) rather than least-privilege (read / narrowly scoped). The
+      least-privilege safety semantic. The driver classifies a curated set of
+      well-known privileged roles per cloud; a role OUTSIDE that set is deliberately
+      left UNVERIFIABLE at observe (groundhold will not guess a custom role's privilege
+      — the four-valued verdict is the honest answer, not a fabricated boolean).
+    mappings:
+      gcp.iam: roles/owner, roles/editor, *admin* => privileged
+      aws.iam: AdministratorAccess, PowerUserAccess, *FullAccess* => privileged
+      azure.authorization: Owner, Contributor, User Access Administrator => privileged
+
+  service.managed:
+    kind: bool
+    description: Managed cloud IAM vs a self-operated authorization system
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: >
+      Projected monthly cost. Grants are free on all three clouds; the figure exists
+      for symmetry and is ~0 — the cost of a grant is the blast radius it confers,
+      which access.privileged and access.scope make visible.
+    verification: static against a pricing catalog; billing after deploy
+
+# Deliberately absent in v0.1 — REFUSED, and the refusal is the point:
+#   - inline policy documents / permission enumerations / conditions / effects: an
+#     EXPRESSION LANGUAGE (invariant #4). A grant references a NAMED role; it never
+#     authors one. Custom-role AUTHORING is a different capability, deferred.
+#   - deny assignments / boundary policies: a different semantic (subtractive), not
+#     a grant; unverifiable as a simple binding.
+#   - conditions (IP, MFA, time, tag-based): a real feature but each cloud models it
+#     differently and it reintroduces expression pressure — a later slice.
+#   - the principal's identity itself: that is capability.identity.workload; a grant
+#     REFERENCES a principal (implementation.principal), it does not own it.

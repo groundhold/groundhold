@@ -1,0 +1,379 @@
+# ACME — PLATFORM SUBSTRATE CONTRACT (groundhold's first real project)
+#
+# What groundhold AUTHORS for acme.example: the platform substrate (network, cluster,
+# data, mail, AI, security, cost). NOT the application layer — Karpenter, the ALB
+# controller, External Secrets, ArgoCD apps and the observability stack are
+# GitOps-owned (author-vs-witness doctrine). Every hard constraint here is the
+# platform's contract with itself; the EU-residency ones are enforced
+# DETERMINISTICALLY by the verifier (no org/SCP in groundhold — a change that would
+# route data outside the EU is caught as violated at plan, before apply).
+#
+# Region policy (architektura §1): primary eu-central-1, DR eu-west-1. The EU
+# allowlist is [eu-central-1, eu-west-1, eu-west-3, eu-north-1, eu-south-1,
+# eu-south-2]; eu-west-2 (London) is NOT in the EU and is deliberately absent.
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta:
+  id: acme-platform
+  environment: production
+  version: 1
+
+capabilities:
+  - id: net
+    type: capability.network.private
+  - id: cluster
+    type: capability.cluster.kubernetes
+  - id: db
+    type: capability.database.relational
+  - id: assets
+    type: capability.storage.object
+  - id: audit-store
+    type: capability.storage.object
+  - id: mail-out
+    type: capability.email.sending
+  - id: mail-in
+    type: capability.email.inbound
+  - id: ai
+    type: capability.ai.inference
+  - id: platform-key
+    type: capability.key.encryption
+  - id: audit-trail
+    type: capability.audit.trail
+  - id: budget
+    type: capability.cost.budget
+  - id: queue-parse
+    type: capability.messaging.queue
+  - id: backup-plan
+    type: capability.backup.plan
+  - id: registry
+    type: capability.registry.image
+  - id: threat
+    type: capability.security.threatdetection
+  - id: app-logs
+    type: capability.monitoring.logs
+
+constraints:
+  hard:
+    # ---- Network: private, NAT egress, private AWS-service access, EU ----
+    - id: c-net-region
+      subject: net
+      path: location.region
+      op: equals
+      value: eu-central-1
+      verify: { method: static }
+    - id: c-net-no-ingress
+      subject: net
+      path: ingress.public
+      op: equals
+      value: false
+      verify: { method: static }
+    - id: c-net-egress-nat
+      subject: net
+      path: egress.internet
+      op: equals
+      value: nat
+      verify: { method: static }
+    - id: c-net-private-svc
+      subject: net
+      path: serviceAccess.private
+      op: equals
+      value: true
+      verify: { method: static }
+
+    # ---- EKS cluster: private API, encrypted secrets, regional HA, EU ----
+    - id: c-cluster-region
+      subject: cluster
+      path: location.region
+      op: equals
+      value: eu-central-1
+      verify: { method: static }
+    - id: c-cluster-api-private
+      subject: cluster
+      path: network.apiExposure
+      op: in
+      value: [private, mixed]
+      verify: { method: static }
+    - id: c-cluster-secrets-enc
+      subject: cluster
+      path: encryption.secrets
+      op: equals
+      value: true
+      verify: { method: static }
+    - id: c-cluster-ha
+      subject: cluster
+      path: availability.class
+      op: equals
+      value: regional
+      verify: { method: static }
+
+    # ---- Aurora: private, RPO<=5m, regional HA, CMK, EU ----
+    - id: c-db-region
+      subject: db
+      path: location.region
+      op: equals
+      value: eu-central-1
+      verify: { method: static }
+    - id: c-db-engine
+      subject: db
+      path: engine.protocol
+      op: compatible-with
+      value: postgresql/16
+      verify: { method: static }
+    - id: c-db-private
+      subject: db
+      path: network.publicExposure
+      op: equals
+      value: false
+      verify: { method: static }
+    - id: c-db-rpo
+      subject: db
+      path: recovery.rpo
+      op: lte
+      value: 5m
+      verify: { method: static }
+    - id: c-db-ha
+      subject: db
+      path: availability.class
+      op: equals
+      value: regional
+      verify: { method: static }
+    - id: c-db-cmk
+      subject: db
+      path: encryption.customerManagedKeys
+      op: equals
+      value: true
+      verify: { method: static }
+
+    # ---- Object storage (assets): versioned, CMK, CRR to EU, EU ----
+    - id: c-assets-region
+      subject: assets
+      path: location.region
+      op: equals
+      value: eu-central-1
+      verify: { method: static }
+    - id: c-assets-versioning
+      subject: assets
+      path: versioning.enabled
+      op: equals
+      value: true
+      verify: { method: static }
+    - id: c-assets-cmk
+      subject: assets
+      path: encryption.customerManagedKeys
+      op: equals
+      value: true
+      verify: { method: static }
+    - id: c-assets-crr
+      subject: assets
+      path: replication.enabled
+      op: equals
+      value: true
+      verify: { method: static }
+    - id: c-assets-crr-eu
+      subject: assets
+      path: replication.destinationRegion
+      op: in
+      value: [eu-central-1, eu-west-1, eu-west-3, eu-north-1, eu-south-1, eu-south-2]
+      verify: { method: static }
+
+    # ---- Audit store (Egzekutor legal docs): WORM Object Lock, versioned, EU ----
+    - id: c-audit-region
+      subject: audit-store
+      path: location.region
+      op: equals
+      value: eu-central-1
+      verify: { method: static }
+    - id: c-audit-versioning
+      subject: audit-store
+      path: versioning.enabled
+      op: equals
+      value: true
+      verify: { method: static }
+    - id: c-audit-worm-floor
+      subject: audit-store
+      path: retention.minimum
+      op: gte
+      value: 2160h        # >=90 days WORM floor for legal demands
+      verify: { method: static }
+    - id: c-audit-worm-locked
+      subject: audit-store
+      path: retention.locked
+      op: equals
+      value: true
+      verify: { method: static }
+
+    # ---- Outbound mail (Egzekutor/follow-ups): DKIM, bounce tracked, EU ----
+    - id: c-mailout-region
+      subject: mail-out
+      path: location.region
+      op: equals
+      value: eu-central-1
+      verify: { method: static }
+    - id: c-mailout-dkim
+      subject: mail-out
+      path: authentication.dkim
+      op: equals
+      value: true
+      verify: { method: static }
+    - id: c-mailout-bounce
+      subject: mail-out
+      path: bounce.tracked
+      op: equals
+      value: true
+      verify: { method: static }
+    - id: c-mailout-prod-access
+      subject: mail-out
+      path: sending.productionAccess
+      op: equals
+      value: true          # manual-gate: sandbox exit before beta (observed, never faked)
+      verify: { method: static }
+
+    # ---- Inbound mail (deal mailbox M1): spam-filtered, durable sink, EU ----
+    - id: c-mailin-region
+      subject: mail-in
+      path: location.region
+      op: equals
+      value: eu-central-1
+      verify: { method: static }
+    - id: c-mailin-spam
+      subject: mail-in
+      path: spam.filtered
+      op: equals
+      value: true
+      verify: { method: static }
+    - id: c-mailin-sink
+      subject: mail-in
+      path: delivery.sink
+      op: equals
+      value: true
+      verify: { method: static }
+
+    # ---- AI inference (Bedrock EU CRIS): destinations subset of EU allowlist ----
+    - id: c-ai-region
+      subject: ai
+      path: location.region
+      op: equals
+      value: eu-central-1
+      verify: { method: static }
+    - id: c-ai-residency
+      subject: ai
+      path: inference.destinationRegions
+      op: subset-of
+      value: [eu-central-1, eu-west-1, eu-west-3, eu-north-1, eu-south-1, eu-south-2]
+      verify: { method: static }
+
+    # ---- KMS platform key (customer-managed by definition): annual rotation ----
+    - id: c-key-rotation
+      subject: platform-key
+      path: rotation.period
+      op: lte
+      value: 8760h        # rotate at least yearly
+      verify: { method: static }
+
+    # ---- CloudTrail: multi-region, log-file integrity, logging on, EU ----
+    - id: c-trail-region
+      subject: audit-trail
+      path: location.region
+      op: equals
+      value: eu-central-1
+      verify: { method: static }
+    - id: c-trail-multiregion
+      subject: audit-trail
+      path: scope.multiRegion
+      op: equals
+      value: true
+      verify: { method: static }
+    - id: c-trail-integrity
+      subject: audit-trail
+      path: integrity.logValidation
+      op: equals
+      value: true
+      verify: { method: static }
+    - id: c-trail-logging
+      subject: audit-trail
+      path: delivery.assured
+      op: equals
+      value: true
+      verify: { method: static }
+
+    # ---- Cost budget: monthly ceiling with an alert ----
+    - id: c-budget-period
+      subject: budget
+      path: budget.period
+      op: equals
+      value: monthly
+      verify: { method: static }
+
+    # ---- SQS: dead-letter reliability, EU ----
+    - id: c-queue-region
+      subject: queue-parse
+      path: location.region
+      op: equals
+      value: eu-central-1
+      verify: { method: static }
+    - id: c-queue-dlq
+      subject: queue-parse
+      path: reliability.deadLetter
+      op: equals
+      value: true
+      verify: { method: static }
+
+    # ---- Backup plan: daily RPO, cross-region copy to EU ----
+    - id: c-backup-rpo
+      subject: backup-plan
+      path: schedule.frequency
+      op: lte
+      value: 24h
+      verify: { method: static }
+    - id: c-backup-copy-eu
+      subject: backup-plan
+      path: copy.destinationRegion
+      op: in
+      value: [eu-west-1, eu-central-1]
+      verify: { method: static }
+
+    # ---- ECR: scan-on-push, EU ----
+    - id: c-registry-scan
+      subject: registry
+      path: security.scanOnPush
+      op: equals
+      value: true
+      verify: { method: static }
+
+    # ---- GuardDuty: detector on, Kubernetes protection, EU ----
+    - id: c-threat-region
+      subject: threat
+      path: location.region
+      op: equals
+      value: eu-central-1
+      verify: { method: static }
+    - id: c-threat-enabled
+      subject: threat
+      path: detection.enabled
+      op: equals
+      value: true
+      verify: { method: static }
+    - id: c-threat-k8s
+      subject: threat
+      path: protection.kubernetes
+      op: equals
+      value: true
+      verify: { method: static }
+
+    # ---- CloudWatch Logs: EU residency, >=90d retention ----
+    - id: c-logs-region
+      subject: app-logs
+      path: location.region
+      op: equals
+      value: eu-central-1
+      verify: { method: static }
+    - id: c-logs-retention
+      subject: app-logs
+      path: retention.days
+      op: gte
+      value: 90d
+      verify: { method: static }
+
+autonomy:
+  forbidden:
+    - delete_stateful: true   # net/cluster/db/assets/audit-store are stateful — no silent teardown

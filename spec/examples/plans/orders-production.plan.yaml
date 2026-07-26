@@ -1,0 +1,66 @@
+apiVersion: plan/v0
+kind: SealedPlan
+
+# What a compiler emits after verification passes. The reads block pins
+# the ACTUAL hashes of the example contract and candidate in this repo —
+# `groundhold hash` on those files reproduces them (D28, D36).
+
+plan:
+  contract: orders-production
+  environment: production
+
+  reads:
+    contractHash: "sha256:019ca3ba2b24d0a49459384b88f4bc4066a7d35412aa32ad166046b0f7ece1ef"
+    candidateHash: "sha256:3ba96d8396881fa867f4bf1e28541b5fbc56f2c49d308a248061f2cb2ea10564"
+    heads:
+      orders-db: genesis
+    vocabularies:
+      capability.database.relational: "0.1"
+    toolchain:
+      compiler: groundhold-go/0.1.0
+      spec: contract/v0.1
+    pricingCatalog: gcp-eu-2026-07
+    provider:
+      name: gcp
+      project: acme-prod
+      region: europe-west1
+
+  writes: [orders-db]
+
+  actions:
+    - id: a-create-primary
+      capability: orders-db
+      operation: create
+      target: cloudsql.instance/primary
+      idempotencyKey: orders-db-create-7f3a
+      dependsOn: []
+      requiredPermissions:                 # D75
+        - cloudsql.instances.create
+        - cloudsql.instances.get
+      risk:
+        reversibility: R2
+        dataLoss: none
+        downtime: none
+        securityExposure: none
+        costDelta: { amount: 912, currency: EUR }
+        identityReplacement: false
+    - id: a-configure-pitr
+      capability: orders-db
+      operation: update
+      target: cloudsql.instance/primary
+      idempotencyKey: orders-db-pitr-7f3a
+      dependsOn: [a-create-primary]
+      requiredPermissions:                 # D75
+        - cloudsql.instances.get
+        - cloudsql.instances.update
+      risk:
+        reversibility: R1
+        dataLoss: none
+        downtime: none
+        securityExposure: none
+        costDelta: { amount: 0, currency: EUR }
+        identityReplacement: false
+
+  preconditions:
+    - type: report-executable
+    - type: within-autonomy

@@ -1,0 +1,56 @@
+# Coordination clock (D56): wall time is injected by writers; the
+# ledger enforces monotonic order. A backdated append would rewind
+# lease arithmetic and resurrect expired fencing — refused, never
+# rewound. Existing history replays leniently (tolerated, not
+# re-judged); only NEW appends are strict. Go-only (the JSONL ledger
+# is the Go runtime's).
+suite: coordination-clock
+cases:
+  - name: backdated-append-is-refused
+    impl: go
+    description: >
+      D56: after an event at 12:00, a writer whose clock says 11:00
+      cannot append — its lease acquisition is rejected with the skew
+      named. Time moving forward again is accepted; the refusal is
+      about order, not about the writer.
+    onboard:
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: clk-t, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-managed
+              subject: db
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: clk-t
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T12:00:00Z"
+          map: { db: "fake:existing-db" }
+          expect: { exit: 0, status: adopted }
+        - cmd: unadopt
+          capability: db
+          at: "2026-07-12T11:00:00Z"
+          expect:
+            exit: 2
+            status: refused
+            code: clock-regress
+            reasonContains: "regresses behind the ledger"
+        - cmd: unadopt
+          capability: db
+          at: "2026-07-12T13:00:00Z"
+          expect: { exit: 0, status: unadopted }

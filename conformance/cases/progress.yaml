@@ -1,0 +1,43 @@
+# Progress stream (D227): honest liveness during apply. The stream is a
+# PROJECTION of the executor's action state machine, never a second source of
+# truth — so it must (a) be well-formed and honest (run-start manifest -> legal
+# transitions -> run-end, k reaching N, no event after a terminal) and (b) leave
+# the machine result (stdout) and the ledger byte-identical to --progress=none.
+# (b) is invariant #6 as an executable assertion: progress cannot perturb
+# durable truth. Go-runtime (the executor), so impl: go. The full transition
+# table is pinned by Go unit tests; this pins the CLI surface + purity.
+suite: progress
+cases:
+  - name: progress-is-honest-and-does-not-perturb-the-result
+    impl: go
+    description: >
+      D227: `apply --progress=ndjson` emits a well-formed liveness stream and
+      leaves stdout and the ledger identical to `--progress=none`.
+    progress:
+      at: "2026-07-12T10:00:00Z"
+      provider: fake
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: prog-t, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-managed
+              subject: db
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: prog-t
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+    expect:
+      resolved: 1

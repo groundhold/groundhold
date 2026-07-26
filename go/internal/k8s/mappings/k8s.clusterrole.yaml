@@ -1,0 +1,41 @@
+# Schema-driven mapping: k8s rbac.authorization.k8s.io/v1 ClusterRole -> capability.authorization.role.
+#
+# A ClusterRole is the cluster-scoped Role: same policy-document semantics, same
+# k8s.rbac.roleRules lens, no namespace. A controller-assembled aggregationRule is
+# surfaced by the lens as a diagnostic (the flat set is the current aggregation, not
+# an authored intent). Reproduces observeRole/buildRole for the cluster kind.
+mapping: v0.1
+fieldpath: groundhold/fieldpath/v1
+service: rbac-clusterrole
+provider: k8s
+capability: capability.authorization.role
+vocab:
+  capability.authorization.role: "0.1"
+
+resource:
+  group: rbac.authorization.k8s.io
+  version: v1
+  kind: ClusterRole
+  plural: clusterroles
+  scope: Cluster
+
+schema:
+  source: "kubernetes /openapi/v3 apis/rbac.authorization.k8s.io/v1 ClusterRole"
+  mappedSurface: sha256:cd4163bdddecd1e48d9e672222037393fbb2ec51a90fefd4162c7f2ef5f3fbfd
+
+lenses:
+  - k8s.rbac.roleRules
+
+classify:
+  role.permissions:
+    change: mutable
+  access.mutating:
+    change: mutable
+  access.privileged:
+    change: mutable
+  service.managed:
+    change: mutable
+  cost.monthly:
+    change: mutable
+
+attributes: {}

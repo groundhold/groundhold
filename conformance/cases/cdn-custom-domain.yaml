@@ -1,0 +1,128 @@
+# CloudFront custom domain: a cdn.distribution served under an alternate domain
+# name (Aliases / CNAMEs, e.g. api.acme.eu) with an ACM ViewerCertificate, wired
+# through the implementation block (D226 $ref — the compiler wires references from
+# implementation:, never from an attribute). This closes the field gap Acme had to
+# fill by hand (attach Aliases, request an ACM cert in us-east-1, set the
+# ViewerCertificate). A CloudFront viewer cert is a PUBLIC edge cert and MUST live in
+# us-east-1 (CloudFront's cert store) regardless of the origin's region — an AWS
+# infrastructural requirement, not a data-residency choice — so the certificate.tls
+# candidate simply declares location.region: us-east-1 and the cdn $refs its
+# certificateArn output. Compile behaviour is Go-runtime (D24), so every case carries
+# impl: go. The verifier is untouched: the operands live in the implementation block
+# (D26); the exact wire (Aliases CNAMEs + ACMCertificateArn / sni-only / TLSv1.2_2021)
+# is pinned by the driver's httptest golden.
+suite: cdn-custom-domain
+cases:
+  - name: cloudfront-custom-domain-refs-acm-cert
+    impl: go
+    description: >
+      A certificate.tls (ACM, us-east-1) and a cdn.distribution whose aliases carry
+      the custom domain and whose certificate is a $ref to the cert's certificateArn.
+      The plan emits create-cert + create-cdn, with a dependsOn edge and a references
+      entry on the cdn (resolved at apply from the cert's receipt), no cycle.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: cdn-domain, environment: test, version: 1 }
+        capabilities:
+          - id: cert
+            type: capability.certificate.tls
+          - id: cdn
+            type: capability.cdn.distribution
+        constraints:
+          hard:
+            - id: c-cert-managed
+              subject: cert
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-cdn-managed
+              subject: cdn
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: cdn-domain
+        capabilities:
+          cert:
+            provider: aws
+            service: acm
+            attributes:
+              service.managed: true
+              location.region: us-east-1
+              domain: api.acme.eu
+              validation.method: dns
+          cdn:
+            provider: aws
+            service: cloudfront
+            attributes:
+              service.managed: true
+              viewer.protocol: https-only
+              origin.domain: origin.example.com
+            implementation:
+              aliases: [api.acme.eu]
+              certificate:
+                $ref: { capability: cert, output: certificateArn }
+    expect:
+      actions:
+        a-create-cert:
+          operation: create
+        a-create-cdn:
+          operation: create
+          dependsOn: [a-create-cert]
+          references:
+            - slot: certificate
+              producerAction: a-create-cert
+              capability: cert
+              output: certificateArn
+              kind: string
+
+  - name: cdn-custom-domain-operands-not-unknown
+    impl: go
+    description: >
+      Regression (D307): a cloudfront whose implementation carries the aliases and
+      certificate operands (a literal us-east-1 ACM ARN here) is NOT tripped by the
+      unknown-operand guard — both are registered in the driver's ConsumedOperands.
+      The plan compiles and emits the create action.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: cdn-domain-reg, environment: test, version: 1 }
+        capabilities:
+          - id: cdn
+            type: capability.cdn.distribution
+        constraints:
+          hard:
+            - id: c-cdn-managed
+              subject: cdn
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: cdn-domain-reg
+        capabilities:
+          cdn:
+            provider: aws
+            service: cloudfront
+            attributes:
+              service.managed: true
+              viewer.protocol: https-only
+              origin.domain: origin.example.com
+            implementation:
+              aliases: [api.acme.eu]
+              certificate: arn:aws:acm:us-east-1:000000000000:certificate/abc-123
+    expect:
+      actions:
+        a-create-cdn:
+          operation: create

@@ -1,0 +1,166 @@
+# Attribute vocabulary for capability.network.private, spec v0.1 (D60).
+# What an organization can REQUIRE of a private network: isolation,
+# egress discipline, audit visibility, residency. CIDR arithmetic,
+# subnet naming and route table shapes are implementation noise.
+
+capability: capability.network.private
+version: 0.1
+stateful: true   # attached workloads and allocated addresses are
+                 # continuity state; deleting a live network severs
+                 # everything on it — D47 friction applies
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Primary region of the network/subnet
+    mappings:
+      gcp.vpc: subnetwork region
+      aws.vpc: region
+
+  availability.class:
+    kind: string
+    enum: [zonal, regional]
+    description: >
+      Whether the network's usable placement spans a single availability
+      zone (zonal) or all zones in the region (regional). A regional
+      network is what a zone-redundant workload — or an internet-facing
+      load balancer, which AWS requires to span >=2 zones — is placed on.
+    mappings:
+      aws.vpc: >
+        zonal = one subnet in one AZ; regional = subnets across >=2 AZs
+        (AWS subnets are AZ-bound, so spanning zones means multiple subnets)
+      gcp.vpc: >
+        native — a GCP subnetwork is regional and spans all zones in the
+        region; a regional network is satisfied by construction, a zonal
+        one is not honestly expressible (refused/unverifiable)
+      azure.vnet: >
+        native — an Azure subnet is region-wide and zone choice is
+        per-resource; a regional network is satisfied by construction
+
+  ingress.public:
+    kind: bool
+    description: >
+      Whether any path from the public internet into the network exists
+      (contracts typically REQUIRE false)
+    mappings:
+      gcp.vpc: no external LBs/addresses on member resources, no 0.0.0.0/0 ingress rules
+      aws.vpc: no IGW route on the workload path AND no security group with a
+        0.0.0.0/0 (or ::/0) ingress rule
+    note: >
+      static verification proves configuration intent; an outcome probe
+      (external reachability scan) proves the actual absence of paths.
+      On AWS this bool SUBSUMES "no world-open ingress": the driver AUTHORS a
+      baseline security group (a materialized posture object, ownership-tagged;
+      its rules are D26 operands — the safe default admits intra-VPC traffic only,
+      never 0.0.0.0/0) and observe OR-combines two doors — a direct IGW route and
+      ANY security group in the VPC with a 0.0.0.0/0 / ::/0 ingress rule. The SG
+      read WITNESSES rules an in-cluster controller (ALB/EKS) appended at runtime:
+      an open rule flips ingress.public to true (surfacing violated on the tray)
+      and is NEVER auto-revoked — groundhold authors the object and tolerates foreign
+      rules, but never lies about the posture.
+    recommended:
+      op: equals
+      value: false
+      scope: all
+      rationale: "Do not expose the private network to unrestricted public ingress; default to deny and open paths explicitly."
+      ruleId: PV_R0011
+      ruleVersion: 1
+      controls:
+        FSBP: ["EC2.13"]
+        CIS-AWS_5.0.0: ["5.1"]
+
+  egress.restricted:
+    kind: bool
+    description: >
+      DESTINATION DISCIPLINE (orthogonal to egress.internet): outbound
+      traffic is limited to declared destinations (a default-deny egress
+      allow-list), independent of WHETHER an internet road exists. This is
+      the SG/firewall posture, not the route topology.
+    mappings:
+      gcp.vpc: egress firewall default-deny + explicit allows
+      aws.vpc: egress SG rules + firewall
+    note: >
+      Do not conflate with egress.internet. egress.internet says whether a
+      road to the internet exists; egress.restricted says whether the
+      destinations reachable over whatever road exists are filtered to a
+      declared set. The AWS driver honors egress.restricted=true only when
+      egress.internet=none (the reachable set is empty, trivially within any
+      allow-list); with a NAT/IGW road it needs egress security groups
+      (a later slice) and refuses rather than lie.
+
+  egress.internet:
+    kind: string
+    enum: [none, nat, direct]
+    description: >
+      The EGRESS ROAD (orthogonal to egress.restricted): whether and how
+      workloads reach the public internet. none = no road (isolated by
+      construction). nat = workloads INITIATE outbound connections but are
+      NOT addressable from outside (NAT gateway in a public subnet + a
+      private default route to it). direct = workloads are publicly
+      addressable (IGW default route on their own subnet).
+    mappings:
+      gcp.vpc: none = no Cloud NAT / no default-internet route; nat = Cloud NAT
+      aws.vpc: none = no IGW/NAT; nat = NAT gateway + private route; direct = IGW route
+    note: >
+      Route tables, the Internet Gateway, Elastic IPs, per-AZ NAT count and
+      CIDR arithmetic are realization OPERANDS (D26), not vocabulary. Only
+      the road MODE is a semantic the organization declares.
+
+  flowLogs.enabled:
+    kind: bool
+    description: Network flow logging for audit is on
+    mappings:
+      gcp.vpc: subnetwork logConfig.enable
+      aws.vpc: VPC flow logs
+    recommended:
+      op: equals
+      value: true
+      scope: prod
+      rationale: "In production, enable network flow logs so traffic is auditable and incidents can be reconstructed."
+      ruleId: PV_R0012
+      ruleVersion: 1
+      controls:
+        CIS-AWS_5.0.0: ["3.9"]
+        FSBP: ["EC2.6"]
+
+  interconnect.private:
+    kind: bool
+    description: >
+      Connectivity to on-prem/other networks rides private links, never
+      the public internet
+    mappings:
+      gcp.vpc: Cloud VPN/Interconnect attachments
+      aws.vpc: DX/VPN attachments
+
+  serviceAccess.private:
+    kind: bool
+    description: >
+      Traffic to the CLOUD PROVIDER's OWN service APIs stays on the private
+      backbone and never traverses the public internet (a residency + egress
+      posture, the same genus as interconnect.private but for the provider's
+      managed services rather than on-prem). This is orthogonal to
+      egress.internet: it constrains WHERE calls to object storage, registries,
+      secrets, logging, KMS etc. travel, not whether a road to the open internet
+      exists at all.
+    mappings:
+      gcp.vpc: Private Google Access / Private Service Connect endpoints
+      aws.vpc: VPC endpoints (S3 gateway + interface endpoints for the API set)
+      azure.vnet: Private Link / service endpoints
+    note: >
+      WHICH concrete endpoints realize this (a gateway endpoint for S3/DynamoDB
+      vs interface endpoints for the rest, the exact service set, security
+      groups, private DNS) is a realization OPERAND set (D26) the driver
+      declares and may accept an override for — not vocabulary. Only the
+      semantic "provider-API traffic is private" is declared here. The AWS
+      driver measures this as observed-endpoints ⊇ its known-required set;
+      an incomplete set is a MEASURED false, never an unknown.
+
+  service.managed:
+    kind: bool
+    description: Managed service vs self-operated
+
+# Deliberately absent in v0.1 (implementation noise / realization operands):
+# CIDR ranges and arithmetic, subnet names, route tables, Internet Gateway,
+# Elastic IPs, per-AZ NAT gateway count/sizing, peering topology shapes.
+# These are HOW egress.internet is realized, not WHAT is required.

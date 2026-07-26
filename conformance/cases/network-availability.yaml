@@ -1,0 +1,118 @@
+# capability.network.private gains availability.class (zonal | regional):
+# whether the network spans one zone or all zones in the region. A regional
+# network is what an internet-facing load balancer (AWS: >=2 AZ) or a
+# zone-redundant workload is placed on. Pure verifier semantics here (the
+# driver behaviour — AWS creating >=2 subnets — is pinned by the Go golden
+# tests); the verdict is vocab-driven, so both implementations agree.
+
+cases:
+  - name: network-availability-regional-satisfied
+    description: >
+      A contract requiring a regional (multi-zone) private network is
+      satisfied by a candidate that declares availability.class: regional.
+    vocab:
+      - capability: capability.network.private
+        version: 0.1
+        stateful: true
+        attributes:
+          availability.class: { kind: string, enum: [zonal, regional] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: net-av, environment: test, version: 1 }
+      capabilities:
+        - id: n
+          type: capability.network.private
+      constraints:
+        hard:
+          - id: n-av
+            subject: n
+            path: availability.class
+            op: equals
+            value: regional
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: net-av
+      capabilities:
+        n:
+          attributes:
+            availability.class: regional
+    expect:
+      executable: true
+      verdicts: { n-av: satisfied }
+
+  - name: network-availability-zonal-violates-regional-requirement
+    description: >
+      A zonal network cannot host what needs multiple zones — a candidate
+      declaring availability.class: zonal VIOLATES a regional requirement
+      (never a silent pass), which blocks execution.
+    vocab:
+      - capability: capability.network.private
+        version: 0.1
+        stateful: true
+        attributes:
+          availability.class: { kind: string, enum: [zonal, regional] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: net-av2, environment: test, version: 1 }
+      capabilities:
+        - id: n
+          type: capability.network.private
+      constraints:
+        hard:
+          - id: n-av
+            subject: n
+            path: availability.class
+            op: equals
+            value: regional
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: net-av2
+      capabilities:
+        n:
+          attributes:
+            availability.class: zonal
+    expect:
+      executable: false
+      verdicts: { n-av: violated }
+
+  - name: network-availability-class-enum-is-enforced
+    description: >
+      availability.class on a private network is a closed enum; a bogus
+      value is a load error, not a silent pass.
+    vocab:
+      - capability: capability.network.private
+        version: 0.1
+        stateful: true
+        attributes:
+          availability.class: { kind: string, enum: [zonal, regional] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: net-av3, environment: test, version: 1 }
+      capabilities:
+        - id: n
+          type: capability.network.private
+      constraints:
+        hard:
+          - id: n-av
+            subject: n
+            path: availability.class
+            op: equals
+            value: regional
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: net-av3
+      capabilities:
+        n:
+          attributes:
+            availability.class: galactic
+    expect:
+      error: candidate

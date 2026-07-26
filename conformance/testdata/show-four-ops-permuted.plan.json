@@ -1,0 +1,179 @@
+{
+  "apiVersion": "plan/v0",
+  "kind": "SealedPlan",
+  "plan": {
+    "contract": "billing-core",
+    "environment": "prod",
+    "reads": {
+      "contractHash": "sha256:4b2200000000000000000000000000000000000000000000000000000000aa91",
+      "candidateHash": "sha256:77ac0000000000000000000000000000000000000000000000000000000000d0",
+      "heads": {
+        "assets": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "billing": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "ledger": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "sessions": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "core-net": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "toolchain": {
+        "compiler": "groundhold-go/0.1.0",
+        "spec": "contract/v0.1"
+      },
+      "provider": {
+        "name": "gcp",
+        "project": "acme-dev"
+      }
+    },
+    "writes": [
+      "assets",
+      "billing",
+      "ledger",
+      "sessions"
+    ],
+    "actions": [
+      {
+        "id": "a-delete-sessions",
+        "capability": "sessions",
+        "operation": "delete",
+        "target": "gcp.memorystore/sessions",
+        "idempotencyKey": "ik-2b7c",
+        "targetProviderId": "projects/acme/instances/sessions",
+        "targetGeneration": 2,
+        "requiredPermissions": [
+          "redis.instances.delete"
+        ],
+        "risk": {
+          "reversibility": "R4",
+          "dataLoss": "certain",
+          "downtime": "certain",
+          "securityExposure": "none",
+          "costDelta": {
+            "amount": -31,
+            "currency": "USD"
+          },
+          "identityReplacement": false
+        }
+      },
+      {
+        "id": "a-create-ledger-g5",
+        "capability": "ledger",
+        "operation": "create",
+        "target": "gcp.cloudsql/ledger",
+        "idempotencyKey": "ik-9c40",
+        "targetGeneration": 5,
+        "replaces": {
+          "providerId": "projects/acme/instances/ledger",
+          "generation": 4,
+          "because": [
+            {
+              "path": "location.region",
+              "from": "europe-west1",
+              "to": "europe-central2"
+            }
+          ]
+        },
+        "requiredPermissions": [
+          "cloudsql.instances.create",
+          "cloudsql.instances.delete"
+        ],
+        "risk": {
+          "reversibility": "R4",
+          "dataLoss": "possible",
+          "downtime": "certain",
+          "securityExposure": "none",
+          "costDelta": {
+            "amount": 0,
+            "currency": "USD"
+          },
+          "identityReplacement": true
+        }
+      },
+      {
+        "id": "a-update-billing",
+        "capability": "billing",
+        "operation": "update",
+        "target": "gcp.cloudsql/billing",
+        "idempotencyKey": "ik-1a02",
+        "targetProviderId": "projects/acme/instances/billing",
+        "targetGeneration": 7,
+        "dependsOn": [
+          "a-create-assets"
+        ],
+        "changes": [
+          {
+            "path": "settings.tier",
+            "from": "db-custom-2-8192",
+            "to": "db-custom-4-16384"
+          },
+          {
+            "path": "settings.flags.max_conn",
+            "from": 400,
+            "to": 800,
+            "caveat": "applied on next instance restart"
+          }
+        ],
+        "references": [
+          {
+            "slot": "backup_target",
+            "producerAction": "a-create-assets",
+            "capability": "assets",
+            "output": "url",
+            "kind": "string"
+          }
+        ],
+        "requiredPermissions": [
+          "cloudsql.instances.update",
+          "cloudsql.instances.get"
+        ],
+        "risk": {
+          "reversibility": "R2",
+          "dataLoss": "none",
+          "downtime": "possible",
+          "securityExposure": "none",
+          "costDelta": {
+            "amount": 93.3,
+            "currency": "USD"
+          },
+          "identityReplacement": false
+        }
+      },
+      {
+        "id": "a-create-assets",
+        "capability": "assets",
+        "operation": "create",
+        "target": "gcp.storage/assets",
+        "idempotencyKey": "ik-8f21",
+        "requiredPermissions": [
+          "storage.buckets.create",
+          "storage.buckets.get"
+        ],
+        "risk": {
+          "reversibility": "R1",
+          "dataLoss": "none",
+          "downtime": "none",
+          "securityExposure": "none",
+          "costDelta": {
+            "amount": 4.2,
+            "currency": "USD"
+          },
+          "identityReplacement": false
+        }
+      }
+    ],
+    "witnessed": [
+      {
+        "capability": "core-net",
+        "provider": "gcp",
+        "service": "compute",
+        "reason": "adopted out of scope"
+      }
+    ],
+    "preconditions": [
+      {
+        "type": "report-executable"
+      },
+      {
+        "type": "no-assumed-hard-basis"
+      }
+    ]
+  }
+}

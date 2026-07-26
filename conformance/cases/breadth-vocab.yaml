@@ -1,0 +1,4463 @@
+# Breadth vocabularies (D60): object-storage, private-network,
+# container-workload. Same engine, three more type systems — and the
+# first STATELESS vocabulary, exercising the delete-policy branch that
+# fail-closed defaults have hidden until now.
+
+cases:
+  - name: object-storage-contract-verifies
+    description: >
+      D60: retention as duration (lte/gte with no coercion), durability
+      as enum, exposure as bool — an object-store compliance contract
+      rides the standard verifier.
+    vocab:
+      - capability: capability.storage.object
+        version: 0.1
+        stateful: true
+        attributes:
+          durability.class:
+            kind: string
+            enum: [single-zone, regional, multi-regional]
+          retention.minimum: { kind: duration }
+          versioning.enabled: { kind: bool }
+          network.publicExposure: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: st-1, environment: production, version: 1 }
+      capabilities:
+        - id: archive
+          type: capability.storage.object
+      constraints:
+        hard:
+          - id: c-durability
+            subject: archive
+            path: durability.class
+            op: in
+            value: [regional, multi-regional]
+            verify: { method: static }
+          - id: c-retention
+            subject: archive
+            path: retention.minimum
+            op: gte
+            value: 90d
+            verify: { method: static }
+          - id: c-versioning
+            subject: archive
+            path: versioning.enabled
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-private
+            subject: archive
+            path: network.publicExposure
+            op: equals
+            value: false
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: st-1
+      capabilities:
+        archive:
+          attributes:
+            durability.class: multi-regional
+            retention.minimum: 180d
+            versioning.enabled: true
+            network.publicExposure: false
+    expect:
+      executable: true
+      verdicts:
+        c-durability: satisfied
+        c-retention: satisfied
+        c-versioning: satisfied
+        c-private: satisfied
+
+  - name: object-storage-retention-maximum-is-a-duration-ceiling
+    description: >
+      retention.maximum (data minimization) is the dual of retention.minimum:
+      a duration CEILING. lte satisfies when the candidate expires at or under
+      the limit; a longer-lived candidate violates. No coercion, same engine.
+    vocab:
+      - capability: capability.storage.object
+        version: 0.1
+        stateful: true
+        attributes:
+          retention.minimum: { kind: duration }
+          retention.maximum: { kind: duration }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: st-max, environment: production, version: 1 }
+      capabilities:
+        - id: pii
+          type: capability.storage.object
+      constraints:
+        hard:
+          - id: c-max
+            subject: pii
+            path: retention.maximum
+            op: lte
+            value: 365d
+            verify: { method: static }
+          - id: c-min
+            subject: pii
+            path: retention.minimum
+            op: gte
+            value: 30d
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: st-max
+      capabilities:
+        pii:
+          attributes:
+            retention.maximum: 90d
+            retention.minimum: 30d
+    expect:
+      executable: true
+      verdicts:
+        c-max: satisfied
+        c-min: satisfied
+
+  - name: customer-managed-keys-across-db-and-storage
+    description: >
+      encryption.customerManagedKeys (CMEK) is a bool that spans two
+      vocabularies — the SAME attribute in capability.database.relational and
+      capability.storage.object. equals-true satisfies when a candidate
+      declares a customer key; the provider default (false) violates. One
+      engine, no coercion, two type systems.
+    vocab:
+      - capability: capability.database.relational
+        version: 0.1
+        stateful: true
+        attributes:
+          encryption.customerManagedKeys: { kind: bool }
+      - capability: capability.storage.object
+        version: 0.1
+        stateful: true
+        attributes:
+          encryption.customerManagedKeys: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: cmek-1, environment: production, version: 1 }
+      capabilities:
+        - id: ledger-db
+          type: capability.database.relational
+        - id: pii-store
+          type: capability.storage.object
+      constraints:
+        hard:
+          - id: c-db-cmek
+            subject: ledger-db
+            path: encryption.customerManagedKeys
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-store-cmek
+            subject: pii-store
+            path: encryption.customerManagedKeys
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: cmek-1
+      capabilities:
+        ledger-db:
+          attributes:
+            encryption.customerManagedKeys: true
+        pii-store:
+          attributes:
+            encryption.customerManagedKeys: true
+    expect:
+      executable: true
+      verdicts:
+        c-db-cmek: satisfied
+        c-store-cmek: satisfied
+
+  - name: database-encryption-in-transit-is-a-bool
+    description: >
+      encryption.inTransit (TLS enforced) is a bool in
+      capability.database.relational: equals-true satisfies when a candidate
+      enforces TLS. Provider-default "allow both" (false) violates. The verifier
+      is provider-agnostic — one cloud honors it, another refuses at compile.
+    vocab:
+      - capability: capability.database.relational
+        version: 0.1
+        stateful: true
+        attributes:
+          encryption.inTransit: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: tls-1, environment: production, version: 1 }
+      capabilities:
+        - id: orders
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-tls
+            subject: orders
+            path: encryption.inTransit
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: tls-1
+      capabilities:
+        orders:
+          attributes:
+            encryption.inTransit: true
+    expect:
+      executable: true
+      verdicts:
+        c-tls: satisfied
+
+  - name: object-storage-retention-locked-is-worm
+    description: >
+      retention.locked (WORM) is a bool: equals-true satisfies when the
+      candidate declares an immutable retention lock. It presupposes
+      retention.minimum (the floor being locked), so both ride together — the
+      lock without a floor is meaningless. Same engine, no coercion.
+    vocab:
+      - capability: capability.storage.object
+        version: 0.1
+        stateful: true
+        attributes:
+          retention.minimum: { kind: duration }
+          retention.locked: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: worm-1, environment: production, version: 1 }
+      capabilities:
+        - id: vault
+          type: capability.storage.object
+      constraints:
+        hard:
+          - id: c-locked
+            subject: vault
+            path: retention.locked
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-min
+            subject: vault
+            path: retention.minimum
+            op: gte
+            value: 3650d
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: worm-1
+      capabilities:
+        vault:
+          attributes:
+            retention.locked: true
+            retention.minimum: 3650d
+    expect:
+      executable: true
+      verdicts:
+        c-locked: satisfied
+        c-min: satisfied
+
+  - name: private-network-short-retention-violates
+    description: >
+      D60: a network that admits public ingress violates; egress left
+      undeclared is unknown and BLOCKS — network contracts fail closed
+      like everything else.
+    vocab:
+      - capability: capability.network.private
+        version: 0.1
+        stateful: true
+        attributes:
+          ingress.public: { kind: bool }
+          egress.restricted: { kind: bool }
+          flowLogs.enabled: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: net-1, environment: production, version: 1 }
+      capabilities:
+        - id: backbone
+          type: capability.network.private
+      constraints:
+        hard:
+          - id: c-no-ingress
+            subject: backbone
+            path: ingress.public
+            op: equals
+            value: false
+            verify: { method: static }
+          - id: c-egress
+            subject: backbone
+            path: egress.restricted
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-flowlogs
+            subject: backbone
+            path: flowLogs.enabled
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: net-1
+      capabilities:
+        backbone:
+          attributes:
+            ingress.public: true
+            flowLogs.enabled: true
+    expect:
+      executable: false
+      verdicts:
+        c-no-ingress: violated
+        c-egress: unknown
+        c-flowlogs: satisfied
+
+  - name: container-workload-capacity-floor
+    description: >
+      D60: replicas.minimum as a number under gte — a capacity floor is
+      capability semantics (availability), while cpu/memory tuning is
+      implementation noise and stays out of the vocabulary.
+    vocab: &workload-vocab
+      - capability: capability.workload.container
+        version: 0.1
+        stateful: false
+        attributes:
+          replicas.minimum: { kind: number }
+          network.publicExposure: { kind: bool }
+          tls.enforced: { kind: bool }
+          image.signedProvenance: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: wl-1, environment: production, version: 1 }
+      capabilities:
+        - id: api
+          type: capability.workload.container
+      constraints:
+        hard:
+          - id: c-floor
+            subject: api
+            path: replicas.minimum
+            op: gte
+            value: 2
+            verify: { method: static }
+          - id: c-signed
+            subject: api
+            path: image.signedProvenance
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: wl-1
+      capabilities:
+        api:
+          attributes:
+            replicas.minimum: 1
+            image.signedProvenance: true
+    expect:
+      executable: false
+      verdicts:
+        c-floor: violated
+        c-signed: satisfied
+
+  - name: stateless-workload-retires-despite-delete-stateful-ban
+    impl: go
+    description: >
+      D60: the first stateless vocabulary bites — autonomy.forbidden
+      delete_stateful gates STATEFUL capabilities only. A container
+      workload proves statelessness through its vocabulary, so its
+      retirement compiles a delete with no consent needed (contrast
+      D47: without a vocabulary the same plan refuses fail-closed).
+    plan:
+      at: "2026-07-12T17:00:00Z"
+      bindings: { api: "fake:api-1" }
+      vocab: *workload-vocab
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: wl-2, environment: test, version: 2 }
+        capabilities:
+          - id: api
+            type: capability.workload.container
+            state: retired
+        autonomy:
+          forbidden:
+            - delete_stateful: true
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: wl-2
+        capabilities: {}
+    expect:
+      actions:
+        a-delete-api: delete
+
+  - name: messaging-queue-broker-guarantees-verify
+    description: >
+      D94: a queue contract constrains the BROKER guarantees — exactly-once
+      (string enum, no coercion), ordering (bool), retention floor (duration).
+      Same engine; the exactly-once honesty caveat lives in the vocab description,
+      not the verifier.
+    vocab:
+      - capability: capability.messaging.queue
+        version: 0.1
+        stateful: true
+        attributes:
+          delivery.guarantee: { kind: string, enum: [at-least-once, exactly-once] }
+          ordering.enabled: { kind: bool }
+          retention.minimum: { kind: duration }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: mq-1, environment: production, version: 1 }
+      capabilities:
+        - id: orders
+          type: capability.messaging.queue
+      constraints:
+        hard:
+          - id: c-exactly-once
+            subject: orders
+            path: delivery.guarantee
+            op: in
+            value: [exactly-once]
+            verify: { method: static }
+          - id: c-ordered
+            subject: orders
+            path: ordering.enabled
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-retain
+            subject: orders
+            path: retention.minimum
+            op: gte
+            value: 7d
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: mq-1
+      capabilities:
+        orders:
+          attributes:
+            delivery.guarantee: exactly-once
+            ordering.enabled: true
+            retention.minimum: 14d
+    expect:
+      executable: true
+      verdicts:
+        c-exactly-once: satisfied
+        c-ordered: satisfied
+        c-retain: satisfied
+
+  - name: queue-deadletter-reliability-verify
+    description: >
+      reliability.deadLetter is a posture bool: unprocessed messages are captured
+      to a DLQ rather than lost. A "deadLetter equals true" hard constraint is
+      satisfied by a candidate that asserts it (the DLQ target + retry threshold
+      are implementation operands, never capability paths).
+    vocab:
+      - capability: capability.messaging.queue
+        version: 0.1
+        stateful: true
+        attributes:
+          reliability.deadLetter: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: mq-dlq, environment: production, version: 1 }
+      capabilities:
+        - id: tasks
+          type: capability.messaging.queue
+      constraints:
+        hard:
+          - id: c-deadletter
+            subject: tasks
+            path: reliability.deadLetter
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: mq-dlq
+      capabilities:
+        tasks:
+          attributes:
+            reliability.deadLetter: true
+    expect:
+      executable: true
+      verdicts:
+        c-deadletter: satisfied
+
+  - name: messaging-topic-residency-and-cmek-verify
+    description: >
+      D94: a topic contract constrains residency + CMEK + exposure. A topic's
+      vocabulary is thin (fan-out address holds nothing the author owns) — but
+      residency (Pub/Sub is global by default) and customer-managed keys are real
+      compliance truths.
+    vocab:
+      - capability: capability.messaging.topic
+        version: 0.1
+        stateful: true
+        attributes:
+          encryption.customerManagedKeys: { kind: bool }
+          network.publicExposure: { kind: bool }
+          location.region: { kind: string }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: mt-1, environment: production, version: 1 }
+      capabilities:
+        - id: events
+          type: capability.messaging.topic
+      constraints:
+        hard:
+          - id: c-cmek
+            subject: events
+            path: encryption.customerManagedKeys
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-private
+            subject: events
+            path: network.publicExposure
+            op: equals
+            value: false
+            verify: { method: static }
+          - id: c-residency
+            subject: events
+            path: location.region
+            op: equals
+            value: europe-west1
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: mt-1
+      capabilities:
+        events:
+          attributes:
+            encryption.customerManagedKeys: true
+            network.publicExposure: false
+            location.region: europe-west1
+    expect:
+      executable: true
+      verdicts:
+        c-cmek: satisfied
+        c-private: satisfied
+        c-residency: satisfied
+
+  - name: secret-handle-residency-and-cmek-verify
+    description: >
+      D97: capability.secret is a thin managed-secret handle — residency (region),
+      exposure (bool), CMK (bool). The value is DATA, never declared. Same engine.
+    vocab:
+      - capability: capability.secret
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          network.publicExposure: { kind: bool }
+          encryption.customerManagedKeys: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: sec-1, environment: production, version: 1 }
+      capabilities:
+        - id: dbcreds
+          type: capability.secret
+      constraints:
+        hard:
+          - id: c-region
+            subject: dbcreds
+            path: location.region
+            op: equals
+            value: europe-west1
+            verify: { method: static }
+          - id: c-private
+            subject: dbcreds
+            path: network.publicExposure
+            op: equals
+            value: false
+            verify: { method: static }
+          - id: c-cmek
+            subject: dbcreds
+            path: encryption.customerManagedKeys
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: sec-1
+      capabilities:
+        dbcreds:
+          attributes:
+            location.region: europe-west1
+            network.publicExposure: false
+            encryption.customerManagedKeys: true
+    expect:
+      executable: true
+      verdicts:
+        c-region: satisfied
+        c-private: satisfied
+        c-cmek: satisfied
+
+  - name: cache-keyvalue-residency-encryption-availability-verify
+    description: >
+      capability.cache.keyvalue is a managed in-memory cache (Redis, 3-cloud) —
+      the sibling of database.relational. Residency (region), protocol, exposure
+      (bool), encryption at-rest/in-transit/CMK, and availability.class are all
+      capability semantics; node/memory/eviction sizing is implementation noise.
+    vocab:
+      - capability: capability.cache.keyvalue
+        version: 0.1
+        stateful: true
+        attributes:
+          engine.protocol: { kind: protocol }
+          location.region: { kind: string }
+          network.publicExposure: { kind: bool }
+          encryption.atRest: { kind: bool }
+          encryption.inTransit: { kind: bool }
+          encryption.customerManagedKeys: { kind: bool }
+          availability.class: { kind: string, enum: [zonal, regional, multi-regional] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: cache-1, environment: production, version: 1 }
+      capabilities:
+        - id: sessions
+          type: capability.cache.keyvalue
+      constraints:
+        hard:
+          - id: c-engine
+            subject: sessions
+            path: engine.protocol
+            op: equals
+            value: redis/7
+            verify: { method: static }
+          - id: c-region
+            subject: sessions
+            path: location.region
+            op: equals
+            value: europe-west1
+            verify: { method: static }
+          - id: c-tls
+            subject: sessions
+            path: encryption.inTransit
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-ha
+            subject: sessions
+            path: availability.class
+            op: equals
+            value: regional
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: cache-1
+      capabilities:
+        sessions:
+          attributes:
+            engine.protocol: redis/7
+            location.region: europe-west1
+            network.publicExposure: false
+            encryption.atRest: true
+            encryption.inTransit: true
+            encryption.customerManagedKeys: true
+            availability.class: regional
+    expect:
+      executable: true
+      verdicts:
+        c-engine: satisfied
+        c-region: satisfied
+        c-tls: satisfied
+        c-ha: satisfied
+
+  - name: cache-availability-class-enum-is-enforced
+    description: >
+      availability.class is a closed enum; multi-regional has no single managed
+      Redis primitive and a bogus value must be a load error, not a silent pass.
+    vocab:
+      - capability: capability.cache.keyvalue
+        version: 0.1
+        stateful: true
+        attributes:
+          availability.class: { kind: string, enum: [zonal, regional, multi-regional] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: cache-enum, environment: test, version: 1 }
+      capabilities:
+        - id: c
+          type: capability.cache.keyvalue
+      constraints:
+        hard:
+          - id: c-ha
+            subject: c
+            path: availability.class
+            op: equals
+            value: regional
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: cache-enum
+      capabilities:
+        c:
+          attributes:
+            availability.class: galactic
+    expect:
+      error: candidate
+
+  - name: dns-zone-domain-exposure-dnssec-verify
+    description: >
+      capability.dns.zone is a managed authoritative DNS zone (3-cloud: Cloud DNS,
+      Route 53, Azure DNS). The zone's domain, public/private reach, and DNSSEC
+      state are capability semantics; the RECORDS are data, out of band. Same
+      thin-envelope stance as capability.secret.
+    vocab:
+      - capability: capability.dns.zone
+        version: 0.1
+        stateful: true
+        attributes:
+          zone.domain: { kind: string }
+          network.publicExposure: { kind: bool }
+          dnssec.enabled: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: dns-1, environment: production, version: 1 }
+      capabilities:
+        - id: apex
+          type: capability.dns.zone
+      constraints:
+        hard:
+          - id: c-domain
+            subject: apex
+            path: zone.domain
+            op: equals
+            value: example.com
+            verify: { method: static }
+          - id: c-public
+            subject: apex
+            path: network.publicExposure
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-dnssec
+            subject: apex
+            path: dnssec.enabled
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: dns-1
+      capabilities:
+        apex:
+          attributes:
+            zone.domain: example.com
+            network.publicExposure: true
+            dnssec.enabled: true
+    expect:
+      executable: true
+      verdicts:
+        c-domain: satisfied
+        c-public: satisfied
+        c-dnssec: satisfied
+
+  - name: authorization-grant-role-scope-privilege-verify
+    description: >
+      capability.authorization.grant is a named-role grant (3-cloud: GCP IAM binding,
+      AWS role-policy attachment, Azure RBAC role assignment) — the FIRST relational
+      capability, composing a principal + a scope. access.scope is a closed enum
+      (breadth); access.privileged is the least-privilege safety semantic. A grant
+      references a NAMED role, never an inline policy (invariant #4).
+    vocab:
+      - capability: capability.authorization.grant
+        version: 0.1
+        stateful: false
+        attributes:
+          grant.role: { kind: string }
+          grant.principal: { kind: string }
+          access.scope: { kind: string, enum: [resource, account] }
+          access.privileged: { kind: bool }
+          service.managed: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: authz-1, environment: production, version: 1 }
+      capabilities:
+        - id: reader
+          type: capability.authorization.grant
+      constraints:
+        hard:
+          - id: c-role
+            subject: reader
+            path: grant.role
+            op: equals
+            value: roles/storage.objectViewer
+            verify: { method: static }
+          - id: c-scope
+            subject: reader
+            path: access.scope
+            op: equals
+            value: account
+            verify: { method: static }
+          - id: c-leastpriv
+            subject: reader
+            path: access.privileged
+            op: equals
+            value: false
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: authz-1
+      capabilities:
+        reader:
+          attributes:
+            grant.role: roles/storage.objectViewer
+            grant.principal: serviceAccount:runner@acme-prod.iam.gserviceaccount.com
+            access.scope: account
+            access.privileged: false
+            service.managed: true
+    expect:
+      executable: true
+      verdicts:
+        c-role: satisfied
+        c-scope: satisfied
+        c-leastpriv: satisfied
+
+  - name: authorization-scope-enum-is-enforced
+    description: >
+      access.scope is a closed enum; a bogus breadth is a load error, not a silent
+      pass.
+    vocab:
+      - capability: capability.authorization.grant
+        version: 0.1
+        stateful: false
+        attributes:
+          access.scope: { kind: string, enum: [resource, account] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: authz-enum, environment: test, version: 1 }
+      capabilities:
+        - id: g
+          type: capability.authorization.grant
+      constraints:
+        hard:
+          - id: c-s
+            subject: g
+            path: access.scope
+            op: equals
+            value: resource
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: authz-enum
+      capabilities:
+        g:
+          attributes:
+            access.scope: galaxywide
+    expect:
+      error: candidate
+
+  - name: authorization-role-least-privilege-verify
+    description: >
+      capability.authorization.role is a custom role — a flat, verifiable SET of
+      named permissions (3-cloud: GCP custom role, AWS customer policy, Azure custom
+      roleDefinition). The showcase: role.permissions subset-of an allowlist is a
+      REAL least-privilege guarantee, and access.mutating/access.privileged are
+      derived safety semantics. A read-only, unprivileged role verifies clean.
+    vocab:
+      - capability: capability.authorization.role
+        version: 0.1
+        stateful: false
+        attributes:
+          role.permissions: { kind: list }
+          access.mutating: { kind: bool }
+          access.privileged: { kind: bool }
+          service.managed: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: role-1, environment: production, version: 1 }
+      capabilities:
+        - id: viewer
+          type: capability.authorization.role
+      constraints:
+        hard:
+          - id: c-allowlist
+            subject: viewer
+            path: role.permissions
+            op: subset-of
+            value: [storage.objects.get, storage.objects.list, storage.buckets.get]
+            verify: { method: static }
+          - id: c-readonly
+            subject: viewer
+            path: access.mutating
+            op: equals
+            value: false
+            verify: { method: static }
+          - id: c-unprivileged
+            subject: viewer
+            path: access.privileged
+            op: equals
+            value: false
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: role-1
+      capabilities:
+        viewer:
+          attributes:
+            role.permissions: [storage.objects.get, storage.objects.list]
+            access.mutating: false
+            access.privileged: false
+            service.managed: true
+    expect:
+      executable: true
+      verdicts:
+        c-allowlist: satisfied
+        c-readonly: satisfied
+        c-unprivileged: satisfied
+
+  - name: authorization-role-overpermissioned-violates
+    description: >
+      The least-privilege guarantee has TEETH: a role whose permission set reaches
+      beyond the allowlist violates subset-of, and a mutating action makes the
+      derived access.mutating true — a read-only claim would then be a violation.
+    vocab:
+      - capability: capability.authorization.role
+        version: 0.1
+        stateful: false
+        attributes:
+          role.permissions: { kind: list }
+          access.mutating: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: role-2, environment: production, version: 1 }
+      capabilities:
+        - id: overbroad
+          type: capability.authorization.role
+      constraints:
+        hard:
+          - id: c-allowlist
+            subject: overbroad
+            path: role.permissions
+            op: subset-of
+            value: [storage.objects.get, storage.objects.list]
+            verify: { method: static }
+          - id: c-readonly
+            subject: overbroad
+            path: access.mutating
+            op: equals
+            value: false
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: role-2
+      capabilities:
+        overbroad:
+          attributes:
+            role.permissions: [storage.objects.get, storage.objects.delete]
+            access.mutating: true
+    expect:
+      executable: false
+      verdicts:
+        c-allowlist: violated
+        c-readonly: violated
+
+  - name: monitoring-alert-threshold-notify-verify
+    description: >
+      capability.monitoring.alert is a metric alert (3-cloud: GCP alerting policy,
+      AWS CloudWatch alarm, Azure metric alert) — the first observability domain. The
+      verifiable core: which metric, which threshold, which direction, and the safety
+      property that it actually NOTIFIES (a silent alert is the common misconfig).
+    vocab:
+      - capability: capability.monitoring.alert
+        version: 0.1
+        stateful: false
+        attributes:
+          alert.metric: { kind: string }
+          alert.threshold: { kind: number }
+          alert.comparison: { kind: string, enum: [greater-than, less-than] }
+          alert.notify: { kind: bool }
+          service.managed: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: alert-1, environment: production, version: 1 }
+      capabilities:
+        - id: cpu
+          type: capability.monitoring.alert
+      constraints:
+        hard:
+          - id: c-metric
+            subject: cpu
+            path: alert.metric
+            op: equals
+            value: compute.googleapis.com/instance/cpu/utilization
+            verify: { method: static }
+          - id: c-threshold
+            subject: cpu
+            path: alert.threshold
+            op: lte
+            value: 90
+            verify: { method: static }
+          - id: c-direction
+            subject: cpu
+            path: alert.comparison
+            op: equals
+            value: greater-than
+            verify: { method: static }
+          - id: c-notify
+            subject: cpu
+            path: alert.notify
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: alert-1
+      capabilities:
+        cpu:
+          attributes:
+            alert.metric: compute.googleapis.com/instance/cpu/utilization
+            alert.threshold: 80
+            alert.comparison: greater-than
+            alert.notify: true
+            service.managed: true
+    expect:
+      executable: true
+      verdicts:
+        c-metric: satisfied
+        c-threshold: satisfied
+        c-direction: satisfied
+        c-notify: satisfied
+
+  - name: monitoring-alert-comparison-enum-is-enforced
+    description: >
+      alert.comparison is a closed enum; a bogus direction is a load error, not a
+      silent pass.
+    vocab:
+      - capability: capability.monitoring.alert
+        version: 0.1
+        stateful: false
+        attributes:
+          alert.comparison: { kind: string, enum: [greater-than, less-than] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: alert-enum, environment: test, version: 1 }
+      capabilities:
+        - id: a
+          type: capability.monitoring.alert
+      constraints:
+        hard:
+          - id: c-c
+            subject: a
+            path: alert.comparison
+            op: equals
+            value: greater-than
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: alert-enum
+      capabilities:
+        a:
+          attributes:
+            alert.comparison: sideways
+    expect:
+      error: candidate
+  - name: monitoring-dashboard-metrics-nonempty-verify
+    description: >
+      capability.monitoring.dashboard is a metric dashboard (3-cloud: GCP/AWS/Azure) —
+      the observability sibling of the alert. dashboard.metrics is a verifiable set
+      (subset-of an approved list); dashboard.widgetCount is the non-emptiness safety
+      property (an empty dashboard is a common mistake).
+    vocab:
+      - capability: capability.monitoring.dashboard
+        version: 0.1
+        stateful: false
+        attributes:
+          dashboard.metrics: { kind: list }
+          dashboard.widgetCount: { kind: number }
+          service.managed: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: dash-1, environment: production, version: 1 }
+      capabilities:
+        - id: golden
+          type: capability.monitoring.dashboard
+      constraints:
+        hard:
+          - id: c-scope
+            subject: golden
+            path: dashboard.metrics
+            op: subset-of
+            value:
+              - compute.googleapis.com/instance/cpu/utilization
+              - compute.googleapis.com/instance/network/received_bytes_count
+              - loadbalancing.googleapis.com/https/request_count
+          - id: c-nonempty
+            subject: golden
+            path: dashboard.widgetCount
+            op: gte
+            value: 1
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: dash-1
+      capabilities:
+        golden:
+          attributes:
+            dashboard.metrics:
+              - compute.googleapis.com/instance/cpu/utilization
+              - loadbalancing.googleapis.com/https/request_count
+            dashboard.widgetCount: 2
+            service.managed: true
+    expect:
+      executable: true
+      verdicts:
+        c-scope: satisfied
+        c-nonempty: satisfied
+
+  - name: monitoring-dashboard-empty-violates
+    description: >
+      The non-emptiness guarantee has teeth: a dashboard with widgetCount 0 (created
+      but never populated) violates widgetCount gte 1.
+    vocab:
+      - capability: capability.monitoring.dashboard
+        version: 0.1
+        stateful: false
+        attributes:
+          dashboard.widgetCount: { kind: number }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: dash-empty, environment: test, version: 1 }
+      capabilities:
+        - id: blank
+          type: capability.monitoring.dashboard
+      constraints:
+        hard:
+          - id: c-nonempty
+            subject: blank
+            path: dashboard.widgetCount
+            op: gte
+            value: 1
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: dash-empty
+      capabilities:
+        blank:
+          attributes:
+            dashboard.widgetCount: 0
+    expect:
+      executable: false
+      verdicts:
+        c-nonempty: violated
+  - name: uptime-check-target-protocol-period-verify
+    description: >
+      capability.monitoring.uptime is a synthetic probe (3-cloud: GCP uptime check, AWS
+      Route 53 health check, Azure availability test) — the third observability domain.
+      The verifiable core: what is probed, how, how often. check.protocol is a closed
+      enum; check.period is a duration a contract can bound (frequent enough).
+    vocab:
+      - capability: capability.monitoring.uptime
+        version: 0.1
+        stateful: false
+        attributes:
+          check.target: { kind: string }
+          check.protocol: { kind: string, enum: [http, https, tcp] }
+          check.path: { kind: string }
+          check.period: { kind: duration }
+          service.managed: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: up-1, environment: production, version: 1 }
+      capabilities:
+        - id: api
+          type: capability.monitoring.uptime
+      constraints:
+        hard:
+          - id: c-target
+            subject: api
+            path: check.target
+            op: equals
+            value: api.example.com
+            verify: { method: static }
+          - id: c-tls
+            subject: api
+            path: check.protocol
+            op: equals
+            value: https
+            verify: { method: static }
+          - id: c-frequent
+            subject: api
+            path: check.period
+            op: lte
+            value: 60s
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: up-1
+      capabilities:
+        api:
+          attributes:
+            check.target: api.example.com
+            check.protocol: https
+            check.path: /healthz
+            check.period: 30s
+            service.managed: true
+    expect:
+      executable: true
+      verdicts:
+        c-target: satisfied
+        c-tls: satisfied
+        c-frequent: satisfied
+  - name: uptime-check-protocol-enum-is-enforced
+    description: >
+      check.protocol is a closed enum; a bogus probe protocol is a load error, not a
+      silent pass.
+    vocab:
+      - capability: capability.monitoring.uptime
+        version: 0.1
+        stateful: false
+        attributes:
+          check.protocol: { kind: string, enum: [http, https, tcp] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: up-enum, environment: test, version: 1 }
+      capabilities:
+        - id: c
+          type: capability.monitoring.uptime
+      constraints:
+        hard:
+          - id: c-p
+            subject: c
+            path: check.protocol
+            op: equals
+            value: https
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: up-enum
+      capabilities:
+        c:
+          attributes:
+            check.protocol: carrier-pigeon
+    expect:
+      error: candidate
+  - name: logmetric-name-filter-kind-verify
+    description: >
+      capability.monitoring.logmetric manufactures a metric from logs (3-cloud: GCP log
+      metric, AWS metric filter, Azure scheduled query rule). groundhold verifies the
+      metric's identity (name) and kind (counter/gauge); the filter is opaque data a
+      contract can pin with equals.
+    vocab:
+      - capability: capability.monitoring.logmetric
+        version: 0.1
+        stateful: false
+        attributes:
+          metric.name: { kind: string }
+          metric.filter: { kind: string }
+          metric.kind: { kind: string, enum: [counter, gauge] }
+          service.managed: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: lm-1, environment: production, version: 1 }
+      capabilities:
+        - id: errors
+          type: capability.monitoring.logmetric
+      constraints:
+        hard:
+          - id: c-name
+            subject: errors
+            path: metric.name
+            op: equals
+            value: app_error_count
+            verify: { method: static }
+          - id: c-filter
+            subject: errors
+            path: metric.filter
+            op: equals
+            value: severity>=ERROR
+            verify: { method: static }
+          - id: c-kind
+            subject: errors
+            path: metric.kind
+            op: equals
+            value: counter
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: lm-1
+      capabilities:
+        errors:
+          attributes:
+            metric.name: app_error_count
+            metric.filter: severity>=ERROR
+            metric.kind: counter
+            service.managed: true
+    expect:
+      executable: true
+      verdicts:
+        c-name: satisfied
+        c-filter: satisfied
+        c-kind: satisfied
+  - name: logmetric-kind-enum-is-enforced
+    description: >
+      metric.kind is a closed enum; a bogus kind is a load error, not a silent pass.
+    vocab:
+      - capability: capability.monitoring.logmetric
+        version: 0.1
+        stateful: false
+        attributes:
+          metric.kind: { kind: string, enum: [counter, gauge] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: lm-enum, environment: test, version: 1 }
+      capabilities:
+        - id: m
+          type: capability.monitoring.logmetric
+      constraints:
+        hard:
+          - id: c-k
+            subject: m
+            path: metric.kind
+            op: equals
+            value: counter
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: lm-enum
+      capabilities:
+        m:
+          attributes:
+            metric.kind: histogram
+    expect:
+      error: candidate
+  - name: registry-image-residency-immutability-verify
+    description: >
+      capability.registry.image is a managed container image registry (3-cloud: GCP
+      Artifact Registry, AWS ECR, Azure ACR). Reuses the storage-family residency /
+      exposure / CMEK attributes and adds immutable.tags — the supply-chain guarantee
+      that a pushed tag never repoints at different bytes.
+    vocab:
+      - capability: capability.registry.image
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          network.publicExposure: { kind: bool }
+          encryption.customerManagedKeys: { kind: bool }
+          immutable.tags: { kind: bool }
+          service.managed: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: reg-1, environment: production, version: 1 }
+      capabilities:
+        - id: images
+          type: capability.registry.image
+      constraints:
+        hard:
+          - id: c-region
+            subject: images
+            path: location.region
+            op: equals
+            value: europe-west1
+            verify: { method: static }
+          - id: c-private
+            subject: images
+            path: network.publicExposure
+            op: equals
+            value: false
+            verify: { method: static }
+          - id: c-immutable
+            subject: images
+            path: immutable.tags
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: reg-1
+      capabilities:
+        images:
+          attributes:
+            location.region: europe-west1
+            network.publicExposure: false
+            encryption.customerManagedKeys: true
+            immutable.tags: true
+            service.managed: true
+    expect:
+      executable: true
+      verdicts:
+        c-region: satisfied
+        c-private: satisfied
+        c-immutable: satisfied
+  - name: registry-image-mutable-tags-violates
+    description: >
+      The supply-chain guarantee has teeth: a registry that permits mutable tags
+      violates immutable.tags equals true.
+    vocab:
+      - capability: capability.registry.image
+        version: 0.1
+        stateful: true
+        attributes:
+          immutable.tags: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: reg-mut, environment: test, version: 1 }
+      capabilities:
+        - id: r
+          type: capability.registry.image
+      constraints:
+        hard:
+          - id: c-immutable
+            subject: r
+            path: immutable.tags
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: reg-mut
+      capabilities:
+        r:
+          attributes:
+            immutable.tags: false
+    expect:
+      executable: false
+      verdicts:
+        c-immutable: violated
+  - name: ecr-scan-on-push-verify
+    description: >
+      security.scanOnPush is a supply-chain posture: every pushed image is scanned
+      for vulnerabilities at push time. A "scanOnPush equals true" hard constraint
+      is satisfied by a candidate asserting it (an ECR registry/repository flag).
+    vocab:
+      - capability: capability.registry.image
+        version: 0.1
+        stateful: true
+        attributes:
+          security.scanOnPush: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: reg-scan, environment: production, version: 1 }
+      capabilities:
+        - id: images
+          type: capability.registry.image
+      constraints:
+        hard:
+          - id: c-scan
+            subject: images
+            path: security.scanOnPush
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: reg-scan
+      capabilities:
+        images:
+          attributes:
+            security.scanOnPush: true
+    expect:
+      executable: true
+      verdicts:
+        c-scan: satisfied
+
+  - name: filesystem-residency-protocol-availability-cmek-verify
+    description: >
+      capability.storage.filesystem is a managed regional network file share
+      (Filestore / EFS / Azure Files). Residency (region), wire protocol,
+      availability.class, at-rest and customer-managed encryption are capability
+      semantics; capacity GiB, throughput mode and tier are implementation noise.
+    vocab:
+      - capability: capability.storage.filesystem
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          protocol: { kind: protocol }
+          availability.class: { kind: string, enum: [zonal, regional] }
+          encryption.atRest: { kind: bool }
+          encryption.customerManagedKeys: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: fs-1, environment: production, version: 1 }
+      capabilities:
+        - id: shared
+          type: capability.storage.filesystem
+      constraints:
+        hard:
+          - id: c-region
+            subject: shared
+            path: location.region
+            op: equals
+            value: europe-west1
+            verify: { method: static }
+          - id: c-proto
+            subject: shared
+            path: protocol
+            op: equals
+            value: nfs/4.1
+            verify: { method: static }
+          - id: c-ha
+            subject: shared
+            path: availability.class
+            op: equals
+            value: regional
+            verify: { method: static }
+          - id: c-cmek
+            subject: shared
+            path: encryption.customerManagedKeys
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: fs-1
+      capabilities:
+        shared:
+          attributes:
+            location.region: europe-west1
+            protocol: nfs/4.1
+            availability.class: regional
+            encryption.atRest: true
+            encryption.customerManagedKeys: true
+    expect:
+      executable: true
+      verdicts:
+        c-region: satisfied
+        c-proto: satisfied
+        c-ha: satisfied
+        c-cmek: satisfied
+  - name: filesystem-availability-class-enum-is-enforced
+    description: >
+      availability.class is a closed enum for a filesystem; a value outside
+      [zonal, regional] must be a load error (D19), never a silent pass.
+    vocab:
+      - capability: capability.storage.filesystem
+        version: 0.1
+        stateful: true
+        attributes:
+          availability.class: { kind: string, enum: [zonal, regional] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: fs-enum, environment: test, version: 1 }
+      capabilities:
+        - id: c
+          type: capability.storage.filesystem
+      constraints:
+        hard:
+          - id: c-ha
+            subject: c
+            path: availability.class
+            op: equals
+            value: regional
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: fs-enum
+      capabilities:
+        c:
+          attributes:
+            availability.class: continental
+    expect:
+      error: candidate
+  - name: nosql-residency-encryption-pitr-deletion-protection-verify
+    description: >
+      capability.database.nosql is a managed NoSQL document/key-value database
+      (DynamoDB / Cosmos DB / Firestore). Residency (region), availability.class,
+      customer-managed encryption, point-in-time recovery and deletion protection
+      are capability semantics; partition-key schema, indexes and throughput are
+      implementation noise.
+    vocab:
+      - capability: capability.database.nosql
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          availability.class: { kind: string, enum: [regional, multi-regional] }
+          encryption.customerManagedKeys: { kind: bool }
+          backup.pointInTimeRecovery: { kind: bool }
+          deletion.protection: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: nosql-1, environment: production, version: 1 }
+      capabilities:
+        - id: sessions
+          type: capability.database.nosql
+      constraints:
+        hard:
+          - id: c-region
+            subject: sessions
+            path: location.region
+            op: equals
+            value: europe-west1
+            verify: { method: static }
+          - id: c-ha
+            subject: sessions
+            path: availability.class
+            op: equals
+            value: regional
+            verify: { method: static }
+          - id: c-cmek
+            subject: sessions
+            path: encryption.customerManagedKeys
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-pitr
+            subject: sessions
+            path: backup.pointInTimeRecovery
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-delprot
+            subject: sessions
+            path: deletion.protection
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: nosql-1
+      capabilities:
+        sessions:
+          attributes:
+            location.region: europe-west1
+            availability.class: regional
+            encryption.customerManagedKeys: true
+            backup.pointInTimeRecovery: true
+            deletion.protection: true
+    expect:
+      executable: true
+      verdicts:
+        c-region: satisfied
+        c-ha: satisfied
+        c-cmek: satisfied
+        c-pitr: satisfied
+        c-delprot: satisfied
+  - name: nosql-availability-class-enum-is-enforced
+    description: >
+      availability.class is a closed enum for a NoSQL database; a value outside
+      [regional, multi-regional] must be a load error (D19), never a silent pass.
+    vocab:
+      - capability: capability.database.nosql
+        version: 0.1
+        stateful: true
+        attributes:
+          availability.class: { kind: string, enum: [regional, multi-regional] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: nosql-enum, environment: test, version: 1 }
+      capabilities:
+        - id: c
+          type: capability.database.nosql
+      constraints:
+        hard:
+          - id: c-ha
+            subject: c
+            path: availability.class
+            op: equals
+            value: regional
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: nosql-enum
+      capabilities:
+        c:
+          attributes:
+            availability.class: planetary
+    expect:
+      error: candidate
+  - name: search-residency-exposure-encryption-availability-verify
+    description: >
+      capability.search.index is a managed full-text search service (OpenSearch /
+      Azure AI Search — an honest two-cloud twin, no GCP). Residency (region),
+      availability.class, public exposure, at-rest/in-transit/CMK encryption are
+      capability semantics; node type, shard/replica counts and index schema are
+      implementation noise.
+    vocab:
+      - capability: capability.search.index
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          availability.class: { kind: string, enum: [zonal, regional] }
+          network.publicExposure: { kind: bool }
+          encryption.atRest: { kind: bool }
+          encryption.inTransit: { kind: bool }
+          encryption.customerManagedKeys: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: search-1, environment: production, version: 1 }
+      capabilities:
+        - id: catalog
+          type: capability.search.index
+      constraints:
+        hard:
+          - id: c-region
+            subject: catalog
+            path: location.region
+            op: equals
+            value: eu-central-1
+            verify: { method: static }
+          - id: c-ha
+            subject: catalog
+            path: availability.class
+            op: equals
+            value: regional
+            verify: { method: static }
+          - id: c-private
+            subject: catalog
+            path: network.publicExposure
+            op: equals
+            value: false
+            verify: { method: static }
+          - id: c-tls
+            subject: catalog
+            path: encryption.inTransit
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-cmek
+            subject: catalog
+            path: encryption.customerManagedKeys
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: search-1
+      capabilities:
+        catalog:
+          attributes:
+            location.region: eu-central-1
+            availability.class: regional
+            network.publicExposure: false
+            encryption.atRest: true
+            encryption.inTransit: true
+            encryption.customerManagedKeys: true
+    expect:
+      executable: true
+      verdicts:
+        c-region: satisfied
+        c-ha: satisfied
+        c-private: satisfied
+        c-tls: satisfied
+        c-cmek: satisfied
+  - name: search-availability-class-enum-is-enforced
+    description: >
+      availability.class is a closed enum for a search service; a value outside
+      [zonal, regional] must be a load error (D19), never a silent pass.
+    vocab:
+      - capability: capability.search.index
+        version: 0.1
+        stateful: true
+        attributes:
+          availability.class: { kind: string, enum: [zonal, regional] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: search-enum, environment: test, version: 1 }
+      capabilities:
+        - id: c
+          type: capability.search.index
+      constraints:
+        hard:
+          - id: c-ha
+            subject: c
+            path: availability.class
+            op: equals
+            value: regional
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: search-enum
+      capabilities:
+        c:
+          attributes:
+            availability.class: planetary
+    expect:
+      error: candidate
+  - name: streaming-residency-retention-availability-encryption-verify
+    description: >
+      capability.streaming.pipe is a managed record stream (Kinesis / Event Hubs —
+      an honest two-cloud twin, no GCP). Residency (region), retention window,
+      availability.class and customer-managed encryption are capability semantics;
+      shard/partition count and throughput mode are implementation noise.
+    vocab:
+      - capability: capability.streaming.pipe
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          retention.window: { kind: duration }
+          availability.class: { kind: string, enum: [zonal, regional] }
+          encryption.customerManagedKeys: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: stream-1, environment: production, version: 1 }
+      capabilities:
+        - id: events
+          type: capability.streaming.pipe
+      constraints:
+        hard:
+          - id: c-region
+            subject: events
+            path: location.region
+            op: equals
+            value: eu-central-1
+            verify: { method: static }
+          - id: c-retain
+            subject: events
+            path: retention.window
+            op: gte
+            value: 72h
+            verify: { method: static }
+          - id: c-ha
+            subject: events
+            path: availability.class
+            op: equals
+            value: regional
+            verify: { method: static }
+          - id: c-cmek
+            subject: events
+            path: encryption.customerManagedKeys
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: stream-1
+      capabilities:
+        events:
+          attributes:
+            location.region: eu-central-1
+            retention.window: 168h
+            availability.class: regional
+            encryption.customerManagedKeys: true
+    expect:
+      executable: true
+      verdicts:
+        c-region: satisfied
+        c-retain: satisfied
+        c-ha: satisfied
+        c-cmek: satisfied
+  - name: streaming-availability-class-enum-is-enforced
+    description: >
+      availability.class is a closed enum for a stream; a value outside
+      [zonal, regional] must be a load error (D19), never a silent pass.
+    vocab:
+      - capability: capability.streaming.pipe
+        version: 0.1
+        stateful: true
+        attributes:
+          availability.class: { kind: string, enum: [zonal, regional] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: stream-enum, environment: test, version: 1 }
+      capabilities:
+        - id: c
+          type: capability.streaming.pipe
+      constraints:
+        hard:
+          - id: c-ha
+            subject: c
+            path: availability.class
+            op: equals
+            value: regional
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: stream-enum
+      capabilities:
+        c:
+          attributes:
+            availability.class: planetary
+    expect:
+      error: candidate
+  - name: kafka-residency-protocol-availability-encryption-verify
+    description: >
+      capability.messaging.kafka is a managed Apache Kafka cluster (MSK / GCP
+      Managed Kafka / Event Hubs Kafka — a genuine three-cloud twin). Residency,
+      Kafka protocol, availability.class, in-transit and customer-managed
+      encryption are capability semantics; broker count, instance sizing and
+      partition defaults are implementation noise.
+    vocab:
+      - capability: capability.messaging.kafka
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          engine.protocol: { kind: protocol }
+          availability.class: { kind: string, enum: [zonal, regional] }
+          encryption.inTransit: { kind: bool }
+          encryption.customerManagedKeys: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: kafka-1, environment: production, version: 1 }
+      capabilities:
+        - id: bus
+          type: capability.messaging.kafka
+      constraints:
+        hard:
+          - id: c-region
+            subject: bus
+            path: location.region
+            op: equals
+            value: eu-central-1
+            verify: { method: static }
+          - id: c-proto
+            subject: bus
+            path: engine.protocol
+            op: equals
+            value: kafka/3
+            verify: { method: static }
+          - id: c-ha
+            subject: bus
+            path: availability.class
+            op: equals
+            value: regional
+            verify: { method: static }
+          - id: c-tls
+            subject: bus
+            path: encryption.inTransit
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-cmek
+            subject: bus
+            path: encryption.customerManagedKeys
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: kafka-1
+      capabilities:
+        bus:
+          attributes:
+            location.region: eu-central-1
+            engine.protocol: kafka/3
+            availability.class: regional
+            encryption.inTransit: true
+            encryption.customerManagedKeys: true
+    expect:
+      executable: true
+      verdicts:
+        c-region: satisfied
+        c-proto: satisfied
+        c-ha: satisfied
+        c-tls: satisfied
+        c-cmek: satisfied
+  - name: kafka-availability-class-enum-is-enforced
+    description: >
+      availability.class is a closed enum for a Kafka cluster; a value outside
+      [zonal, regional] must be a load error (D19), never a silent pass.
+    vocab:
+      - capability: capability.messaging.kafka
+        version: 0.1
+        stateful: true
+        attributes:
+          availability.class: { kind: string, enum: [zonal, regional] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: kafka-enum, environment: test, version: 1 }
+      capabilities:
+        - id: c
+          type: capability.messaging.kafka
+      constraints:
+        hard:
+          - id: c-ha
+            subject: c
+            path: availability.class
+            op: equals
+            value: regional
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: kafka-enum
+      capabilities:
+        c:
+          attributes:
+            availability.class: planetary
+    expect:
+      error: candidate
+  - name: waf-mode-managed-ruleset-bot-verify
+    description: >
+      capability.security.waf is a managed WAF policy (WAFv2 / Front Door WAF /
+      Cloud Armor — a genuine three-cloud twin). policy.mode, managed.ruleset and
+      bot.protection are capability semantics; the rule DEFINITIONS are opaque
+      config (invariant #4), never a vocabulary attribute.
+    vocab:
+      - capability: capability.security.waf
+        version: 0.1
+        stateful: false
+        attributes:
+          policy.mode: { kind: string, enum: [prevention, detection] }
+          managed.ruleset: { kind: bool }
+          bot.protection: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: waf-1, environment: production, version: 1 }
+      capabilities:
+        - id: edge
+          type: capability.security.waf
+      constraints:
+        hard:
+          - id: c-mode
+            subject: edge
+            path: policy.mode
+            op: equals
+            value: prevention
+            verify: { method: static }
+          - id: c-owasp
+            subject: edge
+            path: managed.ruleset
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-bot
+            subject: edge
+            path: bot.protection
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: waf-1
+      capabilities:
+        edge:
+          attributes:
+            policy.mode: prevention
+            managed.ruleset: true
+            bot.protection: true
+    expect:
+      executable: true
+      verdicts:
+        c-mode: satisfied
+        c-owasp: satisfied
+        c-bot: satisfied
+  - name: waf-policy-mode-enum-is-enforced
+    description: >
+      policy.mode is a closed enum; a value outside [prevention, detection] must be
+      a load error (D19), never a silent pass.
+    vocab:
+      - capability: capability.security.waf
+        version: 0.1
+        stateful: false
+        attributes:
+          policy.mode: { kind: string, enum: [prevention, detection] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: waf-enum, environment: test, version: 1 }
+      capabilities:
+        - id: c
+          type: capability.security.waf
+      constraints:
+        hard:
+          - id: c-mode
+            subject: c
+            path: policy.mode
+            op: equals
+            value: prevention
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: waf-enum
+      capabilities:
+        c:
+          attributes:
+            policy.mode: paranoid
+    expect:
+      error: candidate
+  - name: certificate-domain-validation-autorenew-verify
+    description: >
+      capability.certificate.tls is a managed, auto-renewed TLS certificate (ACM /
+      Certificate Manager — an honest two-cloud twin, no Azure). Domain, validation
+      method and auto-renewal are capability semantics; SANs, key algorithm and the
+      private key are implementation detail (the key structurally excluded).
+    vocab:
+      - capability: capability.certificate.tls
+        version: 0.1
+        stateful: false
+        attributes:
+          location.region: { kind: string }
+          domain: { kind: string }
+          validation.method: { kind: string, enum: [dns, email] }
+          auto.renew: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: cert-1, environment: production, version: 1 }
+      capabilities:
+        - id: web
+          type: capability.certificate.tls
+      constraints:
+        hard:
+          - id: c-region
+            subject: web
+            path: location.region
+            op: equals
+            value: us-east-1
+            verify: { method: static }
+          - id: c-domain
+            subject: web
+            path: domain
+            op: equals
+            value: app.example.com
+            verify: { method: static }
+          - id: c-val
+            subject: web
+            path: validation.method
+            op: equals
+            value: dns
+            verify: { method: static }
+          - id: c-renew
+            subject: web
+            path: auto.renew
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: cert-1
+      capabilities:
+        web:
+          attributes:
+            location.region: us-east-1
+            domain: app.example.com
+            validation.method: dns
+            auto.renew: true
+    expect:
+      executable: true
+      verdicts:
+        c-region: satisfied
+        c-domain: satisfied
+        c-val: satisfied
+        c-renew: satisfied
+  - name: certificate-validation-method-enum-is-enforced
+    description: >
+      validation.method is a closed enum; a value outside [dns, email] must be a
+      load error (D19), never a silent pass.
+    vocab:
+      - capability: capability.certificate.tls
+        version: 0.1
+        stateful: false
+        attributes:
+          validation.method: { kind: string, enum: [dns, email] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: cert-enum, environment: test, version: 1 }
+      capabilities:
+        - id: c
+          type: capability.certificate.tls
+      constraints:
+        hard:
+          - id: c-val
+            subject: c
+            path: validation.method
+            op: equals
+            value: dns
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: cert-enum
+      capabilities:
+        c:
+          attributes:
+            validation.method: carrier-pigeon
+    expect:
+      error: candidate
+  - name: cdn-origin-viewer-protocol-verify
+    description: >
+      capability.cdn.distribution is a managed CDN distribution (CloudFront / Azure
+      CDN — an honest two-cloud twin, no GCP). origin.domain and viewer.protocol are
+      capability semantics; cache behaviors, TTLs and path patterns are opaque
+      implementation config (invariant #4).
+    vocab:
+      - capability: capability.cdn.distribution
+        version: 0.1
+        stateful: false
+        attributes:
+          origin.domain: { kind: string }
+          viewer.protocol: { kind: string, enum: [https-only, redirect-to-https, allow-all] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: cdn-1, environment: production, version: 1 }
+      capabilities:
+        - id: edge
+          type: capability.cdn.distribution
+      constraints:
+        hard:
+          - id: c-origin
+            subject: edge
+            path: origin.domain
+            op: equals
+            value: origin.example.com
+            verify: { method: static }
+          - id: c-tls
+            subject: edge
+            path: viewer.protocol
+            op: equals
+            value: https-only
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: cdn-1
+      capabilities:
+        edge:
+          attributes:
+            origin.domain: origin.example.com
+            viewer.protocol: https-only
+    expect:
+      executable: true
+      verdicts:
+        c-origin: satisfied
+        c-tls: satisfied
+  - name: cdn-viewer-protocol-enum-is-enforced
+    description: >
+      viewer.protocol is a closed enum; a value outside
+      [https-only, redirect-to-https, allow-all] must be a load error (D19).
+    vocab:
+      - capability: capability.cdn.distribution
+        version: 0.1
+        stateful: false
+        attributes:
+          viewer.protocol: { kind: string, enum: [https-only, redirect-to-https, allow-all] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: cdn-enum, environment: test, version: 1 }
+      capabilities:
+        - id: c
+          type: capability.cdn.distribution
+      constraints:
+        hard:
+          - id: c-tls
+            subject: c
+            path: viewer.protocol
+            op: equals
+            value: https-only
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: cdn-enum
+      capabilities:
+        c:
+          attributes:
+            viewer.protocol: carrier-pigeon
+    expect:
+      error: candidate
+  - name: apigateway-residency-protocol-verify
+    description: >
+      capability.apigateway.http is a managed HTTP API gateway (API Gateway v2 /
+      API Management — an honest two-cloud twin, no GCP). Residency and wire
+      protocol are capability semantics; routes, integrations and authorizers are
+      opaque implementation config (invariant #4).
+    vocab:
+      - capability: capability.apigateway.http
+        version: 0.1
+        stateful: false
+        attributes:
+          location.region: { kind: string }
+          protocol: { kind: string, enum: [http, websocket] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: apigw-1, environment: production, version: 1 }
+      capabilities:
+        - id: front
+          type: capability.apigateway.http
+      constraints:
+        hard:
+          - id: c-region
+            subject: front
+            path: location.region
+            op: equals
+            value: eu-central-1
+            verify: { method: static }
+          - id: c-proto
+            subject: front
+            path: protocol
+            op: equals
+            value: http
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: apigw-1
+      capabilities:
+        front:
+          attributes:
+            location.region: eu-central-1
+            protocol: http
+    expect:
+      executable: true
+      verdicts:
+        c-region: satisfied
+        c-proto: satisfied
+  - name: apigateway-protocol-enum-is-enforced
+    description: >
+      protocol is a closed enum; a value outside [http, websocket] must be a load
+      error (D19), never a silent pass.
+    vocab:
+      - capability: capability.apigateway.http
+        version: 0.1
+        stateful: false
+        attributes:
+          protocol: { kind: string, enum: [http, websocket] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: apigw-enum, environment: test, version: 1 }
+      capabilities:
+        - id: c
+          type: capability.apigateway.http
+      constraints:
+        hard:
+          - id: c-proto
+            subject: c
+            path: protocol
+            op: equals
+            value: http
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: apigw-enum
+      capabilities:
+        c:
+          attributes:
+            protocol: carrier-pigeon
+    expect:
+      error: candidate
+  - name: container-job-image-trigger-timeout-verify
+    description: >
+      capability.container.job is a managed run-to-completion container job (Cloud
+      Run Jobs / Container Apps Jobs — an honest two-cloud twin, no AWS). Image,
+      trigger type and timeout are capability semantics; the cron expression, env
+      vars, args and resource limits are opaque implementation config (invariant #4).
+    vocab:
+      - capability: capability.container.job
+        version: 0.1
+        stateful: false
+        attributes:
+          location.region: { kind: string }
+          image: { kind: string }
+          trigger.type: { kind: string, enum: [manual, schedule] }
+          timeout: { kind: duration }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: job-1, environment: production, version: 1 }
+      capabilities:
+        - id: worker
+          type: capability.container.job
+      constraints:
+        hard:
+          - id: c-region
+            subject: worker
+            path: location.region
+            op: equals
+            value: europe-west1
+            verify: { method: static }
+          - id: c-image
+            subject: worker
+            path: image
+            op: equals
+            value: gcr.io/proj/worker:1.2
+            verify: { method: static }
+          - id: c-trigger
+            subject: worker
+            path: trigger.type
+            op: equals
+            value: manual
+            verify: { method: static }
+          - id: c-timeout
+            subject: worker
+            path: timeout
+            op: lte
+            value: 1h
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: job-1
+      capabilities:
+        worker:
+          attributes:
+            location.region: europe-west1
+            image: gcr.io/proj/worker:1.2
+            trigger.type: manual
+            timeout: 600s
+    expect:
+      executable: true
+      verdicts:
+        c-region: satisfied
+        c-image: satisfied
+        c-trigger: satisfied
+        c-timeout: satisfied
+  - name: container-job-trigger-type-enum-is-enforced
+    description: >
+      trigger.type is a closed enum; a value outside [manual, schedule] must be a
+      load error (D19), never a silent pass.
+    vocab:
+      - capability: capability.container.job
+        version: 0.1
+        stateful: false
+        attributes:
+          trigger.type: { kind: string, enum: [manual, schedule] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: job-enum, environment: test, version: 1 }
+      capabilities:
+        - id: c
+          type: capability.container.job
+      constraints:
+        hard:
+          - id: c-trigger
+            subject: c
+            path: trigger.type
+            op: equals
+            value: manual
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: job-enum
+      capabilities:
+        c:
+          attributes:
+            trigger.type: whenever
+    expect:
+      error: candidate
+  - name: serviceaccount-name-keyless-verify
+    description: >
+      capability.identity.serviceaccount is a managed machine identity (GCP SA / AWS
+      IAM role / Azure managed identity — a genuine three-cloud twin). display.name
+      and key.exportable are capability semantics; the trust policy and attached
+      roles are opaque implementation config (invariant #4).
+    vocab:
+      - capability: capability.identity.serviceaccount
+        version: 0.1
+        stateful: false
+        attributes:
+          display.name: { kind: string }
+          key.exportable: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: sa-1, environment: production, version: 1 }
+      capabilities:
+        - id: runner
+          type: capability.identity.serviceaccount
+      constraints:
+        hard:
+          - id: c-name
+            subject: runner
+            path: display.name
+            op: equals
+            value: batch-runner
+            verify: { method: static }
+          - id: c-keyless
+            subject: runner
+            path: key.exportable
+            op: equals
+            value: false
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: sa-1
+      capabilities:
+        runner:
+          attributes:
+            display.name: batch-runner
+            key.exportable: false
+    expect:
+      executable: true
+      verdicts:
+        c-name: satisfied
+        c-keyless: satisfied
+  - name: serviceaccount-key-exportable-kind-mismatch-is-load-error
+    description: >
+      A machine identity has no natural closed enum, so the type system stands in for
+      the enum-guard: key.exportable is a bool; a candidate declaring a string there
+      is ill-typed authorship — refused at load (D19), before any constraint is
+      evaluated.
+    vocab:
+      - capability: capability.identity.serviceaccount
+        version: 0.1
+        stateful: false
+        attributes:
+          key.exportable: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: sa-mismatch, environment: test, version: 1 }
+      capabilities:
+        - id: c
+          type: capability.identity.serviceaccount
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: sa-mismatch
+      capabilities:
+        c:
+          attributes:
+            key.exportable: sometimes
+    expect:
+      error: candidate
+  - name: warehouse-analytics-residency-exposure-cmk-verify
+    description: >
+      capability.warehouse.analytics is a managed data warehouse (honest 2-cloud:
+      BigQuery, Redshift Serverless; Azure Synapse refused — no keyless create).
+      Residency, public exposure, and customer-managed-key encryption are capability
+      semantics; table schemas and compute sizing are opaque impl. network.public
+      Exposure is honored on AWS and refused on GCP (no network boundary), but the
+      VERIFIER is provider-agnostic — it checks the declared candidate against the
+      constraints, and the honest gap lives in the driver, not the verdict.
+    vocab:
+      - capability: capability.warehouse.analytics
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          network.publicExposure: { kind: bool }
+          encryption.atRest: { kind: bool }
+          encryption.customerManagedKeys: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: wh-1, environment: production, version: 1 }
+      capabilities:
+        - id: lake
+          type: capability.warehouse.analytics
+      constraints:
+        hard:
+          - id: c-region
+            subject: lake
+            path: location.region
+            op: equals
+            value: us-east-1
+            verify: { method: static }
+          - id: c-private
+            subject: lake
+            path: network.publicExposure
+            op: equals
+            value: false
+            verify: { method: static }
+          - id: c-cmk
+            subject: lake
+            path: encryption.customerManagedKeys
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: wh-1
+      capabilities:
+        lake:
+          attributes:
+            location.region: us-east-1
+            network.publicExposure: false
+            encryption.atRest: true
+            encryption.customerManagedKeys: true
+    expect:
+      executable: true
+      verdicts:
+        c-region: satisfied
+        c-private: satisfied
+        c-cmk: satisfied
+  - name: warehouse-analytics-cmk-kind-mismatch-is-load-error
+    description: >
+      There is no natural closed enum on a warehouse resource (BigQuery editions are
+      reservation-level, Redshift base capacity is sizing noise), so the enum-guard
+      dual case is a KIND-MISMATCH load error (D121 precedent): the type system
+      stands in for the enum-guard. encryption.customerManagedKeys is declared bool;
+      a candidate supplying a string must be a load error, never a silent pass or a
+      coerced truthy value.
+    vocab:
+      - capability: capability.warehouse.analytics
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          encryption.customerManagedKeys: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: wh-mismatch, environment: test, version: 1 }
+      capabilities:
+        - id: lake
+          type: capability.warehouse.analytics
+      constraints:
+        hard:
+          - id: c-cmk
+            subject: lake
+            path: encryption.customerManagedKeys
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: wh-mismatch
+      capabilities:
+        lake:
+          attributes:
+            encryption.customerManagedKeys: "yes"
+    expect:
+      error: candidate
+  - name: scheduler-cron-residency-armed-verify
+    description: >
+      capability.scheduler.cron is a managed cron/scheduled trigger (honest 2-cloud:
+      Cloud Scheduler, EventBridge Scheduler; Azure refused — no clean managed-cron
+      primitive). Residency and whether the trigger is armed are the only capability
+      semantics; the cron expression, target and payload are opaque impl. Same thin-
+      envelope stance as capability.identity.serviceaccount.
+    vocab:
+      - capability: capability.scheduler.cron
+        version: 0.1
+        stateful: false
+        attributes:
+          location.region: { kind: string }
+          schedule.enabled: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: sched-1, environment: production, version: 1 }
+      capabilities:
+        - id: nightly
+          type: capability.scheduler.cron
+      constraints:
+        hard:
+          - id: c-region
+            subject: nightly
+            path: location.region
+            op: equals
+            value: europe-west1
+            verify: { method: static }
+          - id: c-armed
+            subject: nightly
+            path: schedule.enabled
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: sched-1
+      capabilities:
+        nightly:
+          attributes:
+            location.region: europe-west1
+            schedule.enabled: true
+    expect:
+      executable: true
+      verdicts:
+        c-region: satisfied
+        c-armed: satisfied
+  - name: scheduler-cron-enabled-kind-mismatch-is-load-error
+    description: >
+      There is no natural closed enum on a scheduler, so the enum-guard dual case is a
+      KIND-MISMATCH load error (D121 precedent): schedule.enabled is declared bool, and
+      a candidate supplying a string must be a load error, never a coerced truthy value.
+    vocab:
+      - capability: capability.scheduler.cron
+        version: 0.1
+        stateful: false
+        attributes:
+          location.region: { kind: string }
+          schedule.enabled: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: sched-mismatch, environment: test, version: 1 }
+      capabilities:
+        - id: nightly
+          type: capability.scheduler.cron
+      constraints:
+        hard:
+          - id: c-armed
+            subject: nightly
+            path: schedule.enabled
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: sched-mismatch
+      capabilities:
+        nightly:
+          attributes:
+            schedule.enabled: "on"
+    expect:
+      error: candidate
+  - name: key-encryption-rotation-protection-verify
+    description: >
+      capability.key.encryption is a managed encryption key (3-cloud: Cloud KMS,
+      AWS KMS, Azure Key Vault key) — the COUNTERPOINT to capability.secret:
+      rotation.period is HONORED here (the store rotates the key) where it was
+      refused there (the producer's job). protection.level is a closed enum.
+    vocab:
+      - capability: capability.key.encryption
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          rotation.period: { kind: duration }
+          protection.level: { kind: string, enum: [software, hsm] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: key-1, environment: production, version: 1 }
+      capabilities:
+        - id: datakey
+          type: capability.key.encryption
+      constraints:
+        hard:
+          - id: c-region
+            subject: datakey
+            path: location.region
+            op: equals
+            value: europe-west1
+            verify: { method: static }
+          - id: c-rotation
+            subject: datakey
+            path: rotation.period
+            op: lte
+            value: 90d
+            verify: { method: static }
+          - id: c-hsm
+            subject: datakey
+            path: protection.level
+            op: equals
+            value: hsm
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: key-1
+      capabilities:
+        datakey:
+          attributes:
+            location.region: europe-west1
+            rotation.period: 30d
+            protection.level: hsm
+    expect:
+      executable: true
+      verdicts:
+        c-region: satisfied
+        c-rotation: satisfied
+        c-hsm: satisfied
+  - name: key-protection-level-enum-is-enforced
+    description: >
+      protection.level is a closed enum; a bogus value is a load error, not a
+      silent pass.
+    vocab:
+      - capability: capability.key.encryption
+        version: 0.1
+        stateful: true
+        attributes:
+          protection.level: { kind: string, enum: [software, hsm] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: key-enum, environment: test, version: 1 }
+      capabilities:
+        - id: k
+          type: capability.key.encryption
+      constraints:
+        hard:
+          - id: c-p
+            subject: k
+            path: protection.level
+            op: equals
+            value: hsm
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: key-enum
+      capabilities:
+        k:
+          attributes:
+            protection.level: quantum
+    expect:
+      error: candidate
+  - name: vpn-gateway-residency-ipstack-verify
+    description: >
+      capability.vpn.gateway is a managed site-to-site VPN gateway (honest 2-cloud:
+      AWS VPN Gateway, GCP Cloud VPN). Residency and IP stack are the only gateway
+      capability semantics; the tunnels, BGP and pre-shared key are opaque impl /
+      secrets. Same thin-envelope stance as capability.scheduler.cron.
+    vocab:
+      - capability: capability.vpn.gateway
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          ip.stack: { kind: string, enum: [ipv4, dual-stack] }
+          service.managed: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: vpn-1, environment: production, version: 1 }
+      capabilities:
+        - id: site
+          type: capability.vpn.gateway
+      constraints:
+        hard:
+          - id: c-region
+            subject: site
+            path: location.region
+            op: equals
+            value: eu-central-1
+            verify: { method: static }
+          - id: c-stack
+            subject: site
+            path: ip.stack
+            op: equals
+            value: ipv4
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: vpn-1
+      capabilities:
+        site:
+          attributes:
+            location.region: eu-central-1
+            ip.stack: ipv4
+            service.managed: true
+    expect:
+      executable: true
+      verdicts:
+        c-region: satisfied
+        c-stack: satisfied
+  - name: vpn-gateway-ipstack-enum-is-enforced
+    description: >
+      ip.stack is a closed enum (ipv4 | dual-stack); a value outside it (there is no
+      ipv6-only VPN gateway primitive on either cloud) must be a load error, not a
+      silent pass or a coerced value.
+    vocab:
+      - capability: capability.vpn.gateway
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          ip.stack: { kind: string, enum: [ipv4, dual-stack] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: vpn-enum, environment: test, version: 1 }
+      capabilities:
+        - id: site
+          type: capability.vpn.gateway
+      constraints:
+        hard:
+          - id: c-stack
+            subject: site
+            path: ip.stack
+            op: equals
+            value: ipv4
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: vpn-enum
+      capabilities:
+        site:
+          attributes:
+            ip.stack: ipv6-only
+    expect:
+      error: candidate
+  - name: backup-vault-retention-lockmode-verify
+    description: >
+      capability.backup.vault is a managed backup vault (honest 2-cloud: AWS Backup,
+      GCP Backup and DR). Residency, minimum enforced retention, WORM lock mode and
+      customer-managed-key encryption are the capability semantics; the backup plans
+      and schedules that populate it are opaque impl.
+    vocab:
+      - capability: capability.backup.vault
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          retention.minimum: { kind: duration }
+          retention.lockMode: { kind: string, enum: [governance, compliance] }
+          encryption.customerManagedKeys: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: bkp-1, environment: production, version: 1 }
+      capabilities:
+        - id: archive
+          type: capability.backup.vault
+      constraints:
+        hard:
+          - id: c-retain
+            subject: archive
+            path: retention.minimum
+            op: gte
+            value: 720h
+            verify: { method: static }
+          - id: c-lock
+            subject: archive
+            path: retention.lockMode
+            op: equals
+            value: compliance
+            verify: { method: static }
+          - id: c-cmk
+            subject: archive
+            path: encryption.customerManagedKeys
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: bkp-1
+      capabilities:
+        archive:
+          attributes:
+            location.region: eu-central-1
+            retention.minimum: 2160h
+            retention.lockMode: compliance
+            encryption.customerManagedKeys: true
+    expect:
+      executable: true
+      verdicts:
+        c-retain: satisfied
+        c-lock: satisfied
+        c-cmk: satisfied
+  - name: backup-vault-lockmode-enum-is-enforced
+    description: >
+      retention.lockMode is a closed enum (governance | compliance); a value outside it
+      must be a load error, not a silent pass or a coerced value.
+    vocab:
+      - capability: capability.backup.vault
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          retention.lockMode: { kind: string, enum: [governance, compliance] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: bkp-enum, environment: test, version: 1 }
+      capabilities:
+        - id: archive
+          type: capability.backup.vault
+      constraints:
+        hard:
+          - id: c-lock
+            subject: archive
+            path: retention.lockMode
+            op: equals
+            value: compliance
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: bkp-enum
+      capabilities:
+        archive:
+          attributes:
+            retention.lockMode: worm-forever
+    expect:
+      error: candidate
+
+  - name: compute-quota-budget-verify
+    description: >
+      capability.compute.quota is a resource BUDGET for a tenancy scope (the k8s
+      namespace ResourceQuota; a cloud project quota is the same semantic). The
+      compute ceiling (cpu/memory) and the pod ceiling are the governance
+      semantics; per-object counts are operational noise, left out.
+    vocab:
+      - capability: capability.compute.quota
+        version: 0.1
+        stateful: false
+        attributes:
+          cpu.limit: { kind: string }
+          memory.limit: { kind: string }
+          pods.max: { kind: number }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: quota-1, environment: production, version: 1 }
+      capabilities:
+        - id: budget
+          type: capability.compute.quota
+      constraints:
+        hard:
+          - id: c-cpu
+            subject: budget
+            path: cpu.limit
+            op: equals
+            value: "10"
+            verify: { method: static }
+          - id: c-pods
+            subject: budget
+            path: pods.max
+            op: lte
+            value: 50
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: quota-1
+      capabilities:
+        budget:
+          attributes:
+            cpu.limit: "10"
+            pods.max: 50
+    expect:
+      executable: true
+      verdicts:
+        c-cpu: satisfied
+        c-pods: satisfied
+
+  - name: cluster-namespace-podsecurity-verify
+    description: >
+      capability.cluster.namespace is a governed tenancy boundary; the Pod
+      Security Standard it ENFORCES (restricted|baseline|privileged) is a closed
+      enum and the least-privilege posture an org contracts.
+    vocab:
+      - capability: capability.cluster.namespace
+        version: 0.1
+        stateful: false
+        attributes:
+          security.podSecurity: { kind: string, enum: [restricted, baseline, privileged] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: ns-1, environment: production, version: 1 }
+      capabilities:
+        - id: tenant
+          type: capability.cluster.namespace
+      constraints:
+        hard:
+          - id: c-pss
+            subject: tenant
+            path: security.podSecurity
+            op: equals
+            value: restricted
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: ns-1
+      capabilities:
+        tenant:
+          attributes:
+            security.podSecurity: restricted
+    expect:
+      executable: true
+      verdicts:
+        c-pss: satisfied
+
+  - name: cluster-namespace-podsecurity-enum-violation-is-load-error
+    description: >
+      A pod-security level outside the closed enum is a load error in both
+      implementations — the posture is a guardrail, not free text.
+    vocab:
+      - capability: capability.cluster.namespace
+        version: 0.1
+        stateful: false
+        attributes:
+          security.podSecurity: { kind: string, enum: [restricted, baseline, privileged] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: ns-2, environment: production, version: 1 }
+      capabilities:
+        - id: tenant
+          type: capability.cluster.namespace
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: ns-2
+      capabilities:
+        tenant:
+          attributes:
+            security.podSecurity: wideopen
+    expect:
+      error: candidate
+
+  - name: cluster-kubernetes-api-exposure-satisfied
+    description: >
+      capability.cluster.kubernetes is the managed SUBSTRATE (D147). The API-server
+      exposure it contracts (public|private|mixed) is a closed enum and the security
+      posture an org governs — a private endpoint satisfies an EU-private cluster.
+    vocab:
+      - capability: capability.cluster.kubernetes
+        version: 0.1
+        stateful: true
+        attributes:
+          network.apiExposure: { kind: string, enum: [public, private, mixed] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: eks-1, environment: production, version: 1 }
+      capabilities:
+        - id: cluster
+          type: capability.cluster.kubernetes
+      constraints:
+        hard:
+          - id: c-api
+            subject: cluster
+            path: network.apiExposure
+            op: equals
+            value: private
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: eks-1
+      capabilities:
+        cluster:
+          attributes:
+            network.apiExposure: private
+    expect:
+      executable: true
+      verdicts:
+        c-api: satisfied
+
+  - name: cluster-kubernetes-api-exposure-enum-violation-is-load-error
+    description: >
+      An API-server exposure outside the closed enum is a load error in both
+      implementations — the substrate's exposure is a guardrail, not free text.
+    vocab:
+      - capability: capability.cluster.kubernetes
+        version: 0.1
+        stateful: true
+        attributes:
+          network.apiExposure: { kind: string, enum: [public, private, mixed] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: eks-2, environment: production, version: 1 }
+      capabilities:
+        - id: cluster
+          type: capability.cluster.kubernetes
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: eks-2
+      capabilities:
+        cluster:
+          attributes:
+            network.apiExposure: wideopen
+    expect:
+      error: candidate
+
+  - name: ai-inference-eu-residency-satisfied
+    description: >
+      capability.ai.inference (D150). The EU cross-region inference profile's
+      destination regions are OBSERVED (network in observe, never in the verifier,
+      #6); a profile that routes only within the EU allowlist satisfies residency
+      via the existing subset-of operator — no new engine code, the D1 rule is a
+      vocab attribute + a plain constraint.
+    vocab:
+      - capability: capability.ai.inference
+        version: 0.1
+        stateful: false
+        attributes:
+          inference.destinationRegions: { kind: list }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: ai-1, environment: production, version: 1 }
+      capabilities:
+        - id: llm
+          type: capability.ai.inference
+      constraints:
+        hard:
+          - id: c-residency
+            subject: llm
+            path: inference.destinationRegions
+            op: subset-of
+            value: [eu-central-1, eu-west-1, eu-west-3, eu-north-1, eu-south-1, eu-south-2]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: ai-1
+      capabilities:
+        llm:
+          attributes:
+            inference.destinationRegions:
+              value: [eu-central-1, eu-west-1, eu-south-2]
+              status: inferred
+              source: bedrock:get-inference-profile
+    expect:
+      executable: true
+      verdicts:
+        c-residency: satisfied
+
+  - name: ai-inference-eu-south-2-trap-caught-deterministically
+    description: >
+      The documented Bedrock trap: the EU profile routes to eu-south-2, but an
+      allowlist that OMITS it makes inference.destinationRegions NOT a subset —
+      caught as `violated` at verify, deterministically, before any AccessDenied at
+      runtime. This is why the D1 rule is groundhold-native: observe the fact, let the
+      deterministic verifier prove the residency.
+    vocab:
+      - capability: capability.ai.inference
+        version: 0.1
+        stateful: false
+        attributes:
+          inference.destinationRegions: { kind: list }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: ai-2, environment: production, version: 1 }
+      capabilities:
+        - id: llm
+          type: capability.ai.inference
+      constraints:
+        hard:
+          - id: c-residency
+            subject: llm
+            path: inference.destinationRegions
+            op: subset-of
+            value: [eu-central-1, eu-west-1]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: ai-2
+      capabilities:
+        llm:
+          attributes:
+            inference.destinationRegions:
+              value: [eu-central-1, eu-west-1, eu-south-2]
+              status: inferred
+              source: bedrock:get-inference-profile
+    expect:
+      executable: false
+      verdicts:
+        c-residency: violated
+
+  - name: audit-trail-residency-scope-integrity-verify
+    description: >
+      capability.audit.trail (AWS CloudTrail): an EU platform's audit record.
+      Residency (home region), multi-region scope and log-file integrity validation
+      are the compliance truths an auditor is written against; the destination
+      bucket, KMS key and SNS topic are operands, not capability semantics.
+    vocab:
+      - capability: capability.audit.trail
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          scope.multiRegion: { kind: bool }
+          integrity.logValidation: { kind: bool }
+          delivery.assured: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: at-1, environment: production, version: 1 }
+      capabilities:
+        - id: trail
+          type: capability.audit.trail
+      constraints:
+        hard:
+          - id: c-residency
+            subject: trail
+            path: location.region
+            op: equals
+            value: eu-central-1
+            verify: { method: static }
+          - id: c-multiregion
+            subject: trail
+            path: scope.multiRegion
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-integrity
+            subject: trail
+            path: integrity.logValidation
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-logging
+            subject: trail
+            path: delivery.assured
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: at-1
+      capabilities:
+        trail:
+          attributes:
+            location.region: eu-central-1
+            scope.multiRegion: true
+            integrity.logValidation: true
+            delivery.assured: true
+    expect:
+      executable: true
+      verdicts:
+        c-residency: satisfied
+        c-multiregion: satisfied
+        c-integrity: satisfied
+        c-logging: satisfied
+
+  - name: audit-trail-missing-integrity-violated
+    description: >
+      A trail without log-file validation cannot PROVE its record was not tampered
+      with — a hard integrity constraint is violated, blocking execution.
+      delivery.assured is left unstated by the candidate, so it verifies unknown
+      (never a fabricated false).
+    vocab:
+      - capability: capability.audit.trail
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          integrity.logValidation: { kind: bool }
+          delivery.assured: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: at-2, environment: production, version: 1 }
+      capabilities:
+        - id: trail
+          type: capability.audit.trail
+      constraints:
+        hard:
+          - id: c-integrity
+            subject: trail
+            path: integrity.logValidation
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-logging
+            subject: trail
+            path: delivery.assured
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: at-2
+      capabilities:
+        trail:
+          attributes:
+            location.region: eu-central-1
+            integrity.logValidation: false
+    expect:
+      executable: false
+      verdicts:
+        c-integrity: violated
+        c-logging: unknown
+
+  - name: backup-plan-rpo-and-dr-verify
+    description: >
+      capability.backup.plan is the DR-policy layer over a vault. schedule.frequency
+      is the RPO determinant (duration, no coercion); retention.duration is the
+      plan's lifecycle; copy.crossRegion + copy.destinationRegion is the multi-region
+      posture.
+    vocab:
+      - capability: capability.backup.plan
+        version: 0.1
+        stateful: false
+        attributes:
+          location.region: { kind: string }
+          schedule.frequency: { kind: duration }
+          retention.duration: { kind: duration }
+          copy.crossRegion: { kind: bool }
+          copy.destinationRegion: { kind: string }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: bpl-1, environment: production, version: 1 }
+      capabilities:
+        - id: dr
+          type: capability.backup.plan
+      constraints:
+        hard:
+          - id: c-rpo
+            subject: dr
+            path: schedule.frequency
+            op: lte
+            value: 24h
+            verify: { method: static }
+          - id: c-dr-eu
+            subject: dr
+            path: copy.destinationRegion
+            op: in
+            value: [eu-west-1, eu-central-1]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: bpl-1
+      capabilities:
+        dr:
+          attributes:
+            location.region: eu-central-1
+            schedule.frequency: 24h
+            retention.duration: 2160h
+            copy.crossRegion: true
+            copy.destinationRegion: eu-west-1
+    expect:
+      executable: true
+      verdicts:
+        c-rpo: satisfied
+        c-dr-eu: satisfied
+
+  - name: backup-plan-non-eu-copy-violated
+    description: >
+      A cross-region DR copy whose destination is OUTSIDE the EU is a residency
+      violation the plan's copy.destinationRegion catches — not a silent pass.
+    vocab:
+      - capability: capability.backup.plan
+        version: 0.1
+        stateful: false
+        attributes:
+          schedule.frequency: { kind: duration }
+          copy.destinationRegion: { kind: string }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: bpl-eu, environment: production, version: 1 }
+      capabilities:
+        - id: dr
+          type: capability.backup.plan
+      constraints:
+        hard:
+          - id: c-dr-eu
+            subject: dr
+            path: copy.destinationRegion
+            op: in
+            value: [eu-west-1, eu-central-1]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: bpl-eu
+      capabilities:
+        dr:
+          attributes:
+            schedule.frequency: 24h
+            copy.destinationRegion: us-east-1
+    expect:
+      executable: false
+      verdicts:
+        c-dr-eu: violated
+
+  - name: s3-crr-eu-destination-satisfied
+    description: >
+      S3 CRR. The replication destination region is OBSERVED via GetBucketLocation
+      on the replica (an S3 ARN carries no region), never declared; a destination
+      inside the EU allowlist satisfies residency via the membership `in` operator —
+      the SAME D1/Bedrock pattern, no new engine.
+    vocab:
+      - capability: capability.storage.object
+        version: 0.1
+        stateful: true
+        attributes:
+          replication.enabled: { kind: bool }
+          replication.destinationRegion: { kind: string }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: crr-1, environment: production, version: 1 }
+      capabilities:
+        - id: assets
+          type: capability.storage.object
+      constraints:
+        hard:
+          - id: c-dr-enabled
+            subject: assets
+            path: replication.enabled
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-dr-residency
+            subject: assets
+            path: replication.destinationRegion
+            op: in
+            value: [eu-central-1, eu-west-1, eu-west-3, eu-north-1, eu-south-1, eu-south-2]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: crr-1
+      capabilities:
+        assets:
+          attributes:
+            replication.enabled: true
+            replication.destinationRegion:
+              value: eu-west-3
+              status: inferred
+              source: s3:get-bucket-location
+    expect:
+      executable: true
+      verdicts:
+        c-dr-enabled: satisfied
+        c-dr-residency: satisfied
+
+  - name: s3-crr-non-eu-destination-trap
+    description: >
+      The residency trap: replication is on, but the replica lives in us-east-1
+      (OBSERVED, not the operand). An EU-only allowlist makes destinationRegion NOT a
+      member — caught as violated at verify, deterministically, before any data
+      leaves the EU. Residency is measured, then proven by the verifier.
+    vocab:
+      - capability: capability.storage.object
+        version: 0.1
+        stateful: true
+        attributes:
+          replication.enabled: { kind: bool }
+          replication.destinationRegion: { kind: string }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: crr-2, environment: production, version: 1 }
+      capabilities:
+        - id: assets
+          type: capability.storage.object
+      constraints:
+        hard:
+          - id: c-dr-residency
+            subject: assets
+            path: replication.destinationRegion
+            op: in
+            value: [eu-central-1, eu-west-1, eu-west-3, eu-north-1, eu-south-1, eu-south-2]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: crr-2
+      capabilities:
+        assets:
+          attributes:
+            replication.enabled: true
+            replication.destinationRegion:
+              value: us-east-1
+              status: inferred
+              source: s3:get-bucket-location
+    expect:
+      executable: false
+      verdicts:
+        c-dr-residency: violated
+
+  - name: private-network-nat-egress-eu
+    description: >
+      B4 slice 1: a private network whose workloads reach the internet through a
+      NAT road (egress.internet=nat) while staying unaddressable from outside
+      (ingress.public=false), in an EU region. The road (egress.internet) and the
+      destination discipline (egress.restricted) are orthogonal axes.
+    vocab:
+      - capability: capability.network.private
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          ingress.public: { kind: bool }
+          egress.internet: { kind: string, enum: [none, nat, direct] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: vpc-nat-1, environment: production, version: 1 }
+      capabilities:
+        - id: net
+          type: capability.network.private
+      constraints:
+        hard:
+          - id: c-residency
+            subject: net
+            path: location.region
+            op: equals
+            value: eu-central-1
+            verify: { method: static }
+          - id: c-no-ingress
+            subject: net
+            path: ingress.public
+            op: equals
+            value: false
+            verify: { method: static }
+          - id: c-egress-road
+            subject: net
+            path: egress.internet
+            op: equals
+            value: nat
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: vpc-nat-1
+      capabilities:
+        net:
+          attributes:
+            location.region: eu-central-1
+            ingress.public: false
+            egress.internet: nat
+    expect:
+      executable: true
+      verdicts:
+        c-residency: satisfied
+        c-no-ingress: satisfied
+        c-egress-road: satisfied
+
+  - name: network-egress-internet-enum-violation-is-load-error
+    description: >
+      An egress.internet road outside the closed enum is a load error in both
+      implementations — the egress road is a guardrail, not free text.
+    vocab:
+      - capability: capability.network.private
+        version: 0.1
+        stateful: true
+        attributes:
+          egress.internet: { kind: string, enum: [none, nat, direct] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: vpc-nat-2, environment: production, version: 1 }
+      capabilities:
+        - id: net
+          type: capability.network.private
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: vpc-nat-2
+      capabilities:
+        net:
+          attributes:
+            egress.internet: sometimes
+    expect:
+      error: candidate
+
+  - name: private-network-endpoints-eu
+    description: >
+      VPC slice 2: provider-API traffic stays on the private backbone
+      (serviceAccess.private=true) in an EU region — VPC endpoints, not the public
+      internet. Orthogonal to the egress road.
+    vocab:
+      - capability: capability.network.private
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          serviceAccess.private: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: vpc-ep-1, environment: production, version: 1 }
+      capabilities:
+        - id: net
+          type: capability.network.private
+      constraints:
+        hard:
+          - id: c-residency
+            subject: net
+            path: location.region
+            op: equals
+            value: eu-central-1
+            verify: { method: static }
+          - id: c-private-svc
+            subject: net
+            path: serviceAccess.private
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: vpc-ep-1
+      capabilities:
+        net:
+          attributes:
+            location.region: eu-central-1
+            serviceAccess.private: true
+    expect:
+      executable: true
+      verdicts:
+        c-residency: satisfied
+        c-private-svc: satisfied
+
+  - name: s3-object-lock-compliance-worm-satisfied
+    description: >
+      WORM at birth: retention.minimum + retention.locked ride with
+      versioning.enabled — all three satisfied is the honorable S3 Object Lock
+      COMPLIANCE case (the Acme Egzekutor pisma). Same engine, no coercion.
+    vocab:
+      - capability: capability.storage.object
+        version: 0.1
+        stateful: true
+        attributes:
+          retention.minimum: { kind: duration }
+          retention.locked: { kind: bool }
+          versioning.enabled: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: worm-s3, environment: production, version: 1 }
+      capabilities: [{ id: vault, type: capability.storage.object }]
+      constraints:
+        hard:
+          - { id: c-locked, subject: vault, path: retention.locked, op: equals, value: true, verify: { method: static } }
+          - { id: c-min, subject: vault, path: retention.minimum, op: gte, value: 3650d, verify: { method: static } }
+          - { id: c-ver, subject: vault, path: versioning.enabled, op: equals, value: true, verify: { method: static } }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: worm-s3
+      capabilities:
+        vault: { attributes: { retention.locked: true, retention.minimum: 3650d, versioning.enabled: true } }
+    expect:
+      executable: true
+      verdicts: { c-locked: satisfied, c-min: satisfied, c-ver: satisfied }
+
+  - name: email-inbound-eu-residency-with-durable-sink
+    description: >
+      The deal mailbox. Inbound mail received in the EU (residency), scanned for
+      spam/virus, and delivered to a durable S3 sink — all three semantic
+      attributes satisfied. Same engine, one more stateless type system.
+    vocab:
+      - capability: capability.email.inbound
+        version: 0.1
+        stateful: false
+        attributes:
+          location.region: { kind: string }
+          spam.filtered: { kind: bool }
+          delivery.sink: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: mail-in-1, environment: production, version: 1 }
+      capabilities:
+        - id: dealbox
+          type: capability.email.inbound
+      constraints:
+        hard:
+          - id: c-residency
+            subject: dealbox
+            path: location.region
+            op: in
+            value: [eu-central-1, eu-west-1]
+            verify: { method: static }
+          - id: c-scan
+            subject: dealbox
+            path: spam.filtered
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-sink
+            subject: dealbox
+            path: delivery.sink
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: mail-in-1
+      capabilities:
+        dealbox:
+          attributes:
+            location.region: eu-central-1
+            spam.filtered: true
+            delivery.sink: true
+    expect:
+      executable: true
+      verdicts:
+        c-residency: satisfied
+        c-scan: satisfied
+        c-sink: satisfied
+
+  - name: email-inbound-non-eu-unscanned-violates
+    description: >
+      The trap: a receiving pipeline in a non-EU region that accepts mail unscanned
+      violates BOTH residency and the spam/virus scan floor — a hard violation
+      blocks execution. No coercion, four-valued.
+    vocab:
+      - capability: capability.email.inbound
+        version: 0.1
+        stateful: false
+        attributes:
+          location.region: { kind: string }
+          spam.filtered: { kind: bool }
+          delivery.sink: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: mail-in-2, environment: production, version: 1 }
+      capabilities:
+        - id: dealbox
+          type: capability.email.inbound
+      constraints:
+        hard:
+          - id: c-residency
+            subject: dealbox
+            path: location.region
+            op: equals
+            value: eu-central-1
+            verify: { method: static }
+          - id: c-scan
+            subject: dealbox
+            path: spam.filtered
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: mail-in-2
+      capabilities:
+        dealbox:
+          attributes:
+            location.region: us-east-1
+            spam.filtered: false
+            delivery.sink: true
+    expect:
+      executable: false
+      verdicts:
+        c-residency: violated
+        c-scan: violated
+
+  - name: email-sending-production-access-sandbox-violated
+    description: >
+      The SES manual-gate: a contract asserts the account is out of the sandbox
+      (sending.productionAccess=true). A sandboxed candidate observes false — groundhold
+      reports the truth of the gate and REFUSES the plan until a human obtains
+      production access, never faking it (like Bedrock model access).
+    vocab:
+      - capability: capability.email.sending
+        version: 0.1
+        stateful: false
+        attributes:
+          sending.productionAccess: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: ses-prod-1, environment: production, version: 1 }
+      capabilities:
+        - id: mail
+          type: capability.email.sending
+      constraints:
+        hard:
+          - id: c-prod-access
+            subject: mail
+            path: sending.productionAccess
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: ses-prod-1
+      capabilities:
+        mail:
+          attributes:
+            sending.productionAccess: false
+    expect:
+      executable: false
+      verdicts:
+        c-prod-access: violated
+
+  - name: threatdetection-enabled-with-eks-protection-satisfied
+    description: >
+      GuardDuty posture (Acme §7): the detector is enabled with Kubernetes
+      protection in an EU region — the platform threat-detection floor is met.
+    vocab:
+      - capability: capability.security.threatdetection
+        version: 0.1
+        stateful: false
+        attributes:
+          location.region: { kind: string }
+          detection.enabled: { kind: bool }
+          protection.kubernetes: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: gd-1, environment: production, version: 1 }
+      capabilities:
+        - id: threat
+          type: capability.security.threatdetection
+      constraints:
+        hard:
+          - id: c-region
+            subject: threat
+            path: location.region
+            op: equals
+            value: eu-central-1
+            verify: { method: static }
+          - id: c-enabled
+            subject: threat
+            path: detection.enabled
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-k8s
+            subject: threat
+            path: protection.kubernetes
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: gd-1
+      capabilities:
+        threat:
+          attributes:
+            location.region: eu-central-1
+            detection.enabled: true
+            protection.kubernetes: true
+    expect:
+      executable: true
+      verdicts:
+        c-region: satisfied
+        c-enabled: satisfied
+        c-k8s: satisfied
+
+  - name: threatdetection-disabled-violated
+    description: >
+      A detector that is off cannot satisfy a threat-detection floor — a hard
+      violation blocks execution, never a coerced pass.
+    vocab:
+      - capability: capability.security.threatdetection
+        version: 0.1
+        stateful: false
+        attributes:
+          detection.enabled: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: gd-2, environment: production, version: 1 }
+      capabilities:
+        - id: threat
+          type: capability.security.threatdetection
+      constraints:
+        hard:
+          - id: c-enabled
+            subject: threat
+            path: detection.enabled
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: gd-2
+      capabilities:
+        threat:
+          attributes:
+            detection.enabled: false
+    expect:
+      executable: false
+      verdicts:
+        c-enabled: violated
+
+  - name: monitoring-logs-retention-eu-satisfied
+    description: >
+      capability.monitoring.logs: a log group whose logs live in the EU and are kept
+      at least 90 days satisfies a residency + retention contract. retention is a
+      duration (gte, no coercion); region is a closed EU set (in).
+    vocab:
+      - capability: capability.monitoring.logs
+        version: 0.1
+        stateful: true
+        attributes:
+          location.region: { kind: string }
+          retention.days: { kind: duration }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: logs-1, environment: production, version: 1 }
+      capabilities:
+        - id: applogs
+          type: capability.monitoring.logs
+      constraints:
+        hard:
+          - id: c-retain
+            subject: applogs
+            path: retention.days
+            op: gte
+            value: 90d
+            verify: { method: static }
+          - id: c-eu
+            subject: applogs
+            path: location.region
+            op: in
+            value: [eu-central-1, eu-west-1]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: logs-1
+      capabilities:
+        applogs:
+          attributes:
+            location.region: eu-central-1
+            retention.days: 365d
+    expect:
+      executable: true
+      verdicts:
+        c-retain: satisfied
+        c-eu: satisfied
+
+  - name: monitoring-logs-retention-below-threshold-violated
+    description: >
+      retention below the required floor is a real violation, never a coerced pass:
+      30 days < the 90-day minimum a retention policy demands.
+    vocab:
+      - capability: capability.monitoring.logs
+        version: 0.1
+        stateful: true
+        attributes:
+          retention.days: { kind: duration }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: logs-2, environment: production, version: 1 }
+      capabilities:
+        - id: applogs
+          type: capability.monitoring.logs
+      constraints:
+        hard:
+          - id: c-retain
+            subject: applogs
+            path: retention.days
+            op: gte
+            value: 90d
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: logs-2
+      capabilities:
+        applogs:
+          attributes:
+            retention.days: 30d
+    expect:
+      executable: false
+      verdicts:
+        c-retain: violated
+
+  - name: private-network-baseline-sg-no-public-ingress
+    description: >
+      VPC slice 3: a baseline security group with no world-open ingress rule yields
+      ingress.public=false (reduced deterministically in observe from the SG rules),
+      satisfying a no-public-ingress posture.
+    vocab:
+      - capability: capability.network.private
+        version: 0.1
+        stateful: true
+        attributes:
+          ingress.public: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: vpc-sg-1, environment: production, version: 1 }
+      capabilities:
+        - id: net
+          type: capability.network.private
+      constraints:
+        hard:
+          - id: c-no-ingress
+            subject: net
+            path: ingress.public
+            op: equals
+            value: false
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: vpc-sg-1
+      capabilities:
+        net:
+          attributes:
+            ingress.public: false
+    expect:
+      executable: true
+      verdicts:
+        c-no-ingress: satisfied
+
+  - name: open-ingress-sg-violates
+    description: >
+      A security group with a 0.0.0.0/0 ingress rule (e.g. appended by a controller)
+      is WITNESSED: observe reduces it to ingress.public=true, violating a
+      no-public-ingress posture. The open door is surfaced, never auto-revoked.
+    vocab:
+      - capability: capability.network.private
+        version: 0.1
+        stateful: true
+        attributes:
+          ingress.public: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: vpc-sg-2, environment: production, version: 1 }
+      capabilities:
+        - id: net
+          type: capability.network.private
+      constraints:
+        hard:
+          - id: c-no-ingress
+            subject: net
+            path: ingress.public
+            op: equals
+            value: false
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: vpc-sg-2
+      capabilities:
+        net:
+          attributes:
+            ingress.public: true
+    expect:
+      executable: false
+      verdicts:
+        c-no-ingress: violated
+
+  - name: gitops-application-synced-healthy-verify
+    description: >
+      capability.gitops.application: groundhold WITNESSES a GitOps controller's root
+      app. A contract requires the cluster be reconciled to git (sync.status=synced)
+      and its resources healthy (health.status=healthy). Controller-AGNOSTIC — the
+      candidate declares only the neutral enums, so the SAME contract is satisfied
+      whether ArgoCD or Flux (or any controller) produced them.
+    vocab:
+      - capability: capability.gitops.application
+        version: 0.1
+        stateful: false
+        attributes:
+          sync.status: { kind: string, enum: [synced, drifted, unknown] }
+          health.status: { kind: string, enum: [healthy, progressing, degraded, unknown] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: gitops-1, environment: production, version: 1 }
+      capabilities:
+        - id: root
+          type: capability.gitops.application
+      constraints:
+        hard:
+          - id: c-synced
+            subject: root
+            path: sync.status
+            op: equals
+            value: synced
+            verify: { method: static }
+          - id: c-healthy
+            subject: root
+            path: health.status
+            op: equals
+            value: healthy
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: gitops-1
+      capabilities:
+        root:
+          attributes:
+            sync.status: synced
+            health.status: healthy
+    expect:
+      executable: true
+      verdicts:
+        c-synced: satisfied
+        c-healthy: satisfied
+
+  - name: gitops-application-drifted-violated
+    description: >
+      A drifted root app (the cluster no longer matches git) violates a
+      sync-required contract — the witness surfaces GitOps drift as a hard
+      violation, blocking execution, never a coerced pass.
+    vocab:
+      - capability: capability.gitops.application
+        version: 0.1
+        stateful: false
+        attributes:
+          sync.status: { kind: string, enum: [synced, drifted, unknown] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: gitops-2, environment: production, version: 1 }
+      capabilities:
+        - id: root
+          type: capability.gitops.application
+      constraints:
+        hard:
+          - id: c-synced
+            subject: root
+            path: sync.status
+            op: equals
+            value: synced
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: gitops-2
+      capabilities:
+        root:
+          attributes:
+            sync.status: drifted
+    expect:
+      executable: false
+      verdicts:
+        c-synced: violated
+
+  - name: gitops-application-sync-enum-violation-is-load-error
+    description: >
+      A sync.status outside the closed neutral enum is a load error in both
+      implementations — the controller-agnostic sync vocabulary is a guardrail,
+      not free text (a controller mapping must normalise onto the enum, never
+      pass its own raw string through).
+    vocab:
+      - capability: capability.gitops.application
+        version: 0.1
+        stateful: false
+        attributes:
+          sync.status: { kind: string, enum: [synced, drifted, unknown] }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: gitops-3, environment: production, version: 1 }
+      capabilities:
+        - id: root
+          type: capability.gitops.application
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: gitops-3
+      capabilities:
+        root:
+          attributes:
+            sync.status: OutOfSync
+    expect:
+      error: candidate
+
+  - name: dns-record-type-target-verify
+    description: >
+      capability.dns.record is a single DNS record set inside a zone (3-cloud:
+      Route 53, Cloud DNS, Azure DNS). The governed facts are its KIND (dns.type)
+      and where it POINTS (dns.target); TTL/priority/id are noise. dns.proxied is
+      a Cloudflare edge concept, absent on the three managed clouds. This pins the
+      satisfied case: the record is the declared type pointing where it should.
+    vocab:
+      - capability: capability.dns.record
+        version: 0.1
+        stateful: false
+        attributes:
+          dns.type: { kind: string }
+          dns.target: { kind: string }
+          dns.proxied: { kind: bool }
+          service.managed: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: dnsrec-1, environment: production, version: 1 }
+      capabilities:
+        - id: connect
+          type: capability.dns.record
+      constraints:
+        hard:
+          - id: c-type
+            subject: connect
+            path: dns.type
+            op: equals
+            value: CNAME
+            verify: { method: static }
+          - id: c-target
+            subject: connect
+            path: dns.target
+            op: equals
+            value: origin.example.net
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: dnsrec-1
+      capabilities:
+        connect:
+          attributes:
+            dns.type: CNAME
+            dns.target: origin.example.net
+            service.managed: true
+    expect:
+      executable: true
+      verdicts:
+        c-type: satisfied
+        c-target: satisfied
+
+  - name: dns-record-target-drift-violated
+    description: >
+      A record that points somewhere OTHER than the contract requires is a
+      violated hard constraint — the correctness fact an org governs. The record
+      resolves, but to the wrong origin.
+    vocab:
+      - capability: capability.dns.record
+        version: 0.1
+        stateful: false
+        attributes:
+          dns.type: { kind: string }
+          dns.target: { kind: string }
+          service.managed: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: dnsrec-2, environment: production, version: 1 }
+      capabilities:
+        - id: connect
+          type: capability.dns.record
+      constraints:
+        hard:
+          - id: c-target
+            subject: connect
+            path: dns.target
+            op: equals
+            value: origin.example.net
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: dnsrec-2
+      capabilities:
+        connect:
+          attributes:
+            dns.type: CNAME
+            dns.target: attacker.example.org
+            service.managed: true
+    expect:
+      executable: false
+      verdicts:
+        c-target: violated
+
+  - name: dns-record-proxied-kind-mismatch-is-load-error
+    description: >
+      Invariant #2 (no coercion): dns.proxied is a bool. A candidate that declares
+      it as the STRING "false" is a vocab kind mismatch — a candidate LOAD error,
+      never silently coerced. Pins that the record vocabulary enforces its kinds.
+    vocab:
+      - capability: capability.dns.record
+        version: 0.1
+        stateful: false
+        attributes:
+          dns.type: { kind: string }
+          dns.target: { kind: string }
+          dns.proxied: { kind: bool }
+          service.managed: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: dnsrec-3, environment: production, version: 1 }
+      capabilities:
+        - id: connect
+          type: capability.dns.record
+      constraints:
+        hard:
+          - id: c-proxied
+            subject: connect
+            path: dns.proxied
+            op: equals
+            value: false
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: dnsrec-3
+      capabilities:
+        connect:
+          attributes:
+            dns.proxied: "false"
+            service.managed: true
+    expect:
+      error: candidate

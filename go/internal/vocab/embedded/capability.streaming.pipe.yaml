@@ -1,0 +1,82 @@
+# Attribute vocabulary for capability.streaming.pipe, spec v0.1 (D114).
+#
+# A managed record STREAM — a partitioned, ordered, replayable append log with a
+# retention window. Distinct from capability.messaging.topic (D60): a topic is
+# fan-out pub/sub (a message is delivered then gone); a stream is a durable log
+# consumers read at their own offset within a retention window. The twin is AWS
+# Kinesis Data Streams and Azure Event Hubs.
+#
+# This is an HONEST TWO-CLOUD domain: GCP has no clean managed streaming twin —
+# Pub/Sub Lite (the closest) is deprecated (shutdown announced), and Managed
+# Service for Apache Kafka is a different Kafka-cluster model, not a single stream
+# resource. So a gcp candidate is REFUSED by fail-closed dispatch, never a faked
+# third mapping (the D113 search stance, applied again).
+#
+# Shard/partition count, throughput/capacity mode and consumer registrations are
+# implementation sizing; residency, retention, availability and encryption are the
+# capability.
+
+capability: capability.streaming.pipe
+version: 0.1
+stateful: true   # a stream buffers records within its retention window; destroying
+                 # it drops replayable/in-flight data (rebuildable from producers,
+                 # but a real footprint — D47 delete friction, softer than a database).
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Primary region of the stream
+    mappings:
+      aws.kinesis: provider region (the stream is regional)
+      azure.eventhubs: the Event Hubs namespace location
+
+  retention.window:
+    kind: duration
+    description: >
+      How long records remain replayable in the stream. A durability/replay
+      guarantee, not sizing — a consumer that falls behind by less than this
+      window can still catch up.
+    mappings:
+      aws.kinesis: RetentionPeriodHours (24h default, up to 8760h)
+      azure.eventhubs: retentionDescription / messageRetentionInDays (tier-capped)
+
+  availability.class:
+    kind: string
+    enum: [zonal, regional]
+    description: >
+      Failure domain the stream survives. regional = replicated across zones in
+      the region (the twin path). zonal is honored ONLY on Azure (a
+      non-zone-redundant namespace); on AWS it is REFUSED — a Kinesis stream is
+      always regionally/multi-AZ replicated, so a zonal claim would misrepresent it.
+    mappings:
+      aws.kinesis: always regional (multi-AZ) — zonal refused
+      azure.eventhubs: zoneRedundant=true (regional) vs false (zonal)
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: >
+      Records encrypted with a CUSTOMER-managed key (CMEK/KMS), not the provider
+      default. The key id is implementation detail (implementation.kms_*), never a
+      capability path.
+    mappings:
+      aws.kinesis: StartStreamEncryption with a customer KMS key
+      azure.eventhubs: namespace encryption keySource=Microsoft.KeyVault (Premium tier + identity)
+
+  service.managed:
+    kind: bool
+    description: Managed service vs self-operated
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost of the capability
+    verification: static against a pricing catalog; provider-api (billing) after deploy
+
+# Deliberately absent in v0.1 (implementation detail / sizing, not capability
+# semantics): shard/partition count, throughput/capacity mode (on-demand vs
+# provisioned), consumer registrations (enhanced fan-out / consumer groups),
+# partition-key strategy. A candidate may carry them under `implementation:`; the
+# verifier ignores them.
+#   - ordering.guarantee: a stream is per-partition ordered by construction; there
+#     is no cross-cloud knob to toggle it, so it is not a vocabulary attribute.

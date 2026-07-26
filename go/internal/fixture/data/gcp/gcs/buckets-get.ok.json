@@ -1,0 +1,77 @@
+{
+  "schema": "groundhold/fixture/v1",
+  "provider": "gcp",
+  "service": "gcs",
+  "operation": "buckets.get",
+  "variant": "ok",
+  "provenance": "handwritten-pending-canary",
+  "apiVersion": "storage/v1",
+  "note": "Body transcribed from GCP storage/v1 buckets.get published response shape; NOT a live capture. Exercises the harness and catches DRIVER drift; flips to provenance:live when canary-gcp records the real bucket (D234 acceptance criterion).",
+  "request": {
+    "method": "GET",
+    "path": "/b/gh-fixture-bucket"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=UTF-8"
+    },
+    "raw": {
+      "kind": "storage#bucket",
+      "id": "gh-fixture-bucket",
+      "name": "gh-fixture-bucket",
+      "projectNumber": "111111111111",
+      "location": "EUROPE-CENTRAL2",
+      "locationType": "region",
+      "storageClass": "STANDARD",
+      "metageneration": "1",
+      "timeCreated": "2026-07-20T10:00:00.000Z",
+      "updated": "2026-07-20T10:00:00.000Z",
+      "versioning": {
+        "enabled": true
+      },
+      "iamConfiguration": {
+        "uniformBucketLevelAccess": {
+          "enabled": true
+        },
+        "publicAccessPrevention": "enforced"
+      },
+      "etag": "CAE="
+    }
+  },
+  "shapeHash": "sha256:af5f512d0df155de10522aa2289ab30421f924247dd75b7a73f470c8e0941d6f",
+  "expected": {
+    "observations": [
+      {
+        "path": "location.region",
+        "value": "europe-central2",
+        "derivation": "measured"
+      },
+      {
+        "path": "replication.enabled",
+        "value": false,
+        "derivation": "measured"
+      },
+      {
+        "path": "encryption.atRest",
+        "value": true,
+        "derivation": "config-intent"
+      },
+      {
+        "path": "service.managed",
+        "value": true,
+        "derivation": "measured"
+      },
+      {
+        "path": "versioning.enabled",
+        "value": true,
+        "derivation": "measured"
+      },
+      {
+        "path": "network.publicExposure",
+        "value": false,
+        "derivation": "measured"
+      }
+    ]
+  }
+}

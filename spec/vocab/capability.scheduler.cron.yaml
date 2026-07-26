@@ -1,0 +1,63 @@
+# Attribute vocabulary for capability.scheduler.cron, spec v0.1 (D123).
+#
+# A managed CRON / SCHEDULED-TRIGGER — the honest 2-cloud twin is GCP Cloud Scheduler
+# (a job) and AWS EventBridge Scheduler (a schedule). It fires a target on a recurring
+# cron expression. This is a DELIBERATELY THIN capability, and the vocabulary says so
+# rather than inventing semantics: a scheduler's cron expression, timezone, target
+# (topic / queue / function / http endpoint), payload, retry policy and dead-letter
+# config are all IMPLEMENTATION detail (invariant #4) — several of them (an HTTP
+# target's auth header, a payload) are secrets groundhold must never manage (D53). What
+# is LEFT that an organization can meaningfully REQUIRE and a driver can verify is the
+# residency and whether the trigger is ARMED. That is the whole capability, and it is
+# the same thin-envelope stance as capability.identity.serviceaccount (D121).
+#
+# WHY 2-CLOUD (Azure refused, fail-closed dispatch): Azure has no clean single-resource
+# managed-cron primitive. The nearest analogues — a Logic App with a Recurrence
+# trigger, or an Automation runbook schedule — are different shapes (an app / a runbook
+# with a separate schedule object), not a standalone "scheduled trigger" resource, so a
+# scheduler is refused at dispatch rather than mapped onto a resource that means
+# something else. The refusal is the honest answer (the D120 / D122 precedent).
+#
+# There is no natural closed enum on a scheduler, so the enum-guard dual conformance
+# case is a KIND-MISMATCH load error (D121 precedent): schedule.enabled is declared
+# bool, and a candidate supplying a non-bool is a load error, never a coerced truthy.
+
+capability: capability.scheduler.cron
+version: 0.1
+stateful: false   # a scheduler holds no data — its target and payload are references
+                  # out of band; deleting it stops a trigger, it does not lose data.
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Region the scheduler runs in.
+    mappings:
+      gcp.cloudscheduler: the job location
+      aws.eventbridgescheduler: derived from the provider region
+
+  schedule.enabled:
+    kind: bool
+    description: >
+      Whether the trigger is ARMED (firing on its cron) or PAUSED. The one genuine
+      run-state toggle both clouds expose as a first-class property.
+    mappings:
+      gcp.cloudscheduler: job state ENABLED vs PAUSED (jobs.pause / jobs.resume)
+      aws.eventbridgescheduler: schedule State ENABLED vs DISABLED
+
+  service.managed:
+    kind: bool
+    description: Managed scheduler service vs a self-operated cron host.
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost (per-job / per-invocation).
+    verification: static against a pricing catalog; billing after deploy
+
+# Deliberately absent in v0.1 (implementation detail / opaque config / secrets — NOT
+# capability semantics): the cron expression and timezone, the target (pubsub topic /
+# SQS queue / Lambda / Cloud Run / HTTP endpoint) and its ARN/URI, the request payload
+# and headers (a payload or auth header is a secret — D53), retry and backoff policy,
+# dead-letter configuration, the flexible-time-window / jitter, and the invoker IAM
+# role. A scheduler is mostly opaque plumbing; the capability is only residency + armed.

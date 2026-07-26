@@ -1,0 +1,99 @@
+# Attribute vocabulary for capability.registry.image, spec v0.1 (D110).
+#
+# A managed CONTAINER IMAGE REGISTRY — the 3-cloud twin is GCP Artifact Registry, AWS
+# ECR, and Azure Container Registry. It is a managed stateful data service (it holds
+# image layers), so it carries the same residency / exposure / encryption semantics as
+# storage.object, plus one supply-chain semantic of its own: tag IMMUTABILITY, the
+# guarantee that a pushed tag (v1.2.3) can never be silently repointed at different
+# bytes.
+#
+# Two honest per-cloud gaps the vocabulary surfaces rather than smooths: a public
+# registry (network.publicExposure=true) is refused on AWS, because an ECR PRIVATE
+# registry cannot be made public — public pull is AWS's separate ECR Public service, a
+# different resource, so faking it here would lie; and immutable.tags is refused on
+# Azure, because ACR has no registry-level tag-immutability toggle (it is per-repository
+# policy), where GCP Artifact Registry and AWS ECR both expose it as a registry/repo
+# flag. A contract asking for both public and immutable tags is honored where each cloud
+# supports it and refused where it does not, and the refusal is the honest answer.
+
+capability: capability.registry.image
+version: 0.1
+stateful: true   # a registry holds image layers; destroying it loses them (and can
+                 # break every deployment that pulls from it) — conservative-honest
+                 # retirement gating (D47).
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Region the registry lives in.
+    mappings:
+      gcp.artifactregistry: the repository location
+      aws.ecr: derived from the provider region
+      azure.acr: the registry location
+
+  network.publicExposure:
+    kind: bool
+    description: >
+      Whether the registry is reachable from the public internet (anonymous or
+      cross-account pull). REFUSED on AWS: an ECR private registry is never public —
+      public pull is the separate ECR Public service (a different resource), so a
+      public=true ECR request is refused rather than faked.
+    mappings:
+      gcp.artifactregistry: an allUsers/allAuthenticatedUsers reader IAM binding
+      aws.ecr: REFUSED (ECR Public is a distinct service)
+      azure.acr: publicNetworkAccess=Enabled
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: >
+      Image layers encrypted with a CUSTOMER-managed key (the key id is impl detail —
+      implementation.kms_key, never a capability path). On Azure this requires the
+      Premium SKU, so it is refused on a non-Premium request rather than downgraded.
+    mappings:
+      gcp.artifactregistry: kmsKeyName
+      aws.ecr: encryptionConfiguration.encryptionType=KMS + kmsKey
+      azure.acr: Premium encryption.keyVaultProperties, else REFUSED
+
+  immutable.tags:
+    kind: bool
+    description: >
+      Whether pushed tags are IMMUTABLE — a tag can never be repointed at different
+      image bytes (a supply-chain guarantee: v1.2.3 always means the same digest).
+      Honored on GCP/AWS as a registry/repository flag; REFUSED on Azure, whose ACR has
+      no registry-level toggle (immutability there is per-repository policy).
+    mappings:
+      gcp.artifactregistry: dockerConfig.immutableTags
+      aws.ecr: imageTagMutability=IMMUTABLE
+      azure.acr: REFUSED (no registry-level flag)
+
+  security.scanOnPush:
+    kind: bool
+    description: >
+      Every pushed image is automatically scanned for known vulnerabilities at push
+      time — a supply-chain POSTURE: a newly pushed layer cannot enter the registry
+      unscanned. Honored on AWS as a registry/repository flag; GCP and Azure express
+      the same posture through different mechanisms (Artifact Analysis / Defender for
+      Cloud), wired in their own slices.
+    mappings:
+      aws.ecr: imageScanningConfiguration.scanOnPush=true
+      gcp.artifactregistry: Artifact Analysis on-push scanning (separate slice)
+      azure.acr: Microsoft Defender for Cloud registry scanning (separate slice)
+
+  service.managed:
+    kind: bool
+    description: Managed registry vs a self-operated one
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost (largely storage of image layers).
+    verification: static against a pricing catalog; billing after deploy
+
+# Deliberately absent in v0.1 (implementation detail / topology, not capability
+# semantics): SKU/tier (Basic/Standard/Premium sizing), replication topology, cleanup /
+# lifecycle policies (age-out rules — a richer per-cloud shape, deferred), the image
+# FORMAT (docker/OCI is the universal default; maven/npm/other Artifact Registry formats
+# are a one-cloud feature, deferred). The scan-on-push POSTURE is now security.scanOnPush
+# (above); richer scan configuration (continuous rescan, enhanced-scan filters, severity
+# gates) stays deferred as per-cloud shape.

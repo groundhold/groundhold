@@ -1,0 +1,136 @@
+# Attribute vocabulary for capability.cache.keyvalue, spec v0.1.
+#
+# A managed, in-memory KEY-VALUE cache — the 3-cloud twin is Redis (GCP
+# Memorystore, AWS ElastiCache, Azure Cache for Redis). It is the sibling of
+# capability.database.relational: a managed stateful data service, so it carries
+# the same residency / encryption / availability semantics and refuses the same
+# implementation noise (node type, memory size, shard count, eviction policy —
+# all sizing/tuning, never capability semantics).
+#
+# engine.protocol names the wire protocol (redis/N is the tested, 3-cloud path).
+# memcached exists on GCP+AWS but has no managed Azure twin, so a memcached
+# candidate is an honest one-cloud GAP (refused on Azure), never a silent
+# two-cloud capability.
+
+capability: capability.cache.keyvalue
+version: 0.1
+stateful: true   # a running cache holds data (and, with persistence, durable
+                 # snapshots); destroying it flushes the cache — a cold-start
+                 # thundering herd on the origin, treated with delete friction.
+                 # Softer than a database, but conservative-honest (D47 gating).
+
+attributes:
+
+  engine.protocol:
+    kind: protocol
+    description: >
+      Cache wire protocol, e.g. redis/7. redis/N is the 3-cloud path; memcached
+      is honored on gcp/aws and REFUSED on azure (no managed Azure Memcached).
+    mappings:
+      gcp.memorystore: redisVersion (REDIS_7_0) / Memcached instance
+      aws.elasticache: Engine + EngineVersion (redis | memcached)
+      azure.rediscache: always Redis (memcached refused)
+
+  location.region:
+    kind: string
+    description: Primary region of the cache instance
+    mappings:
+      gcp.memorystore: locationId / the instance region
+      aws.elasticache: derived from provider region / the subnet group's AZs
+      azure.rediscache: the resource location
+
+  network.publicExposure:
+    kind: bool
+    description: Whether any public network path to the cache exists
+    mappings:
+      gcp.memorystore: connectMode PRIVATE_SERVICE_ACCESS (no public IP ever)
+      aws.elasticache: the cache subnet group is private (no public route)
+      azure.rediscache: publicNetworkAccess=Disabled
+    note: >
+      static verification proves configuration intent; an anonymous-reach probe
+      proves the actual absence of a public path post-deploy.
+
+  encryption.atRest:
+    kind: bool
+    description: >
+      Provider-side encryption of persisted cache data (snapshots/persistence).
+      An in-memory-only cache still encrypts its backups; the flag is about the
+      durable footprint, not the volatile working set.
+    mappings:
+      gcp.memorystore: always encrypted at rest (CMEK optional)
+      aws.elasticache: AtRestEncryptionEnabled
+      azure.rediscache: always encrypted (data persistence encrypted; Premium)
+    recommended:
+      op: equals
+      value: true
+      scope: all
+      rationale: "Encrypt cached data at rest so a disk or snapshot compromise does not expose it."
+      ruleId: PV_R0009
+      ruleVersion: 1
+      controls:
+        FSBP: ["ElastiCache.6"]
+        GDPR: ["Art.32"]
+
+  encryption.inTransit:
+    kind: bool
+    description: >
+      Client connections to the cache must be TLS-encrypted, not merely
+      permitted. A provider default that also allows cleartext does NOT satisfy it.
+    mappings:
+      gcp.memorystore: transitEncryptionMode = SERVER_AUTHENTICATION
+      aws.elasticache: TransitEncryptionEnabled
+      azure.rediscache: enableNonSslPort=false AND minimumTlsVersion >= 1.2
+    recommended:
+      op: equals
+      value: true
+      scope: all
+      rationale: "Require TLS between clients and the cache; cache traffic often carries session data and PII."
+      ruleId: PV_R0008
+      ruleVersion: 1
+      controls:
+        FSBP: ["ElastiCache.5"]
+        GDPR: ["Art.32"]
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: >
+      Persisted cache data encrypted with a CUSTOMER-managed key. The key id is
+      implementation detail (implementation.kms_key_name / kms_key_id), never a
+      capability path. Honored on gcp/aws; on azure REFUSED unless Premium (CMK
+      for Redis is a Premium-tier data-persistence feature) — refused rather than
+      silently downgraded.
+    mappings:
+      gcp.memorystore: customerManagedKey
+      aws.elasticache: KmsKeyId (a customer key, with at-rest encryption)
+      azure.rediscache: Premium data-persistence CMK, else REFUSED
+
+  availability.class:
+    kind: string
+    enum: [zonal, regional, multi-regional]
+    description: >
+      Failure domain the cache survives. multi-regional has no single managed
+      Redis primitive (it is app-level active/active or cross-region replication
+      topology) and is REFUSED, never faked.
+    mappings:
+      gcp.memorystore: tier BASIC=zonal, STANDARD_HA=regional
+      aws.elasticache: MultiAZEnabled + AutomaticFailoverEnabled => regional
+      azure.rediscache: Basic=zonal, Standard/Premium=regional (replica)
+
+  service.managed:
+    kind: bool
+    description: Managed service vs self-operated
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost of the capability
+    verification: static against a pricing catalog; provider-api (billing) after deploy
+
+# Deliberately absent in v0.1 (implementation detail / topology, not capability
+# semantics): memory size / node type / shard (cluster) count / replica count —
+# sizing; eviction policy (maxmemory-policy) and other redis.conf tuning; version
+# minor pinning; maintenance windows. A candidate may carry them under
+# `implementation:` — the verifier ignores them.
+#   - recovery.rpo (snapshot/persistence cadence): a real feature but tier-gated
+#     and engine-specific across the three clouds; DEFERRED to a later slice with
+#     honest per-cloud refusals, never a ledger promise it cannot keep.

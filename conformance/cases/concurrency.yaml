@@ -1,0 +1,305 @@
+# D37: concurrency semantics (D28 CAS, D29 leases/fencing/receipts) pinned
+# by deterministic scenarios. Logical clock, no wall time; concurrency is
+# interleaved steps. "@N" references the hash of the event appended at
+# step N. conflict = CAS mismatch (the mechanism working, not an error);
+# rejected = rule violation.
+
+cases:
+  - name: cas-append-and-conflict
+    description: >
+      D28: append succeeds only against the expected head; a concurrent
+      writer sees a conflict and must re-read.
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - append: { type: contract.published, capabilities: [db], actor: alice, actorType: human }
+          expectedHeads: { db: genesis }
+        - append: { type: candidate.verified, capabilities: [db], actor: bob, actorType: human }
+          expectedHeads: { db: genesis }
+        - append: { type: candidate.verified, capabilities: [db], actor: bob, actorType: human }
+          expectedHeads: { db: "@1" }
+    expect:
+      results:
+        - { status: ok }
+        - { status: conflict }
+        - { status: ok }
+
+  - name: checkheads-detects-stale-read-set
+    description: >
+      D28 + D36: a plan pins heads at seal time; any later event on the
+      capability makes that read-set stale.
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - append: { type: plan.sealed, capabilities: [db] }
+        - checkHeads: { db: "@1" }
+        - append: { type: contract.published, capabilities: [db] }
+        - checkHeads: { db: "@1" }
+    expect:
+      results:
+        - { status: ok }
+        - { status: fresh }
+        - { status: ok }
+        - { status: stale }
+
+  - name: lease-tokens-are-monotonic
+    description: >
+      D29 + D35: tokens derive from ledger history — max prior token + 1,
+      across release/reacquire.
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - append: { type: lease.acquired, capabilities: [db], actor: worker-a, body: { ttlSeconds: 100 } }
+        - append: { type: lease.released, capabilities: [db], actor: worker-a, fencingToken: 1 }
+        - append: { type: lease.acquired, capabilities: [db], actor: worker-b, body: { ttlSeconds: 100 } }
+    expect:
+      results:
+        - { status: ok, token: 1 }
+        - { status: ok }
+        - { status: ok, token: 2 }
+
+  - name: resumed-stale-worker-cannot-write
+    description: >
+      D29: worker-a pauses past its TTL; worker-b acquires token 2;
+      worker-a resumes and writes with token 1 — rejected. TTL alone
+      would have let it falsify history.
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - append: { type: lease.acquired, capabilities: [db], actor: worker-a, body: { ttlSeconds: 3 } }
+        - tick: 5
+        - append: { type: lease.acquired, capabilities: [db], actor: worker-b, body: { ttlSeconds: 100 } }
+        - append: { type: binding.updated, capabilities: [db], actor: worker-a, fencingToken: 1 }
+        - append: { type: binding.updated, capabilities: [db], actor: worker-b, fencingToken: 2 }
+    expect:
+      results:
+        - { status: ok, token: 1 }
+        - { status: ok }
+        - { status: ok, token: 2 }
+        - { status: rejected }
+        - { status: ok }
+
+  - name: cannot-acquire-over-active-lease
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - append: { type: lease.acquired, capabilities: [db], actor: worker-a, body: { ttlSeconds: 100 } }
+        - append: { type: lease.acquired, capabilities: [db], actor: worker-b, body: { ttlSeconds: 100 } }
+    expect:
+      results:
+        - { status: ok, token: 1 }
+        - { status: rejected }
+
+  - name: mutation-without-lease-is-rejected
+    description: D29 - mutations require an active lease and its token.
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - append: { type: binding.updated, capabilities: [db], fencingToken: 1 }
+        - append: { type: apply.started, capabilities: [db], fencingToken: 1 }
+    expect:
+      results:
+        - { status: rejected }
+        - { status: rejected }
+
+  - name: breaking-lease-requires-receipt-reconciliation
+    description: >
+      D29: a pending operation receipt blocks lease.broken until the
+      provider operation reaches a terminal status — cloud operations
+      outlive processes.
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - append: { type: lease.acquired, capabilities: [db], actor: worker-a, body: { ttlSeconds: 100 } }
+        - append: { type: operation.receipt, capabilities: [db], actor: worker-a, body: { operationId: op-1, status: pending } }
+        - append: { type: lease.broken, capabilities: [db], actor: worker-b }
+        - append: { type: operation.receipt, capabilities: [db], actor: worker-b, body: { operationId: op-1, status: succeeded } }
+        - append: { type: lease.broken, capabilities: [db], actor: worker-b }
+        - append: { type: lease.acquired, capabilities: [db], actor: worker-b, body: { ttlSeconds: 100 } }
+    expect:
+      results:
+        - { status: ok, token: 1 }
+        - { status: ok }
+        - { status: rejected }
+        - { status: ok }
+        - { status: ok }
+        - { status: ok, token: 2 }
+
+  - name: unknown-receipt-blocks-lease-breaking
+    description: >
+      D29 + D57: an UNKNOWN outcome is nonterminal — it keeps the
+      operation pending exactly like an explicit pending receipt.
+      Breaking the lease without adopting the receipts stays refused;
+      only resume (or adoptReceipts, deliberately) concludes it. The
+      reference drifted here once (unknown fell through as neither
+      pending nor terminal) and the differential caught it at n=200.
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - append: { type: lease.acquired, capabilities: [db], actor: worker-a, body: { ttlSeconds: 100 } }
+        - append: { type: operation.receipt, capabilities: [db], actor: worker-a, body: { operationId: op-1, status: unknown } }
+        - append: { type: lease.broken, capabilities: [db], actor: worker-b }
+        - append: { type: lease.broken, capabilities: [db], actor: worker-b, body: { adoptReceipts: true } }
+        - append: { type: lease.acquired, capabilities: [db], actor: worker-b, body: { ttlSeconds: 100 } }
+    expect:
+      results:
+        - { status: ok, token: 1 }
+        - { status: ok }
+        - { status: rejected }
+        - { status: ok }
+        - { status: ok, token: 2 }
+
+  - name: lease-renewal-extends-expiry
+    description: >
+      D29: renewal under the correct token extends the lease from the
+      renewal moment; past the extended TTL the token is stale again.
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - append: { type: lease.acquired, capabilities: [db], actor: worker-a, body: { ttlSeconds: 3 } }
+        - tick: 2
+        - append: { type: lease.renewed, capabilities: [db], actor: worker-a, fencingToken: 1 }
+        - tick: 2
+        - append: { type: binding.updated, capabilities: [db], actor: worker-a, fencingToken: 1 }
+        - tick: 2
+        - append: { type: binding.updated, capabilities: [db], actor: worker-a, fencingToken: 1 }
+    expect:
+      results:
+        - { status: ok, token: 1 }
+        - { status: ok }
+        - { status: ok }
+        - { status: ok }
+        - { status: ok }
+        - { status: ok }
+        - { status: rejected }
+
+  - name: breaking-with-adopted-receipts
+    description: >
+      D29: adoptReceipts is the explicit escape hatch — the breaker takes
+      responsibility for in-flight operations, and the pending set clears.
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - append: { type: lease.acquired, capabilities: [db], actor: worker-a, body: { ttlSeconds: 100 } }
+        - append: { type: operation.receipt, capabilities: [db], actor: worker-a, body: { operationId: op-1, status: pending } }
+        - append: { type: lease.broken, capabilities: [db], actor: worker-b, body: { adoptReceipts: true } }
+        - append: { type: lease.acquired, capabilities: [db], actor: worker-b, body: { ttlSeconds: 100 } }
+        - append: { type: lease.broken, capabilities: [db], actor: worker-c }
+    expect:
+      results:
+        - { status: ok, token: 1 }
+        - { status: ok }
+        - { status: ok }
+        - { status: ok, token: 2 }
+        - { status: ok }
+
+  - name: multi-capability-lease
+    description: >
+      A lease may span several capabilities: one token guards all of them,
+      and any of them being held blocks a competing acquire.
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - append: { type: lease.acquired, capabilities: [db, cache], actor: worker-a, body: { ttlSeconds: 100 } }
+        - append: { type: binding.updated, capabilities: [db, cache], actor: worker-a, fencingToken: 1 }
+        - append: { type: lease.acquired, capabilities: [db], actor: worker-b, body: { ttlSeconds: 100 } }
+        - append: { type: lease.released, capabilities: [db, cache], actor: worker-a, fencingToken: 1 }
+        - append: { type: lease.acquired, capabilities: [cache], actor: worker-b, body: { ttlSeconds: 100 } }
+    expect:
+      results:
+        - { status: ok, token: 1 }
+        - { status: ok }
+        - { status: rejected }
+        - { status: ok }
+        - { status: ok, token: 2 }
+
+  - name: negative-tick-is-a-scenario-error
+    description: >
+      Time only moves forward — a reversible clock would resurrect
+      expired leases and break fencing.
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - append: { type: lease.acquired, capabilities: [db], body: { ttlSeconds: 3 } }
+        - tick: 5
+        - tick: -5
+    expect:
+      error: scenario
+
+  - name: bad-step-reference-is-a-scenario-error
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - checkHeads: { db: "@x" }
+    expect:
+      error: scenario
+
+  - name: knowledge-and-coordination-do-not-invalidate-decisions
+    description: >
+      D41: observations, receipts and lease churn advance the audit chain
+      (full heads) but never the decision heads a sealed plan pins.
+      Learning about the world is not deciding about it.
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - append: { type: contract.published, capabilities: [db] }
+        - checkDecisionHeads: { db: "@1" }
+        - append: { type: observation.recorded, capabilities: [db], body: { path: network.publicExposure, value: false } }
+        - checkDecisionHeads: { db: "@1" }
+        - append: { type: lease.acquired, capabilities: [db], body: { ttlSeconds: 100 } }
+        - checkDecisionHeads: { db: "@1" }
+        - append: { type: operation.receipt, capabilities: [db], body: { operationId: op-1, status: succeeded } }
+        - checkDecisionHeads: { db: "@1" }
+        - checkHeads: { db: "@1" }
+        - append: { type: binding.updated, capabilities: [db], fencingToken: 1 }
+        - checkDecisionHeads: { db: "@1" }
+    expect:
+      results:
+        - { status: ok }
+        - { status: fresh }
+        - { status: ok }
+        - { status: fresh }
+        - { status: ok, token: 1 }
+        - { status: fresh }
+        - { status: ok }
+        - { status: fresh }
+        - { status: stale }
+        - { status: ok }
+        - { status: stale }
+
+  - name: failed-apply-advances-heads
+    description: >
+      After apply.failed the pre-apply read-set is stale: the same sealed
+      plan cannot be retried blindly — re-verify, re-seal (D28).
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - append: { type: plan.sealed, capabilities: [db] }
+        - checkHeads: { db: "@1" }
+        - append: { type: lease.acquired, capabilities: [db], body: { ttlSeconds: 100 } }
+        - append: { type: apply.started, capabilities: [db], fencingToken: 1 }
+        - append: { type: apply.failed, capabilities: [db], fencingToken: 1 }
+        - checkHeads: { db: "@1" }
+    expect:
+      results:
+        - { status: ok }
+        - { status: fresh }
+        - { status: ok, token: 1 }
+        - { status: ok }
+        - { status: ok }
+        - { status: stale }

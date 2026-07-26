@@ -1,0 +1,34 @@
+# Report identity: every verification report names the spec version it was
+# produced under. Contract/candidate hashes join it once canonicalization
+# is decided (open question, prerequisite for Sealed Plan IR).
+
+cases:
+  - name: report-carries-spec-version
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: s1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-encrypted
+            subject: db
+            path: encryption.atRest
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: s1
+      capabilities:
+        db:
+          attributes:
+            encryption.atRest: true
+    expect:
+      executable: true
+      specVersion: contract/v0.1
+      verdicts:
+        c-encrypted: satisfied

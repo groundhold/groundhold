@@ -1,0 +1,89 @@
+# Attribute vocabulary for capability.warehouse.analytics, spec v0.1 (D122).
+#
+# A managed ANALYTICS DATA WAREHOUSE — the honest 2-cloud twin is GCP BigQuery (a
+# dataset) and AWS Redshift Serverless (a namespace + workgroup). It is a managed
+# stateful data service (it holds tables and their rows), so it carries the same
+# residency / exposure / encryption semantics as storage.object, with two honest
+# per-cloud gaps the vocabulary surfaces rather than smooths.
+#
+# WHY 2-CLOUD (Azure refused, fail-closed dispatch): the closest Azure analogue,
+# a Synapse workspace (Microsoft.Synapse/workspaces), cannot be created without a
+# SQL administrator PASSWORD — a secret groundhold must never manage or transit (D53) —
+# and a pre-existing ADLS Gen2 storage substrate. There is no keyless create path,
+# so an Azure warehouse is refused at dispatch rather than faked with a managed
+# credential. The refusal is the honest answer (the D120 container-job 2-cloud
+# precedent). BigQuery and Redshift Serverless both create with IAM auth alone.
+#
+# The two honest gaps:
+#  - network.publicExposure is honored on AWS (a Redshift workgroup's
+#    publiclyAccessible flag is genuine network reachability) and REFUSED on GCP,
+#    because a BigQuery dataset has NO network boundary — it is reached through the
+#    global bigquery.googleapis.com endpoint and gated by IAM, not by a public/
+#    private network mode. Mapping it to an allUsers IAM grant would answer a
+#    different question (IAM reach, not network reach), so it is refused, not faked.
+#  - there is no natural closed enum on the warehouse resource (BigQuery editions
+#    are a reservation-level capacity concept, not a dataset attribute; Redshift
+#    Serverless base capacity is sizing noise), so the enum-guard dual conformance
+#    case is a KIND-MISMATCH load error instead (D121 precedent): the type system
+#    stands in for the enum-guard.
+
+capability: capability.warehouse.analytics
+version: 0.1
+stateful: true   # tables and rows ARE the data; destroying the warehouse loses them
+                 # — conservative-honest retirement gating (D47), as with
+                 # storage.object and registry.image.
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Region (or multi-region) the warehouse's data lives in.
+    mappings:
+      gcp.bigquery: the dataset location (US / EU / a region)
+      aws.redshiftserverless: derived from the provider region
+
+  network.publicExposure:
+    kind: bool
+    description: >
+      Whether the warehouse is reachable from the public internet. Honored on AWS
+      as the Redshift workgroup's publiclyAccessible flag; REFUSED on GCP, whose
+      BigQuery datasets have no network exposure mode (a dataset is reached through
+      the global API endpoint and gated by IAM, not a public/private network toggle).
+    mappings:
+      gcp.bigquery: REFUSED (no network boundary — IAM-gated global endpoint)
+      aws.redshiftserverless: workgroup publiclyAccessible
+
+  encryption.atRest:
+    kind: bool
+    description: Data at rest is encrypted (always true on both — a managed default).
+    mappings:
+      gcp.bigquery: always true (Google-managed key by default)
+      aws.redshiftserverless: always true (AWS-managed key by default)
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: >
+      Tables are encrypted with a CUSTOMER-managed key (CMEK/KMS), not merely the
+      provider's default key. The key id itself is implementation detail
+      (implementation.kms_key_name / implementation.kms_key_id), never a capability
+      path. The provider-default key does NOT satisfy this.
+    mappings:
+      gcp.bigquery: defaultEncryptionConfiguration.kmsKeyName
+      aws.redshiftserverless: namespace kmsKeyId (a customer key)
+
+  service.managed:
+    kind: bool
+    description: Managed warehouse service vs a self-operated cluster.
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost (compute + stored bytes).
+    verification: static against a pricing catalog; billing after deploy
+
+# Deliberately absent in v0.1 (implementation detail / topology, not capability
+# semantics): table/column schemas, query and materialized-view configuration,
+# compute sizing (BigQuery slots / reservations, Redshift base capacity RPUs),
+# node types, warehouse admin credentials (a secret — D53), workgroup subnets and
+# security groups, snapshot/backup schedules (a richer per-cloud shape, deferred),
+# and the storage substrate an Azure Synapse workspace would require.

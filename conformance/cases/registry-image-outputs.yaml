@@ -1,0 +1,200 @@
+# Registry image outputs (F-registry / D226 consumer proof): a container image
+# registry (ECR / Artifact Registry / ACR) now declares a typed repositoryUri
+# create output, so a workload.container candidate wires its image as a
+# structured {$ref:{capability,output}} instead of a hand-pasted literal — the
+# whole loop stays pure-groundhold. Compile behaviour is Go-runtime (D24), so
+# every case carries impl: go. The verifier is untouched: the $ref lives in the
+# implementation block (D26), which the verifier ignores. Symmetric across all
+# three clouds — the same registry -> repositoryUri -> image wiring on each.
+suite: registry-image-outputs
+cases:
+  - name: gcp-cloudrun-wires-image-from-artifactregistry-repositoryUri
+    impl: go
+    description: >
+      GCP: a Cloud Run workload wires image = $ref
+      artifactregistry.repositoryUri. Two creates; the consumer carries a
+      symbolic reference (kind string) + a DependsOn on the registry's create.
+      Only the symbolic structure is in the plan — restart-stable.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract: &gcp-contract
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: reg-gcp, environment: test, version: 1 }
+        capabilities:
+          - id: registry
+            type: capability.registry.image
+          - id: app
+            type: capability.workload.container
+        constraints:
+          hard:
+            - id: c-registry-managed
+              subject: registry
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-app-managed
+              subject: app
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: reg-gcp
+        capabilities:
+          registry:
+            provider: gcp
+            service: artifactregistry
+            attributes:
+              service.managed: true
+              location.region: europe-west1
+          app:
+            provider: gcp
+            service: cloudrun
+            attributes:
+              service.managed: true
+            implementation:
+              image:
+                $ref: { capability: registry, output: repositoryUri }
+    expect:
+      actions:
+        a-create-registry:
+          operation: create
+        a-create-app:
+          operation: create
+          dependsOn: [a-create-registry]
+          references:
+            - slot: image
+              producerAction: a-create-registry
+              capability: registry
+              output: repositoryUri
+              kind: string
+
+  - name: aws-ecs-wires-image-from-ecr-repositoryUri
+    impl: go
+    description: >
+      AWS: an ECS workload wires image = $ref ecr.repositoryUri — the ECR
+      repositoryUri (accountId.dkr.ecr.region.amazonaws.com/repo) is derived
+      from the create's pid, so a same-plan consumer resolves it at apply.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: reg-aws, environment: test, version: 1 }
+        capabilities:
+          - id: registry
+            type: capability.registry.image
+          - id: app
+            type: capability.workload.container
+        constraints:
+          hard:
+            - id: c-registry-managed
+              subject: registry
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-app-managed
+              subject: app
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: reg-aws
+        capabilities:
+          registry:
+            provider: aws
+            service: ecr
+            attributes:
+              service.managed: true
+          app:
+            provider: aws
+            service: ecs
+            attributes:
+              service.managed: true
+            implementation:
+              image:
+                $ref: { capability: registry, output: repositoryUri }
+    expect:
+      actions:
+        a-create-registry:
+          operation: create
+        a-create-app:
+          operation: create
+          dependsOn: [a-create-registry]
+          references:
+            - slot: image
+              producerAction: a-create-registry
+              capability: registry
+              output: repositoryUri
+              kind: string
+
+  - name: azure-containerapps-wires-image-from-acr-repositoryUri
+    impl: go
+    description: >
+      Azure: a Container App wires image = $ref acr.repositoryUri — the ACR
+      login server (registry.azurecr.io) is derived from the create's pid.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: reg-az, environment: test, version: 1 }
+        capabilities:
+          - id: registry
+            type: capability.registry.image
+          - id: app
+            type: capability.workload.container
+        constraints:
+          hard:
+            - id: c-registry-managed
+              subject: registry
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-app-managed
+              subject: app
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: reg-az
+        capabilities:
+          registry:
+            provider: azure
+            service: acr
+            attributes:
+              service.managed: true
+              location.region: westeurope
+          app:
+            provider: azure
+            service: containerapps
+            attributes:
+              service.managed: true
+            implementation:
+              image:
+                $ref: { capability: registry, output: repositoryUri }
+    expect:
+      actions:
+        a-create-registry:
+          operation: create
+        a-create-app:
+          operation: create
+          dependsOn: [a-create-registry]
+          references:
+            - slot: image
+              producerAction: a-create-registry
+              capability: registry
+              output: repositoryUri
+              kind: string

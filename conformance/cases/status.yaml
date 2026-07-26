@@ -1,0 +1,189 @@
+# Background-run status (D229): `status <handle>` derives a run's state PURELY
+# from ledger events + an explicit clock (N1 family). The four-valued discipline
+# extends to run state — a writer whose lease lapsed with no terminal event is
+# `stalled` / `needs-reconcile` (run resume), never silently `failed` and never
+# still `running`. These cases pin each derivation at the CLI surface over a
+# seeded ledger. Go-runtime, impl: go.
+suite: status
+cases:
+  - name: status-running-while-lease-live
+    impl: go
+    status:
+      handle: run-x
+      at: "2026-07-11T19:03:00Z"    # within the 300s lease
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { applyRunId: run-x, ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: apply.started
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:01Z"
+            actor: { id: seeder, type: human }
+            body: { applyRunId: run-x, plan: "sha256:p" }
+    expect:
+      state: running
+      code: run-running
+      kind: apply
+
+  - name: status-stalled-when-lease-lapsed
+    impl: go
+    status:
+      handle: run-x
+      at: "2026-07-11T19:10:00Z"    # past the 300s lease, no terminal, no pending
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { applyRunId: run-x, ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: apply.started
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:01Z"
+            actor: { id: seeder, type: human }
+            body: { applyRunId: run-x, plan: "sha256:p" }
+    expect:
+      state: stalled
+      code: run-stalled
+
+  - name: status-needs-reconcile-with-pending
+    impl: go
+    status:
+      handle: run-x
+      at: "2026-07-11T19:10:00Z"    # past the lease, a receipt is unsettled
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { applyRunId: run-x, ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: apply.started
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:01Z"
+            actor: { id: seeder, type: human }
+            body: { applyRunId: run-x, plan: "sha256:p" }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: operation.receipt
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:02Z"
+            actor: { id: seeder, type: human }
+            body: { applyRunId: run-x, operationId: "intent-1", status: pending }
+    expect:
+      state: needs-reconcile
+      code: run-needs-reconcile
+
+  - name: status-done-on-finished
+    impl: go
+    status:
+      handle: run-x
+      at: "2026-07-11T19:10:00Z"    # lease TTL lapsed but the run finished
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { applyRunId: run-x, ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: apply.started
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:01Z"
+            actor: { id: seeder, type: human }
+            body: { applyRunId: run-x, plan: "sha256:p" }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: apply.finished
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:02:00Z"
+            actor: { id: seeder, type: human }
+            body: { applyRunId: run-x }
+    expect:
+      state: done
+      code: run-done
+
+  - name: status-converge-shows-phase-and-tree
+    impl: go
+    description: >
+      D229: a converge run's status derives from its own lifecycle events —
+      kind=converge, the phase reached, and the run state. Here it is running
+      in the apply phase under a live lease.
+    status:
+      handle: conv-1
+      at: "2026-07-11T19:03:00Z"
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: converge.started
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:00Z"
+            actor: { id: seeder, type: human }
+            body: { convergeRunId: conv-1, at: "2026-07-11T19:00:00Z" }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: converge.phase.entered
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:01Z"
+            actor: { id: seeder, type: human }
+            body: { convergeRunId: conv-1, phase: verify }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: converge.phase.entered
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:02Z"
+            actor: { id: seeder, type: human }
+            body: { convergeRunId: conv-1, phase: apply }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: test
+            capabilities: [db]
+            occurredAt: "2026-07-11T19:00:03Z"
+            actor: { id: seeder, type: human }
+            body: { convergeRunId: conv-1, ttlSeconds: 300 }
+    expect:
+      state: running
+      code: run-running
+      kind: converge

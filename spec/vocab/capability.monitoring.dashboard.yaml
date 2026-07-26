@@ -1,0 +1,75 @@
+# Attribute vocabulary for capability.monitoring.dashboard, spec v0.1 (D107).
+#
+# A METRIC DASHBOARD: a set of metrics rendered as charts. The observability sibling
+# of capability.monitoring.alert (D106) — an alert WATCHES a metric and fires; a
+# dashboard DISPLAYS metrics for a human to read. The 3-cloud twin is the GCP
+# Monitoring dashboard, the AWS CloudWatch dashboard, and the Azure Portal dashboard.
+#
+# A dashboard's cloud-native form is a free-form LAYOUT of widgets — positions,
+# chart types, text panels, log queries — and that free-form content is the same
+# category as a policy document (D105) or an alert's compound condition (D106): not
+# verifiable capability semantics. So the vocabulary admits a dashboard as a flat SET
+# of metrics to chart (dashboard.metrics), each rendered as one auto-laid-out widget,
+# and describes the one property a contract actually wants to guarantee about a
+# dashboard: that it is NOT EMPTY (dashboard.widgetCount). Rich custom widget authoring
+# — hand-placed tiles, text/markdown panels, log-query widgets, heatmaps — is REFUSED,
+# the same boundary the authorization and alert domains draw; a dashboard here is
+# "these metrics, charted", not an arbitrary canvas.
+
+capability: capability.monitoring.dashboard
+version: 0.1
+stateful: false  # a dashboard holds no data and removing it loses none — it is a
+                 # DISPLAY artifact, re-creatable from its metric set. The risk it
+                 # carries is being EMPTY (created but never populated), which
+                 # dashboard.widgetCount makes verifiable, not deletion.
+
+attributes:
+
+  dashboard.metrics:
+    kind: list
+    description: >
+      The SET of metrics the dashboard charts — a flat set of named metrics, each
+      rendered as one auto-laid-out widget. This is the dashboard's verifiable
+      content, the same treatment capability.authorization.role gives a permission
+      set: a contract constrains it with subset-of (the dashboard charts only
+      approved metrics) or equals (an exact set).
+    mappings:
+      gcp.monitoring: one XyChart widget per metric in a mosaicLayout (metric.type filters)
+      aws.cloudwatch: one metric widget per metric in the DashboardBody (Namespace/MetricName)
+      azure.portal: one MonitoringChartPart tile per metric (on a target resource)
+
+  dashboard.widgetCount:
+    kind: number
+    description: >
+      How many widgets the dashboard has (= the number of charted metrics). The
+      safety property: an EMPTY dashboard (widgetCount 0) is a common mistake — created
+      but never populated — so a contract asserts widgetCount gte 1 (or an exact
+      count). DERIVED deterministically from the metric set; the driver refuses a
+      declared count that contradicts the metrics it was given.
+    mappings:
+      gcp.monitoring: the number of widgets in the layout
+      aws.cloudwatch: the number of widgets in the DashboardBody
+      azure.portal: the number of parts in the lens
+
+  service.managed:
+    kind: bool
+    description: Managed cloud monitoring vs a self-operated dashboard system
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: >
+      Projected monthly cost — dashboards are near-free (a small per-dashboard charge
+      on some clouds); the figure exists for symmetry.
+    verification: static against a pricing catalog; billing after deploy
+
+# Deliberately absent in v0.1 — REFUSED, and the refusal is the point:
+#   - hand-placed widget LAYOUT (positions/sizes), chart TYPES, text/markdown panels,
+#     log-query widgets, heatmaps: free-form canvas content, not capability semantics.
+#     A dashboard here is "these metrics, charted", auto-laid-out; an arbitrary layout
+#     is data, out of scope (like an alert's compound condition, D106).
+#   - per-widget thresholds / annotations / time ranges: display tuning (impl block).
+#   - the metric SOURCE resource: on Azure a chart tile is scoped to a target resource
+#     (implementation.target_resource), the same per-cloud requirement metric alerts
+#     carry (D106); GCP/AWS charts are namespace/metric-typed.
+#   - variables / templating: an expression language by another name (invariant #4).

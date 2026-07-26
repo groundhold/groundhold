@@ -1,0 +1,404 @@
+# Cross-cloud capability parity matrix — GENERATED, DO NOT EDIT.
+#
+# Regenerate with: go test ./internal/parity -run TestParityMatrix -update
+# (or: make parity). TestParityMatrix proves this file byte-for-byte against the
+# three drivers' ServiceCapabilities() maps + the authored structural gaps, so it
+# can never drift or over-claim.
+#
+# Each (capability, cloud) cell is exactly one of:
+#   fulfilled: [tokens]  — one or more SERVICE tokens fulfil the capability (D76)
+#   gap: {class, reason} — the cloud STRUCTURALLY cannot fulfil it (a fact about
+#                          the cloud; class is from a closed set)
+#   unbuilt: true        — DERIVED: no token, no declared gap (a fact about groundhold —
+#                          a driver could be written; the cloud is not the blocker)
+#
+# The gap-vs-unbuilt distinction is the point: it tells the bake-off (D92) when a
+# cloud CANNOT satisfy a contract versus when groundhold simply lacks the driver.
+version: "0.1"
+clouds:
+  - aws
+  - gcp
+  - azure
+capabilities:
+  capability.ai.inference:
+    aws:
+      fulfilled: [bedrock]
+    gcp:
+      fulfilled: [vertexai]
+    azure:
+      fulfilled: [azureopenai]
+  capability.apigateway.http:
+    aws:
+      fulfilled: [apigateway]
+    gcp:
+      gap:
+        class: not-capability-shaped
+        reason: "GCP API Gateway is not a single managed-gateway resource — a serving gateway is an api+apiConfig+gateway chain whose apiConfig requires an OpenAPI document (opaque config), so it cannot honor this capability the way AWS API Gateway v2 and Azure API Management do (D119)."
+    azure:
+      fulfilled: [apim]
+  capability.audit.trail:
+    aws:
+      fulfilled: [cloudtrail]
+    gcp:
+      fulfilled: [auditlogs]
+    azure:
+      fulfilled: [activitylog]
+  capability.authorization.grant:
+    aws:
+      fulfilled: [rolepolicy]
+    gcp:
+      fulfilled: [iambinding]
+    azure:
+      fulfilled: [roleassignment]
+  capability.authorization.role:
+    aws:
+      fulfilled: [custompolicy]
+    gcp:
+      fulfilled: [customrole]
+    azure:
+      fulfilled: [customroledef]
+  capability.backup.plan:
+    aws:
+      fulfilled: [backupplan]
+    gcp:
+      fulfilled: [backupplan]
+    azure:
+      fulfilled: [backuppolicy]
+  capability.backup.vault:
+    aws:
+      fulfilled: [backupvault]
+    gcp:
+      fulfilled: [backupvault]
+    azure:
+      fulfilled: [backupvault]
+  capability.cache.keyvalue:
+    aws:
+      fulfilled: [elasticache, elasticache-serverless]
+    gcp:
+      fulfilled: [memorystore]
+    azure:
+      fulfilled: [rediscache]
+  capability.cdn.distribution:
+    aws:
+      fulfilled: [cloudfront]
+    gcp:
+      gap:
+        class: not-capability-shaped
+        reason: "GCP Cloud CDN is not a standalone resource — it is enableCdn on a load-balancer backend service, part of an irreducible L7 load-balancer composite, so it cannot honor this single-distribution capability the way AWS CloudFront and Azure CDN do (D118)."
+    azure:
+      fulfilled: [azurecdn]
+  capability.certificate.tls:
+    aws:
+      fulfilled: [acm]
+    gcp:
+      fulfilled: [certmanager]
+    azure:
+      gap:
+        class: not-capability-shaped
+        reason: "Azure has no management-plane managed-TLS-certificate service: Key Vault certificates are data-plane and App Service managed certificates are coupled to an App Service Plan, so neither honors this standalone managed-certificate capability the way AWS ACM and GCP Certificate Manager do (D117)."
+  capability.cluster.addon:
+    aws:
+      fulfilled: [eks-addon]
+    gcp:
+      fulfilled: [gke-addon]
+    azure:
+      fulfilled: [aks-addon]
+  capability.cluster.kubernetes:
+    aws:
+      fulfilled: [eks]
+    gcp:
+      fulfilled: [gke]
+    azure:
+      fulfilled: [aks]
+  capability.cluster.namespace:
+    aws:
+      unbuilt: true
+    gcp:
+      unbuilt: true
+    azure:
+      unbuilt: true
+  capability.compute.quota:
+    aws:
+      unbuilt: true
+    gcp:
+      unbuilt: true
+    azure:
+      unbuilt: true
+  capability.container.job:
+    aws:
+      gap:
+        class: not-capability-shaped
+        reason: "AWS has no standalone managed-job resource: AWS Batch is a job-definition + queue + compute-environment composite and an ECS RunTask is an ephemeral action, not a single durable job resource the way GCP Cloud Run Jobs and Azure Container Apps Jobs are (D120)."
+    gcp:
+      fulfilled: [cloudrunjobs]
+    azure:
+      fulfilled: [containerappsjob]
+  capability.cost.budget:
+    aws:
+      fulfilled: [budgets]
+    gcp:
+      fulfilled: [billingbudget]
+    azure:
+      fulfilled: [consumptionbudget]
+  capability.database.nosql:
+    aws:
+      fulfilled: [dynamodb]
+    gcp:
+      fulfilled: [firestore]
+    azure:
+      fulfilled: [cosmos]
+  capability.database.relational:
+    aws:
+      fulfilled: [aurora, rds]
+    gcp:
+      fulfilled: [cloudsql]
+    azure:
+      fulfilled: [flexpostgres]
+  capability.dns.record:
+    aws:
+      fulfilled: [route53record]
+    gcp:
+      fulfilled: [clouddnsrecord]
+    azure:
+      fulfilled: [dnsrecord]
+  capability.dns.zone:
+    aws:
+      fulfilled: [route53]
+    gcp:
+      fulfilled: [clouddns]
+    azure:
+      fulfilled: [dnszone]
+  capability.email.inbound:
+    aws:
+      fulfilled: [ses-inbound]
+    gcp:
+      gap:
+        class: no-native-service
+        reason: "GCP has no managed inbound-mail-to-storage pipeline (the SES-receiving analog does not exist)."
+    azure:
+      gap:
+        class: no-native-service
+        reason: "Azure has no managed inbound-mail-to-storage pipeline (ACS Email is send-only; there is no SES-receiving analog)."
+  capability.email.sending:
+    aws:
+      fulfilled: [ses-sending]
+    gcp:
+      gap:
+        class: no-native-service
+        reason: "GCP has no first-party transactional email service — sending relies on a third-party relay (SendGrid/Mailgun), which is outside groundhold's provider boundary."
+    azure:
+      fulfilled: [acsemail]
+  capability.function.serverless:
+    aws:
+      fulfilled: [lambda]
+    gcp:
+      fulfilled: [cloudfunctions-fn]
+    azure:
+      unbuilt: true
+  capability.gitops.application:
+    aws:
+      unbuilt: true
+    gcp:
+      unbuilt: true
+    azure:
+      unbuilt: true
+  capability.identity.oauth-client:
+    aws:
+      unbuilt: true
+    gcp:
+      unbuilt: true
+    azure:
+      unbuilt: true
+  capability.identity.podidentity:
+    aws:
+      fulfilled: [eks-podidentity]
+    gcp:
+      fulfilled: [gke-workloadidentity]
+    azure:
+      fulfilled: [aks-workloadidentity]
+  capability.identity.serviceaccount:
+    aws:
+      fulfilled: [iam]
+    gcp:
+      fulfilled: [serviceaccount]
+    azure:
+      fulfilled: [managedidentity]
+  capability.identity.sso:
+    aws:
+      unbuilt: true
+    gcp:
+      unbuilt: true
+    azure:
+      unbuilt: true
+  capability.key.encryption:
+    aws:
+      fulfilled: [kms]
+    gcp:
+      fulfilled: [cloudkms]
+    azure:
+      fulfilled: [keyvaultkey]
+  capability.messaging.kafka:
+    aws:
+      fulfilled: [msk]
+    gcp:
+      fulfilled: [managedkafka]
+    azure:
+      fulfilled: [azkafka]
+  capability.messaging.queue:
+    aws:
+      fulfilled: [sqs]
+    gcp:
+      fulfilled: [pubsub-queue]
+    azure:
+      fulfilled: [servicebusqueue]
+  capability.messaging.topic:
+    aws:
+      fulfilled: [sns]
+    gcp:
+      fulfilled: [pubsub-topic]
+    azure:
+      fulfilled: [servicebustopic]
+  capability.monitoring.alert:
+    aws:
+      fulfilled: [cloudwatch]
+    gcp:
+      fulfilled: [monitoring]
+    azure:
+      fulfilled: [metricalert]
+  capability.monitoring.dashboard:
+    aws:
+      fulfilled: [cloudwatchdash]
+    gcp:
+      fulfilled: [dashboard]
+    azure:
+      fulfilled: [portaldash]
+  capability.monitoring.logmetric:
+    aws:
+      fulfilled: [cwlogfilter]
+    gcp:
+      fulfilled: [logmetric]
+    azure:
+      fulfilled: [scheduledquery]
+  capability.monitoring.logs:
+    aws:
+      fulfilled: [cwlogs]
+    gcp:
+      fulfilled: [logbucket]
+    azure:
+      fulfilled: [loganalytics]
+  capability.monitoring.uptime:
+    aws:
+      fulfilled: [route53health]
+    gcp:
+      fulfilled: [uptime]
+    azure:
+      fulfilled: [webtest]
+  capability.network.loadbalancer:
+    aws:
+      fulfilled: [loadbalancer]
+    gcp:
+      fulfilled: [loadbalancer]
+    azure:
+      fulfilled: [loadbalancer]
+  capability.network.private:
+    aws:
+      fulfilled: [vpc]
+    gcp:
+      fulfilled: [vpc]
+    azure:
+      fulfilled: [vnet]
+  capability.observability.changefeed:
+    aws:
+      fulfilled: [changefeed]
+    gcp:
+      fulfilled: [assetfeed]
+    azure:
+      fulfilled: [changefeed]
+  capability.registry.image:
+    aws:
+      fulfilled: [ecr]
+    gcp:
+      fulfilled: [artifactregistry]
+    azure:
+      fulfilled: [acr]
+  capability.scheduler.cron:
+    aws:
+      fulfilled: [eventbridgescheduler]
+    gcp:
+      fulfilled: [cloudscheduler]
+    azure:
+      unbuilt: true
+  capability.search.index:
+    aws:
+      fulfilled: [opensearch, opensearch-serverless]
+    gcp:
+      gap:
+        class: not-capability-shaped
+        reason: "GCP has no managed search-cluster twin: Vertex AI Search is an ML/RAG product, not an operable full-text search cluster the way AWS OpenSearch Service and Azure AI Search are (D113)."
+    azure:
+      fulfilled: [aisearch]
+  capability.secret:
+    aws:
+      fulfilled: [secretsmanager]
+    gcp:
+      fulfilled: [secretmanager]
+    azure:
+      fulfilled: [keyvault]
+  capability.security.threatdetection:
+    aws:
+      fulfilled: [guardduty]
+    gcp:
+      fulfilled: [scc]
+    azure:
+      fulfilled: [defender]
+  capability.security.waf:
+    aws:
+      fulfilled: [waf]
+    gcp:
+      fulfilled: [cloudarmor]
+    azure:
+      fulfilled: [frontdoorwaf]
+  capability.storage.filesystem:
+    aws:
+      fulfilled: [efs]
+    gcp:
+      fulfilled: [filestore]
+    azure:
+      fulfilled: [azurefiles]
+  capability.storage.object:
+    aws:
+      fulfilled: [s3]
+    gcp:
+      fulfilled: [gcs]
+    azure:
+      fulfilled: [blob]
+  capability.streaming.pipe:
+    aws:
+      fulfilled: [kinesis]
+    gcp:
+      gap:
+        class: not-capability-shaped
+        reason: "GCP has no clean managed streaming twin: Pub/Sub Lite (the closest) is deprecated and Managed Service for Apache Kafka is a Kafka-cluster model, not a single stream resource the way AWS Kinesis Data Streams and Azure Event Hubs are (D114)."
+    azure:
+      fulfilled: [eventhubs]
+  capability.vpn.gateway:
+    aws:
+      fulfilled: [vpngateway]
+    gcp:
+      fulfilled: [vpngateway]
+    azure:
+      unbuilt: true
+  capability.warehouse.analytics:
+    aws:
+      fulfilled: [redshiftserverless]
+    gcp:
+      fulfilled: [bigquery]
+    azure:
+      unbuilt: true
+  capability.workload.container:
+    aws:
+      fulfilled: [apprunner, ecs]
+    gcp:
+      fulfilled: [cloudfunctions, cloudrun]
+    azure:
+      fulfilled: [containerapps]

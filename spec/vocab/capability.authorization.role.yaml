@@ -1,0 +1,93 @@
+# Attribute vocabulary for capability.authorization.role, spec v0.1 (D105).
+#
+# A CUSTOM ROLE: a named, reusable SET of permissions. This is the definition side
+# of authorization — capability.authorization.grant (D104) assigns a role to a
+# principal; here we DEFINE one. It is the domain where invariant #4 (closed operator
+# set) is under the most pressure, because a role's cloud-native form is often a
+# POLICY DOCUMENT (actions, resources, conditions, effects) — an expression language.
+# The resolution: a role is admitted as a flat SET OF NAMED PERMISSIONS, nothing
+# more. A set of permission strings has no logical connectives, no interpolation, no
+# conditions — it is data, exactly like capability.identity.oauth-client's
+# scopes.granted, and it is verifiable the same way: role.permissions subset-of an
+# allowlist is a REAL, deterministic least-privilege guarantee. What is REFUSED is
+# everything that reintroduces the expression language: resource scoping inside the
+# policy, conditions, Deny/notActions, effects. Those are deferred; keeping them out
+# is what lets a custom role be a first-class verifiable contract subject.
+#
+# The 3-cloud twin: a GCP IAM custom role (includedPermissions), an AWS
+# customer-managed policy (a single Allow statement over the action set, Resource *),
+# and an Azure custom roleDefinition (permissions[].actions). Each driver builds its
+# native form from the SAME flat permission set and refuses the non-flat extras.
+
+capability: capability.authorization.role
+version: 0.1
+stateful: false  # a role holds no data and removing it loses none (it is
+                 # re-creatable from its permission set). The risk a role carries is
+                 # on DEFINITION — an over-broad permission set — which
+                 # role.permissions/access.privileged make verifiable, not on delete.
+
+attributes:
+
+  role.permissions:
+    kind: list
+    description: >
+      The SET of permission/action strings the role confers — a flat set of NAMED
+      permissions, never an inline policy with effects/resources/conditions. This is
+      the role's semantic core, and it is verifiable: contracts constrain
+      `role.permissions subset-of <allowlist>` for a deterministic least-privilege
+      guarantee (the role grants ONLY approved permissions), or `equals` for an exact
+      set. The same treatment as capability.identity.oauth-client's scopes.granted.
+    mappings:
+      gcp.iam: the custom role's includedPermissions
+      aws.iam: the Action list of a single Allow statement (Resource "*")
+      azure.authorization: the custom roleDefinition's permissions[].actions
+
+  access.mutating:
+    kind: bool
+    description: >
+      Whether the permission set includes ANY write/create/update/delete action
+      (rather than a pure read/get/list role). A read-only role is a common
+      least-privilege target, and this is DERIVED deterministically from the action
+      verbs — the driver refuses a candidate that declares access.mutating=false
+      while role.permissions contains a mutating action (a false read-only claim).
+    mappings:
+      gcp.iam: any permission not ending in .get/.list/.getIamPolicy
+      aws.iam: any action not matching Get*/List*/Describe*
+      azure.authorization: any action not ending in /read
+
+  access.privileged:
+    kind: bool
+    description: >
+      Whether the permission set confers IAM/administrative CONTROL — the power to
+      grant further access (setIamPolicy, iam:*, role/policy writes) or a wildcard.
+      The sharpest least-privilege signal, DERIVED and verifiable; a role that can
+      re-grant access is a privilege-escalation vector even if it looks scoped. The
+      driver refuses a false access.privileged=false claim, and leaves it UNVERIFIABLE
+      for a set groundhold cannot classify (never guessed).
+    mappings:
+      gcp.iam: any *.setIamPolicy / iam.* / resourcemanager.*.setIamPolicy, or a wildcard
+      aws.iam: any iam:* / sts:AssumeRole / a "*" action or "service:*" wildcard
+      azure.authorization: any Microsoft.Authorization/*/write or a "*" action
+
+  service.managed:
+    kind: bool
+    description: Managed cloud IAM vs a self-operated authorization system
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: >
+      Projected monthly cost. Custom roles are free on all three clouds; the figure
+      exists for symmetry and is ~0 — a role's cost is the blast radius of its
+      permission set, which role.permissions and access.privileged make visible.
+    verification: static against a pricing catalog; billing after deploy
+
+# Deliberately absent in v0.1 — REFUSED, and the refusal is the point:
+#   - resource scoping inside the policy / conditions / effects (Deny) / notActions:
+#     the EXPRESSION LANGUAGE (invariant #4). A role is a flat SET of allowed named
+#     permissions; anything with connectives, interpolation or a resource predicate
+#     is refused. Resource scoping belongs to the GRANT's scope (D104), not the role.
+#   - role STAGE / launch phase (GA/BETA), title, description: labelling, not
+#     capability semantics.
+#   - assigning the role: that is capability.authorization.grant (D104) — a role is a
+#     definition; a grant binds it to a principal.

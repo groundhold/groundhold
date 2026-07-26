@@ -1,0 +1,2988 @@
+# Multi-service dispatch (D76). impl: go — the compiler is Go-only (D24).
+# A plan action's requiredPermissions are now derived PER SERVICE (the API
+# family that fulfils the capability) and are attribute-aware: a public Cloud
+# Run service needs the IAM read-modify-write permissions a private one does
+# not — omitting them would false-PASS the D75 preflight (the dangerous
+# direction), including them unconditionally would false-refuse private
+# deployers.
+
+cases:
+  - name: plan-emits-cloudrun-permissions-public
+    impl: go
+    description: >
+      A public Cloud Run (workload.container) create: run.services.create/get
+      + the DISTINCT run.operations.get (v2 LRO poll) + the IAM pair to grant
+      allUsers the invoker role.
+    plan:
+      at: "2026-07-12T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d76pub, environment: test, version: 1 }
+        capabilities:
+          - id: be
+            type: capability.workload.container
+        constraints:
+          hard:
+            - id: c-region
+              subject: be
+              path: location.region
+              op: equals
+              value: europe-central2
+              verify: { method: static }
+            - id: c-public
+              subject: be
+              path: network.publicExposure
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d76pub
+        capabilities:
+          be:
+            provider: gcp
+            service: cloudrun
+            attributes:
+              location.region: europe-central2
+              network.publicExposure: true
+            implementation:
+              image: europe-docker.pkg.dev/x/y/be:sha
+    expect:
+      actions:
+        a-create-be:
+          operation: create
+          requiredPermissions:
+            - run.operations.get
+            - run.services.create
+            - run.services.get
+            - run.services.getIamPolicy
+            - run.services.setIamPolicy
+
+  - name: plan-emits-cloudrun-permissions-private
+    impl: go
+    description: >
+      A private Cloud Run create needs NO IAM permissions — proof the
+      permission set is attribute-conditional, not a blanket over-declaration.
+    plan:
+      at: "2026-07-12T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d76priv, environment: test, version: 1 }
+        capabilities:
+          - id: be
+            type: capability.workload.container
+        constraints:
+          hard:
+            - id: c-region
+              subject: be
+              path: location.region
+              op: equals
+              value: europe-central2
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d76priv
+        capabilities:
+          be:
+            provider: gcp
+            service: cloudrun
+            attributes:
+              location.region: europe-central2
+              network.publicExposure: false
+            implementation:
+              image: europe-docker.pkg.dev/x/y/be:sha
+    expect:
+      actions:
+        a-create-be:
+          operation: create
+          requiredPermissions:
+            - run.operations.get
+            - run.services.create
+            - run.services.get
+
+  - name: plan-emits-gcs-permissions-public
+    impl: go
+    description: >
+      A public object-storage bucket (capability.storage.object on gcs) create:
+      storage.buckets.create + the storage.buckets.get ownership pre-read + the
+      IAM pair to grant allUsers objectViewer. A different SERVICE (gcs, not
+      cloudrun) yields a different permission family — dispatch is on the
+      service token, and the IAM pair is still attribute-conditional on public.
+    plan:
+      at: "2026-07-12T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d77gcs, environment: test, version: 1 }
+        capabilities:
+          - id: assets
+            type: capability.storage.object
+        constraints:
+          hard:
+            - id: c-region
+              subject: assets
+              path: location.region
+              op: equals
+              value: europe-central2
+              verify: { method: static }
+            - id: c-public
+              subject: assets
+              path: network.publicExposure
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d77gcs
+        capabilities:
+          assets:
+            provider: gcp
+            service: gcs
+            attributes:
+              location.region: europe-central2
+              network.publicExposure: true
+              encryption.atRest: true
+              service.managed: true
+    expect:
+      actions:
+        a-create-assets:
+          operation: create
+          requiredPermissions:
+            - resourcemanager.projects.get
+            - storage.buckets.create
+            - storage.buckets.get
+            - storage.buckets.getIamPolicy
+            - storage.buckets.setIamPolicy
+
+  - name: plan-emits-vpc-permissions-egress
+    impl: go
+    description: >
+      A private network (capability.network.private on vpc) create with
+      egress.restricted: the multi-resource permission set — network +
+      subnetwork + BOTH operation-poll scopes + the firewall triple and
+      compute.networks.updatePolicy the egress firewall needs. Proof the vpc
+      rows are attribute-aware (a non-restricted network omits the firewall perms).
+    plan:
+      at: "2026-07-12T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d83vpc, environment: test, version: 1 }
+        capabilities:
+          - id: net
+            type: capability.network.private
+        constraints:
+          hard:
+            - id: c-region
+              subject: net
+              path: location.region
+              op: equals
+              value: europe-central2
+              verify: { method: static }
+            - id: c-egress
+              subject: net
+              path: egress.restricted
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d83vpc
+        capabilities:
+          net:
+            provider: gcp
+            service: vpc
+            attributes:
+              location.region: europe-central2
+              egress.restricted: true
+              service.managed: true
+    expect:
+      actions:
+        a-create-net:
+          operation: create
+          requiredPermissions:
+            - compute.firewalls.create
+            - compute.firewalls.get
+            - compute.globalOperations.get
+            - compute.networks.create
+            - compute.networks.get
+            - compute.networks.updatePolicy
+            - compute.regionOperations.get
+            - compute.subnetworks.create
+            - compute.subnetworks.get
+
+  - name: plan-emits-cloudfunctions-permissions-public
+    impl: go
+    description: >
+      A public Cloud Function (Gen2) create — the SECOND service under
+      capability.workload.container (D84). Proof of D76: the same capability
+      TYPE as cloudrun, a different SERVICE token yields a different permission
+      family (cloudfunctions.functions.* + the LRO poll), and public exposure
+      still adds the run.services IAM pair because the invoker grant lands on
+      the function's backing Cloud Run service.
+    plan:
+      at: "2026-07-12T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d84fn, environment: test, version: 1 }
+        capabilities:
+          - id: fn
+            type: capability.workload.container
+        constraints:
+          hard:
+            - id: c-region
+              subject: fn
+              path: location.region
+              op: equals
+              value: europe-central2
+              verify: { method: static }
+            - id: c-public
+              subject: fn
+              path: network.publicExposure
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d84fn
+        capabilities:
+          fn:
+            provider: gcp
+            service: cloudfunctions
+            attributes:
+              location.region: europe-central2
+              network.publicExposure: true
+            implementation:
+              runtime: nodejs20
+              entry_point: handler
+              source: { bucket: my-src, object: fn.zip }
+    expect:
+      actions:
+        a-create-fn:
+          operation: create
+          requiredPermissions:
+            - cloudfunctions.functions.create
+            - cloudfunctions.functions.get
+            - cloudfunctions.operations.get
+            - run.services.getIamPolicy
+            - run.services.setIamPolicy
+
+  - name: plan-emits-aws-s3-permissions-public
+    impl: go
+    description: >
+      A public S3 bucket (capability.storage.object on the AWS provider, service
+      s3) create — the PROVIDER-AGNOSTIC thesis (D85/D86): the SAME storage.object
+      vocab GCS fulfils, a different PROVIDER yields IAM-action permissions
+      (s3:*), and public exposure adds s3:PutBucketPolicy (the anonymous
+      GetObject grant), versioning adds s3:PutBucketVersioning — attribute-aware.
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d86s3, environment: test, version: 1 }
+        capabilities:
+          - id: assets
+            type: capability.storage.object
+        constraints:
+          hard:
+            - id: c-region
+              subject: assets
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+            - id: c-public
+              subject: assets
+              path: network.publicExposure
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d86s3
+        capabilities:
+          assets:
+            provider: aws
+            service: s3
+            attributes:
+              location.region: eu-central-1
+              network.publicExposure: true
+              versioning.enabled: true
+              encryption.atRest: true
+              service.managed: true
+    expect:
+      actions:
+        a-create-assets:
+          operation: create
+          requiredPermissions:
+            - s3:CreateBucket
+            - s3:GetBucketTagging
+            - s3:PutBucketPolicy
+            - s3:PutBucketPublicAccessBlock
+            - s3:PutBucketTagging
+            - s3:PutBucketVersioning
+
+  - name: plan-emits-aws-rds-permissions
+    impl: go
+    description: >
+      An RDS instance (capability.database.relational on aws/rds) create — the
+      thesis on a SECOND capability type (D86): the SAME database.relational vocab
+      Cloud SQL fulfils, a different provider yields rds:* IAM actions. Async
+      create/poll folds into rds:DescribeDBInstances (the quiet read).
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d86rds, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-region
+              subject: db
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d86rds
+        capabilities:
+          db:
+            provider: aws
+            service: rds
+            attributes:
+              engine.protocol: postgresql/16
+              location.region: eu-central-1
+              network.publicExposure: false
+              encryption.atRest: true
+              service.managed: true
+            implementation:
+              instance_class: db.t3.micro
+              master_username: groundholdadmin
+              master_password: GroundholdSmoke123!
+    expect:
+      actions:
+        a-create-db:
+          operation: create
+          requiredPermissions:
+            - rds:AddTagsToResource
+            - rds:CreateDBInstance
+            - rds:DescribeDBInstances
+
+  - name: plan-emits-aws-ecs-permissions-public
+    impl: go
+    description: >
+      A public ECS/Fargate service (capability.workload.container on aws/ecs) —
+      GCP/AWS parity on workload.container (D86): the SAME vocab cloudrun/
+      cloudfunctions fulfil, fulfilled by ECS. Multi-resource create folds into
+      the cluster/task-def/service permissions + iam:PassRole (Fargate passes
+      the execution role).
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d86ecs, environment: test, version: 1 }
+        capabilities:
+          - id: app
+            type: capability.workload.container
+        constraints:
+          hard:
+            - id: c-region
+              subject: app
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+            - id: c-public
+              subject: app
+              path: network.publicExposure
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d86ecs
+        capabilities:
+          app:
+            provider: aws
+            service: ecs
+            attributes:
+              location.region: eu-central-1
+              network.publicExposure: true
+              service.managed: true
+            implementation:
+              image: public.ecr.aws/nginx/nginx:latest
+              subnets: [subnet-0684dfea877b3e4e3]
+              security_groups: [sg-000]
+              execution_role_arn: arn:aws:iam::000000000000:role/ecsTaskExecutionRole
+    expect:
+      actions:
+        a-create-app:
+          operation: create
+          requiredPermissions:
+            - ecs:CreateCluster
+            - ecs:CreateService
+            - ecs:DescribeServices
+            - ecs:RegisterTaskDefinition
+            - ecs:TagResource
+            - iam:PassRole
+
+  - name: plan-emits-aws-apprunner-permissions-public
+    impl: go
+    description: >
+      A public App Runner service (capability.workload.container on aws/apprunner)
+      — a SECOND AWS backend for the SAME vocab ecs/cloudrun/containerapps fulfil
+      (D76: one capability TYPE, many services; App Runner is the Cloud Run twin).
+      Proof the portable workload.container contract dispatches to App Runner by
+      the service token and folds into the CreateService/DescribeService/
+      ListServices/TagResource permissions + iam:PassRole (App Runner assumes the
+      access role to pull a private image).
+    plan:
+      at: "2026-07-24T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: apprun, environment: test, version: 1 }
+        capabilities:
+          - id: app
+            type: capability.workload.container
+        constraints:
+          hard:
+            - id: c-region
+              subject: app
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+            - id: c-public
+              subject: app
+              path: network.publicExposure
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-tls
+              subject: app
+              path: tls.enforced
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: apprun
+        capabilities:
+          app:
+            provider: aws
+            service: apprunner
+            attributes:
+              location.region: eu-central-1
+              network.publicExposure: true
+              tls.enforced: true
+              service.managed: true
+            implementation:
+              image: public.ecr.aws/nginx/nginx:latest
+              port: 8080
+    expect:
+      actions:
+        a-create-app:
+          operation: create
+          requiredPermissions:
+            - apprunner:CreateService
+            - apprunner:DescribeService
+            - apprunner:ListServices
+            - apprunner:TagResource
+            - iam:PassRole
+
+  - name: plan-emits-aws-vpc-permissions-flowlogs
+    impl: go
+    description: >
+      A private network with flow logs (capability.network.private on aws/vpc) —
+      GCP/AWS parity on network.private (D86): the SAME vocab the GCP VPC driver
+      fulfils, fulfilled by AWS EC2. Multi-resource; flow logs add
+      ec2:CreateFlowLogs + iam:PassRole (attribute-aware).
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d86vpc, environment: test, version: 1 }
+        capabilities:
+          - id: net
+            type: capability.network.private
+        constraints:
+          hard:
+            - id: c-region
+              subject: net
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+            - id: c-flow
+              subject: net
+              path: flowLogs.enabled
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d86vpc
+        capabilities:
+          net:
+            provider: aws
+            service: vpc
+            attributes:
+              location.region: eu-central-1
+              flowLogs.enabled: true
+              service.managed: true
+            implementation:
+              flow_log_destination: groundhold-flowlogs
+              flow_log_role_arn: arn:aws:iam::000000000000:role/flowlogs
+    expect:
+      actions:
+        a-create-net:
+          operation: create
+          requiredPermissions:
+            - ec2:CreateFlowLogs
+            - ec2:CreateSubnet
+            - ec2:CreateTags
+            - ec2:CreateVpc
+            - ec2:DescribeVpcs
+            - iam:PassRole
+
+  - name: plan-emits-aws-sns-permissions-public-cmek
+    impl: go
+    description: >
+      A public, customer-encrypted SNS topic (capability.messaging.topic on
+      aws/sns) — the provider-agnostic thesis on a fifth capability type (D94):
+      the SAME messaging.topic vocab Pub/Sub fulfils, a different provider yields
+      sns:* IAM actions. Encryption (a KMS key) OR public exposure (a resource
+      policy) each add sns:SetTopicAttributes — attribute-conditional. Ownership
+      tags are set at CreateTopic birth (sns:TagResource), read back via
+      sns:ListTagsForResource.
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d89sns, environment: test, version: 1 }
+        capabilities:
+          - id: topic
+            type: capability.messaging.topic
+        constraints:
+          hard:
+            - id: c-region
+              subject: topic
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+            - id: c-cmek
+              subject: topic
+              path: encryption.customerManagedKeys
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-public
+              subject: topic
+              path: network.publicExposure
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d89sns
+        capabilities:
+          topic:
+            provider: aws
+            service: sns
+            attributes:
+              location.region: eu-central-1
+              network.publicExposure: true
+              encryption.atRest: true
+              encryption.customerManagedKeys: true
+              service.managed: true
+            implementation:
+              kms_key_id: arn:aws:kms:eu-central-1:000000000000:key/abc
+    expect:
+      actions:
+        a-create-topic:
+          operation: create
+          requiredPermissions:
+            - sns:CreateTopic
+            - sns:ListTagsForResource
+            - sns:SetTopicAttributes
+            - sns:TagResource
+
+  - name: plan-emits-aws-sns-permissions-private
+    impl: go
+    description: >
+      A private, unencrypted SNS topic needs NO sns:SetTopicAttributes — proof
+      the permission set is attribute-conditional (D94): no encryption and no
+      public policy means no attribute mutation, just create + ownership.
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d89snspriv, environment: test, version: 1 }
+        capabilities:
+          - id: topic
+            type: capability.messaging.topic
+        constraints:
+          hard:
+            - id: c-region
+              subject: topic
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+            - id: c-private
+              subject: topic
+              path: network.publicExposure
+              op: equals
+              value: false
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d89snspriv
+        capabilities:
+          topic:
+            provider: aws
+            service: sns
+            attributes:
+              location.region: eu-central-1
+              network.publicExposure: false
+              service.managed: true
+    expect:
+      actions:
+        a-create-topic:
+          operation: create
+          requiredPermissions:
+            - sns:CreateTopic
+            - sns:ListTagsForResource
+            - sns:TagResource
+
+  - name: plan-emits-pubsub-permissions-public-cmek
+    impl: go
+    description: >
+      A public, customer-encrypted Pub/Sub topic (capability.messaging.topic on
+      gcp/pubsub) — the SAME vocab SNS fulfils, a different provider yields
+      pubsub.topics.* permissions (D94). Public exposure adds the IAM
+      read-modify-write to grant allUsers the publisher role — attribute-
+      conditional, exactly like cloudrun/gcs.
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d89ps, environment: test, version: 1 }
+        capabilities:
+          - id: topic
+            type: capability.messaging.topic
+        constraints:
+          hard:
+            - id: c-region
+              subject: topic
+              path: location.region
+              op: equals
+              value: europe-west1
+              verify: { method: static }
+            - id: c-cmek
+              subject: topic
+              path: encryption.customerManagedKeys
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-public
+              subject: topic
+              path: network.publicExposure
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d89ps
+        capabilities:
+          topic:
+            provider: gcp
+            service: pubsub-topic
+            attributes:
+              location.region: europe-west1
+              network.publicExposure: true
+              encryption.atRest: true
+              encryption.customerManagedKeys: true
+              service.managed: true
+            implementation:
+              kms_key_name: projects/p/locations/europe-west1/keyRings/r/cryptoKeys/k
+    expect:
+      actions:
+        a-create-topic:
+          operation: create
+          requiredPermissions:
+            - pubsub.topics.create
+            - pubsub.topics.get
+            - pubsub.topics.getIamPolicy
+            - pubsub.topics.setIamPolicy
+
+  - name: plan-emits-pubsub-permissions-private
+    impl: go
+    description: >
+      A private Pub/Sub topic needs NO IAM permissions — proof the set is
+      attribute-conditional (D94): no public exposure means no setIamPolicy, just
+      create + the ownership/409 quiet read.
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d89pspriv, environment: test, version: 1 }
+        capabilities:
+          - id: topic
+            type: capability.messaging.topic
+        constraints:
+          hard:
+            - id: c-region
+              subject: topic
+              path: location.region
+              op: equals
+              value: europe-west1
+              verify: { method: static }
+            - id: c-private
+              subject: topic
+              path: network.publicExposure
+              op: equals
+              value: false
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d89pspriv
+        capabilities:
+          topic:
+            provider: gcp
+            service: pubsub-topic
+            attributes:
+              location.region: europe-west1
+              network.publicExposure: false
+              encryption.atRest: true
+              service.managed: true
+    expect:
+      actions:
+        a-create-topic:
+          operation: create
+          requiredPermissions:
+            - pubsub.topics.create
+            - pubsub.topics.get
+
+  - name: plan-emits-aws-sqs-permissions
+    impl: go
+    description: >
+      capability.messaging.queue on aws/sqs (D95): every attribute is set at
+      CreateQueue time, so create is unconditional — CreateQueue + the ownership
+      tag write + the ListQueueTags re-read.
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d90sqs, environment: test, version: 1 }
+        capabilities:
+          - id: orders
+            type: capability.messaging.queue
+        constraints:
+          hard:
+            - id: c-region
+              subject: orders
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d90sqs
+        capabilities:
+          orders:
+            provider: aws
+            service: sqs
+            attributes:
+              location.region: eu-central-1
+              service.managed: true
+    expect:
+      actions:
+        a-create-orders:
+          operation: create
+          requiredPermissions:
+            - sqs:CreateQueue
+            - sqs:ListQueueTags
+            - sqs:TagQueue
+
+  - name: plan-emits-pubsub-queue-permissions-private
+    impl: go
+    description: >
+      capability.messaging.queue on gcp/pubsub (D95) — the constitutive composite:
+      a subscription PLUS its backing topic, so create needs BOTH pubsub.
+      subscriptions.* and pubsub.topics.* under one binding. Private -> no IAM pair.
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d90psqpriv, environment: test, version: 1 }
+        capabilities:
+          - id: orders
+            type: capability.messaging.queue
+        constraints:
+          hard:
+            - id: c-private
+              subject: orders
+              path: network.publicExposure
+              op: equals
+              value: false
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d90psqpriv
+        capabilities:
+          orders:
+            provider: gcp
+            service: pubsub-queue
+            attributes:
+              location.region: europe-west1
+              network.publicExposure: false
+              delivery.guarantee: at-least-once
+              service.managed: true
+    expect:
+      actions:
+        a-create-orders:
+          operation: create
+          requiredPermissions:
+            - pubsub.subscriptions.create
+            - pubsub.subscriptions.get
+            - pubsub.topics.create
+            - pubsub.topics.get
+
+  - name: plan-emits-pubsub-queue-permissions-public
+    impl: go
+    description: >
+      A public Pub/Sub queue adds the subscription IAM read-modify-write to grant
+      allUsers the subscriber role — attribute-conditional, on top of the
+      constitutive subscription+topic create set (D95).
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d90psqpub, environment: test, version: 1 }
+        capabilities:
+          - id: orders
+            type: capability.messaging.queue
+        constraints:
+          hard:
+            - id: c-public
+              subject: orders
+              path: network.publicExposure
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d90psqpub
+        capabilities:
+          orders:
+            provider: gcp
+            service: pubsub-queue
+            attributes:
+              location.region: europe-west1
+              network.publicExposure: true
+              delivery.guarantee: at-least-once
+              service.managed: true
+    expect:
+      actions:
+        a-create-orders:
+          operation: create
+          requiredPermissions:
+            - pubsub.subscriptions.create
+            - pubsub.subscriptions.get
+            - pubsub.subscriptions.getIamPolicy
+            - pubsub.subscriptions.setIamPolicy
+            - pubsub.topics.create
+            - pubsub.topics.get
+
+  - name: plan-emits-azure-vnet-permissions
+    impl: go
+    description: >
+      capability.network.private on azure/vnet (D99) — the third cloud. The
+      constitutive NSG (created when egress is restricted) means create needs
+      networkSecurityGroups/* on top of virtualNetworks/*. ARM action-string
+      permissions; proof the compiler dispatches a third provider.
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d91vnet, environment: test, version: 1 }
+        capabilities:
+          - id: backbone
+            type: capability.network.private
+        constraints:
+          hard:
+            - id: c-egress
+              subject: backbone
+              path: egress.restricted
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d91vnet
+        capabilities:
+          backbone:
+            provider: azure
+            service: vnet
+            attributes:
+              location.region: eastus
+              egress.restricted: true
+              ingress.public: false
+              service.managed: true
+            implementation:
+              resource_group: rg-groundhold
+    expect:
+      actions:
+        a-create-backbone:
+          operation: create
+          requiredPermissions:
+            - Microsoft.Network/networkSecurityGroups/read
+            - Microsoft.Network/networkSecurityGroups/write
+            - Microsoft.Network/virtualNetworks/read
+            - Microsoft.Network/virtualNetworks/write
+
+  - name: plan-emits-azure-blob-permissions
+    impl: go
+    description: >
+      capability.storage.object on azure/blob (D99) — the constitutive composite
+      (storage account + blobServices + container) yields the Microsoft.Storage
+      account/blobServices/containers permissions; a WORM-locked retention adds the
+      immutabilityPolicies write + lock/action, attribute-conditional.
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d91blob, environment: test, version: 1 }
+        capabilities:
+          - id: archive
+            type: capability.storage.object
+        constraints:
+          hard:
+            - id: c-worm
+              subject: archive
+              path: retention.locked
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d91blob
+        capabilities:
+          archive:
+            provider: azure
+            service: blob
+            attributes:
+              location.region: eastus
+              durability.class: multi-regional
+              network.publicExposure: false
+              encryption.atRest: true
+              retention.minimum: 365d
+              retention.locked: true
+              service.managed: true
+            implementation:
+              resource_group: rg-groundhold
+    expect:
+      actions:
+        a-create-archive:
+          operation: create
+          requiredPermissions:
+            - Microsoft.Storage/storageAccounts/blobServices/containers/immutabilityPolicies/lock/action
+            - Microsoft.Storage/storageAccounts/blobServices/containers/immutabilityPolicies/write
+            - Microsoft.Storage/storageAccounts/blobServices/containers/read
+            - Microsoft.Storage/storageAccounts/blobServices/containers/write
+            - Microsoft.Storage/storageAccounts/blobServices/write
+            - Microsoft.Storage/storageAccounts/read
+            - Microsoft.Storage/storageAccounts/write
+
+  - name: plan-emits-azure-containerapps-permissions
+    impl: go
+    description: >
+      capability.workload.container on azure/containerapps (D99) — the constitutive
+      composite (managed environment + container app, the ECS-cluster precedent)
+      yields the Microsoft.App managedEnvironments + containerApps permissions.
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d91aca, environment: test, version: 1 }
+        capabilities:
+          - id: api
+            type: capability.workload.container
+        constraints:
+          hard:
+            - id: c-tls
+              subject: api
+              path: tls.enforced
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d91aca
+        capabilities:
+          api:
+            provider: azure
+            service: containerapps
+            attributes:
+              location.region: eastus
+              network.publicExposure: true
+              tls.enforced: true
+              replicas.minimum: 2
+              autoscaling.enabled: true
+              availability.class: zonal
+              service.managed: true
+            implementation:
+              resource_group: rg-groundhold
+              image: mcr.microsoft.com/hello:latest
+    expect:
+      actions:
+        a-create-api:
+          operation: create
+          requiredPermissions:
+            - Microsoft.App/containerApps/read
+            - Microsoft.App/containerApps/write
+            - Microsoft.App/managedEnvironments/read
+            - Microsoft.App/managedEnvironments/write
+
+  - name: plan-emits-azure-flexpostgres-permissions
+    impl: go
+    description: >
+      capability.database.relational on azure/flexpostgres (D99) — PostgreSQL
+      Flexible Server, a single ARM resource (NOT Azure SQL DB, which is TDS-only).
+      Proves the third cloud dispatches the fourth capability type.
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d91pg, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-tls
+              subject: db
+              path: encryption.inTransit
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d91pg
+        capabilities:
+          db:
+            provider: azure
+            service: flexpostgres
+            attributes:
+              engine.protocol: postgresql/16
+              location.region: eastus
+              network.publicExposure: false
+              encryption.atRest: true
+              encryption.inTransit: true
+              availability.class: regional
+              service.managed: true
+            implementation:
+              resource_group: rg-groundhold
+              admin_username: pgadmin
+              admin_password: S3cret-pw
+    expect:
+      actions:
+        a-create-db:
+          operation: create
+          requiredPermissions:
+            - Microsoft.DBforPostgreSQL/flexibleServers/read
+            - Microsoft.DBforPostgreSQL/flexibleServers/write
+
+  - name: plan-emits-azure-servicebus-queue-permissions
+    impl: go
+    description: >
+      capability.messaging.queue on azure/servicebusqueue (D99) — messaging now
+      symmetric across all THREE clouds. Constitutive composite (namespace + queue)
+      yields the Microsoft.ServiceBus namespaces + queues permissions.
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d91sbq, environment: test, version: 1 }
+        capabilities:
+          - id: orders
+            type: capability.messaging.queue
+        constraints:
+          hard:
+            - id: c-eo
+              subject: orders
+              path: delivery.guarantee
+              op: in
+              value: [exactly-once]
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d91sbq
+        capabilities:
+          orders:
+            provider: azure
+            service: servicebusqueue
+            attributes:
+              location.region: eastus
+              delivery.guarantee: exactly-once
+              ordering.enabled: true
+              encryption.atRest: true
+              network.publicExposure: false
+              service.managed: true
+            implementation:
+              resource_group: rg-groundhold
+    expect:
+      actions:
+        a-create-orders:
+          operation: create
+          requiredPermissions:
+            - Microsoft.ServiceBus/namespaces/queues/write
+            - Microsoft.ServiceBus/namespaces/read
+            - Microsoft.ServiceBus/namespaces/write
+
+  - name: plan-emits-azure-servicebus-topic-permissions
+    impl: go
+    description: >
+      capability.messaging.topic on azure/servicebustopic (D99) — namespace + topic.
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d91sbt, environment: test, version: 1 }
+        capabilities:
+          - id: events
+            type: capability.messaging.topic
+        constraints:
+          hard:
+            - id: c-private
+              subject: events
+              path: network.publicExposure
+              op: equals
+              value: false
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d91sbt
+        capabilities:
+          events:
+            provider: azure
+            service: servicebustopic
+            attributes:
+              location.region: eastus
+              encryption.atRest: true
+              network.publicExposure: false
+              service.managed: true
+            implementation:
+              resource_group: rg-groundhold
+    expect:
+      actions:
+        a-create-events:
+          operation: create
+          requiredPermissions:
+            - Microsoft.ServiceBus/namespaces/read
+            - Microsoft.ServiceBus/namespaces/topics/write
+            - Microsoft.ServiceBus/namespaces/write
+
+  - name: plan-emits-gcp-secretmanager-permissions
+    impl: go
+    description: >
+      A managed secret handle (capability.secret on gcp/secretmanager, D97) —
+      create emits secretmanager.secrets.create plus the quiet secrets.get
+      (409-continue ownership + delete pre-read). A private secret needs no IAM
+      RMW; the value is never written by groundhold (it is data, out of band).
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d92sec, environment: test, version: 1 }
+        capabilities:
+          - id: creds
+            type: capability.secret
+        constraints:
+          hard:
+            - id: c-region
+              subject: creds
+              path: location.region
+              op: equals
+              value: europe-west1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d92sec
+        capabilities:
+          creds:
+            provider: gcp
+            service: secretmanager
+            attributes:
+              location.region: europe-west1
+              network.publicExposure: false
+              encryption.atRest: true
+              service.managed: true
+    expect:
+      actions:
+        a-create-creds:
+          operation: create
+          requiredPermissions:
+            - secretmanager.secrets.create
+            - secretmanager.secrets.get
+
+  - name: plan-emits-aws-secretsmanager-permissions
+    impl: go
+    description: >
+      A managed secret handle (capability.secret on aws/secretsmanager, D97) —
+      GCP/AWS parity on the secret domain (the SAME vocab GCP Secret Manager
+      fulfils). Create emits secretsmanager:CreateSecret plus the quiet
+      DescribeSecret (ownership re-check + delete pre-read). The residency
+      contrast with GCP is invisible to permissions but real: Secrets Manager is
+      regional by construction, nothing to pin.
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d92asm, environment: test, version: 1 }
+        capabilities:
+          - id: creds
+            type: capability.secret
+        constraints:
+          hard:
+            - id: c-region
+              subject: creds
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d92asm
+        capabilities:
+          creds:
+            provider: aws
+            service: secretsmanager
+            attributes:
+              location.region: eu-central-1
+              network.publicExposure: false
+              encryption.atRest: true
+              service.managed: true
+    expect:
+      actions:
+        a-create-creds:
+          operation: create
+          requiredPermissions:
+            - secretsmanager:CreateSecret
+            - secretsmanager:DescribeSecret
+            - secretsmanager:TagResource
+
+  - name: plan-emits-azure-keyvault-permissions
+    impl: go
+    description: >
+      A Key Vault as the secret's home (capability.secret on azure/keyvault, D97)
+      — the secret domain on the THIRD cloud, completing 3-cloud symmetry. Azure
+      has no value-less secret handle, so the binding is the vault itself; the
+      value is written out of band and groundhold emits no secrets/* permission.
+      vaults/read is the quiet read (provisioning poll + delete pre-read).
+    plan:
+      at: "2026-07-13T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d92kv, environment: test, version: 1 }
+        capabilities:
+          - id: creds
+            type: capability.secret
+        constraints:
+          hard:
+            - id: c-region
+              subject: creds
+              path: location.region
+              op: equals
+              value: eastus
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d92kv
+        capabilities:
+          creds:
+            provider: azure
+            service: keyvault
+            attributes:
+              location.region: eastus
+              network.publicExposure: false
+              encryption.atRest: true
+              service.managed: true
+            implementation:
+              resource_group: rg-groundhold
+              tenant_id: "00000000-0000-0000-0000-0000000000aa"
+    expect:
+      actions:
+        a-create-creds:
+          operation: create
+          requiredPermissions:
+            - Microsoft.KeyVault/vaults/read
+            - Microsoft.KeyVault/vaults/write
+
+  - name: plan-emits-gcp-memorystore-permissions
+    impl: go
+    description: >
+      A managed Redis cache (capability.cache.keyvalue on gcp/memorystore, D100) —
+      the sixth capability domain. Async create/delete, so redis.operations.get is
+      the LRO poll permission alongside instances.create + the quiet instances.get.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d100cache, environment: test, version: 1 }
+        capabilities:
+          - id: sessions
+            type: capability.cache.keyvalue
+        constraints:
+          hard:
+            - id: c-region
+              subject: sessions
+              path: location.region
+              op: equals
+              value: europe-west1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d100cache
+        capabilities:
+          sessions:
+            provider: gcp
+            service: memorystore
+            attributes:
+              engine.protocol: redis/7
+              location.region: europe-west1
+              network.publicExposure: false
+              encryption.atRest: true
+              encryption.inTransit: true
+              availability.class: regional
+              service.managed: true
+    expect:
+      actions:
+        a-create-sessions:
+          operation: create
+          requiredPermissions:
+            - redis.instances.create
+            - redis.instances.get
+            - redis.operations.get
+
+  - name: plan-emits-aws-elasticache-permissions
+    impl: go
+    description: >
+      A managed Redis cache (capability.cache.keyvalue on aws/elasticache, D100) —
+      GCP/AWS parity on the cache domain (the SAME vocab Memorystore fulfils),
+      here a replication group. DescribeReplicationGroups is the async poll +
+      delete pre-read; ListTagsForResource is the ownership read off the ARN.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d100ec, environment: test, version: 1 }
+        capabilities:
+          - id: sessions
+            type: capability.cache.keyvalue
+        constraints:
+          hard:
+            - id: c-region
+              subject: sessions
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d100ec
+        capabilities:
+          sessions:
+            provider: aws
+            service: elasticache
+            attributes:
+              engine.protocol: redis/7
+              location.region: eu-central-1
+              network.publicExposure: false
+              encryption.atRest: true
+              encryption.inTransit: true
+              availability.class: regional
+              service.managed: true
+    expect:
+      actions:
+        a-create-sessions:
+          operation: create
+          requiredPermissions:
+            - elasticache:AddTagsToResource
+            - elasticache:CreateReplicationGroup
+            - elasticache:DescribeReplicationGroups
+            - elasticache:ListTagsForResource
+
+  - name: plan-emits-aws-elasticache-serverless-permissions
+    impl: go
+    description: >
+      A managed Redis cache on the SECOND AWS backend (capability.cache.keyvalue
+      on aws/elasticache-serverless) — the pay-per-use cost lever alongside the
+      provisioned replication group, selected by the service token
+      elasticache-serverless. Serverless has no node/shard sizing (capacity
+      auto-scales) and is VPC-only, always-encrypted, regional by construction.
+      DescribeServerlessCaches is the async poll + delete pre-read;
+      ListTagsForResource is the ownership read off the ARN.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: ecslgo, environment: test, version: 1 }
+        capabilities:
+          - id: sessions
+            type: capability.cache.keyvalue
+        constraints:
+          hard:
+            - id: c-region
+              subject: sessions
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: ecslgo
+        capabilities:
+          sessions:
+            provider: aws
+            service: elasticache-serverless
+            attributes:
+              engine.protocol: redis/7
+              location.region: eu-central-1
+              network.publicExposure: false
+              encryption.atRest: true
+              encryption.inTransit: true
+              availability.class: regional
+              service.managed: true
+    expect:
+      actions:
+        a-create-sessions:
+          operation: create
+          requiredPermissions:
+            - elasticache:AddTagsToResource
+            - elasticache:CreateServerlessCache
+            - elasticache:DescribeServerlessCaches
+            - elasticache:ListTagsForResource
+
+  - name: plan-emits-aws-opensearch-serverless-permissions
+    impl: go
+    description: >
+      A managed full-text search index on the SECOND AWS backend
+      (capability.search.index on aws/opensearch-serverless) — the pay-per-use
+      cost lever alongside the provisioned OpenSearch domain, selected by the
+      service token opensearch-serverless. A collection is a COMPOSITE: an
+      encryption + a network security policy (CreateSecurityPolicy) are required
+      before CreateCollection; BatchGetCollection is the async poll + ARN/id
+      resolve; TagResource/ListTagsForResource are ownership; GetSecurityPolicy
+      reads the network policy for exposure. Serverless has no instance/node/shard
+      sizing (capacity auto-scales in OCUs) and is always-encrypted, TLS-only,
+      regional by construction.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: aossgo, environment: test, version: 1 }
+        capabilities:
+          - id: catalog
+            type: capability.search.index
+        constraints:
+          hard:
+            - id: c-region
+              subject: catalog
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+            - id: c-tls
+              subject: catalog
+              path: encryption.inTransit
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: aossgo
+        capabilities:
+          catalog:
+            provider: aws
+            service: opensearch-serverless
+            attributes:
+              location.region: eu-central-1
+              network.publicExposure: true
+              encryption.atRest: true
+              encryption.inTransit: true
+              availability.class: regional
+              service.managed: true
+    expect:
+      actions:
+        a-create-catalog:
+          operation: create
+          requiredPermissions:
+            - aoss:BatchGetCollection
+            - aoss:CreateCollection
+            - aoss:CreateSecurityPolicy
+            - aoss:GetSecurityPolicy
+            - aoss:ListTagsForResource
+            - aoss:TagResource
+
+  - name: plan-emits-azure-rediscache-permissions
+    impl: go
+    description: >
+      A managed Redis cache (capability.cache.keyvalue on azure/rediscache, D100) —
+      the cache domain on the THIRD cloud, completing 3-cloud symmetry. Unlike GCP/
+      AWS, Azure Cache for Redis can be public, so publicExposure is a real toggle;
+      redis/7 and CMK are honest one-cloud gaps. redis/read is the provisioning poll.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d100az, environment: test, version: 1 }
+        capabilities:
+          - id: sessions
+            type: capability.cache.keyvalue
+        constraints:
+          hard:
+            - id: c-region
+              subject: sessions
+              path: location.region
+              op: equals
+              value: eastus
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d100az
+        capabilities:
+          sessions:
+            provider: azure
+            service: rediscache
+            attributes:
+              engine.protocol: redis/6
+              location.region: eastus
+              network.publicExposure: false
+              encryption.atRest: true
+              encryption.inTransit: true
+              availability.class: regional
+              service.managed: true
+            implementation:
+              resource_group: rg-groundhold
+    expect:
+      actions:
+        a-create-sessions:
+          operation: create
+          requiredPermissions:
+            - Microsoft.Cache/redis/read
+            - Microsoft.Cache/redis/write
+
+  - name: plan-emits-gcp-clouddns-permissions
+    impl: go
+    description: >
+      A managed DNS zone (capability.dns.zone on gcp/clouddns, D101) — the seventh
+      capability domain. Sync create/delete; managedZones.get is the quiet read
+      (ownership + delete pre-read). Records are data (out of band), so no rrsets
+      permission appears.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d101dns, environment: test, version: 1 }
+        capabilities:
+          - id: apex
+            type: capability.dns.zone
+        constraints:
+          hard:
+            - id: c-domain
+              subject: apex
+              path: zone.domain
+              op: equals
+              value: example.com
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d101dns
+        capabilities:
+          apex:
+            provider: gcp
+            service: clouddns
+            attributes:
+              zone.domain: example.com
+              network.publicExposure: true
+              dnssec.enabled: true
+              service.managed: true
+    expect:
+      actions:
+        a-create-apex:
+          operation: create
+          requiredPermissions:
+            - dns.managedZones.create
+            - dns.managedZones.get
+
+  - name: plan-emits-aws-route53-permissions
+    impl: go
+    description: >
+      A managed DNS zone (capability.dns.zone on aws/route53, D101) — GCP/AWS parity
+      on the DNS domain. Route 53 is global with a server-assigned id, so
+      ListHostedZonesByName recovers a lost create (deterministic CallerReference);
+      ownership is tags. Records are data, out of band.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d101r53, environment: test, version: 1 }
+        capabilities:
+          - id: apex
+            type: capability.dns.zone
+        constraints:
+          hard:
+            - id: c-domain
+              subject: apex
+              path: zone.domain
+              op: equals
+              value: example.com
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d101r53
+        capabilities:
+          apex:
+            provider: aws
+            service: route53
+            attributes:
+              zone.domain: example.com
+              network.publicExposure: true
+              service.managed: true
+    expect:
+      actions:
+        a-create-apex:
+          operation: create
+          requiredPermissions:
+            - route53:ChangeTagsForResource
+            - route53:CreateHostedZone
+            - route53:GetHostedZone
+            - route53:ListHostedZonesByName
+            - route53:ListTagsForResource
+
+  - name: plan-emits-azure-dnszone-permissions
+    impl: go
+    description: >
+      A managed DNS zone (capability.dns.zone on azure/dnszone, D101) — the DNS
+      domain on the THIRD cloud, completing 3-cloud symmetry. The RESOURCE TYPE
+      forks on exposure: a public zone needs dnsZones permissions (a private one
+      privateDnsZones). Records are data, out of band.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d101adns, environment: test, version: 1 }
+        capabilities:
+          - id: apex
+            type: capability.dns.zone
+        constraints:
+          hard:
+            - id: c-domain
+              subject: apex
+              path: zone.domain
+              op: equals
+              value: example.com
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d101adns
+        capabilities:
+          apex:
+            provider: azure
+            service: dnszone
+            attributes:
+              zone.domain: example.com
+              network.publicExposure: true
+              service.managed: true
+            implementation:
+              resource_group: rg-groundhold
+    expect:
+      actions:
+        a-create-apex:
+          operation: create
+          requiredPermissions:
+            - Microsoft.Network/dnsZones/read
+            - Microsoft.Network/dnsZones/write
+
+  - name: plan-emits-gcp-iambinding-permissions
+    impl: go
+    description: >
+      A named-role grant (capability.authorization.grant on gcp/iambinding, D104) —
+      the tenth capability domain, the first relational one. A grant is a read-modify-
+      write on the project IAM policy: getIamPolicy is the quiet read, setIamPolicy the
+      mutation. No role is authored, so no iam.roles.create.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d104authz, environment: test, version: 1 }
+        capabilities:
+          - id: reader
+            type: capability.authorization.grant
+        constraints:
+          hard:
+            - id: c-leastpriv
+              subject: reader
+              path: access.privileged
+              op: equals
+              value: false
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d104authz
+        capabilities:
+          reader:
+            provider: gcp
+            service: iambinding
+            attributes:
+              grant.role: roles/storage.objectViewer
+              grant.principal: serviceAccount:runner@acme-prod.iam.gserviceaccount.com
+              access.scope: account
+              access.privileged: false
+              service.managed: true
+    expect:
+      actions:
+        a-create-reader:
+          operation: create
+          requiredPermissions:
+            - resourcemanager.projects.getIamPolicy
+            - resourcemanager.projects.setIamPolicy
+
+  - name: plan-emits-aws-rolepolicy-permissions
+    impl: go
+    description: >
+      A named-role grant (capability.authorization.grant on aws/rolepolicy, D104) —
+      GCP/AWS parity on the authorization domain. On AWS a grant is a managed policy
+      attached to a role; ListAttachedRolePolicies is the quiet read (observe + attach
+      idempotency). No role/policy is authored, so no iam:CreatePolicy / iam:CreateRole.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d104authzaws, environment: test, version: 1 }
+        capabilities:
+          - id: reader
+            type: capability.authorization.grant
+        constraints:
+          hard:
+            - id: c-leastpriv
+              subject: reader
+              path: access.privileged
+              op: equals
+              value: false
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d104authzaws
+        capabilities:
+          reader:
+            provider: aws
+            service: rolepolicy
+            attributes:
+              grant.role: arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+              grant.principal: app-runner
+              access.scope: account
+              access.privileged: false
+              service.managed: true
+    expect:
+      actions:
+        a-create-reader:
+          operation: create
+          requiredPermissions:
+            - iam:AttachRolePolicy
+            - iam:ListAttachedRolePolicies
+
+  - name: plan-emits-azure-roleassignment-permissions
+    impl: go
+    description: >
+      A named-role grant (capability.authorization.grant on azure/roleassignment,
+      D104) — the third cloud on the authorization domain. On Azure a grant is an RBAC
+      role assignment (the cleanest of the three: a real assignment object).
+      roleAssignments/read is the quiet read (observe). No role is authored, so no
+      roleDefinitions/write.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d104authzaz, environment: test, version: 1 }
+        capabilities:
+          - id: reader
+            type: capability.authorization.grant
+        constraints:
+          hard:
+            - id: c-leastpriv
+              subject: reader
+              path: access.privileged
+              op: equals
+              value: false
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d104authzaz
+        capabilities:
+          reader:
+            provider: azure
+            service: roleassignment
+            attributes:
+              grant.role: Reader
+              grant.principal: 11111111-1111-1111-1111-111111111111
+              access.scope: account
+              access.privileged: false
+              service.managed: true
+    expect:
+      actions:
+        a-create-reader:
+          operation: create
+          requiredPermissions:
+            - Microsoft.Authorization/roleAssignments/read
+            - Microsoft.Authorization/roleAssignments/write
+
+  - name: plan-emits-gcp-customrole-permissions
+    impl: go
+    description: >
+      A custom role (capability.authorization.role on gcp/customrole, D105) — the
+      eleventh capability domain. Sync create/delete; roles.get is the quiet read
+      (permission-set match on 409 + observe). role.permissions is a verifiable set.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d105role, environment: test, version: 1 }
+        capabilities:
+          - id: viewer
+            type: capability.authorization.role
+        constraints:
+          hard:
+            - id: c-allowlist
+              subject: viewer
+              path: role.permissions
+              op: subset-of
+              value: [storage.objects.get, storage.objects.list, storage.buckets.get]
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d105role
+        capabilities:
+          viewer:
+            provider: gcp
+            service: customrole
+            attributes:
+              role.permissions: [storage.objects.get, storage.objects.list]
+              access.mutating: false
+              access.privileged: false
+              service.managed: true
+    expect:
+      actions:
+        a-create-viewer:
+          operation: create
+          requiredPermissions:
+            - iam.roles.create
+            - iam.roles.get
+
+  - name: plan-emits-gcp-monitoring-permissions
+    impl: go
+    description: >
+      A metric alert (capability.monitoring.alert on gcp/monitoring, D106) — the
+      twelfth capability domain, the first observability one. Sync create/delete;
+      alertPolicies.get is the quiet read (ownership pre-read + observe).
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d106alert, environment: test, version: 1 }
+        capabilities:
+          - id: cpu
+            type: capability.monitoring.alert
+        constraints:
+          hard:
+            - id: c-notify
+              subject: cpu
+              path: alert.notify
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d106alert
+        capabilities:
+          cpu:
+            provider: gcp
+            service: monitoring
+            attributes:
+              alert.metric: compute.googleapis.com/instance/cpu/utilization
+              alert.threshold: 80
+              alert.comparison: greater-than
+              alert.notify: true
+              service.managed: true
+            implementation:
+              notification_channel: projects/acme-prod/notificationChannels/123
+    expect:
+      actions:
+        a-create-cpu:
+          operation: create
+          requiredPermissions:
+            - monitoring.alertPolicies.create
+            - monitoring.alertPolicies.get
+
+  - name: plan-emits-aws-cloudwatch-permissions
+    impl: go
+    description: >
+      A metric alert (capability.monitoring.alert on aws/cloudwatch, D106) — GCP/AWS
+      parity. PutMetricAlarm is an upsert; DescribeAlarms + ListTagsForResource are the
+      ownership pre-read; the account is resolved via STS for the alarm ARN. The
+      alarm's region is an implementation detail (the alert vocab is region-free).
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d106alertaws, environment: test, version: 1 }
+        capabilities:
+          - id: cpu
+            type: capability.monitoring.alert
+        constraints:
+          hard:
+            - id: c-notify
+              subject: cpu
+              path: alert.notify
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d106alertaws
+        capabilities:
+          cpu:
+            provider: aws
+            service: cloudwatch
+            attributes:
+              alert.metric: AWS/EC2/CPUUtilization
+              alert.threshold: 80
+              alert.comparison: greater-than
+              alert.notify: true
+              service.managed: true
+            implementation:
+              region: eu-central-1
+              notification_channel: arn:aws:sns:eu-central-1:000000000000:alerts
+    expect:
+      actions:
+        a-create-cpu:
+          operation: create
+          requiredPermissions:
+            - cloudwatch:DescribeAlarms
+            - cloudwatch:ListTagsForResource
+            - cloudwatch:PutMetricAlarm
+            - cloudwatch:TagResource
+            - sts:GetCallerIdentity
+
+  - name: plan-emits-azure-metricalert-permissions
+    impl: go
+    description: >
+      A metric alert (capability.monitoring.alert on azure/metricalert, D106) — the
+      third cloud on the monitoring domain. metricAlerts/read is the quiet read
+      (ownership pre-read + observe). An Azure metric alert must be scoped to a target
+      resource (implementation.target_resource) — an honest per-cloud requirement.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d106alertaz, environment: test, version: 1 }
+        capabilities:
+          - id: cpu
+            type: capability.monitoring.alert
+        constraints:
+          hard:
+            - id: c-notify
+              subject: cpu
+              path: alert.notify
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d106alertaz
+        capabilities:
+          cpu:
+            provider: azure
+            service: metricalert
+            attributes:
+              alert.metric: Percentage CPU
+              alert.threshold: 80
+              alert.comparison: greater-than
+              alert.notify: true
+              service.managed: true
+            implementation:
+              resource_group: rg-groundhold
+              target_resource: /subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-groundhold/providers/Microsoft.Compute/virtualMachines/vm1
+              notification_channel: /subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-groundhold/providers/Microsoft.Insights/actionGroups/ag1
+    expect:
+      actions:
+        a-create-cpu:
+          operation: create
+          requiredPermissions:
+            - Microsoft.Insights/metricAlerts/read
+            - Microsoft.Insights/metricAlerts/write
+  - name: plan-emits-gcp-dashboard-permissions
+    impl: go
+    description: >
+      A metric dashboard (capability.monitoring.dashboard on gcp/dashboard, D107) — the
+      thirteenth capability domain, the observability sibling of the alert. Sync
+      create/delete; dashboards.get is the quiet read (ownership pre-read + observe).
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d107dash, environment: test, version: 1 }
+        capabilities:
+          - id: golden
+            type: capability.monitoring.dashboard
+        constraints:
+          hard:
+            - id: c-nonempty
+              subject: golden
+              path: dashboard.widgetCount
+              op: gte
+              value: 1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d107dash
+        capabilities:
+          golden:
+            provider: gcp
+            service: dashboard
+            attributes:
+              dashboard.metrics:
+                - compute.googleapis.com/instance/cpu/utilization
+                - loadbalancing.googleapis.com/https/request_count
+              dashboard.widgetCount: 2
+              service.managed: true
+    expect:
+      actions:
+        a-create-golden:
+          operation: create
+          requiredPermissions:
+            - monitoring.dashboards.create
+            - monitoring.dashboards.get
+
+  - name: plan-emits-aws-cloudwatchdash-permissions
+    impl: go
+    description: >
+      A metric dashboard (capability.monitoring.dashboard on aws/cloudwatchdash, D107)
+      — GCP/AWS parity. CloudWatch dashboards are global; PutDashboard is an upsert,
+      GetDashboard the read. The widgets' region is an implementation detail.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d107dashaws, environment: test, version: 1 }
+        capabilities:
+          - id: golden
+            type: capability.monitoring.dashboard
+        constraints:
+          hard:
+            - id: c-nonempty
+              subject: golden
+              path: dashboard.widgetCount
+              op: gte
+              value: 1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d107dashaws
+        capabilities:
+          golden:
+            provider: aws
+            service: cloudwatchdash
+            attributes:
+              dashboard.metrics:
+                - AWS/EC2/CPUUtilization
+                - AWS/ELB/RequestCount
+              dashboard.widgetCount: 2
+              service.managed: true
+            implementation:
+              region: eu-central-1
+    expect:
+      actions:
+        a-create-golden:
+          operation: create
+          requiredPermissions:
+            - cloudwatch:GetDashboard
+            - cloudwatch:PutDashboard
+
+  - name: plan-emits-azure-portaldash-permissions
+    impl: go
+    description: >
+      A metric dashboard (capability.monitoring.dashboard on azure/portaldash, D107) —
+      the third cloud on the dashboard domain. dashboards/read is the quiet read. An
+      Azure chart tile is scoped to a target resource (implementation.target_resource).
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d107dashaz, environment: test, version: 1 }
+        capabilities:
+          - id: golden
+            type: capability.monitoring.dashboard
+        constraints:
+          hard:
+            - id: c-nonempty
+              subject: golden
+              path: dashboard.widgetCount
+              op: gte
+              value: 1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d107dashaz
+        capabilities:
+          golden:
+            provider: azure
+            service: portaldash
+            attributes:
+              dashboard.metrics:
+                - Percentage CPU
+                - Network In Total
+              dashboard.widgetCount: 2
+              service.managed: true
+            implementation:
+              resource_group: rg-groundhold
+              target_resource: /subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-groundhold/providers/Microsoft.Compute/virtualMachines/vm1
+    expect:
+      actions:
+        a-create-golden:
+          operation: create
+          requiredPermissions:
+            - Microsoft.Portal/dashboards/read
+            - Microsoft.Portal/dashboards/write
+  - name: plan-emits-gcp-uptime-permissions
+    impl: go
+    description: >
+      A synthetic uptime check (capability.monitoring.uptime on gcp/uptime, D108) — the
+      fourteenth capability domain, the third observability one. Sync create/delete;
+      uptimeCheckConfigs.get is the quiet read (ownership pre-read + observe).
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d108up, environment: test, version: 1 }
+        capabilities:
+          - id: api
+            type: capability.monitoring.uptime
+        constraints:
+          hard:
+            - id: c-frequent
+              subject: api
+              path: check.period
+              op: lte
+              value: 60s
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d108up
+        capabilities:
+          api:
+            provider: gcp
+            service: uptime
+            attributes:
+              check.target: api.example.com
+              check.protocol: https
+              check.path: /healthz
+              check.period: 60s
+              service.managed: true
+    expect:
+      actions:
+        a-create-api:
+          operation: create
+          requiredPermissions:
+            - monitoring.uptimeCheckConfigs.create
+            - monitoring.uptimeCheckConfigs.get
+
+  - name: plan-emits-aws-route53health-permissions
+    impl: go
+    description: >
+      A synthetic uptime check (capability.monitoring.uptime on aws/route53health, D108)
+      — GCP/AWS parity. A Route 53 health check is global with a server-assigned Id;
+      GetHealthCheck + ListTagsForResource are the reads. Route 53 permits only a 10s or
+      30s interval.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d108upaws, environment: test, version: 1 }
+        capabilities:
+          - id: api
+            type: capability.monitoring.uptime
+        constraints:
+          hard:
+            - id: c-frequent
+              subject: api
+              path: check.period
+              op: lte
+              value: 60s
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d108upaws
+        capabilities:
+          api:
+            provider: aws
+            service: route53health
+            attributes:
+              check.target: api.example.com
+              check.protocol: https
+              check.path: /healthz
+              check.period: 30s
+              service.managed: true
+    expect:
+      actions:
+        a-create-api:
+          operation: create
+          requiredPermissions:
+            - route53:ChangeTagsForResource
+            - route53:CreateHealthCheck
+            - route53:GetHealthCheck
+            - route53:ListTagsForResource
+
+  - name: plan-emits-azure-webtest-permissions
+    impl: go
+    description: >
+      A synthetic uptime check (capability.monitoring.uptime on azure/webtest, D108) —
+      the third cloud on the uptime domain. webtests/read is the quiet read. An Azure
+      availability test is HTTP(S)-only and links to an App Insights component
+      (implementation.app_insights_id); its frequency is 300/600/900s.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d108upaz, environment: test, version: 1 }
+        capabilities:
+          - id: api
+            type: capability.monitoring.uptime
+        constraints:
+          hard:
+            - id: c-tls
+              subject: api
+              path: check.protocol
+              op: equals
+              value: https
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d108upaz
+        capabilities:
+          api:
+            provider: azure
+            service: webtest
+            attributes:
+              check.target: api.example.com
+              check.protocol: https
+              check.path: /healthz
+              check.period: 300s
+              service.managed: true
+            implementation:
+              resource_group: rg-groundhold
+              app_insights_id: /subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-groundhold/providers/Microsoft.Insights/components/ai1
+    expect:
+      actions:
+        a-create-api:
+          operation: create
+          requiredPermissions:
+            - Microsoft.Insights/webtests/read
+            - Microsoft.Insights/webtests/write
+  - name: plan-emits-gcp-logmetric-permissions
+    impl: go
+    description: >
+      A log-based metric (capability.monitoring.logmetric on gcp/logmetric, D109) — the
+      fifteenth capability domain, the fourth observability one. Sync create/delete;
+      logMetrics.get is the quiet read (409-continue ownership + observe).
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d109lm, environment: test, version: 1 }
+        capabilities:
+          - id: errors
+            type: capability.monitoring.logmetric
+        constraints:
+          hard:
+            - id: c-kind
+              subject: errors
+              path: metric.kind
+              op: equals
+              value: counter
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d109lm
+        capabilities:
+          errors:
+            provider: gcp
+            service: logmetric
+            attributes:
+              metric.name: app_error_count
+              metric.filter: severity>=ERROR
+              metric.kind: counter
+              service.managed: true
+    expect:
+      actions:
+        a-create-errors:
+          operation: create
+          requiredPermissions:
+            - logging.logMetrics.create
+            - logging.logMetrics.get
+
+  - name: plan-emits-aws-cwlogfilter-permissions
+    impl: go
+    description: >
+      A log-based metric (capability.monitoring.logmetric on aws/cwlogfilter, D109) —
+      GCP/AWS parity. A CloudWatch Logs metric filter over a log group; PutMetricFilter
+      is an upsert, DescribeMetricFilters the read. The log group + region are impl.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d109lmaws, environment: test, version: 1 }
+        capabilities:
+          - id: errors
+            type: capability.monitoring.logmetric
+        constraints:
+          hard:
+            - id: c-kind
+              subject: errors
+              path: metric.kind
+              op: equals
+              value: counter
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d109lmaws
+        capabilities:
+          errors:
+            provider: aws
+            service: cwlogfilter
+            attributes:
+              metric.name: app_error_count
+              metric.filter: ERROR
+              metric.kind: counter
+              service.managed: true
+            implementation:
+              region: eu-central-1
+              log_group: /aws/lambda/app
+    expect:
+      actions:
+        a-create-errors:
+          operation: create
+          requiredPermissions:
+            - logs:DescribeMetricFilters
+            - logs:PutMetricFilter
+
+  - name: plan-emits-azure-scheduledquery-permissions
+    impl: go
+    description: >
+      A log-based metric (capability.monitoring.logmetric on azure/scheduledquery, D109)
+      — the third cloud on the log-metric domain. Azure realizes it as a scheduled query
+      rule (evaluate-on-schedule); scheduledQueryRules/read is the quiet read. The KQL
+      query is scoped to a Log Analytics workspace (implementation.scope).
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d109lmaz, environment: test, version: 1 }
+        capabilities:
+          - id: errors
+            type: capability.monitoring.logmetric
+        constraints:
+          hard:
+            - id: c-kind
+              subject: errors
+              path: metric.kind
+              op: equals
+              value: counter
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d109lmaz
+        capabilities:
+          errors:
+            provider: azure
+            service: scheduledquery
+            attributes:
+              metric.name: app_error_count
+              metric.filter: AppLogs | where Level == 'Error'
+              metric.kind: counter
+              service.managed: true
+            implementation:
+              resource_group: rg-groundhold
+              scope: /subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-groundhold/providers/Microsoft.OperationalInsights/workspaces/law1
+    expect:
+      actions:
+        a-create-errors:
+          operation: create
+          requiredPermissions:
+            - Microsoft.Insights/scheduledQueryRules/read
+            - Microsoft.Insights/scheduledQueryRules/write
+  - name: plan-emits-gcp-artifactregistry-permissions-public
+    impl: go
+    description: >
+      A public container image registry (capability.registry.image on
+      gcp/artifactregistry, D110) — the sixteenth capability domain. LRO create;
+      repositories.get is the quiet read; public exposure adds the IAM pair to grant
+      allUsers reader.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d110reg, environment: test, version: 1 }
+        capabilities:
+          - id: images
+            type: capability.registry.image
+        constraints:
+          hard:
+            - id: c-region
+              subject: images
+              path: location.region
+              op: equals
+              value: europe-west1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d110reg
+        capabilities:
+          images:
+            provider: gcp
+            service: artifactregistry
+            attributes:
+              location.region: europe-west1
+              network.publicExposure: true
+              immutable.tags: true
+              service.managed: true
+    expect:
+      actions:
+        a-create-images:
+          operation: create
+          requiredPermissions:
+            - artifactregistry.repositories.create
+            - artifactregistry.repositories.get
+            - artifactregistry.repositories.getIamPolicy
+            - artifactregistry.repositories.setIamPolicy
+
+  - name: plan-emits-aws-ecr-permissions
+    impl: go
+    description: >
+      A container image registry (capability.registry.image on aws/ecr, D110) — GCP/AWS
+      parity. An ECR repository; DescribeRepositories + ListTagsForResource are the reads.
+      A private ECR registry is never public (public=true would be refused).
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d110regaws, environment: test, version: 1 }
+        capabilities:
+          - id: images
+            type: capability.registry.image
+        constraints:
+          hard:
+            - id: c-region
+              subject: images
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d110regaws
+        capabilities:
+          images:
+            provider: aws
+            service: ecr
+            attributes:
+              location.region: eu-central-1
+              network.publicExposure: false
+              immutable.tags: true
+              service.managed: true
+    expect:
+      actions:
+        a-create-images:
+          operation: create
+          requiredPermissions:
+            - ecr:CreateRepository
+            - ecr:DescribeRepositories
+            - ecr:ListTagsForResource
+            - ecr:TagResource
+
+  - name: plan-emits-azure-acr-permissions
+    impl: go
+    description: >
+      A container image registry (capability.registry.image on azure/acr, D110) — the
+      third cloud on the registry domain. registries/read is the quiet read. immutable.tags
+      is refused on Azure (no registry-level flag); CMK requires the Premium SKU.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d110regaz, environment: test, version: 1 }
+        capabilities:
+          - id: images
+            type: capability.registry.image
+        constraints:
+          hard:
+            - id: c-region
+              subject: images
+              path: location.region
+              op: equals
+              value: eastus
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d110regaz
+        capabilities:
+          images:
+            provider: azure
+            service: acr
+            attributes:
+              location.region: eastus
+              network.publicExposure: false
+              service.managed: true
+            implementation:
+              resource_group: rg-groundhold
+    expect:
+      actions:
+        a-create-images:
+          operation: create
+          requiredPermissions:
+            - Microsoft.ContainerRegistry/registries/read
+            - Microsoft.ContainerRegistry/registries/write
+  - name: plan-emits-gcp-cloudkms-permissions
+    impl: go
+    description: >
+      A managed encryption key (capability.key.encryption on gcp/cloudkms, D102) —
+      the eighth capability domain. Constitutive composite keyRing + cryptoKey;
+      neither is deletable, so delete lists + destroys key VERSIONS. cryptoKeys.get
+      is the quiet read (ownership + delete pre-read).
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d102key, environment: test, version: 1 }
+        capabilities:
+          - id: datakey
+            type: capability.key.encryption
+        constraints:
+          hard:
+            - id: c-region
+              subject: datakey
+              path: location.region
+              op: equals
+              value: europe-west1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d102key
+        capabilities:
+          datakey:
+            provider: gcp
+            service: cloudkms
+            attributes:
+              location.region: europe-west1
+              rotation.period: 30d
+              protection.level: hsm
+              service.managed: true
+    expect:
+      actions:
+        a-create-datakey:
+          operation: create
+          requiredPermissions:
+            - cloudkms.cryptoKeys.create
+            - cloudkms.cryptoKeys.get
+            - cloudkms.keyRings.create
+            - cloudkms.keyRings.get
+
+  - name: plan-emits-aws-kms-permissions
+    impl: go
+    description: >
+      A managed encryption key (capability.key.encryption on aws/kms, D102) —
+      GCP/AWS parity on the key domain. A single key (no ring); tags ride inline
+      on CreateKey; rotation adds EnableKeyRotation. A KMS key cannot be hard-
+      deleted, so delete is ScheduleKeyDeletion.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d102akms, environment: test, version: 1 }
+        capabilities:
+          - id: datakey
+            type: capability.key.encryption
+        constraints:
+          hard:
+            - id: c-region
+              subject: datakey
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d102akms
+        capabilities:
+          datakey:
+            provider: aws
+            service: kms
+            attributes:
+              location.region: eu-central-1
+              rotation.period: 90d
+              protection.level: hsm
+              service.managed: true
+    expect:
+      actions:
+        a-create-datakey:
+          operation: create
+          requiredPermissions:
+            - kms:CreateKey
+            - kms:DescribeKey
+            - kms:EnableKeyRotation
+            - kms:GetKeyRotationStatus
+            - kms:TagResource
+
+  - name: plan-emits-azure-keyvaultkey-permissions
+    impl: go
+    description: >
+      A managed encryption key (capability.key.encryption on azure/keyvaultkey,
+      D102) — the key domain on the THIRD cloud, completing 3-cloud symmetry. A
+      constitutive composite vault + key (distinct from the keyvault SECRET
+      service). vaults/read is the ownership pre-read; delete removes the vault.
+    plan:
+      at: "2026-07-15T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d102ak, environment: test, version: 1 }
+        capabilities:
+          - id: datakey
+            type: capability.key.encryption
+        constraints:
+          hard:
+            - id: c-region
+              subject: datakey
+              path: location.region
+              op: equals
+              value: eastus
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d102ak
+        capabilities:
+          datakey:
+            provider: azure
+            service: keyvaultkey
+            attributes:
+              location.region: eastus
+              rotation.period: 90d
+              protection.level: hsm
+              service.managed: true
+            implementation:
+              resource_group: rg-groundhold
+              tenant_id: "00000000-0000-0000-0000-0000000000aa"
+    expect:
+      actions:
+        a-create-datakey:
+          operation: create
+          requiredPermissions:
+            - Microsoft.KeyVault/vaults/keys/write
+            - Microsoft.KeyVault/vaults/read
+            - Microsoft.KeyVault/vaults/write
+
+  - name: plan-refuses-real-provider-with-no-service
+    impl: go
+    description: >
+      D76 fail-closed: a non-fake provider MUST name a service — dispatch and
+      permission derivation both key on it. A candidate that binds a real
+      provider but omits the service is refused at compile, never dispatched
+      to some default (a confused-deputy: it could hit the wrong API family).
+      The fake is exempt (service-agnostic); this refusal is provider-neutral.
+    plan:
+      at: "2026-07-19T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: nosvc, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-managed
+              subject: db
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: nosvc
+        capabilities:
+          db:
+            provider: aws
+            attributes:
+              service.managed: true
+    expect:
+      error: refused
+
+  - name: plan-emits-aws-route53record-permissions
+    impl: go
+    description: >
+      A single DNS record set (capability.dns.record on aws/route53record, D262).
+      A record carries no tags, so ownership is the parent hosted zone's tags
+      (ListTagsForResource + GetHostedZone); the write is an UPSERT
+      (ChangeResourceRecordSets), the read a ListResourceRecordSets.
+    plan:
+      at: "2026-07-23T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d262aws, environment: test, version: 1 }
+        capabilities:
+          - id: connect
+            type: capability.dns.record
+        constraints:
+          hard:
+            - id: c-type
+              subject: connect
+              path: dns.type
+              op: equals
+              value: CNAME
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d262aws
+        capabilities:
+          connect:
+            provider: aws
+            service: route53record
+            attributes:
+              dns.type: CNAME
+              dns.target: origin.example.net
+              service.managed: true
+            implementation:
+              zone_id: Z123ABC
+              record_name: connect.example.com
+    expect:
+      actions:
+        a-create-connect:
+          operation: create
+          requiredPermissions:
+            - route53:ChangeResourceRecordSets
+            - route53:GetHostedZone
+            - route53:ListResourceRecordSets
+            - route53:ListTagsForResource
+
+  - name: plan-emits-gcp-clouddnsrecord-permissions
+    impl: go
+    description: >
+      capability.dns.record on gcp/clouddnsrecord (D262). The write is an atomic
+      Change (dns.changes.create); managedZones.get is the parent-zone ownership
+      read, resourceRecordSets.list the observe / pre-delete read.
+    plan:
+      at: "2026-07-23T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d262gcp, environment: test, version: 1 }
+        capabilities:
+          - id: connect
+            type: capability.dns.record
+        constraints:
+          hard:
+            - id: c-type
+              subject: connect
+              path: dns.type
+              op: equals
+              value: CNAME
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d262gcp
+        capabilities:
+          connect:
+            provider: gcp
+            service: clouddnsrecord
+            attributes:
+              dns.type: CNAME
+              dns.target: origin.example.net
+              service.managed: true
+            implementation:
+              zone: example-com
+              record_name: connect.example.com
+    expect:
+      actions:
+        a-create-connect:
+          operation: create
+          requiredPermissions:
+            - dns.changes.create
+            - dns.managedZones.get
+            - dns.resourceRecordSets.list
+
+  - name: plan-emits-azure-dnsrecord-permissions
+    impl: go
+    description: >
+      capability.dns.record on azure/dnsrecord (D262) — an ARM child under a public
+      dnsZone, one per record type. The type is resolved at runtime, so the static
+      declaration is the per-type wildcard; dnsZones/read is the ownership pre-read.
+    plan:
+      at: "2026-07-23T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d262az, environment: test, version: 1 }
+        capabilities:
+          - id: connect
+            type: capability.dns.record
+        constraints:
+          hard:
+            - id: c-type
+              subject: connect
+              path: dns.type
+              op: equals
+              value: CNAME
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d262az
+        capabilities:
+          connect:
+            provider: azure
+            service: dnsrecord
+            attributes:
+              dns.type: CNAME
+              dns.target: origin.example.net
+              service.managed: true
+            implementation:
+              zone: example.com
+              resourceGroup: rg1
+              record_name: connect
+    expect:
+      actions:
+        a-create-connect:
+          operation: create
+          requiredPermissions:
+            - Microsoft.Network/dnsZones/*/read
+            - Microsoft.Network/dnsZones/*/write
+            - Microsoft.Network/dnsZones/read

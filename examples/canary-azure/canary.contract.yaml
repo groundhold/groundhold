@@ -1,0 +1,42 @@
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta:
+  id: azure-canary
+  environment: canary
+  version: 1
+
+# The FIRST live Azure slice (D290). Deliberately the cheapest honest loop:
+# a virtual network costs nothing in Azure, so this proves auth, the ARM PUT,
+# the async poll, ownership tags, the observe reverse-map, the convergence
+# check and retirement — without a bill. What it does NOT prove is stated in
+# docs/MATURITY.md rather than implied here.
+capabilities:
+  - id: net
+    type: capability.network.private
+
+constraints:
+  hard:
+    - id: c-residency
+      subject: net
+      path: location.region
+      op: equals
+      value: westeurope
+      # static: the candidate DECLARES the region and the compiler seals it.
+      # The measured half comes after the fact — `observe` records what ARM
+      # actually returned and the convergence check compares it. A
+      # provider-api method here would block the very first plan (no
+      # observation can exist before the resource does), which is the system
+      # being right, not a contract worth writing.
+      verify: { method: static }
+    - id: c-private
+      subject: net
+      path: ingress.public
+      op: equals
+      value: false
+      verify: { method: static }
+    - id: c-managed
+      subject: net
+      path: service.managed
+      op: equals
+      value: true
+      verify: { method: static }

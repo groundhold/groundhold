@@ -1,0 +1,45 @@
+# Plan preview (D89): `show <plan.json>` renders a SAVED sealed plan to a
+# scannable human review surface before apply. Presentation only — the JSON
+# stays the machine contract; the render is a pure, deterministic function of the
+# plan bytes (golden-testable). Honesty pinned here: the six-field risk vector is
+# verbatim (no composite score, no severity adjective — grep-negative), destructive
+# actions get a rail AND a recap (cannot be buried), cost is per-currency declared
+# sum (no fabricated PARTIAL/precision). Go-runtime, so impl: go.
+suite: show
+cases:
+  - name: sealed-plan-human-preview
+    impl: go
+    description: >
+      D89: a plan with create + update(diff) + stateful replace + delete renders
+      byte-for-byte: DAG order, verbatim risk vectors, rail + recap on the two
+      destructive actions, references, witnessed, preconditions, permission union,
+      per-axis-worst aggregate. No severity word anywhere.
+    show:
+      plan: testdata/show-four-ops.plan.json
+    expect:
+      golden: testdata/show-four-ops.golden.txt
+      absent: [high, medium, low, danger, "risk score", severity]
+
+  - name: plan-order-is-derived-not-input-order
+    impl: go
+    description: >
+      D89: the same plan with its Actions[] array reversed renders the same
+      EXECUTION ORDER — order is derived from the DAG (topological, lexicographic
+      tiebreak), never the input array order. (The plan hash differs, correctly:
+      a permuted file is a different artifact.)
+    show:
+      plan: testdata/show-four-ops-permuted.plan.json
+    expect:
+      golden: testdata/show-four-ops.golden.txt
+      ignoreHashLine: true
+
+  - name: benign-plan-has-no-rail-or-recap
+    impl: go
+    description: >
+      D89: a create-only plan has no destructive action, so absence is pinned —
+      no rail, no "destructive recap" section. Absence is a first-class assertion.
+    show:
+      plan: testdata/show-benign.plan.json
+    expect:
+      golden: testdata/show-benign.golden.txt
+      absent: ["destructive recap", "##", danger, severity]

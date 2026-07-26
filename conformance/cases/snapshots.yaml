@@ -1,0 +1,199 @@
+# Ledger snapshots (D137). impl: go — the file backend's compaction
+# valve. A snapshot is the full fold of a prefix; the prefix is
+# ARCHIVED, never deleted. The deep correctness pin (every projection
+# equal between full fold and snapshot+tail, reflect.DeepEqual over the
+# whole struct) lives in the Go equivalence test; these cases pin the
+# operational contract through the CLI.
+
+cases:
+  - name: snapshot-compacts-and-history-continues
+    description: >
+      D137: after compaction every verb keeps working against the tail
+      — appends continue the chain from the snapshot's heads, replay
+      seeds the fold, export keeps ABSOLUTE indices (a cursor consumer
+      never sees positions reset), and a second compaction stacks.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: false }
+        - publish: { signed: false, version: 2 }
+        - snapshot: {}
+          expect: { exit: 0 }
+        - publish: { signed: false, version: 3 }
+        - replay: {}
+          expect: { exit: 0 }
+        - export: {}
+          expect: { exit: 0 }
+        - snapshot: {}
+          expect: { exit: 0 }
+        - publish: { signed: false, version: 4 }
+        - replay: {}
+          expect: { exit: 0 }
+
+  - name: empty-tail-refuses-to-compact
+    description: >
+      D137: compacting an already-empty tail is a no-op wearing a
+      side-effect — refused loudly instead of stacking pointless
+      archives.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: false }
+        - snapshot: {}
+        - snapshot: {}
+          expect: { exit: 1, stderrContains: "nothing to compact" }
+
+  - name: unsigned-snapshot-under-trust-refuses
+    description: >
+      D137/D102: a fold must be as verifiable as the history it
+      replaces — otherwise compaction is a signature-stripping laundry
+      (fold signed history, drop every event signature, present the
+      unsigned fold). A snapshot written WITH the key verifies; one
+      written without refuses under --trust.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - snapshot: { signed: true }
+          expect: { exit: 0 }
+        - publish: { signed: true, version: 2 }
+        - replay: { trust: "@pub" }
+          expect: { exit: 0 }
+        - snapshot: {}
+        - replay: { trust: "@pub" }
+          expect: { exit: 5, stderrContains: "snapshot is unsigned" }
+
+  - name: anchor-inside-the-compacted-prefix-refuses
+    description: >
+      D137/D70: positions stay absolute, so tail-era anchors keep
+      verifying — but an anchor pinning an event strictly inside the
+      compacted prefix cannot be positionally checked against the live
+      file. It refuses TOWARD the archive instead of rubber-stamping.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: false }
+        - anchorEmit: {}
+        - publish: { signed: false, version: 2 }
+        - snapshot: {}
+        - anchorCheck: {}
+          expect: { exit: 5 }
+
+  - name: capsule-of-compacted-history-points-to-the-archive
+    description: >
+      D137/D103: a capsule is the subchain from GENESIS — a capability
+      whose early history was compacted cannot be proven from the tail
+      alone. Loud refusal naming the archive, exit 1 (operator action),
+      never a partial capsule pretending to be whole.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: false }
+        - snapshot: {}
+        - publish: { signed: false, version: 2 }
+        - capsule: { capability: db }
+          expect: { exit: 1 }
+
+  - name: trust-from-boundary-survives-compaction
+    description: >
+      D137/D133: when the --trust-from boundary event is compacted into
+      the archive, the snapshot's verifiedUnder receipt records that
+      the rotation replay honored EXACTLY that boundary — the tail
+      replay seeds the obligation as met instead of refusing on an
+      absent hash. A different armed boundary gets no such credit.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: false }
+        - publish: { signed: true, version: 2 }
+        - captureHash: { index: 1 }
+        - snapshot: { signed: true, trust: "@pub", trustFrom: "@h" }
+          expect: { exit: 0 }
+        - publish: { signed: true, version: 3 }
+        - replay: { trust: "@pub", trustFrom: "@h" }
+          expect: { exit: 0 }
+        - replay:
+            trust: "@pub"
+            trustFrom: "sha256:00000000000000000000000000000000000000000000000000000000deadbeef"
+          expect: { exit: 5, stderrContains: "boundary" }
+
+  - name: export-since-uses-absolute-cursors-after-compaction
+    description: >
+      D137 (review fix): export indices stay ABSOLUTE, so a consumer's
+      saved cursor keeps meaning across a compaction. After a snapshot
+      at baseEvents=2, --since 2 emits the tail from absolute index 2 —
+      not zero records (raw index 0 < 2), not the whole tail.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: false }
+        - publish: { signed: false, version: 2 }
+        - snapshot: {}
+        - publish: { signed: false, version: 3 }
+        - publish: { signed: false, version: 4 }
+        - exportSince: { since: 2, emits: 2, firstIndex: 2 }
+        - exportSince: { since: 3, emits: 1, firstIndex: 3 }
+
+  - name: repair-does-not-cry-corruption-over-a-healthy-snapshot
+    description: >
+      D137/D69 (review fix): a compacted ledger's tail continues the
+      snapshot heads, not genesis. Diagnosing it from an empty state
+      would call a HEALTHY tail chain-broken and steer the operator to
+      quarantine, which truncates the healthy tail away. repair seeds
+      from the snapshot and reports healthy.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: false }
+        - publish: { signed: false, version: 2 }
+        - snapshot: {}
+        - publish: { signed: false, version: 3 }
+        - repairProbe: { status: healthy }
+
+  - name: swapped-snapshot-fold-fails-the-anchor
+    description: >
+      D137 (review fix): an anchor cut at a compaction pins the fold
+      hash. A doctored snapshot that preserves baseHead/heads but
+      rewrites a projection (here clock) is caught by anchor --check —
+      the fold was swapped after anchoring, even though the tail still
+      continues.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: false }
+        - publish: { signed: false, version: 2 }
+        - snapshot: {}
+        - anchorEmit: {}
+        - tamperSnapshot: { findRe: "\"clock\":[0-9]+", replaceRe: "\"clock\":999999999" }
+        - anchorCheck: {}
+          expect: { exit: 5, stderrContains: "snapshot" }
+
+  - name: malformed-snapshot-signature-alg-refuses-under-trust
+    description: >
+      D137 (review fix): the sig envelope is excluded from the fold
+      hash, so alg must be pinned SEPARATELY. A snapshot whose alg is
+      swapped to a non-ed25519 value refuses under --trust rather than
+      verifying by luck.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - snapshot: { signed: true }
+        - publish: { signed: true, version: 2 }
+        - tamperSnapshot: { find: "\"alg\":\"ed25519\"", replace: "\"alg\":\"rsa-2048\"" }
+        - replay: { trust: "@pub" }
+          expect: { exit: 5, stderrContains: "alg" }
+
+  - name: armed-trust-without-a-signing-key-refuses-to-rotate
+    description: >
+      D137 (review fix): rotating with --trust armed but no --sign-key
+      would write a fold claiming mode:trust that cannot be signed —
+      the next read would refuse it and brick the ledger. Refused up
+      front instead.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - publish: { signed: true, version: 2 }
+        - snapshot: { trust: "@pub" }
+          expect: { exit: 1, stderrContains: "no --sign-key" }

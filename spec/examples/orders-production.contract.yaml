@@ -1,0 +1,107 @@
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+
+meta:
+  id: orders-production
+  owner: piotr
+  environment: production
+  version: 3
+
+capabilities:
+  - id: orders-db
+    type: capability.database.relational
+    requirements:
+      engine.protocol:
+        op: compatible-with
+        value: postgresql/16
+
+constraints:
+  hard:
+    - id: c-residency
+      subject: orders-db
+      path: location.region
+      op: in
+      value: [europe-west1, europe-west3]
+      verify: { method: static }
+
+    - id: c-private
+      subject: orders-db
+      path: network.publicExposure
+      op: equals
+      value: false
+      verify: { method: static }
+
+    - id: c-encrypted
+      subject: orders-db
+      path: encryption.atRest
+      op: equals
+      value: true
+      verify: { method: static }
+
+    - id: c-rpo
+      subject: orders-db
+      path: recovery.rpo
+      op: lte
+      value: 5m
+      verify: { method: static }
+
+    - id: c-rto
+      subject: orders-db
+      path: recovery.rto
+      op: lte
+      value: 30m
+      verify: { method: probe }   # provable ONLY by an actual restore test
+
+  soft:
+    - id: s-cost
+      subject: orders-db
+      path: cost.monthly
+      objective: minimize
+
+    - id: s-managed
+      subject: orders-db
+      path: service.managed
+      op: equals
+      value: true
+
+budget:
+  - id: c-budget
+    subject: orders-db
+    path: cost.monthly
+    op: lte
+    value: { amount: 1500, currency: EUR }
+    verify: { method: static }
+
+assumptions:
+  - id: a-growth
+    statement: "workload grows 30% within 90 days"
+    status: assumed
+    source: "metrics:orders-prod, 14d window"
+    confidence: 0.6
+    affects: [s-cost, c-budget]
+
+autonomy:
+  auto_execute:
+    max_reversibility: R1
+    max_cost_delta: { amount: 100, currency: EUR }
+  forbidden:
+    - disable: c-encrypted
+    - delete_stateful: true
+
+outcomes:
+  - id: o-connect
+    probe: tcp-connect
+    target: orders-db.endpoint
+    expect: success
+    within: 10m
+  - id: o-latency
+    probe: metric
+    source: app.orders.p95_latency
+    op: lte
+    value: 250ms
+    window: 30m
+  - id: o-no-public
+    probe: provider-api
+    path: network.publicNetworkPaths
+    op: equals
+    value: 0

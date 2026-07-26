@@ -1,0 +1,287 @@
+# Conformance cases for spec v0.1.
+# Any conforming implementation (this Python reference, the future Go runtime)
+# MUST produce these verdicts. Semantics live here, not in any codebase.
+
+cases:
+  - name: probe-gated-hard-constraint-blocks-execution
+    description: >
+      A hard constraint with verify.method=probe cannot be satisfied from the
+      candidate alone. Verdict is unknown, and unknown on hard blocks execution.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-rto
+            subject: db
+            path: recovery.rto
+            op: lte
+            value: 30m
+            verify: { method: probe }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t1
+      capabilities:
+        db:
+          attributes:
+            recovery.rto: 25m
+    expect:
+      executable: false
+      code: not-executable
+      verdicts:
+        c-rto: unknown
+
+  - name: violated-hard-constraint
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t2, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-residency
+            subject: db
+            path: location.region
+            op: in
+            value: [europe-west1]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t2
+      capabilities:
+        db:
+          attributes:
+            location.region: us-east1
+    expect:
+      executable: false
+      verdicts:
+        c-residency: violated
+
+  - name: unit-mismatch-is-unverifiable-not-false
+    description: >
+      Comparing a duration constraint against a money value is a typing error
+      in one of the documents — the verdict must be unverifiable, never a
+      silent false or a coerced comparison.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t3, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-rpo
+            subject: db
+            path: recovery.rpo
+            op: lte
+            value: 5m
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t3
+      capabilities:
+        db:
+          attributes:
+            recovery.rpo: 5 EUR
+    expect:
+      executable: false
+      verdicts:
+        c-rpo: unverifiable
+
+  - name: undeclared-attribute-is-unknown
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t4, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-encrypted
+            subject: db
+            path: encryption.atRest
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t4
+      capabilities:
+        db:
+          attributes: {}
+    expect:
+      executable: false
+      verdicts:
+        c-encrypted: unknown
+
+  - name: assumed-value-satisfies-but-carries-basis
+    description: >
+      A verdict may rest on an inferred/assumed value. It still counts as
+      satisfied, but the basis must be reported so policy can gate on it.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t5, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      budget:
+        - id: c-budget
+          subject: db
+          path: cost.monthly
+          op: lte
+          value: { amount: 1500, currency: EUR }
+          verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t5
+      capabilities:
+        db:
+          attributes:
+            cost.monthly:
+              value: 912 EUR
+              status: inferred
+              source: pricing-catalog
+              confidence: 0.8
+    expect:
+      executable: true
+      verdicts:
+        c-budget: satisfied
+      basis:
+        c-budget: inferred
+
+  - name: currency-mismatch-is-unverifiable
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t6, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      budget:
+        - id: c-budget
+          subject: db
+          path: cost.monthly
+          op: lte
+          value: { amount: 1500, currency: EUR }
+          verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t6
+      capabilities:
+        db:
+          attributes:
+            cost.monthly: 900 USD
+    expect:
+      executable: false
+      verdicts:
+        c-budget: unverifiable
+
+  - name: protocol-compatibility
+    description: postgresql/16.4 is compatible-with postgresql/16; 15.x is not.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: t7, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+          requirements:
+            engine.protocol:
+              op: compatible-with
+              value: postgresql/16
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: t7
+      capabilities:
+        db:
+          attributes:
+            engine.protocol: postgresql/15.6
+    expect:
+      executable: false
+      verdicts:
+        req-db-engine.protocol: violated
+
+  - name: equals-bool-vs-string-is-unverifiable-not-coerced
+    description: >
+      The classic coercion trap: a contract requires encryption.atRest equals the
+      BOOL true, but the candidate declares the STRING "true" (a quoted value a
+      naive exporter emits). equals is the most-used operator; a coercing verifier
+      would silently report satisfied. The four-valued verdict is unverifiable —
+      the candidate is ill-typed against the contract, never a coerced pass
+      (invariant #2, pinned for equals as unit-mismatch pins it for lte).
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: eqk1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-enc
+            subject: db
+            path: encryption.atRest
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: eqk1
+      capabilities:
+        db:
+          attributes:
+            encryption.atRest: "true"
+    expect:
+      executable: false
+      verdicts:
+        c-enc: unverifiable
+
+  - name: equals-number-vs-string-is-unverifiable-not-coerced
+    description: >
+      The numeric coercion trap under equals: the contract requires the NUMBER 3,
+      the candidate declares the STRING "3". No silent stringly-typed match — the
+      verdict is unverifiable, not satisfied and not violated (invariant #2).
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: eqk2, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-count
+            subject: db
+            path: replicas.count
+            op: equals
+            value: 3
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: eqk2
+      capabilities:
+        db:
+          attributes:
+            replicas.count: "3"
+    expect:
+      executable: false
+      verdicts:
+        c-count: unverifiable

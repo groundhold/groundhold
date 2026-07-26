@@ -1,0 +1,58 @@
+# Attribute vocabulary for capability.dns.record, spec v0.1.
+#
+# A single DNS record: a name in a zone that resolves to a value. What an
+# organization GOVERNS about it is CORRECTNESS and EXPOSURE POSTURE — does the
+# name point where it should (target), what KIND of record it is (type), and — on
+# an edge/proxy provider like Cloudflare — whether traffic runs through the
+# provider's edge (proxied, origin hidden) or straight to the origin (exposed).
+# A Cloudflare DNS record, a Route 53 record set and a Cloud DNS rrset are the
+# same semantic at different control planes. The TTL, priority (MX/SRV), record
+# id and zone metadata are operational noise / identity; the type, the target and
+# the proxy posture are the facts an org actually governs — exactly the facts the
+# vendor-broker's `connect.example.com` zone turns on (a name whose HTTPS
+# depends on Cloudflare DNS-01 validation pointing at the right origin).
+
+capability: capability.dns.record
+version: 0.1
+stateful: false   # a DNS record holds no data; removing it loses none — it stops
+                  # resolving the name. The risk is on CORRECTNESS (does it point
+                  # where it should) and EXPOSURE (proxied vs direct-to-origin),
+                  # which the attributes below make verifiable.
+
+attributes:
+
+  dns.type:
+    kind: string
+    description: >
+      The record type — A, AAAA, CNAME, TXT, MX, ... The record's KIND. An A
+      record points a name at an IPv4 address; a CNAME aliases it to another
+      name; a TXT carries verification/policy text. The kind constrains what the
+      target legitimately is, so it is the first governed fact about a record.
+
+  dns.target:
+    kind: string
+    description: >
+      The value the record points to — an IP address (A/AAAA), a hostname (CNAME),
+      the exchange host (MX), the text payload (TXT). The correctness fact an
+      organization governs: does the name resolve to where it should. Cloudflare
+      calls this the record `content`; Route 53 the resource record value.
+
+  dns.proxied:
+    kind: bool
+    description: >
+      The Cloudflare proxy is ON (orange-cloud): traffic for this name runs
+      through Cloudflare's edge (CDN / WAF / TLS termination) and the origin IP is
+      hidden — vs OFF (grey-cloud): DNS resolves straight to the origin, which is
+      then directly reachable and exposed. The protection / exposure posture an org
+      governs on an edge provider. Only proxiable record types (A/AAAA/CNAME) can
+      carry it; a TXT/MX is always direct.
+
+  service.managed:
+    kind: bool
+    description: A managed cloud DNS record vs a self-operated zone file (bind/knot).
+
+# Deliberately absent in v0.1 (operational noise / identity, not governance semantics):
+#   - TTL — cache lifetime tuning, not a governed correctness fact
+#   - priority / weight (MX / SRV) — routing preference, operational detail
+#   - the record ID and the zone id / zone name — identity, not a governed attribute
+#   - comment, tags, created/modified timestamps — metadata

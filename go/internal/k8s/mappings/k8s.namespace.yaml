@@ -1,0 +1,40 @@
+# Schema-driven mapping: k8s core/v1 Namespace -> capability.cluster.namespace.
+#
+# A Namespace is a governed tenancy boundary; groundhold maps only the ONE capability
+# semantic it carries — the Pod Security Standard it ENFORCES, held on the
+# pod-security.kubernetes.io/enforce label. That value is validated against a closed
+# enum (restricted|baseline|privileged), so it is a NAMED LENS
+# (k8s.namespace.podSecurity), not a copy op (invariant #4). The name and arbitrary
+# labels are identity/scope, never capability semantics. service.managed is a plain
+# const. Reproduces the hand-coded observeNamespace/buildNamespace byte-for-byte.
+mapping: v0.1
+fieldpath: groundhold/fieldpath/v1
+service: namespace
+provider: k8s
+capability: capability.cluster.namespace
+vocab:
+  capability.cluster.namespace: "0.1"
+
+resource:
+  group: ""                          # core group
+  version: v1
+  kind: Namespace
+  plural: namespaces
+  scope: Cluster
+
+schema:
+  source: "kubernetes /openapi/v3 api/v1 Namespace"
+  mappedSurface: sha256:f8407314145311de7a5deaeaebfd5cd8dd3a18c5a0df6bacf0b4b053a224017a
+
+lenses:
+  - k8s.namespace.podSecurity        # enum-validated Pod Security Standard
+
+classify:
+  security.podSecurity:
+    change: mutable                  # the enforce label is patchable in place
+
+attributes:
+  service.managed:
+    op: const
+    value: true
+    derivation: measured

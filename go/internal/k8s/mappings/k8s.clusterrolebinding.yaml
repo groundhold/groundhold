@@ -1,0 +1,45 @@
+# Schema-driven mapping: k8s rbac.authorization.k8s.io/v1 ClusterRoleBinding -> capability.authorization.grant.
+#
+# The cluster-scoped binding: same k8s.rbac.grant lens, no namespace. access.scope
+# is `account` (cluster-wide breadth) — the lens derives it from the object's kind.
+# grant.role and access.scope are IMMUTABLE. Reproduces observeRoleBinding/buildGrant
+# for the cluster kind.
+mapping: v0.1
+fieldpath: groundhold/fieldpath/v1
+service: rbac-clustergrant
+provider: k8s
+capability: capability.authorization.grant
+vocab:
+  capability.authorization.grant: "0.1"
+
+resource:
+  group: rbac.authorization.k8s.io
+  version: v1
+  kind: ClusterRoleBinding
+  plural: clusterrolebindings
+  scope: Cluster
+
+schema:
+  source: "kubernetes /openapi/v3 apis/rbac.authorization.k8s.io/v1 ClusterRoleBinding"
+  mappedSurface: sha256:13bca6d3405c27e3951a79050c54c4debf7ced48e06b9362cfe9982c5331766a
+
+lenses:
+  - k8s.rbac.grant
+
+classify:
+  grant.role:
+    change: immutable
+    reason: "roleRef/scope of a RoleBinding is immutable in k8s — change is a replacement"
+  access.scope:
+    change: immutable
+    reason: "roleRef/scope of a RoleBinding is immutable in k8s — change is a replacement"
+  grant.principal:
+    change: mutable
+  access.privileged:
+    change: mutable
+  service.managed:
+    change: mutable
+  cost.monthly:
+    change: mutable
+
+attributes: {}

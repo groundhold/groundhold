@@ -1,0 +1,83 @@
+# Attribute vocabulary for capability.certificate.tls, spec v0.1 (D117).
+#
+# A managed TLS certificate for a domain — auto-provisioned, domain-validated and
+# AUTO-RENEWED by the provider. The twin is AWS ACM (public certificate) and GCP
+# Certificate Manager (managed certificate).
+#
+# This is an HONEST TWO-CLOUD domain: Azure has no MANAGEMENT-PLANE managed-TLS-cert
+# twin. Key Vault certificates are DATA-PLANE (the vault.azure.net endpoint, a
+# different auth surface than the ARM bearer token this runtime uses), and App
+# Service managed certificates are coupled to an App Service Plan. So an azure
+# candidate is REFUSED by fail-closed dispatch, never a faked third mapping (the
+# search/streaming stance, applied again).
+#
+# The certificate's PRIVATE KEY is NEVER a groundhold concern — secrets are
+# structurally excluded (D53). groundhold declares "a valid, auto-renewed cert for
+# this domain exists"; the key material stays with the provider.
+
+capability: capability.certificate.tls
+version: 0.1
+stateful: false   # a managed certificate is reprovisionable protective config, not
+                  # stored data — retirement breaks TLS for the domain until reissue,
+                  # but loses no records (no D47 data-loss friction).
+
+attributes:
+
+  location.region:
+    kind: string
+    description: >
+      Region/location the certificate is issued in. For a CloudFront-fronted cert
+      this is us-east-1 (ACM's global-edge region); GCP certs carry a location
+      ("global" for global load balancers, or a region).
+    mappings:
+      aws.acm: the ACM endpoint region
+      gcp.certificatemanager: the certificate's location
+
+  domain:
+    kind: string
+    description: >
+      The primary fully-qualified domain the certificate is valid for (e.g.
+      app.example.com). Additional SANs are implementation detail carried under
+      `implementation:`, not a capability path.
+    mappings:
+      aws.acm: RequestCertificate DomainName
+      gcp.certificatemanager: managed.domains[0]
+
+  validation.method:
+    kind: string
+    enum: [dns, email]
+    description: >
+      How the provider proves domain control before issuing. dns = a DNS record
+      (the 2-cloud path, and the only method that supports auto-renewal). email is
+      honored ONLY on AWS ACM; on GCP it is REFUSED (Certificate Manager validates
+      via DNS authorization or the attached load balancer, never email).
+    mappings:
+      aws.acm: RequestCertificate ValidationMethod (DNS | EMAIL)
+      gcp.certificatemanager: managed.dnsAuthorizations (DNS) — email refused
+
+  auto.renew:
+    kind: bool
+    description: >
+      The provider automatically renews the certificate before expiry. A managed
+      certificate auto-renews by definition, so false (a manually-renewed / imported
+      cert) is refused — that is a self-managed cert, out of this capability's scope.
+      Auto-renewal REQUIRES dns validation (an email-validated ACM cert cannot
+      auto-renew).
+    mappings:
+      aws.acm: RenewalEligibility = ELIGIBLE (DNS-validated public certs)
+      gcp.certificatemanager: managed certificates auto-renew
+
+  service.managed:
+    kind: bool
+    description: Managed service vs self-operated
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost of the capability
+    verification: static against a pricing catalog; provider-api (billing) after deploy
+
+# Deliberately absent in v0.1: subject alternative names (SANs), key algorithm /
+# size, certificate transparency logging, the private key (structurally excluded —
+# secrets never transit groundhold, D53). A candidate may carry SANs / key algorithm
+# under `implementation:`; the verifier ignores them.

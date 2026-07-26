@@ -1,0 +1,89 @@
+# Attribute vocabulary for capability.backup.vault, spec v0.1 (D127).
+#
+# A managed BACKUP VAULT — the honest 3-cloud twin is AWS Backup, GCP Backup and DR, and
+# Azure Backup (a Microsoft.DataProtection backup vault). Unlike the thin vpn/scheduler domains, a backup
+# vault has REAL, compliance-grade capability semantics an organization genuinely
+# audits: where the recovery points live, how long they are guaranteed to be kept, and
+# whether that guarantee is IMMUTABLE (WORM) — the properties a data-retention or
+# ransomware-recovery policy is written against. The backup PLANS, schedules and
+# resource selections that populate the vault are a separate concern (opaque impl,
+# invariant #4); this capability is the vault itself and its retention guarantee.
+#
+# One honest per-cloud gap and one honest per-cloud requirement:
+#  - retention.lockMode=governance is REFUSED on GCP. A GCP backup vault's enforced
+#    minimum retention is immutable by construction (it can be increased, never
+#    decreased or removed), i.e. compliance-only; there is no admin-changeable
+#    governance mode, so a governance request is refused rather than silently upgraded
+#    to compliance (which would over-commit) or downgraded (which would under-deliver).
+#  - retention.minimum is REQUIRED on GCP (the API mandates a minimum enforced
+#    retention at create); on AWS a vault can exist without one, honored via a Backup
+#    Vault Lock when the contract asks for it. Stated, not smoothed.
+#
+# retention.lockMode is the domain's natural closed enum (the enum-guard dual case).
+
+capability: capability.backup.vault
+version: 0.1
+stateful: true   # a vault HOLDS recovery points — destroying it loses the ability to
+                 # recover, the sharpest kind of data loss; conservative-honest
+                 # retirement (D47), and a compliance-locked vault may refuse deletion
+                 # outright until its retention elapses.
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Region the vault (and its recovery points) live in.
+    mappings:
+      aws.backup: derived from the provider region
+      gcp.backupdr: the backup vault location
+      azure.dataprotection: the backup vault location
+
+  retention.minimum:
+    kind: duration
+    description: >
+      The MINIMUM guaranteed retention of recovery points in the vault — they cannot
+      be deleted before this age. Required on GCP (enforced natively); on AWS enforced
+      via a Backup Vault Lock's MinRetentionDays.
+    mappings:
+      gcp.backupdr: backupMinimumEnforcedRetentionDuration (required)
+      aws.backup: Backup Vault Lock MinRetentionDays
+      azure.dataprotection: securitySettings.softDeleteSettings.retentionDurationInDays (optional; day-granular)
+
+  retention.lockMode:
+    kind: string
+    enum: [governance, compliance]
+    description: >
+      Whether the retention guarantee is admin-changeable (governance) or IMMUTABLE
+      (compliance / WORM). governance is REFUSED on GCP, whose enforced retention is
+      immutable by construction (compliance-only).
+    mappings:
+      aws.backup: Backup Vault Lock — governance (ChangeableForDays set) vs compliance (immutable)
+      gcp.backupdr: compliance only (enforced retention is immutable; governance refused)
+      azure.dataprotection: securitySettings.immutabilitySettings.state — Unlocked (governance) vs Locked (compliance); honors BOTH
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: >
+      Recovery points are encrypted with a CUSTOMER-managed key (CMK/CMEK), not merely
+      the provider's default key. The key id is implementation detail
+      (implementation.kms_key_arn / implementation.kms_key_name), never a capability path.
+    mappings:
+      aws.backup: EncryptionKeyArn (a customer key)
+      gcp.backupdr: CMEK (a customer key)
+      azure.dataprotection: securitySettings.encryptionSettings + a system-assigned identity (implementation.key_vault_key_uri)
+
+  service.managed:
+    kind: bool
+    description: Managed backup service vs a self-operated backup store.
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost (recovery-point storage).
+    verification: static against a pricing catalog; billing after deploy
+
+# Deliberately absent in v0.1 (implementation detail / opaque config — NOT vault
+# capability semantics): the backup PLANS, schedules, and resource selections that
+# populate the vault; the copy/replication rules to other vaults; the KMS key id
+# itself (a customer key reference is impl); the vault-lock cooling-off window; and
+# the individual recovery points (they are the data, not the capability).

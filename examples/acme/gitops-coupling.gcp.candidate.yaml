@@ -1,0 +1,29 @@
+# GCP candidate for the SAME acme-gitops-coupling contract — proof the coupling is
+# cloud-agnostic: the neutral capability.identity.podidentity is fulfilled by GCP
+# Workload Identity (gke-workloadidentity) exactly as by AWS Pod Identity, with no
+# change to the contract. The GSA the controller SA impersonates is the operand.
+apiVersion: candidate/v0.1
+kind: ImplementationCandidate
+contract: acme-gitops-coupling
+
+capabilities:
+
+  repo-server-identity:
+    provider: gcp
+    service: gke-workloadidentity
+    attributes:
+      workload.namespace: argocd
+      workload.serviceAccount: argocd-repo-server
+      service.managed: true
+    implementation:
+      gsaEmail: acme-argocd-repo@acme-prod.iam.gserviceaccount.com
+
+  app-controller-identity:
+    provider: gcp
+    service: gke-workloadidentity
+    attributes:
+      workload.namespace: argocd
+      workload.serviceAccount: argocd-application-controller
+      service.managed: true
+    implementation:
+      gsaEmail: acme-argocd-appctl@acme-prod.iam.gserviceaccount.com

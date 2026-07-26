@@ -1,0 +1,36 @@
+# Groundhold in GitLab CI: verify gates the MR, audit gates the schedule.
+stages: [verify, audit]
+
+.build: &build
+  image: golang:1.25
+  before_script:
+    - cd go && go build -o ../bin/groundhold-go ./cmd/groundhold && cd ..
+
+verify:
+  <<: *build
+  stage: verify
+  script:
+    - bin/groundhold-go verify contracts/prod.contract.yaml
+        candidates/prod.candidate.yaml --vocab spec/vocab --json
+        | tee verify-report.json
+  artifacts:
+    paths: [verify-report.json]
+    when: always
+
+# code<->contract drift gate (D93): exit 2 (`survey-drift`) means the
+# code and the contract disagree about reality — reconcile before merge.
+survey-drift:
+  <<: *build
+  stage: verify
+  script:
+    - bin/groundhold-go survey contracts/prod.contract.yaml
+        --survey .groundhold/survey/${CI_COMMIT_SHORT_SHA}.json --explain
+
+drift-audit:
+  <<: *build
+  stage: audit
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  script:
+    - bin/groundhold-go audit contracts/prod.contract.yaml
+        --ledger state/prod.jsonl --at "$(date -u +%FT%TZ)" --explain

@@ -1,0 +1,17 @@
+apiVersion: candidate/v0.1
+kind: ImplementationCandidate
+contract: azure-canary
+capabilities:
+  net:
+    provider: azure
+    service: vnet
+    attributes:
+      location.region: westeurope
+      ingress.public: false
+      egress.internet: none
+      service.managed: true
+    implementation:
+      # The resource group must PRE-EXIST: groundhold does not own resource
+      # groups (there is no such service in the Azure driver), the same way it
+      # does not own the subscription. Substitute yours before running.
+      resource_group: groundhold-canary

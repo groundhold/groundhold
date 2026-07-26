@@ -1,0 +1,378 @@
+# Structural rejections are semantics too (D19): a conforming
+# implementation must refuse these documents at load time, before any
+# verification happens. expect.error names the document that must be
+# refused: contract | candidate.
+
+cases:
+  - name: invalid-severity-is-load-error
+    description: >
+      An unknown severity must be refused at load. Anything else is
+      fail-open: a constraint with a mistyped severity would never match
+      the hard gate and could not block execution.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      budget:
+        - id: c-budget
+          subject: db
+          path: cost.monthly
+          op: lte
+          value: { amount: 100, currency: EUR }
+          severity: critical
+    expect:
+      error: contract
+
+  - name: capability-without-id-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e2, environment: test, version: 1 }
+      capabilities:
+        - type: capability.database.relational
+    expect:
+      error: contract
+
+  - name: duplicate-capability-id-is-load-error
+    description: >
+      D11 + D19: a second capability with the same id silently replacing
+      the first is data loss, not configuration.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e17, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+        - id: db
+          type: capability.storage.object
+    expect:
+      error: contract
+
+  - name: empty-contract-document-is-load-error
+    contract: null
+    expect:
+      error: contract
+
+  - name: objective-with-op-is-load-error
+    description: objective and op/value are mutually exclusive on a constraint.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e4, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        soft:
+          - id: s-cost
+            subject: db
+            path: cost.monthly
+            objective: minimize
+            op: lte
+            value: 100 EUR
+    expect:
+      error: contract
+
+  - name: invalid-objective-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e5, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        soft:
+          - id: s-cost
+            subject: db
+            path: cost.monthly
+            objective: maximise
+    expect:
+      error: contract
+
+  - name: provenance-confidence-out-of-range-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e6, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: e6
+      capabilities:
+        db:
+          attributes:
+            cost.monthly:
+              value: 912 EUR
+              status: inferred
+              confidence: 1.5
+    expect:
+      error: candidate
+
+  - name: non-bool-no-assumed-hard-basis-is-load-error
+    description: >
+      D195: autonomy.no_assumed_hard_basis is the opt-in that arms the
+      hard-only assumed-basis gate. A malformed (non-boolean) value must be a
+      load error, never silently read as false — a disarmed gate the operator
+      believes is armed is exactly the fail-open the knob exists to prevent.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e7, environment: test, version: 1 }
+      autonomy:
+        no_assumed_hard_basis: "yes"
+      capabilities:
+        - id: db
+          type: capability.database.relational
+    expect:
+      error: contract
+
+  # ---- pins of pre-existing loader behavior (D19). Without these, a port
+  # could accept documents the reference refuses and still pass the suite.
+
+  - name: duplicate-constraint-ids-is-load-error
+    description: D11 - approvals and the decision ledger hang off stable ids.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e7, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-dup
+            subject: db
+            path: encryption.atRest
+            op: equals
+            value: true
+          - id: c-dup
+            subject: db
+            path: service.managed
+            op: equals
+            value: true
+    expect:
+      error: contract
+
+  - name: unknown-operator-is-load-error
+    description: D4 - the operator set is closed.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e8, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-match
+            subject: db
+            path: location.region
+            op: matches
+            value: europe-.*
+    expect:
+      error: contract
+
+  - name: unknown-capability-type-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e9, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.graph
+    expect:
+      error: contract
+
+  - name: objective-on-hard-constraint-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e10, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-cost
+            subject: db
+            path: cost.monthly
+            objective: minimize
+    expect:
+      error: contract
+
+  - name: unknown-subject-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e11, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-orphan
+            subject: cache
+            path: encryption.atRest
+            op: equals
+            value: true
+    expect:
+      error: contract
+
+  # ---- D19: constraint values parse eagerly. An ill-typed value in the
+  # contract itself never survives to verification as unverifiable —
+  # unverifiable is reserved for contract<->candidate mismatches.
+
+  - name: ill-typed-constraint-value-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e12, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-replicas
+            subject: db
+            path: replication.settings
+            op: equals
+            value: { replicas: 3 }   # object that is not money -> untypable
+    expect:
+      error: contract
+
+  - name: in-with-non-list-value-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e13, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-residency
+            subject: db
+            path: location.region
+            op: in
+            value: europe-west1
+    expect:
+      error: contract
+
+  - name: lte-with-non-orderable-value-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e14, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-class
+            subject: db
+            path: availability.class
+            op: lte
+            value: zonal
+    expect:
+      error: contract
+
+  - name: raw-integer-beyond-json-safe-is-load-error
+    description: >
+      D66: a raw integer outside the JSON-safe range (2^53) cannot
+      canonicalize deterministically — a JSON round-trip would round it,
+      so the hash would depend on whether the value passed through JSON.
+      Both implementations refuse it at LOAD, structurally — never a
+      verdict. Encode bigger integers as strings.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e-num, environment: test, version: 9007199254740992 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+    expect:
+      error: contract
+
+  - name: scalar-value-beyond-json-safe-is-load-error
+    description: >
+      D66: a scalar whose parsed magnitude exceeds 2^53 (here a percent)
+      is refused at load in both implementations — the fail-closed point
+      is parse, not hashing, so it never becomes an unverifiable verdict
+      in one implementation and a structural error in the other.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e-scalar, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: e-scalar
+      capabilities:
+        db:
+          attributes:
+            some.ratio: "1152921504606846976%"
+    expect:
+      error: candidate
+
+  - name: sub-1e-17-scalar-value-is-load-error
+    description: >
+      D179 lower bound (mirror of the >2^53 upper bound): a constraint value too
+      small to canonicalize as a fixed-point decimal (below ~1e-17) has no lossless
+      canonical form — it would render as a false "0.000…0" and collide with every
+      other such value in the contract hash. Both impls refuse it at LOAD, the
+      fail-closed point, so it never becomes a verify verdict resting on a bogus
+      canonical form. Encode tiny values as strings.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e-tiny, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c
+            subject: db
+            path: cost.monthly
+            op: lte
+            value: 1e-18
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: e-tiny
+      capabilities:
+        db:
+          attributes:
+            cost.monthly: 3
+    expect:
+      error: contract
+
+  - name: control-character-in-a-capability-id-is-load-error
+    description: >
+      D179 review: stable ids are joined with a "\x00" separator to key the
+      violation-state projection, which folds into the snapshot hash. A NUL inside
+      an id (reachable only via YAML's \0 escape) would let two distinct
+      (capability, constraint) pairs produce the SAME key — a pre-image collision
+      forging a shared snapshot identity. Both impls refuse any control character
+      in an id at load; no real identifier carries one.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: nul1, environment: test, version: 1 }
+      capabilities:
+        - id: "a\0b"
+          type: capability.database.relational
+    expect:
+      error: contract

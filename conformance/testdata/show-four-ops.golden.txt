@@ -1,0 +1,58 @@
+GROUNDHOLD SEALED PLAN  (preview only -- apply consumes the JSON)
+plan sha256:d69b424e222075f138b99f8b7bf85920e871322aeccc1d3cdb52230e5edb1905
+contract billing-core @ env prod
+reads  contract sha256:4b22000..  candidate sha256:77ac000..  heads 5  provider gcp/acme-dev
+
+execution order -- 4 actions
+
+[1] +  create assets
+      target       gcp.storage/assets   idempotency ik-8f21
+      risk         reversibility R1 | dataLoss none | downtime none | exposure none | identity kept | cost +4.20 USD/mo
+      permissions  2 required
+
+################################################################################
+## [2] +x replace ledger
+##       target       gcp.cloudsql/ledger   idempotency ik-9c40
+##       replaces     projects/acme/instances/ledger gen 4
+##       because      location.region: europe-west1 -> europe-central2   (immutable)
+##       risk         reversibility R4 | dataLoss possible | downtime certain | exposure none | identity REPLACED | cost +0.00 USD/mo
+##       permissions  2 required
+################################################################################
+
+################################################################################
+## [3] x  delete sessions
+##       target       gcp.memorystore/sessions   idempotency ik-2b7c
+##       pinned       projects/acme/instances/sessions gen 2
+##       risk         reversibility R4 | dataLoss certain | downtime certain | exposure none | identity kept | cost -31.00 USD/mo
+##       permissions  1 required
+################################################################################
+
+[4] ~  update billing
+      target       gcp.cloudsql/billing   idempotency ik-1a02
+      pinned       projects/acme/instances/billing gen 7
+      changes
+        settings.tier: db-custom-2-8192 -> db-custom-4-16384
+        settings.flags.max_conn: 400 -> 800
+            caveat: applied on next instance restart
+      wires        backup_target <- [a-create-assets] assets output url (kind string)
+      risk         reversibility R2 | dataLoss none | downtime possible | exposure none | identity kept | cost +93.30 USD/mo
+      permissions  2 required
+
+destructive recap -- read before apply
+  +x replace ledger   R4, identity REPLACED
+  x  delete sessions   R4, dataLoss certain
+
+= witnessed (verified, not authored -- untouched by this plan)
+  core-net   gcp compute   reason: adopted out of scope
+
+preconditions
+  report-executable
+  no-assumed-hard-basis
+
+permissions  union preflighted before the lease (7)
+  cloudsql.instances.create  cloudsql.instances.delete  cloudsql.instances.get  cloudsql.instances.update  redis.instances.delete  storage.buckets.create  storage.buckets.get
+
+--------------------------------------------------------------------------------
+4 actions: 1 create, 1 update, 1 replace, 1 delete | destructive: 2
+per-axis worst: reversibility R4; dataLoss certain; downtime certain; exposure none
+cost delta (sum of declared cost.monthly; unclaimed counted 0): +66.50 USD/mo

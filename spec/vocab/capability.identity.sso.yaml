@@ -1,0 +1,67 @@
+# Attribute vocabulary for capability.identity.sso, spec v0.1 (D55).
+#
+# Federated single sign-on as ONE capability: SAML and OIDC are
+# different protocols but the same buyer-facing capability, so the
+# protocol is an attribute (like engine.protocol for databases), never
+# a separate type. Vendor names, admin UI shapes and pricing tiers are
+# implementation noise; what the organization can REQUIRE of its
+# sign-on is semantics.
+
+capability: capability.identity.sso
+version: 0.1
+stateful: true   # user/group assignments and session continuity are
+                 # state; retiring an SSO surface locks people out —
+                 # D47 friction applies in full
+
+attributes:
+
+  federation.protocol:
+    kind: protocol
+    description: Federation protocol compatibility, e.g. saml/2.0 or oidc/1.0
+    mappings:
+      gcp.workforce-identity: workforcePools provider (saml | oidc)
+      azure.entra: app SSO mode (saml | openIdConnect)
+      okta: app sign_on_mode
+
+  sso.enforced:
+    kind: bool
+    description: >
+      Federated sign-on is the ONLY path — no local-password bypass
+      survives next to it
+    mappings:
+      google.workspace: SSO profile assignment covers all OUs, no exceptions
+      azure.entra: no cloud-only accounts with password auth in scope
+
+  mfa.required:
+    kind: bool
+    description: A second factor is required, not merely available
+    mappings:
+      azure.entra: conditional access policy grant requires MFA
+      okta: sign-on policy factor requirement
+
+  session.maxDuration:
+    kind: duration
+    description: Upper bound on an SSO session's lifetime
+    mappings:
+      google.workspace: session control duration
+      azure.entra: sign-in frequency in conditional access
+
+  provisioning.scim:
+    kind: bool
+    description: >
+      Accounts are provisioned AND deprovisioned via SCIM — offboarding
+      is automatic, not a ticket
+    mappings:
+      okta: SCIM app integration enabled
+      azure.entra: provisioning mode automatic
+
+  assertions.signed:
+    kind: bool
+    description: Assertions/tokens are cryptographically signed
+    verification: >
+      config intent statically; an outcome probe should verify the
+      IdP rejects unsigned assertions
+
+# Deliberately absent in v0.1 (implementation noise):
+# vendor names (Okta/Auth0/Entra), certificate rotation schedules,
+# attribute-mapping tables, login page branding, admin console roles.

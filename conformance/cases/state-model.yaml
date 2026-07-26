@@ -1,0 +1,94 @@
+# State Model v0 (spec/state-model.md, D35). Hash cases use the
+# `document:` form: the runner feeds the document to `<impl> hash` and
+# compares against the pinned literal.
+
+cases:
+  - name: ledger-event-hash-is-pinned
+    description: >
+      D35: event identity is the raw canonical tree under the
+      groundhold/canon/v1:event domain. An event records what was said —
+      no semantic normalization of history.
+    document:
+      apiVersion: state/v0
+      kind: LedgerEvent
+      event:
+        type: lease.acquired
+        environment: production
+        capabilities: [orders-db]
+        occurredAt: "2026-07-11T09:00:00Z"
+        actor: { id: runtime-eu1, type: runtime }
+        fencingToken: 7
+        body:
+          ttlSeconds: 120
+    expect:
+      hash: sha256:cae2c417a485be28d4c2028313bf6f921b02507312b508b9b418728825ef04b2
+
+  - name: converge-lifecycle-event-loads-in-both-implementations
+    description: >
+      D338: the converge lifecycle types are in the closed set, and the set is the
+      SAME set on both sides. The runtime writes converge.started on every run of
+      the flagship porcelain verb (D51); a reference that does not know the type
+      refuses the whole ledger, because the registry is fail-closed (D19). Pinning
+      the hash proves both accept it AND canonicalize it identically.
+    document:
+      apiVersion: state/v0
+      kind: LedgerEvent
+      event:
+        type: converge.started
+        environment: production
+        capabilities: [orders-db]
+        occurredAt: "2026-07-25T09:00:00Z"
+        actor: { id: runtime-eu1, type: runtime }
+        body:
+          at: "2026-07-25T09:00:00Z"
+    expect:
+      hash: sha256:916463fed44099c759458de46bc0ba1a8010a38ebc17af991042cd8cdc805c80
+
+  - name: unknown-event-type-is-load-error
+    description: >
+      The event type registry is closed and fail-closed (D19) — an
+      unrecognized type must be refused, not logged as-is.
+    document:
+      apiVersion: state/v0
+      kind: LedgerEvent
+      event:
+        type: lease.stolen
+        environment: production
+        capabilities: [orders-db]
+        occurredAt: "2026-07-11T09:00:00Z"
+        actor: { id: runtime-eu1, type: runtime }
+    expect:
+      error: document
+
+  - name: event-without-capabilities-is-load-error
+    description: >
+      Capabilities are the head keys (D28) — an event affecting nothing
+      cannot be sequenced and must be refused.
+    document:
+      apiVersion: state/v0
+      kind: LedgerEvent
+      event:
+        type: apply.started
+        environment: production
+        capabilities: []
+        occurredAt: "2026-07-11T09:00:00Z"
+        actor: { id: runtime-eu1, type: runtime }
+    expect:
+      error: document
+
+  - name: event-with-invalid-fencing-token-is-load-error
+    description: >
+      D29: fencing tokens are positive integers derived from ledger
+      history; zero or negative tokens can never be valid.
+    document:
+      apiVersion: state/v0
+      kind: LedgerEvent
+      event:
+        type: binding.updated
+        environment: production
+        capabilities: [orders-db]
+        occurredAt: "2026-07-11T09:00:00Z"
+        actor: { id: runtime-eu1, type: runtime }
+        fencingToken: 0
+    expect:
+      error: document

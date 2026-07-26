@@ -1,0 +1,214 @@
+# Evidence capsules (D103). impl: go — single-implementation per D24.
+# A capsule is a SELF-CONTAINED proof for one capability: its full event
+# subchain verbatim (genesis -> tip) plus the tip hash. Verification
+# needs no ledger: replay the linkage, recompute the hashes, check the
+# signatures under --trust, and optionally pin the tip against an
+# anchor the receiver holds (--check) — that anchor, not the capsule,
+# is what counters omission of a newer suffix. These cases drive real
+# verbs through the signing runner (keygen/publish steps shared).
+
+cases:
+  - name: capsule-carries-the-verbatim-subchain-and-verifies
+    description: >
+      Emit from a signed ledger, verify standalone under --trust: the
+      linkage (prev[cap]), the recomputed hashes, the tip head and
+      every signature must hold with NO access to the source ledger.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - capsule: { capability: db }
+          expect: { exit: 0 }
+        - capsuleVerify: { trust: "@pub" }
+          expect: { exit: 0 }
+
+  - name: capsule-verify-refuses-a-tampered-event
+    description: >
+      Change one byte of a carried event and the recomputed tip hash no
+      longer matches the capsule's head — structural refusal, even
+      without --trust. The capsule cannot be quietly edited in transit.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - capsule: { capability: db }
+        - tamperCapsule: { find: "ops@example.test", replace: "eve@evil.test0" }
+        - capsuleVerify: {}
+          expect: { exit: 5, stderrContains: "head" }
+
+  - name: stale-capsule-is-caught-by-the-anchor
+    description: >
+      The honest threat model (D102/D103): a capsule proves what was
+      said as of ITS tip — a signer can withhold a newer suffix. The
+      receiver's countermeasure is an anchor held off-host: a capsule
+      emitted before newer events fails --check against the current
+      anchor because the anchored head has moved past the capsule's.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - capsule: { capability: db }
+        - publish: { signed: true, version: 2 }
+        - anchorEmit: {}
+        - capsuleVerify: { trust: "@pub", check: true }
+          expect: { exit: 5, stderrContains: "anchor" }
+
+  - name: capsule-verify-under-trust-refuses-unsigned
+    description: >
+      --trust is the same all-or-nothing contract as on the ledger: a
+      capsule whose events carry no signatures does not verify as
+      authored, no matter how internally consistent it is.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: false }
+        - capsule: { capability: db }
+        - capsuleVerify: { trust: "@pub" }
+          expect: { exit: 5, stderrContains: "unsigned" }
+
+  - name: capsule-of-unsigned-history-verifies-plain
+    description: >
+      Without --trust a capsule from an unsigned ledger still verifies
+      structurally (linkage + hashes + head) — capsules do not force
+      signing on anyone; they prove less without it and say nothing
+      more than they can.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: false }
+        - capsule: { capability: db }
+        - capsuleVerify: {}
+          expect: { exit: 0 }
+
+  - name: capsule-for-an-unknown-capability-is-refused
+    description: >
+      A capability with no events yields no capsule — an empty proof
+      would be a lie shaped like a document. Loud refusal, exit 1
+      (operator error, not corruption).
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - capsule: { capability: ghost }
+          expect: { exit: 1 }
+
+  - name: capsule-declares-its-verification-parameters
+    description: >
+      D132: a capsule names the algebra it was built with (eventHashAlg,
+      canonicalization) so a future verifier can refuse instead of
+      silently reinterpreting. A capsule claiming an algorithm this
+      verifier does not implement is refused loudly — fail-closed
+      against interpretation drift, the same rule as version pins.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - capsule: { capability: db }
+        - capsuleVerify: { trust: "@pub" }
+          expect: { exit: 0 }
+        - tamperCapsule: { find: "\"eventHashAlg\": \"sha256\"", replace: "\"eventHashAlg\": \"sha3-512\"" }
+        - capsuleVerify: {}
+          expect: { exit: 5, stderrContains: "eventHashAlg" }
+
+  - name: capsule-without-parameters-is-refused
+    description: >
+      D132: the self-description is mandatory — a capsule that does not
+      say how it hashes is not verifiable, only guessable, and this
+      verifier does not guess. (capsule/v0.1 is pre-freeze; there is no
+      legacy fleet to tolerate.)
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - capsule: { capability: db }
+        - tamperCapsule: { find: "\"canonicalization\": \"groundhold/canon/v1\",", replace: "" }
+        - capsuleVerify: {}
+          expect: { exit: 5, stderrContains: "canonicalization" }
+
+  - name: capsule-with-mixed-trusted-keys-verifies
+    description: >
+      D133: capsules follow the same receiver-policy rule — every
+      carried event must verify by ANY key in the trust set. A rotation
+      mid-history does not strand old capsules.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - publish: { signed: true, key: 2, version: 2 }
+        - capsule: { capability: db }
+        - capsuleVerify: { trust: ["@pub", "@pub2"] }
+          expect: { exit: 0 }
+        - capsuleVerify: { trust: "@pub2" }
+          expect: { exit: 5, stderrContains: "FOREIGN key" }
+
+  - name: capsule-missing-the-trust-boundary-refuses
+    description: >
+      D133: --trust-from against a capsule requires the boundary event
+      INSIDE the capsule — the boundary is evaluated against the actual
+      input being verified, never against a parent ledger the verifier
+      cannot see.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - capsule: { capability: db }
+        - capsuleVerify:
+            trust: "@pub"
+            trustFrom: "sha256:00000000000000000000000000000000000000000000000000000000deadbeef"
+          expect: { exit: 5, stderrContains: "boundary" }
+
+  - name: capsule-carries-one-consistent-ledger-identity
+    description: >
+      D134: every signature in a capsule claims the ledger it was
+      minted for; the capsule must claim ONE ledger. A doctored claim
+      refuses even without --trust (consistency is structure), and
+      under --check the claim must match the anchor's ledgerId — a
+      capsule from tenant A cannot pose as tenant B's just because the
+      same key signs both.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - publish: { signed: true, version: 2 }
+        - capsule: { capability: db }
+        - anchorEmit: { trust: "@pub" }
+        - capsuleVerify: { check: true }
+          expect: { exit: 0 }
+        - tamperAnchor: { findRe: "\"ledgerId\": \"sha256:[0-9a-f]{16}", replaceRe: "\"ledgerId\": \"sha256:0000000000000000" }
+        - capsuleVerify: { check: true }
+          expect: { exit: 5, stderrContains: "ledger" }
+
+  - name: capsule-check-arms-the-anchors-trust
+    description: >
+      D135: capsule --check with a trust-carrying anchor verifies
+      signatures with no flags given — the receiver's one held artifact
+      brings the whole policy. A capsule with a broken signature then
+      refuses on --check alone.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - capsule: { capability: db }
+        - anchorEmit: { trust: "@pub" }
+        - capsuleVerify: { check: true }
+          expect: { exit: 0 }
+        - tamperCapsule: { find: "ops@example.test", replace: "eve@evil.test0" }
+        - capsuleVerify: { check: true }
+          expect: { exit: 5 }
+
+  - name: capsule-check-refuses-a-malformed-anchor-not-panics
+    description: >
+      Review fix: LoadAnchorFile validates only kind, not the ledgerId
+      shape, and the D134 foreign-ledger branch formatted the id with a
+      raw [:23] slice — a crafted anchor with a short ledgerId crashed
+      the verifier (slice out of range) instead of refusing. A malformed
+      claim must produce a clean refusal, never a panic.
+    impl: go
+    signing:
+      steps:
+        - publish: { signed: true }
+        - capsule: { capability: db }
+        - anchorEmit: {}
+        - tamperAnchor: { findRe: "\"ledgerId\": \"sha256:[0-9a-f]+\"", replaceRe: "\"ledgerId\": \"x\"" }
+        - capsuleVerify: { trust: "@pub", check: true }
+          expect: { exit: 5, stderrContains: "foreign ledger" }

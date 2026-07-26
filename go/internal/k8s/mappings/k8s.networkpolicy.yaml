@@ -1,0 +1,42 @@
+# Schema-driven mapping: k8s networking.k8s.io/v1 NetworkPolicy -> capability.network.private.
+#
+# NetworkPolicy is the case the closed op set CANNOT express: its config-intent
+# semantics are conditional (ingress.public=false only for a default-deny — Ingress
+# in policyTypes AND an empty rule list). That conditional lives in a NAMED LENS
+# (k8s.netpol.defaultDenyIngress), an in-tree Go function reviewed like any driver
+# code — never an inline expression in this document (invariant #4). The lens emits
+# the config-intent facts + the CNI caveat; service.managed is a plain const. This
+# mapping reproduces the hand-coded observeNetpol byte-for-byte (observe path).
+mapping: v0.1
+fieldpath: groundhold/fieldpath/v1
+service: netpol
+provider: k8s
+capability: capability.network.private
+vocab:
+  capability.network.private: "0.1"
+
+resource:
+  group: networking.k8s.io
+  version: v1
+  kind: NetworkPolicy
+  plural: networkpolicies
+  scope: Namespaced
+
+schema:
+  source: "kubernetes /openapi/v3 apis/networking.k8s.io/v1 NetworkPolicy"
+  mappedSurface: sha256:5119e647c1f7f7a1529b8f6ff4e02e1657444771b5aa74b9ab15471307f77e76
+
+lenses:
+  - k8s.netpol.defaultDenyIngress   # conditional config-intent — an in-tree Go function
+
+classify:
+  ingress.public:
+    change: mutable                  # a NetworkPolicy's rules are patchable in place
+  egress.restricted:
+    change: mutable
+
+attributes:
+  service.managed:
+    op: const
+    value: true
+    derivation: measured

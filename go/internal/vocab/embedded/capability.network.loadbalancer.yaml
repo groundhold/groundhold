@@ -1,0 +1,47 @@
+# Attribute vocabulary for capability.network.loadbalancer, spec v0.1.
+#
+# A managed load balancer: the front door in front of a service. What an
+# organization GOVERNS about it is its EXPOSURE posture — is it internet-facing,
+# and does it terminate TLS — because a public load balancer with no HTTPS
+# listener is a plaintext front door on the internet. The AWS ALB / NLB, a GCP
+# forwarding rule + target proxy, and an Azure Load Balancer / Application Gateway
+# are the same semantic at different control planes. The type (application vs
+# network vs gateway), sizing, idle timeout, listener rules, target-group
+# internals and health-check path are operational noise; the exposure and the
+# in-transit encryption are the posture an org actually governs (and exactly the
+# facts the vendor-broker's public ALB + HTTPS-behind-a-flag turn on).
+
+capability: capability.network.loadbalancer
+version: 0.1
+stateful: false   # a load balancer holds no data; removing it loses none — it
+                  # stops distributing traffic. The risk is on EXPOSURE (public +
+                  # unencrypted), which the attributes below make verifiable.
+
+attributes:
+
+  network.publicExposure:
+    kind: bool
+    description: >
+      Internet-facing (a public frontend) vs internal (VPC/network-private). The
+      exposure posture an organization governs — a public load balancer is the
+      front door reachable from the internet. AWS ALB `Scheme=internet-facing`,
+      GCP `loadBalancingScheme=EXTERNAL*`, an Azure public frontend IP.
+
+  encryption.inTransit:
+    kind: bool
+    description: >
+      The load balancer terminates TLS — an HTTPS/TLS listener (AWS), an HTTPS
+      target proxy (GCP), or an SSL/HTTPS listener (Azure App Gateway) is
+      configured. Whether the front door speaks encrypted. A public load balancer
+      with no TLS listener is plaintext on the internet — the precise posture the
+      broker's `enable_https` flag flips.
+
+  service.managed:
+    kind: bool
+    description: A managed cloud load balancer vs a self-operated proxy (haproxy/nginx).
+
+# Deliberately absent in v0.1 (operational noise, not governance semantics):
+#   - the load-balancer TYPE (application / network / gateway) and instance sizing
+#   - idle timeout, connection draining, cross-zone, stickiness
+#   - listener RULES, target-group internals, health-check path/interval
+#   - the DNS name / public IP — identity and routing, not a governed attribute

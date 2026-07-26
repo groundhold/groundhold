@@ -1,0 +1,136 @@
+# Cloud Functions VPC-connector + environment via $ref (D308 consumer proof, GCP):
+# the GCP twin of lambda-vpc-env.yaml. A capability.function.serverless candidate
+# reaches a private Cloud SQL the honest way — an env var (DATABASE_HOST) wired to
+# the Cloud SQL privateIpAddress (a string output NESTED in the environment MAP
+# operand), never a hand-pasted literal. Unlike AWS Lambda (which attaches directly
+# to a vpc's privateSubnetIds by $ref), GCP's Serverless VPC Access connector is a
+# DISTINCT resource groundhold has no capability for, so vpc_connector is a LITERAL
+# connector name — it wires no dependency edge. The dependency the plan discovers is
+# fn -> db, through the map-value-$ref the compiler resolves generically (D308). The
+# Cloud SQL connection output is what makes the DATABASE_HOST travel by reference
+# (the PASSWORD is NOT an output — it stays off-ledger). Compile behaviour is
+# Go-runtime (D24), so every case carries impl: go. The verifier is untouched: the
+# $ref lives in the implementation block (D26).
+suite: cloudfunctions-vpc-env
+cases:
+  - name: cloudfunction-wires-vpc-connector-and-db-host-by-ref
+    impl: go
+    description: >
+      A Cloud Function (gen2) wires vpc_connector = a literal connector name and
+      environment.DATABASE_HOST = $ref cloudsql.privateIpAddress (a $ref nested in
+      the env map). The plan emits create-db + create-fn, with a dependsOn edge and
+      a references entry — the compiler orders the graph and resolves the env value
+      at apply from the producer's receipt.
+    plan:
+      at: "2026-07-25T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: cfve-gcp, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+          - id: fn
+            type: capability.function.serverless
+        constraints:
+          hard:
+            - id: c-db-managed
+              subject: db
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-fn-managed
+              subject: fn
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: cfve-gcp
+        capabilities:
+          db:
+            provider: gcp
+            service: cloudsql
+            attributes:
+              service.managed: true
+              location.region: europe-west1
+          fn:
+            provider: gcp
+            service: cloudfunctions-fn
+            attributes:
+              service.managed: true
+              location.region: europe-west1
+            implementation:
+              runtime: nodejs20
+              entry_point: handler
+              source: { bucket: gh-src, object: fn.zip }
+              vpc_connector: projects/acme/locations/europe-west1/connectors/serverless-conn
+              environment:
+                LOG_LEVEL: info
+                DATABASE_HOST:
+                  $ref: { capability: db, output: privateIpAddress }
+    expect:
+      actions:
+        a-create-db:
+          operation: create
+        a-create-fn:
+          operation: create
+          dependsOn: [a-create-db]
+          references:
+            - slot: environment.DATABASE_HOST
+              producerAction: a-create-db
+              capability: db
+              output: privateIpAddress
+              kind: string
+
+  - name: cloudfunction-vpc-env-operands-not-unknown
+    impl: go
+    description: >
+      Regression (D307): a Cloud Function whose implementation block carries only
+      operands the driver reads — vpc_connector, vpc_connector_egress_settings and
+      an environment map (all literals here) alongside runtime/entry_point/source —
+      is NOT tripped by the unknown-operand guard; it plans and emits the create
+      action. Proves the new operands are registered in the driver's ConsumedOperands.
+    plan:
+      at: "2026-07-25T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: cfve-reg, environment: test, version: 1 }
+        capabilities:
+          - id: fn
+            type: capability.function.serverless
+        constraints:
+          hard:
+            - id: c-region
+              subject: fn
+              path: location.region
+              op: equals
+              value: europe-west1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: cfve-reg
+        capabilities:
+          fn:
+            provider: gcp
+            service: cloudfunctions-fn
+            attributes:
+              location.region: europe-west1
+              network.publicExposure: false
+            implementation:
+              runtime: nodejs20
+              entry_point: handler
+              source: { bucket: gh-src, object: fn.zip }
+              vpc_connector: projects/acme/locations/europe-west1/connectors/serverless-conn
+              vpc_connector_egress_settings: PRIVATE_RANGES_ONLY
+              environment:
+                LOG_LEVEL: info
+    expect:
+      actions:
+        a-create-fn:
+          operation: create

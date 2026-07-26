@@ -1,0 +1,40 @@
+# Attribute vocabulary for capability.identity.podidentity, spec v0.1 (D149).
+#
+# Workload identity — the binding that lets a Kubernetes workload assume a CLOUD
+# IAM role without a long-lived key. This is the P0 that Acme's evaluation (B1)
+# caught groundhold missing: a cloud "IAM role" resource is NOT pod identity; without
+# the binding, the SES/Bedrock/S3 workers have no way to authenticate, so those
+# drivers are useless at runtime. What an organization governs: WHICH workload (a
+# namespace + serviceAccount) may assume WHICH role — a least-privilege security
+# posture. The cluster and the role ARN are operator OPERANDS (impl block, D26):
+# the role is a separate capability (identity.role), the cluster the substrate it
+# binds into.
+#
+# One TYPE, many services (D76): aws.eks-podidentity (EKS Pod Identity
+# Association) today; GKE Workload Identity and AKS workload identity fulfil the
+# same contract — a serviceAccount mapped to a cloud identity. STATELESS: the
+# binding holds no data; retirement removes only the mapping.
+
+capability: capability.identity.podidentity
+version: 0.1
+stateful: false
+
+attributes:
+
+  workload.namespace:
+    kind: string
+    description: The Kubernetes namespace of the workload that assumes the role
+    mappings:
+      aws.eks-podidentity: PodIdentityAssociation namespace
+
+  workload.serviceAccount:
+    kind: string
+    description: The Kubernetes serviceAccount that assumes the role — the least-privilege subject
+    mappings:
+      aws.eks-podidentity: PodIdentityAssociation serviceAccount
+
+  service.managed:
+    kind: bool
+    description: Whether groundhold manages this association
+    mappings:
+      aws.eks-podidentity: const true when observed through the driver

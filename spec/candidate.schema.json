@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "groundhold://schemas/candidate/v0.1",
+  "title": "ImplementationCandidate v0.1",
+  "description": "What an agent emits INSTEAD of writing Terraform: capability attributes with provenance, verified against a contract. Provider detail rides in the free-form implementation block (D26) — ignored by the verifier, consumed by the compiler, never the source of truth (D18: the compiler re-derives attributes from its own output and verification runs again).",
+  "type": "object",
+  "required": ["apiVersion", "kind", "contract", "capabilities"],
+  "properties": {
+    "apiVersion": { "const": "candidate/v0.1" },
+    "kind": { "const": "ImplementationCandidate" },
+    "contract": { "$ref": "#/$defs/identifier" },
+    "capabilities": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/identifier" },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "provider": { "type": "string" },
+          "service": { "type": "string" },
+          "attributes": {
+            "type": "object",
+            "additionalProperties": { "$ref": "#/$defs/attributeValue" }
+          },
+          "implementation": {
+            "type": "object",
+            "description": "Free-form provider detail (tiers, disk types, flags). The verifier ignores it; the compiler consumes it (D26). An operand VALUE may instead be an intra-plan output reference — a mapping whose sole key is `$ref` (D226/#/$defs/outputRef) — resolved to another same-candidate capability's typed output; the compiler never coerces it into a string."
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9\\-\\.]*$",
+      "maxLength": 128
+    },
+    "scalar": {
+      "description": "Typed scalar (D3, D15): bool; number; string with unit syntax — duration '5m', money '912 EUR', percent '99.9%', bytes '100GiB'/'100GB', protocol 'postgresql/16'; money object {amount, currency}; or a list of scalars.",
+      "anyOf": [
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array" },
+        {
+          "type": "object",
+          "required": ["amount", "currency"],
+          "properties": {
+            "amount": { "type": "number" },
+            "currency": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "attributeValue": {
+      "description": "A plain scalar is shorthand for status: declared. A mapping with a status key carries explicit provenance (D5).",
+      "anyOf": [
+        { "$ref": "#/$defs/scalar" },
+        { "$ref": "#/$defs/provenanced" }
+      ]
+    },
+    "outputRef": {
+      "description": "Intra-plan output reference (D226/F13): an implementation operand whose value is another same-candidate capability's typed output, wired in the SAME plan. Structured, never string interpolation (invariant #4). `$ref` MUST be the sole key; `capability` is a capID in this candidate; `output` must appear in that capability's driver OutputsFor and match the operand slot's kind (no coercion, invariant #2).",
+      "type": "object",
+      "required": ["$ref"],
+      "additionalProperties": false,
+      "properties": {
+        "$ref": {
+          "type": "object",
+          "required": ["capability", "output"],
+          "additionalProperties": false,
+          "properties": {
+            "capability": { "$ref": "#/$defs/identifier" },
+            "output": { "type": "string" }
+          }
+        }
+      }
+    },
+    "provenanced": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "value": { "$ref": "#/$defs/scalar" },
+        "status": { "enum": ["declared", "inferred", "assumed", "unknown"] },
+        "source": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    }
+  }
+}

@@ -1,0 +1,47 @@
+# Example: what an organization REQUIRES of its sign-on — not which
+# vendor implements it. The same contract verifies an Okta candidate, an
+# Entra candidate or a Workspace one; the vendor is implementation.
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta:
+  id: workforce-sso
+  environment: production
+  version: 1
+capabilities:
+  - id: sso
+    type: capability.identity.sso
+constraints:
+  hard:
+    - id: c-protocol
+      subject: sso
+      path: federation.protocol
+      op: compatible-with
+      value: saml/2
+      verify: { method: static }
+    - id: c-enforced
+      subject: sso
+      path: sso.enforced
+      op: equals
+      value: true
+      verify: { method: static }
+    - id: c-mfa
+      subject: sso
+      path: mfa.required
+      op: equals
+      value: true
+      verify: { method: static }
+    - id: c-session
+      subject: sso
+      path: session.maxDuration
+      op: lte
+      value: 8h
+      verify: { method: static }
+    - id: c-offboarding
+      subject: sso
+      path: provisioning.scim
+      op: equals
+      value: true
+      verify: { method: static }
+autonomy:
+  forbidden:
+    - delete_stateful: true

@@ -1,0 +1,237 @@
+# D23: the vocabulary is an optional, strengthening input. Without one,
+# behavior is exactly that of the earlier cases (unit-mismatch stays a
+# verify-time unverifiable). With one, candidate values on vocabulary paths
+# are kind/enum-checked at load, and every verdict carries pathInVocabulary.
+# A case opts in by carrying `vocab:` — a list of vocabulary documents.
+
+cases:
+  - name: vocab-kind-mismatch-in-candidate-is-load-error
+    description: >
+      The vocabulary says recovery.rpo is a duration. A candidate declaring
+      money there is ill-typed authorship — refused at load (D19), before
+      any constraint is ever evaluated.
+    vocab:
+      - capability: capability.database.relational
+        version: 0.1
+        attributes:
+          recovery.rpo: { kind: duration }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: v1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: v1
+      capabilities:
+        db:
+          attributes:
+            recovery.rpo: 5 EUR
+    expect:
+      error: candidate
+
+  - name: vocab-enum-violation-is-load-error
+    vocab:
+      - capability: capability.database.relational
+        version: 0.1
+        attributes:
+          availability.class:
+            kind: string
+            enum: [zonal, regional, multi-regional]
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: v2, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: v2
+      capabilities:
+        db:
+          attributes:
+            availability.class: galactic
+    expect:
+      error: candidate
+
+  - name: unknown-path-is-flagged-not-rejected
+    description: >
+      Paths outside the vocabulary stay legal — rejecting them would close
+      the door on extension vocabularies before the governance model exists.
+      The verdict carries pathInVocabulary so policy can gate on it.
+    vocab:
+      - capability: capability.database.relational
+        version: 0.1
+        attributes:
+          encryption.atRest: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: v3, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-encrypted
+            subject: db
+            path: encryption.atRest
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-custom
+            subject: db
+            path: custom.replicaWarmup
+            op: exists
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: v3
+      capabilities:
+        db:
+          attributes:
+            encryption.atRest: true
+            custom.replicaWarmup: 5m
+    expect:
+      executable: true
+      verdicts:
+        c-encrypted: satisfied
+        c-custom: satisfied
+      pathInVocabulary:
+        c-encrypted: true
+        c-custom: false
+
+  - name: without-vocab-verdicts-carry-no-flag
+    description: >
+      No vocabulary provided -> no claim about the path either way.
+      The flag is null, never a guessed true/false.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: v4, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-encrypted
+            subject: db
+            path: encryption.atRest
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: v4
+      capabilities:
+        db:
+          attributes:
+            encryption.atRest: true
+    expect:
+      executable: true
+      verdicts:
+        c-encrypted: satisfied
+      pathInVocabulary:
+        c-encrypted: null
+
+  - name: numeric-vocab-enum-accepts-a-matching-number
+    description: >
+      Cross-impl parity (review fix): a vocabulary enum of NUMBERS must
+      accept a candidate whose value equals an element. A numeric enum
+      decodes as int while the parsed scalar value is a float, so raw
+      interface equality (float64 vs int) rejected every numeric enum —
+      the reference accepted it (3.0 == 3). Both must ACCEPT now.
+    vocab:
+      - capability: capability.database.relational
+        version: 0.1
+        attributes:
+          cache.replicas:
+            kind: number
+            enum: [1, 3, 5]
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: venum, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: venum
+      capabilities:
+        db:
+          attributes:
+            cache.replicas: 3
+    expect:
+      executable: true
+      verdicts: {}
+
+  - name: numeric-vocab-enum-refuses-a-nonmember-number
+    description: >
+      The other side of the fix: a number OUTSIDE the enum is still a
+      load error in both implementations — the canonical comparison
+      must not accept everything, only exact members.
+    vocab:
+      - capability: capability.database.relational
+        version: 0.1
+        attributes:
+          cache.replicas:
+            kind: number
+            enum: [1, 3, 5]
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: venum2, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: venum2
+      capabilities:
+        db:
+          attributes:
+            cache.replicas: 4
+    expect:
+      error: candidate
+
+  - name: money-amount-must-be-a-number-not-a-string
+    description: >
+      Cross-impl parity (review fix): a money object with a STRING
+      amount ({amount:"100"}) is refused by BOTH implementations and by
+      candidate.schema.json (amount:{type:number}). The reference used
+      float() coercion and silently accepted it; now both refuse.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: money, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-cost
+            subject: db
+            path: cost.monthly
+            op: lte
+            value: { amount: 1500, currency: EUR }
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: money
+      capabilities:
+        db:
+          attributes:
+            cost.monthly: { amount: "100", currency: USD }
+    expect:
+      error: candidate

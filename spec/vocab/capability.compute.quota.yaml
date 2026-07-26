@@ -1,0 +1,50 @@
+# Attribute vocabulary for capability.compute.quota, spec v0.1.
+#
+# A resource BUDGET for a tenancy scope: a hard ceiling on the compute a scope
+# may consume. The k8s twin is a namespace ResourceQuota; a cloud project's
+# compute quota is the same semantic at a different scope. What an organization
+# REQUIRES is the CEILING — a budget is a governance guardrail (like cost.cap),
+# and the ceiling is the verifiable value. The specific per-object counts a
+# ResourceQuota can also carry (services, configmaps, secrets) are operational
+# noise; the compute budget (cpu, memory) and the pod ceiling are the semantics
+# an org actually governs.
+
+capability: capability.compute.quota
+version: 0.1
+stateful: false   # a quota holds no data; removing it loses none — it only
+                  # widens what a scope may consume. The risk is on the CEILING
+                  # (too high = ungoverned), which the attributes make verifiable.
+
+attributes:
+
+  cpu.limit:
+    kind: string
+    description: >
+      Hard ceiling on total CPU the scope may use (a k8s quantity, e.g. "10" or
+      "10000m"). The compute budget's core semantic.
+    mappings:
+      k8s.resourcequota: spec.hard["limits.cpu"]
+
+  memory.limit:
+    kind: string
+    description: >
+      Hard ceiling on total memory the scope may use (a k8s quantity, e.g.
+      "20Gi").
+    mappings:
+      k8s.resourcequota: spec.hard["limits.memory"]
+
+  pods.max:
+    kind: number
+    description: >
+      Maximum number of pods the scope may run — the density ceiling.
+    mappings:
+      k8s.resourcequota: spec.hard["pods"]
+
+  service.managed:
+    kind: bool
+    description: Managed platform quota vs a self-operated accounting system
+
+# Deliberately absent in v0.1 (operational noise, not budget semantics):
+#   - per-object counts (services, configmaps, secrets, replicationcontrollers)
+#   - requests.* vs limits.* split beyond the compute ceiling
+#   - scopeSelector / PriorityClass scoping / extended resources

@@ -1,0 +1,105 @@
+# Azure CDN custom domain (D332): the Azure twin of cdn-custom-domain.yaml. A
+# cdn.distribution served under an alternate domain name (a customDomains sub-resource,
+# NOT an inline field like CloudFront's Aliases) with TLS bound via enableCustomHttps.
+#
+# Azure's cert model differs from AWS's fundamentally, so the twin is NOT a $ref: the
+# capability.certificate.tls domain is an honest AWS+GCP two-cloud domain with NO Azure
+# implementation (Key Vault certs are data-plane), so there is nothing to reference.
+# Instead Azure serves the custom domain with a CDN-MANAGED certificate
+# (certificate: managed → certificateSource: Cdn) — free, auto-provisioned and
+# auto-renewed by Azure, with no external cert resource. A BYO cert is a literal Key
+# Vault secret id (covered by the driver golden). Compile behaviour is Go-runtime
+# (D24), so every case carries impl: go. The verifier is untouched: the operands live
+# in the implementation block (D26); the exact wire (customDomains hostName +
+# enableCustomHttps certificateSource) is pinned by the driver's httptest golden.
+suite: cdn-custom-domain-azure
+cases:
+  - name: azure-cdn-custom-domain-managed-cert
+    impl: go
+    description: >
+      An Azure cdn.distribution whose aliases carry the custom domain and whose
+      certificate is an Azure CDN-managed cert (no external resource). One create
+      action — Azure manages the cert itself, so there is no producer to depend on.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: cdn-domain-az, environment: test, version: 1 }
+        capabilities:
+          - id: cdn
+            type: capability.cdn.distribution
+        constraints:
+          hard:
+            - id: c-cdn-managed
+              subject: cdn
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: cdn-domain-az
+        capabilities:
+          cdn:
+            provider: azure
+            service: azurecdn
+            attributes:
+              service.managed: true
+              viewer.protocol: https-only
+              origin.domain: origin.example.com
+            implementation:
+              resource_group: rg-cdn
+              aliases: [api.acme.eu]
+              certificate: managed
+    expect:
+      actions:
+        a-create-cdn:
+          operation: create
+
+  - name: azure-cdn-custom-domain-operands-not-unknown
+    impl: go
+    description: >
+      Regression (D307): an azurecdn whose implementation carries the aliases,
+      certificate and cache_policy operands is NOT tripped by the unknown-operand
+      guard — all three are registered in the driver's ConsumedOperands. The plan
+      compiles and emits the create action.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: cdn-domain-az-reg, environment: test, version: 1 }
+        capabilities:
+          - id: cdn
+            type: capability.cdn.distribution
+        constraints:
+          hard:
+            - id: c-cdn-managed
+              subject: cdn
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: cdn-domain-az-reg
+        capabilities:
+          cdn:
+            provider: azure
+            service: azurecdn
+            attributes:
+              service.managed: true
+              viewer.protocol: https-only
+              origin.domain: origin.example.com
+            implementation:
+              resource_group: rg-cdn
+              aliases: [api.acme.eu]
+              certificate: managed
+              cache_policy: disabled
+    expect:
+      actions:
+        a-create-cdn:
+          operation: create

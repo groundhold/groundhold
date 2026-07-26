@@ -1,0 +1,33 @@
+{
+  "components": { "schemas": {
+    "io.k8s.api.rbac.v1.Role": {
+      "type": "object",
+      "x-kubernetes-group-version-kind": [{"group":"rbac.authorization.k8s.io","version":"v1","kind":"Role"}],
+      "properties": {
+        "metadata": {"$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"},
+        "rules": {"type": "array", "items": {"$ref": "#/components/schemas/io.k8s.api.rbac.v1.PolicyRule"}}
+      }
+    },
+    "io.k8s.api.rbac.v1.ClusterRole": {
+      "type": "object",
+      "x-kubernetes-group-version-kind": [{"group":"rbac.authorization.k8s.io","version":"v1","kind":"ClusterRole"}],
+      "properties": {
+        "metadata": {"$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"},
+        "rules": {"type": "array", "items": {"$ref": "#/components/schemas/io.k8s.api.rbac.v1.PolicyRule"}},
+        "aggregationRule": {"$ref": "#/components/schemas/io.k8s.api.rbac.v1.AggregationRule"}
+      }
+    },
+    "io.k8s.api.rbac.v1.PolicyRule": {
+      "type": "object",
+      "properties": {
+        "verbs": {"type": "array", "items": {"type": "string"}},
+        "apiGroups": {"type": "array", "items": {"type": "string"}},
+        "resources": {"type": "array", "items": {"type": "string"}},
+        "resourceNames": {"type": "array", "items": {"type": "string"}},
+        "nonResourceURLs": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "io.k8s.api.rbac.v1.AggregationRule": {"type": "object"},
+    "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta": {"type": "object", "properties": {"name": {"type": "string"}}}
+  }}
+}

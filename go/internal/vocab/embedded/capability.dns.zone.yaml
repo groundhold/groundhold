@@ -1,0 +1,79 @@
+# Attribute vocabulary for capability.dns.zone, spec v0.1 (D101).
+#
+# A managed authoritative DNS ZONE — the container that owns a domain's records.
+# The 3-cloud twin: GCP Cloud DNS managed zone, AWS Route 53 hosted zone, Azure
+# DNS zone. Deliberately THIN, and for the same reason capability.secret is: the
+# RECORDS (A/AAAA/CNAME/MX/TXT/…) are DATA, supplied out of band — never a
+# declared attribute. groundhold provisions the zone (the governed envelope: its
+# domain, its public/private reach, whether it is DNSSEC-signed); the record set
+# is the operator's/app's to fill, exactly as a secret's value or an object's
+# bytes are. A vocabulary that provisioned records would be a config-management
+# tool smuggled into an infrastructure contract.
+
+capability: capability.dns.zone
+version: 0.1
+stateful: true   # a zone owns records and IS the authority for a domain;
+                 # destroying it breaks resolution (an outage) and loses the
+                 # record set — delete friction is warranted (D47).
+
+attributes:
+
+  zone.domain:
+    kind: string
+    description: >
+      The fully-qualified DNS name the zone is authoritative for (e.g.
+      example.com). This is the zone's identity, not sizing — a contract may
+      require a candidate be authoritative for exactly this domain.
+    mappings:
+      gcp.clouddns: managedZone.dnsName
+      aws.route53: HostedZone.Name
+      azure.dnszone: the dnsZones/privateDnsZones resource name
+
+  network.publicExposure:
+    kind: bool
+    description: >
+      Whether the zone is PUBLIC (internet-resolvable authoritative DNS) or
+      PRIVATE (resolves only within attached networks/VPCs). This is genuine
+      capability semantics, and it maps to DIFFERENT shapes per cloud — a flag on
+      GCP/AWS, a SEPARATE resource type on Azure (dnsZones vs privateDnsZones).
+    mappings:
+      gcp.clouddns: visibility (public / private)
+      aws.route53: HostedZoneConfig.PrivateZone == false
+      azure.dnszone: Microsoft.Network/dnsZones (public) vs privateDnsZones
+
+  dnssec.enabled:
+    kind: bool
+    description: >
+      Whether the zone is DNSSEC-signed (origin authentication of DNS data).
+      Honored where the provider offers zone-level signing; on a cloud whose
+      DNSSEC requires out-of-band key ceremony (e.g. a Route 53 KMS-backed KSK) a
+      driver may REFUSE it in v0 rather than half-configure — an honest gap, not
+      a silent no-op.
+    mappings:
+      gcp.clouddns: managedZone.dnssecConfig.state = on
+      aws.route53: a KMS-backed key-signing key + EnableHostedZoneDNSSEC
+      azure.dnszone: zone-level DNSSEC (public zones)
+
+  service.managed:
+    kind: bool
+    description: Managed service vs self-operated
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: >
+      Projected monthly cost (per-zone hosting; queries billed after deploy).
+    verification: static against a pricing catalog; billing after deploy
+
+# Deliberately absent in v0.1 — DATA / output / topology, not capability semantics:
+#   - the RECORD SET (A/AAAA/CNAME/MX/TXT/SRV/…): DATA, supplied out of band; a
+#     zone with records is like a secret with a value — groundhold provisions the
+#     envelope, never the contents. Record TTLs are record-level data too.
+#   - assigned name servers (NS delegation): a provider-assigned OUTPUT read back
+#     from the created zone, not a declared input.
+#   - location.region: DNS is a GLOBAL control plane (public zones resolve
+#     worldwide; Route 53 / Cloud DNS / Azure DNS zones are global resources) —
+#     there is no residency knob. A private zone's network associations are
+#     topology/impl, carried under `implementation:`, never a capability path.
+#   - query logging / traffic policies / health checks: operations & routing
+#     topology, a different concern (and no uniform 3-cloud semantic).

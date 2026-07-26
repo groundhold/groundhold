@@ -1,0 +1,280 @@
+# Observe v0 (D44). impl: go — single-implementation per D24. The fake
+# provider's deterministic observation pins the document format
+# end-to-end: source, derivation, explicit observedAt, layered TTL.
+
+cases:
+  - name: observe-emits-documents-with-derivation
+    impl: go
+    observe:
+      at: "2026-07-11T16:30:00Z"
+      provider: fake
+      bindings:
+        orders-db: "fake:orders-db-1"
+        cache: "fake:cache-1"
+    expect:
+      observations:
+        - capability: cache
+          path: outputs.endpoint
+          value: cache-1.fake.internal
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 900
+        - capability: cache
+          path: outputs.id
+          value: "fake:cache-1"
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 900
+        - capability: cache
+          path: outputs.privateSubnetIds
+          value: [subnet-cache-1-a, subnet-cache-1-b]
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 900
+        - capability: cache
+          path: outputs.selfLink
+          value: fake://net/cache-1
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 900
+        - capability: cache
+          path: service.managed
+          value: true
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 86400
+        - capability: orders-db
+          path: outputs.endpoint
+          value: orders-db-1.fake.internal
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 900
+        - capability: orders-db
+          path: outputs.id
+          value: "fake:orders-db-1"
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 900
+        - capability: orders-db
+          path: outputs.privateSubnetIds
+          value: [subnet-orders-db-1-a, subnet-orders-db-1-b]
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 900
+        - capability: orders-db
+          path: outputs.selfLink
+          value: fake://net/orders-db-1
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 900
+        - capability: orders-db
+          path: service.managed
+          value: true
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 86400
+
+  - name: observe-ttl-override
+    impl: go
+    description: --ttl is the blunt override over the layered defaults.
+    observe:
+      at: "2026-07-11T16:30:00Z"
+      provider: fake
+      ttl: 120
+      bindings:
+        orders-db: "fake:orders-db-1"
+    expect:
+      observations:
+        - capability: orders-db
+          path: outputs.endpoint
+          value: orders-db-1.fake.internal
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 120
+        - capability: orders-db
+          path: outputs.id
+          value: "fake:orders-db-1"
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 120
+        - capability: orders-db
+          path: outputs.privateSubnetIds
+          value: [subnet-orders-db-1-a, subnet-orders-db-1-b]
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 120
+        - capability: orders-db
+          path: outputs.selfLink
+          value: fake://net/orders-db-1
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 120
+        - capability: orders-db
+          path: service.managed
+          value: true
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 120
+
+  - name: observation-carries-the-contracts-environment
+    impl: go
+    description: >
+      The observation event's envelope carries the environment the
+      capability's own ledger history declares — never a sentinel word.
+      "observed" is a derivation, not an environment; a sentinel there
+      broke every environment-scoped consumer of the export.
+    observe:
+      at: "2026-07-15T10:00:00Z"
+      provider: fake
+      record: true
+      ledger:
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: lease.acquired
+            environment: staging
+            capabilities: [orders-db]
+            occurredAt: "2026-07-15T08:59:00Z"
+            actor: { id: seeder, type: human }
+            body: { ttlSeconds: 300 }
+        - apiVersion: state/v0
+          kind: LedgerEvent
+          event:
+            type: binding.updated
+            environment: staging
+            capabilities: [orders-db]
+            occurredAt: "2026-07-15T09:00:00Z"
+            actor: { id: seeder, type: human }
+            fencingToken: 1
+            body:
+              capability: orders-db
+              environment: staging
+              provider: { name: fake }
+              resources:
+                - { id: primary, type: t, providerId: "fake:orders-db-1", generation: 1 }
+    expect:
+      observations:
+        - capability: orders-db
+          path: outputs.endpoint
+          value: orders-db-1.fake.internal
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-15T10:00:00Z"
+          ttlSeconds: 900
+        - capability: orders-db
+          path: outputs.id
+          value: "fake:orders-db-1"
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-15T10:00:00Z"
+          ttlSeconds: 900
+        - capability: orders-db
+          path: outputs.privateSubnetIds
+          value: [subnet-orders-db-1-a, subnet-orders-db-1-b]
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-15T10:00:00Z"
+          ttlSeconds: 900
+        - capability: orders-db
+          path: outputs.selfLink
+          value: fake://net/orders-db-1
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-15T10:00:00Z"
+          ttlSeconds: 900
+        - capability: orders-db
+          path: service.managed
+          value: true
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-15T10:00:00Z"
+          ttlSeconds: 86400
+      appendedEnvironment: staging
+
+  - name: observe-partial-continues-on-unreadable-capability
+    impl: go
+    description: >
+      D242: a capability whose primary read fails is isolated — the run
+      does NOT abort. The other capability is still observed, the failed
+      one yields no observations (never fabricated), it is listed in
+      `unreadable`, the result is `partial`, and observe stays exit 0.
+      The evidence gap is resolved downstream (verify unknown, plan
+      observation-required).
+    observe:
+      at: "2026-07-11T16:30:00Z"
+      provider: fake
+      bindings:
+        db: "unreadable:HTTP 429"
+        web: "fake:web-1"
+    expect:
+      partial: true
+      unreadable: [db]
+      observations:
+        - capability: web
+          path: outputs.endpoint
+          value: web-1.fake.internal
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 900
+        - capability: web
+          path: outputs.id
+          value: "fake:web-1"
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 900
+        - capability: web
+          path: outputs.privateSubnetIds
+          value: [subnet-web-1-a, subnet-web-1-b]
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 900
+        - capability: web
+          path: outputs.selfLink
+          value: fake://net/web-1
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 900
+        - capability: web
+          path: service.managed
+          value: true
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T16:30:00Z"
+          ttlSeconds: 86400
+
+  - name: observe-all-unreadable-is-empty-partial-not-error
+    impl: go
+    description: >
+      D242: even when EVERY capability is unreadable, observe does not
+      error — it reports an empty, `partial` result at exit 0. The total
+      evidence gap becomes observation-required at plan/apply, never a
+      fabricated success. Uniformity: 1/N and N/N unreadable behave the same.
+    observe:
+      at: "2026-07-11T16:30:00Z"
+      provider: fake
+      bindings:
+        a: "unreadable:down"
+        b: "unreadable:down"
+    expect:
+      partial: true
+      unreadable: [a, b]
+      observations: []

@@ -1,0 +1,40 @@
+apiVersion: candidate/v0.1
+kind: ImplementationCandidate
+contract: orders-production
+
+# This is what an agent emits INSTEAD of writing Terraform.
+# Every non-declared value carries provenance — the verifier propagates it.
+
+capabilities:
+  orders-db:
+    provider: gcp
+    service: cloudsql
+    attributes:
+      engine.protocol: postgresql/16.4
+      location.region: europe-west1
+      network.publicExposure: false
+      encryption.atRest: true
+      service.managed: true
+
+      recovery.rpo: 5m            # follows from PITR configuration
+
+      recovery.rto:
+        value: 25m
+        status: inferred
+        source: "vendor documentation, not yet measured"
+        confidence: 0.5
+
+      cost.monthly:
+        value: 912 EUR
+        status: inferred
+        source: "pricing catalog gcp-eu 2026-07"
+        confidence: 0.8
+
+    # free-form provider detail (D26): the verifier ignores this block,
+    # the compiler consumes it — and re-derives the attributes above from
+    # its own output, so it is never the source of truth (D18)
+    implementation:
+      tier: db-custom-4-16384
+      disk_type: PD_SSD
+      flags:
+        max_connections: 500

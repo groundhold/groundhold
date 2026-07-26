@@ -1,0 +1,78 @@
+# Attribute vocabulary for capability.cdn.distribution, spec v0.1 (D118).
+#
+# A managed CDN distribution — an edge content-delivery endpoint that fronts an
+# origin and terminates TLS at the edge. The twin is AWS CloudFront and Azure CDN.
+#
+# This is an HONEST TWO-CLOUD domain: GCP Cloud CDN is NOT a standalone resource —
+# it is a FLAG (enableCdn) on a backend service, coupled to a load balancer + URL
+# map. It cannot be modelled as a single edge resource the way CloudFront and Azure
+# CDN can, so a gcp candidate is REFUSED by fail-closed dispatch, never faked (the
+# search/streaming/certificate stance, applied again).
+#
+# INVARIANT #4 (closed operator set): a CDN's cache behaviors — path patterns, TTLs,
+# header/cookie forwarding, geo restrictions, custom error responses — are OPAQUE
+# config carried under `implementation:`, never a vocabulary attribute. The
+# vocabulary exposes only the origin, the viewer TLS posture and management.
+#
+# OAC → Function URL (D316/D329, field-validated): an `origin_access: oac` distribution
+# fronting a Lambda Function URL (AuthType AWS_IAM) signs origin requests as the CloudFront
+# service principal. AWS changed behaviour ~Oct 2025: a Function URL created after that date
+# needs the resource policy to allow BOTH `lambda:InvokeFunctionUrl` AND `lambda:InvokeFunction`
+# — so D329 grants both (older URLs ignore the extra allow). A field 403 first misread as an
+# org RCP (D326) was in fact this missing grant; the org had no guardrail. The residual honest
+# note stands as a HYPOTHETICAL, not the diagnosed case: a principal-scoped org RCP denying the
+# CloudFront service principal would still block, and admitting that principal is the operator's
+# environment decision, not a product setting — Groundhold emits the correct wiring and stops at
+# the account boundary.
+
+capability: capability.cdn.distribution
+version: 0.1
+stateful: false   # a CDN distribution is edge configuration + a cache, not stored
+                  # data — retirement stops delivery but loses no records (the cache
+                  # is repopulated from the origin; no D47 data-loss friction).
+
+attributes:
+
+  origin.domain:
+    kind: string
+    description: >
+      The origin host the distribution fetches content from (e.g.
+      origin.example.com or a bucket/website endpoint). The distribution's own
+      edge hostname is provider-assigned and observed, not requested.
+    mappings:
+      aws.cloudfront: Origins.Items[0].DomainName
+      azure.cdn: endpoint origins[0].hostName
+
+  viewer.protocol:
+    kind: string
+    enum: [https-only, redirect-to-https, allow-all]
+    description: >
+      The TLS posture the edge enforces on viewer (client) connections. https-only
+      = reject plain HTTP; redirect-to-https = 301 HTTP to HTTPS; allow-all = serve
+      both. redirect-to-https is honored on AWS CloudFront natively; on Azure
+      CLASSIC CDN it is REFUSED (a redirect needs a Standard-profile delivery rule,
+      out of this single-endpoint slice) — refused rather than silently downgraded.
+    mappings:
+      aws.cloudfront: DefaultCacheBehavior.ViewerProtocolPolicy
+      azure.cdn: endpoint isHttpAllowed / isHttpsAllowed (redirect refused on classic)
+
+  service.managed:
+    kind: bool
+    description: Managed service vs self-operated
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost of the capability
+    verification: static against a pricing catalog; provider-api (billing) after deploy
+
+# Deliberately absent in v0.1:
+#   - location.region: a CDN distribution is an EDGE/GLOBAL resource (CloudFront is
+#     global; an Azure CDN profile is Global), so there is no residency knob — the
+#     dns.zone / waf stance. Geo-restriction of WHERE content is served is a cache
+#     behavior (opaque impl), not residency.
+#   - cache behaviors, path patterns, TTLs, header/cookie forwarding, custom error
+#     pages, price class, WAF association: all OPAQUE config under `implementation:`,
+#     never a vocabulary attribute (invariant #4).
+#   - the TLS certificate the edge presents is a SEPARATE capability
+#     (capability.certificate.tls, D117), referenced by implementation, not inlined.

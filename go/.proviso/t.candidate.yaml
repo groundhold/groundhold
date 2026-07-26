@@ -1,0 +1,7 @@
+apiVersion: candidate/v0.1
+kind: ImplementationCandidate
+contract: mcp-t
+capabilities:
+  db:
+    attributes:
+      service.managed: true

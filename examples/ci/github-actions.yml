@@ -1,0 +1,61 @@
+# Groundhold in CI: verify as the PR gate, audit as the drift gate.
+# Every failure is classifiable (exit code + `code` field), serializable
+# (JSON on stdout) and replayable (the ledger is in the repo or a bucket).
+name: groundhold
+on: [pull_request]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25' }
+      - name: build groundhold
+        run: cd go && go build -o ../bin/groundhold-go ./cmd/groundhold
+      - name: verify the candidate against the contract
+        run: |
+          bin/groundhold-go verify contracts/prod.contract.yaml \
+            candidates/prod.candidate.yaml --vocab spec/vocab --json \
+            | tee verify-report.json
+      - name: forecast the sealed plan (advisory)
+        if: always()
+        run: |
+          bin/groundhold-go plan contracts/prod.contract.yaml \
+            candidates/prod.candidate.yaml --vocab spec/vocab \
+            --ledger state/prod.jsonl > plan.json || {
+              code=$?
+              # exit 2 with "nothing to change" means converged — OK for CI
+              [ $code -eq 2 ] && exit 0 || exit $code
+            }
+          bin/groundhold-go forecast plan.json candidates/prod.candidate.yaml \
+            --ledger state/prod.jsonl
+
+  survey-drift:
+    runs-on: ubuntu-latest
+    # code<->contract drift gate (D93): the survey is the commit-pinned
+    # evidence table the code-to-contract crawl produced for THIS sha.
+    # exit 2 (`survey-drift`) = the code and the contract disagree
+    # about reality; reconcile before merge.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25' }
+      - run: cd go && go build -o ../bin/groundhold-go ./cmd/groundhold
+      - name: compare the code survey against the contract
+        run: |
+          bin/groundhold-go survey contracts/prod.contract.yaml \
+            --survey .groundhold/survey/${GITHUB_SHA::7}.json --explain
+
+  drift-audit:
+    runs-on: ubuntu-latest
+    # scheduled drift detection: observations are recorded by the
+    # operator's observe cron; audit judges them and exit 2 fails the job
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25' }
+      - run: cd go && go build -o ../bin/groundhold-go ./cmd/groundhold
+      - name: audit recorded reality
+        run: |
+          bin/groundhold-go audit contracts/prod.contract.yaml \
+            --ledger state/prod.jsonl --at "$(date -u +%FT%TZ)" --explain

@@ -1,0 +1,209 @@
+# CloudFront + Origin Access Control -> Lambda Function URL (AuthType AWS_IAM),
+# the edge pattern that makes a serverless api PUBLIC at the edge WITHOUT
+# anonymous invoke (closes Acme's last launch blocker: their org RCP forbids
+# Principal:* invoke on a Function URL). Three parts wire together through the
+# implementation block (D226 $ref — the compiler wires references from
+# implementation:, never from an attribute):
+#   1. the lambda's Function URL is AuthType=AWS_IAM (url_auth: iam);
+#   2. the cdn.distribution origins to the Function URL host (origin_domain =
+#      $ref fn.functionUrlDomain) with an OAC (origin_access: oac);
+#   3. the distribution grants ITSELF invoke on its origin lambda
+#      (grant_invoke_lambda = $ref fn.functionArn) — the SourceArn is the
+#      distribution's own post-create ARN, added inside the cdn create (Model 2).
+# The DAG is create-lambda -> create-distribution(+OAC+grant): a SINGLE edge,
+# acyclic (the grant needs no third action — the distribution knows its own ARN).
+# Compile behaviour is Go-runtime (D24), so every case carries impl: go. The
+# verifier is untouched: the operands live in the implementation block (D26).
+suite: cdn-oac-lambda
+cases:
+  - name: cloudfront-oac-fronts-iam-lambda-url
+    impl: go
+    description: >
+      A function.serverless (url_auth=iam) and a cdn.distribution whose origin is
+      the lambda's functionUrlDomain and whose invoke grant targets the lambda's
+      functionArn. The plan emits create-fn + create-cdn, with a dependsOn edge
+      and two references entries on the cdn (both resolved at apply from the fn's
+      receipt), no cycle.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: cdn-oac, environment: test, version: 1 }
+        capabilities:
+          - id: fn
+            type: capability.function.serverless
+          - id: cdn
+            type: capability.cdn.distribution
+        constraints:
+          hard:
+            - id: c-fn-managed
+              subject: fn
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-cdn-managed
+              subject: cdn
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: cdn-oac
+        capabilities:
+          fn:
+            provider: aws
+            service: lambda
+            attributes:
+              service.managed: true
+              location.region: eu-central-1
+              network.publicExposure: true
+              tls.enforced: true
+            implementation:
+              image_uri: 123456789012.dkr.ecr.eu-central-1.amazonaws.com/fn:sha
+              role_arn: arn:aws:iam::123456789012:role/fn-exec
+              url_auth: iam
+          cdn:
+            provider: aws
+            service: cloudfront
+            attributes:
+              service.managed: true
+              viewer.protocol: https-only
+            implementation:
+              origin_access: oac
+              origin_domain:
+                $ref: { capability: fn, output: functionUrlDomain }
+              grant_invoke_lambda:
+                $ref: { capability: fn, output: functionArn }
+    expect:
+      actions:
+        a-create-fn:
+          operation: create
+        a-create-cdn:
+          operation: create
+          dependsOn: [a-create-fn]
+          references:
+            - slot: grant_invoke_lambda
+              producerAction: a-create-fn
+              capability: fn
+              output: functionArn
+              kind: string
+            - slot: origin_domain
+              producerAction: a-create-fn
+              capability: fn
+              output: functionUrlDomain
+              kind: string
+
+  - name: cdn-cache-policy-operand-not-unknown
+    impl: go
+    description: >
+      Regression (D307): a cloudfront whose implementation carries the cache_policy
+      override operand (disabled|optimized) is NOT tripped by the unknown-operand
+      guard — cache_policy is registered in the driver's ConsumedOperands. The plan
+      compiles and emits the create action. (With no operand the default is safe per
+      origin type: CachingDisabled for a Function-URL/OAC origin, CachingOptimized
+      for a static origin; the exact managed-policy id lands in the CreateDistribution
+      body at apply, pinned by the driver's httptest golden.)
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: cdn-cache-reg, environment: test, version: 1 }
+        capabilities:
+          - id: cdn
+            type: capability.cdn.distribution
+        constraints:
+          hard:
+            - id: c-cdn-managed
+              subject: cdn
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: cdn-cache-reg
+        capabilities:
+          cdn:
+            provider: aws
+            service: cloudfront
+            attributes:
+              service.managed: true
+              viewer.protocol: https-only
+              origin.domain: origin.example.com
+            implementation:
+              cache_policy: disabled
+    expect:
+      actions:
+        a-create-cdn:
+          operation: create
+
+  - name: cdn-oac-operands-not-unknown
+    impl: go
+    description: >
+      Regression (D307): a lambda with url_auth and a cloudfront with
+      origin_access / origin_domain / grant_invoke_lambda (all literals here) are
+      NOT tripped by the unknown-operand guard — they are registered in each
+      driver's ConsumedOperands. The plan compiles and emits both create actions.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: cdn-oac-reg, environment: test, version: 1 }
+        capabilities:
+          - id: fn
+            type: capability.function.serverless
+          - id: cdn
+            type: capability.cdn.distribution
+        constraints:
+          hard:
+            - id: c-fn-managed
+              subject: fn
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-cdn-managed
+              subject: cdn
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: cdn-oac-reg
+        capabilities:
+          fn:
+            provider: aws
+            service: lambda
+            attributes:
+              service.managed: true
+              location.region: eu-central-1
+              network.publicExposure: true
+            implementation:
+              image_uri: 123456789012.dkr.ecr.eu-central-1.amazonaws.com/fn:sha
+              role_arn: arn:aws:iam::123456789012:role/fn-exec
+              url_auth: iam
+          cdn:
+            provider: aws
+            service: cloudfront
+            attributes:
+              service.managed: true
+              viewer.protocol: https-only
+            implementation:
+              origin_access: oac
+              origin_domain: abc123.lambda-url.eu-central-1.on.aws
+              grant_invoke_lambda: arn:aws:lambda:eu-central-1:123456789012:function:fn
+    expect:
+      actions:
+        a-create-fn:
+          operation: create
+        a-create-cdn:
+          operation: create

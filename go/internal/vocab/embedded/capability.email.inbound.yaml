@@ -1,0 +1,55 @@
+# Attribute vocabulary for capability.email.inbound, spec v0.1 (D154).
+#
+# Inbound email RECEIVING as a governed capability — the "deal mailbox" at the
+# heart of the product (module M1): mail from brands lands, a parser drafts a
+# deal. What an organization contracts about a receiving pipeline: residency
+# (where the mail is received and stored), whether inbound mail is SCANNED for
+# spam/virus before it is trusted, and whether the pipeline DELIVERS matched
+# mail to a durable sink (raw MIME to object storage, optionally announced on a
+# topic) rather than dropping it into the void.
+#
+# The recipient domain/address, the receipt-rule-set name, the destination S3
+# bucket and key prefix, and the notification topic are operator OPERANDS
+# (implementation: block, D26): the bucket is a separate storage.object
+# capability, the topic a separate messaging.topic capability, and the MX record
+# that points the domain at the receiving endpoint is a separate dns.record
+# capability — none is a receiving attribute, none is provisioned here.
+#
+# One capability TYPE, many services (D76): aws.ses-inbound today (SES receiving,
+# eu-central-1 since 09/2023); a future gcp/mailgun/cloudmailin receiver fulfils
+# the same contract. This is the INBOUND half; the outbound sender is
+# capability.email.sending (D148, a separate slice).
+#
+# STATELESS: a receipt rule set / rule is CONFIGURATION, not a store — the raw
+# mail lands in the operator's S3 bucket (a separate capability). Retirement of
+# the rule destroys no durable data, so the delete_stateful gates do not bind it.
+
+capability: capability.email.inbound
+version: 0.1
+stateful: false
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Region the mail is received and (via the S3 sink) stored in — the residency of inbound mail
+    mappings:
+      aws.ses-inbound: SES receiving region (receipt rule set is regional)
+
+  spam.filtered:
+    kind: bool
+    description: Whether inbound mail is scanned for spam and virus before it is trusted (a scan verdict is attached) — false means raw mail is accepted unscanned
+    mappings:
+      aws.ses-inbound: receipt rule ScanEnabled (Amazon SES spam + virus scanning, verdict headers)
+
+  delivery.sink:
+    kind: bool
+    description: Whether the rule delivers matched mail to a durable sink (raw MIME to object storage) AND the rule set is active — false means matched mail is not durably captured, so nothing reaches the parser
+    mappings:
+      aws.ses-inbound: receipt rule S3Action present AND rule set is the active receipt rule set
+
+  service.managed:
+    kind: bool
+    description: Whether groundhold manages this receiving pipeline
+    mappings:
+      aws.ses-inbound: const true when observed through the driver

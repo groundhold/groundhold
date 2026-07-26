@@ -1,0 +1,59 @@
+# Attribute vocabulary for capability.ai.inference, spec v0.1 (D150).
+#
+# Managed LLM inference as a governed capability — the AI layer of a product whose
+# every model call must stay inside the EU (Acme's invariant #1). The crux is a
+# residency trap that AWS documents: a Bedrock EU cross-region inference profile
+# (eu.anthropic.*) routes calls across SEVERAL EU regions, and the set INCLUDES
+# eu-south-2 (Spain); if that region is outside the account's allowlist, calls fail
+# at random. groundhold catches this DETERMINISTICALLY without a network call in the
+# verifier (#6): the driver OBSERVES the profile's destination regions (network in
+# observe, never in verify), and a contract asserts
+#   inference.destinationRegions subset-of [<EU allowlist>]
+# with the EXISTING subset-of operator — the eu-south-2 trap becomes a `violated`
+# verdict before any traffic, not an AccessDenied at runtime. This is the D1
+# "verifier rule" as a vocab attribute + a plain constraint, not new engine code.
+#
+# What an organization governs: residency (the client region AND the full set of
+# destination regions the profile may route to), the model provider/family, and
+# whether the profile is single-region (the +10% paranoid option) or cross-region.
+# The inference-profile id and any model-access grant are operator OPERANDS /
+# manual-gates (impl block, D26): Bedrock model access is sometimes gated by a
+# use-case form — a manual-gate the driver OBSERVES, never fakes (C2).
+#
+# One TYPE, many services (D76): aws.bedrock today. STATELESS.
+
+capability: capability.ai.inference
+version: 0.1
+stateful: false
+
+attributes:
+
+  location.region:
+    kind: string
+    description: The region the client invokes inference from (the profile's home)
+    mappings:
+      aws.bedrock: the inference profile's home region
+
+  inference.destinationRegions:
+    kind: list
+    description: The full set of regions the inference profile may ROUTE a call to — the residency surface. Assert subset-of the EU allowlist to catch the eu-south-2 trap deterministically.
+    mappings:
+      aws.bedrock: get-inference-profile models[].modelArn regions (the authoritative routing set)
+
+  model.provider:
+    kind: string
+    description: The model provider/family the profile serves (e.g. anthropic)
+    mappings:
+      aws.bedrock: the profile's model provider
+
+  model.access:
+    kind: bool
+    description: Whether model access is granted on this account (a manual-gate — Bedrock model access is sometimes granted by a use-case form, never an API create; the driver OBSERVES it, never fabricates)
+    mappings:
+      aws.bedrock: model access status (manual-gate, observed)
+
+  service.managed:
+    kind: bool
+    description: Whether groundhold manages this inference configuration
+    mappings:
+      aws.bedrock: const true when observed through the driver

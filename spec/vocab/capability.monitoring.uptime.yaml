@@ -1,0 +1,93 @@
+# Attribute vocabulary for capability.monitoring.uptime, spec v0.1 (D108).
+#
+# An UPTIME CHECK: a synthetic probe of an endpoint on a period, reporting up/down.
+# The third observability domain, alongside the alert (D106) and the dashboard (D107):
+# an alert watches an internal metric, a dashboard displays metrics, an uptime check
+# probes a service FROM OUTSIDE to answer "is it reachable?". The 3-cloud twin is the
+# GCP Monitoring uptime check, the AWS Route 53 health check, and the Azure Application
+# Insights availability test.
+#
+# The verifiable core is small and universal — what is probed, how, and how often —
+# and this domain is a showcase of HONEST PER-CLOUD GAPS, because the three clouds
+# disagree sharply on two axes. Protocol: GCP and Route 53 probe HTTP/HTTPS/TCP, but an
+# Azure availability test is HTTP(S)-ONLY, so check.protocol=tcp is REFUSED on Azure.
+# Period: Route 53 permits ONLY a 10s or 30s interval, GCP permits 60s/300s/600s/900s,
+# and an Azure test permits only 300s/600s/900s — so a check.period each cloud cannot
+# honor is refused there rather than silently rounded. A contract asking for a 30s
+# check is satisfiable on GCP/AWS and refused on Azure; that refusal is the honest
+# answer, not a lie.
+
+capability: capability.monitoring.uptime
+version: 0.1
+stateful: false  # an uptime check holds no data and removing it loses none — it is a
+                 # probe config, re-creatable. The risk it carries is being too
+                 # INFREQUENT to catch an outage, which check.period makes verifiable,
+                 # not deletion.
+
+attributes:
+
+  check.target:
+    kind: string
+    description: >
+      The endpoint the check probes — a hostname or IP (the path is separate). The
+      semantic "what is being watched".
+    mappings:
+      gcp.monitoring: the uptime check's monitoredResource host
+      aws.route53: the health check's FullyQualifiedDomainName (or IPAddress)
+      azure.appinsights: the availability test's request host
+
+  check.protocol:
+    kind: string
+    enum: [http, https, tcp]
+    description: >
+      How the endpoint is probed. A closed enum. tcp is a bare port connect; http/https
+      issue a request. REFUSED on Azure for tcp — an Application Insights availability
+      test is HTTP(S)-only, an honest one-cloud gap.
+    mappings:
+      gcp.monitoring: httpCheck.useSsl (http/https) or tcpCheck (tcp)
+      aws.route53: HealthCheckConfig.Type HTTP | HTTPS | TCP
+      azure.appinsights: HTTP(S) only (tcp refused)
+
+  check.path:
+    kind: string
+    description: >
+      The HTTP path probed (http/https only). REFUSED for a tcp check — a bare port
+      connect has no path.
+    mappings:
+      gcp.monitoring: httpCheck.path
+      aws.route53: HealthCheckConfig.ResourcePath
+      azure.appinsights: the request URL path
+
+  check.period:
+    kind: duration
+    description: >
+      How often the check runs — a contract constrains it (period lte 60s to catch an
+      outage within a minute). Each cloud permits only a FIXED SET of intervals, and a
+      period the target cloud cannot honor is REFUSED there, not silently rounded:
+      Route 53 = 10s | 30s; GCP = 60s | 300s | 600s | 900s; Azure = 300s | 600s | 900s.
+    mappings:
+      gcp.monitoring: period (60s/300s/600s/900s)
+      aws.route53: RequestInterval (10s or 30s)
+      azure.appinsights: Frequency (300/600/900 seconds)
+
+  service.managed:
+    kind: bool
+    description: Managed cloud uptime monitoring vs a self-operated prober
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: >
+      Projected monthly cost — checks are near-free (a small per-check charge on some
+      clouds); the figure exists for symmetry.
+    verification: static against a pricing catalog; billing after deploy
+
+# Deliberately absent in v0.1 — REFUSED, and the refusal is the point:
+#   - the ALERT on failure: an uptime check PROBES; alerting when it fails is a
+#     separate capability.monitoring.alert (D106) that REFERENCES the check. A future
+#     slice may compose them (cross-capability); v0 keeps the probe and the alert apart.
+#   - expected content/body matching, custom headers, auth: request tuning that each
+#     cloud models differently — implementation-block detail, not capability semantics.
+#   - probe REGIONS / number of locations: reliability tuning (a check from one region
+#     vs many); impl detail, deferred.
+#   - SSL cert expiry checking: a distinct concern (a certificate probe), its own slice.

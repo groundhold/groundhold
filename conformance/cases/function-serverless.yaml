@@ -1,0 +1,325 @@
+# capability.function.serverless — request-driven, scale-to-zero compute
+# (Lambda / Cloud Functions gen2). The deliberately SEPARATE capability from
+# capability.workload.container: no idle floor, $0 at rest. The verifier cases are
+# impl-agnostic (dual); the plan cases pin the per-service, attribute-aware
+# permission sets (impl: go — the compiler is Go-only, D24).
+
+cases:
+  - name: function-serverless-contract-verifies
+    description: >
+      A scale-to-zero function contract: residency (region), private exposure,
+      HTTPS enforced, a bounded max execution time (duration, no coercion), and
+      the DEFINING scale-to-zero floor (replicas.minimum lte 0 — $0 idle). All
+      satisfied by an honest candidate. Same engine, no new operators.
+    vocab: &fn-vocab
+      - capability: capability.function.serverless
+        version: 0.1
+        stateful: false
+        attributes:
+          location.region: { kind: string }
+          network.publicExposure: { kind: bool }
+          tls.enforced: { kind: bool }
+          timeout.maximum: { kind: duration }
+          replicas.minimum: { kind: number }
+          service.managed: { kind: bool }
+          cost.monthly: { kind: money }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: fn-1, environment: production, version: 1 }
+      capabilities:
+        - id: worker
+          type: capability.function.serverless
+      constraints:
+        hard:
+          - id: c-region
+            subject: worker
+            path: location.region
+            op: equals
+            value: europe-west1
+            verify: { method: static }
+          - id: c-private
+            subject: worker
+            path: network.publicExposure
+            op: equals
+            value: false
+            verify: { method: static }
+          - id: c-tls
+            subject: worker
+            path: tls.enforced
+            op: equals
+            value: true
+            verify: { method: static }
+          - id: c-timeout
+            subject: worker
+            path: timeout.maximum
+            op: lte
+            value: 15m
+            verify: { method: static }
+          - id: c-scale-to-zero
+            subject: worker
+            path: replicas.minimum
+            op: lte
+            value: 0
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: fn-1
+      capabilities:
+        worker:
+          attributes:
+            location.region: europe-west1
+            network.publicExposure: false
+            tls.enforced: true
+            timeout.maximum: 5m
+            replicas.minimum: 0
+            service.managed: true
+    expect:
+      executable: true
+      verdicts:
+        c-region: satisfied
+        c-private: satisfied
+        c-tls: satisfied
+        c-timeout: satisfied
+        c-scale-to-zero: satisfied
+
+  - name: function-serverless-warm-floor-breaks-zero-idle
+    description: >
+      The $0-idle guarantee has teeth: a candidate carrying a warm floor
+      (replicas.minimum 2 — provisioned concurrency / minInstanceCount) violates
+      replicas.minimum lte 0. A duration is a duration: timeout.maximum 20m
+      exceeds a 15m ceiling and violates too. No coercion, same engine.
+    vocab: *fn-vocab
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: fn-2, environment: production, version: 1 }
+      capabilities:
+        - id: worker
+          type: capability.function.serverless
+      constraints:
+        hard:
+          - id: c-scale-to-zero
+            subject: worker
+            path: replicas.minimum
+            op: lte
+            value: 0
+            verify: { method: static }
+          - id: c-timeout
+            subject: worker
+            path: timeout.maximum
+            op: lte
+            value: 15m
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: fn-2
+      capabilities:
+        worker:
+          attributes:
+            replicas.minimum: 2
+            timeout.maximum: 20m
+    expect:
+      executable: false
+      verdicts:
+        c-scale-to-zero: violated
+        c-timeout: violated
+
+  - name: function-serverless-long-timeout-satisfiable-on-gen2
+    description: >
+      The per-cloud timeout gap, at the verifier: a 45-minute maximum execution
+      time satisfies a lte-60m contract — a duration only GCP Cloud Functions
+      gen2 (3600s ceiling) can honor; AWS Lambda (900s) would be refused at
+      compile. The verifier is provider-agnostic; the driver bites per cloud.
+    vocab: *fn-vocab
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: fn-3, environment: production, version: 1 }
+      capabilities:
+        - id: batch
+          type: capability.function.serverless
+      constraints:
+        hard:
+          - id: c-timeout
+            subject: batch
+            path: timeout.maximum
+            op: lte
+            value: 60m
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: fn-3
+      capabilities:
+        batch:
+          attributes:
+            timeout.maximum: 45m
+    expect:
+      executable: true
+      verdicts:
+        c-timeout: satisfied
+
+  - name: plan-emits-lambda-permissions-public
+    impl: go
+    description: >
+      A public AWS Lambda (function.serverless) create: iam:PassRole (execution
+      role) + CreateFunction + the GetFunction ownership pre-read/LRO poll, PLUS
+      the Function URL + resource-policy grant that make it world-invocable
+      (attribute-conditional on public exposure).
+    plan:
+      at: "2026-07-12T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: fnawspub, environment: test, version: 1 }
+        capabilities:
+          - id: fn
+            type: capability.function.serverless
+        constraints:
+          hard:
+            - id: c-region
+              subject: fn
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+            - id: c-public
+              subject: fn
+              path: network.publicExposure
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: fnawspub
+        capabilities:
+          fn:
+            provider: aws
+            service: lambda
+            attributes:
+              location.region: eu-central-1
+              network.publicExposure: true
+            implementation:
+              image_uri: 123456789012.dkr.ecr.eu-central-1.amazonaws.com/fn:sha
+              role_arn: arn:aws:iam::123456789012:role/fn-exec
+    expect:
+      actions:
+        a-create-fn:
+          operation: create
+          requiredPermissions:
+            - iam:PassRole
+            - lambda:AddPermission
+            - lambda:CreateFunction
+            - lambda:CreateFunctionUrlConfig
+            - lambda:GetFunction
+            - lambda:GetFunctionUrlConfig
+
+  - name: plan-emits-lambda-permissions-private
+    impl: go
+    description: >
+      A private Lambda create needs NO URL-creation / resource-policy permissions
+      (CreateFunctionUrlConfig / AddPermission stay PUBLIC-only) — proof the set is
+      attribute-conditional, not a blanket over-declaration. GetFunctionUrlConfig
+      IS present unconditionally: every create reads it to derive the
+      functionUrl/functionUrlDomain outputs (a clean 404 means no URL — a private
+      function — and must be distinguishable from AccessDenied).
+    plan:
+      at: "2026-07-12T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: fnawspriv, environment: test, version: 1 }
+        capabilities:
+          - id: fn
+            type: capability.function.serverless
+        constraints:
+          hard:
+            - id: c-region
+              subject: fn
+              path: location.region
+              op: equals
+              value: eu-central-1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: fnawspriv
+        capabilities:
+          fn:
+            provider: aws
+            service: lambda
+            attributes:
+              location.region: eu-central-1
+              network.publicExposure: false
+            implementation:
+              image_uri: 123456789012.dkr.ecr.eu-central-1.amazonaws.com/fn:sha
+              role_arn: arn:aws:iam::123456789012:role/fn-exec
+    expect:
+      actions:
+        a-create-fn:
+          operation: create
+          requiredPermissions:
+            - iam:PassRole
+            - lambda:CreateFunction
+            - lambda:GetFunction
+            - lambda:GetFunctionUrlConfig
+
+  - name: plan-emits-cloudfunctions-fn-permissions-public
+    impl: go
+    description: >
+      A public GCP Cloud Functions gen2 (function.serverless) create on the
+      distinct `cloudfunctions-fn` token: functions.create/get + the DISTINCT
+      operations.get (gen2 LRO poll) + the run.services IAM pair that grants
+      allUsers the invoker role on the backing Cloud Run service.
+    plan:
+      at: "2026-07-12T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: fngcppub, environment: test, version: 1 }
+        capabilities:
+          - id: fn
+            type: capability.function.serverless
+        constraints:
+          hard:
+            - id: c-region
+              subject: fn
+              path: location.region
+              op: equals
+              value: europe-west1
+              verify: { method: static }
+            - id: c-public
+              subject: fn
+              path: network.publicExposure
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: fngcppub
+        capabilities:
+          fn:
+            provider: gcp
+            service: cloudfunctions-fn
+            attributes:
+              location.region: europe-west1
+              network.publicExposure: true
+            implementation:
+              runtime: nodejs20
+              entry_point: handler
+              source: { bucket: my-src, object: fn.zip }
+    expect:
+      actions:
+        a-create-fn:
+          operation: create
+          requiredPermissions:
+            - cloudfunctions.functions.create
+            - cloudfunctions.functions.get
+            - cloudfunctions.operations.get
+            - run.services.getIamPolicy
+            - run.services.setIamPolicy

@@ -1,0 +1,120 @@
+# Attribute vocabulary for capability.function.serverless, spec v0.1.
+#
+# Request-driven, ephemeral, SCALE-TO-ZERO compute — a function that runs on an
+# invocation and costs $0 while idle. This is the DELIBERATELY SEPARATE capability
+# from capability.workload.container (D60): a container workload (App Runner /
+# Cloud Run / Container Apps / ECS) has a floor of >= 1 running instance; a
+# serverless function has NO idle floor. The economics differ in kind, so the
+# capability an org contracts differs in kind — a function.serverless contract
+# says "I need pay-per-request compute that costs nothing at rest", which a
+# min-1-instance workload cannot satisfy. Field request (Acme): the two must not
+# be conflated.
+#
+# One capability TYPE, MANY services (D76): fulfilled on AWS by Lambda (container-
+# image package type) and on GCP by Cloud Functions (2nd gen). Azure Functions is
+# the natural third and is left unbuilt for now. What an org contracts (residency,
+# public exposure, TLS, the maximum execution time, the capacity floor, cost) is
+# identical across the two; the handler, the image/code location, env vars, memory
+# size, concurrency tuning and VPC-connector wiring are implementation noise.
+#
+# STATELESS (D60): a function's execution environment is replaceable by definition
+# — retirement destroys no data, so delete_stateful gates do not bind it and
+# replacement needs no allow_replace_stateful consent.
+#
+# INVARIANT #4 (closed operator set): no expression language. Complexity lives in
+# more constraints, never in an interpolation on one.
+
+capability: capability.function.serverless
+version: 0.1
+stateful: false
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Primary region the function runs in (residency)
+    mappings:
+      aws.lambda: region
+      gcp.cloudfunctions: function location
+
+  network.publicExposure:
+    kind: bool
+    description: >
+      Whether the function is invokable over public HTTPS by anyone (an
+      unauthenticated public endpoint), as opposed to reachable only by
+      authenticated/internal callers.
+    mappings:
+      aws.lambda: >
+        a Function URL with AuthType NONE plus a resource-based
+        lambda:InvokeFunctionUrl grant to principal * (both, or the function
+        stays private) — false means no public Function URL
+      gcp.cloudfunctions: >
+        ingressSettings ALLOW_ALL plus an allUsers invoker binding on the
+        backing Cloud Run service (both) — false means ALLOW_INTERNAL_ONLY
+
+  tls.enforced:
+    kind: bool
+    description: Plaintext invocation is refused (HTTPS-only)
+    mappings:
+      aws.lambda: Function URLs are HTTPS-only by construction
+      gcp.cloudfunctions: HTTPS-only by construction
+
+  timeout.maximum:
+    kind: duration
+    description: >
+      The maximum wall-clock time a single invocation may run before the
+      platform stops it — a REAL, per-cloud capability limit, not a tuning
+      knob. A contract asking for more than a cloud's hard ceiling cannot be
+      honored there and is refused (never silently clamped): AWS Lambda caps a
+      single invocation at 15 minutes (900s); GCP Cloud Functions (2nd gen,
+      HTTP) caps it at 60 minutes (3600s). This is an HONEST per-cloud gap — a
+      30-minute contract is satisfiable on GCP and refused on Lambda.
+    mappings:
+      aws.lambda: Configuration.Timeout (seconds; hard max 900)
+      gcp.cloudfunctions: serviceConfig.timeoutSeconds (hard max 3600)
+
+  replicas.minimum:
+    kind: number
+    description: >
+      Capacity FLOOR — the number of warm instances that must exist even at zero
+      load. The defining value here is 0: pure scale-to-zero, $0 idle, the reason
+      this capability exists (unlike capability.workload.container, whose floor is
+      >= 1). 0 is HONORED on both clouds. A floor > 0 is a cold-start mitigation
+      (Lambda provisioned concurrency / GCP minInstanceCount); it is honored on
+      GCP but REFUSED on Lambda in v0 (provisioned concurrency needs a published
+      version/alias, out of this single resource's scope) — refused, never faked.
+    mappings:
+      aws.lambda: 0 = native scale-to-zero; > 0 = provisioned concurrency (refused in v0)
+      gcp.cloudfunctions: serviceConfig.minInstanceCount
+
+  service.managed:
+    kind: bool
+    description: Managed serverless runtime vs self-operated compute
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    verification: static against a pricing catalog; billing after deploy
+    description: >
+      Projected monthly cost. For a scale-to-zero function this is request-
+      driven and floors at $0 when idle — the economics App Runner / a min-1
+      container workload cannot offer.
+
+# Deliberately absent in v0.1 (implementation noise, carried under
+# `implementation:` and ignored by the verifier):
+#
+#   runtime.protocol / language family — considered as a semantic attribute and
+#   LEFT OUT: it does not map cleanly across both clouds. A Lambda CONTAINER-IMAGE
+#   function declares NO runtime family at all (the runtime is baked into the image
+#   the candidate ships); GCP Cloud Functions REQUIRES an explicit runtime
+#   (nodejs20, python312, ...). There is no shared granularity to contract, so the
+#   language/runtime is the candidate's business, not a capability attribute. If a
+#   future need appears (e.g. a compliance rule on runtime EOL), it earns its own
+#   entry on its own merits.
+#
+#   the handler string, the image URI / code-zip location, the execution role,
+#   environment variables, layers, memory size (sizing), reserved/provisioned
+#   concurrency tuning, and VPC-connector details — all implementation config.
+#
+#   availability.class / autoscaling.enabled — a function is regional and always
+#   autoscaling by construction; neither is a contractable knob here.

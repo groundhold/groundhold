@@ -1,0 +1,49 @@
+# Deploy the mkdocs documentation site (website/) to GitHub Pages.
+#
+# DORMANT ON PURPOSE: this triggers manually only. GitHub Pages on a free org
+# requires a PUBLIC repository, and this repo is private. To activate:
+#   1. Make the repo public (or upgrade the org plan for private Pages).
+#   2. Settings > Pages > Build and deployment > Source: "GitHub Actions".
+#   3. Run this workflow (Actions tab > pages > Run workflow) — or add a
+#      `push: { branches: [main], paths: ['website/**'] }` trigger for
+#      auto-deploy on docs changes.
+name: pages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install the docs toolchain
+        run: pip install -r website/requirements.txt
+      - name: Build (strict — a broken link or nav entry fails)
+        working-directory: website
+        run: mkdocs build --strict
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: website/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

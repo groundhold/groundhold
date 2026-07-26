@@ -1,0 +1,19 @@
+{
+  "components": { "schemas": {
+    "com.github.cert-manager.pkg.apis.certmanager.v1.Certificate": {
+      "type": "object",
+      "x-kubernetes-group-version-kind": [{"group":"cert-manager.io","version":"v1","kind":"Certificate"}],
+      "properties": {
+        "spec": {"$ref": "#/components/schemas/com.github.cert-manager.pkg.apis.certmanager.v1.CertificateSpec"}
+      }
+    },
+    "com.github.cert-manager.pkg.apis.certmanager.v1.CertificateSpec": {
+      "type": "object",
+      "properties": {
+        "dnsNames": {"type":"array","items":{"type":"string"}},
+        "secretName": {"type":"string"},
+        "issuerRef": {"type":"object"}
+      }
+    }
+  }}
+}

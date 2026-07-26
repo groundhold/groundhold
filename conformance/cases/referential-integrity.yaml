@@ -1,0 +1,80 @@
+# D11 + D19: every reference between documents' stable ids must resolve at
+# load time. Approvals, selective invalidation and the decision ledger will
+# hang off these ids — a dangling reference today is a silent no-op later.
+
+cases:
+  - name: assumption-affects-dangling-reference-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: r1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-encrypted
+            subject: db
+            path: encryption.atRest
+            op: equals
+            value: true
+      assumptions:
+        - id: a-growth
+          statement: "workload grows"
+          status: assumed
+          confidence: 0.6
+          affects: [c-encrytped]   # typo: no such constraint
+    expect:
+      error: contract
+
+  - name: autonomy-forbidden-dangling-reference-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: r2, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-encrypted
+            subject: db
+            path: encryption.atRest
+            op: equals
+            value: true
+      autonomy:
+        forbidden:
+          - disable: c-encryption   # no such constraint
+    expect:
+      error: contract
+
+  - name: assumption-invalid-status-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: r3, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      assumptions:
+        - id: a-guess
+          statement: "probably fine"
+          status: guessed
+    expect:
+      error: contract
+
+  - name: assumption-confidence-out-of-range-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: r4, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      assumptions:
+        - id: a-sure
+          statement: "very sure"
+          status: assumed
+          confidence: 2.0
+    expect:
+      error: contract

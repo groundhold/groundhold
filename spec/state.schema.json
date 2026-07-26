@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "groundhold://schemas/state/v0",
+  "title": "State Model v0",
+  "description": "Ledger events, bindings, observations, operation receipts (spec/state-model.md, D27-D33, D35). The ledger is the only write path; bindings and lease status are projections of it.",
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9\\-\\.]*$",
+      "maxLength": 128
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "description": "RFC3339 UTC, always quoted in YAML",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "actor": {
+      "type": "object",
+      "required": ["id", "type"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "enum": ["human", "agent", "runtime"] }
+      }
+    },
+    "ledgerEvent": {
+      "type": "object",
+      "required": ["apiVersion", "kind", "event"],
+      "properties": {
+        "apiVersion": { "const": "state/v0" },
+        "kind": { "const": "LedgerEvent" },
+        "event": {
+          "type": "object",
+          "required": ["type", "environment", "capabilities", "occurredAt", "actor"],
+          "properties": {
+            "type": {
+              "enum": ["contract.published", "candidate.verified", "plan.sealed",
+                       "apply.started", "apply.finished", "apply.failed",
+                       "observation.recorded", "violation.detected", "violation.resolved",
+                       "probe.failed", "binding.updated",
+                       "lease.acquired", "lease.renewed", "lease.released", "lease.broken",
+                       "operation.receipt", "ownership.claimed",
+                       "converge.started", "converge.phase.entered",
+                       "converge.finished", "converge.failed"]
+            },
+            "environment": { "type": "string" },
+            "capabilities": {
+              "type": "array", "minItems": 1,
+              "items": { "$ref": "#/$defs/identifier" }
+            },
+            "occurredAt": { "$ref": "#/$defs/timestamp" },
+            "actor": { "$ref": "#/$defs/actor" },
+            "body": { "type": "object" },
+            "prev": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/hash" }
+            },
+            "fencingToken": { "type": "integer", "minimum": 1 },
+            "idempotencyKey": { "type": "string" },
+            "signature": { "type": "object", "description": "reserved in v0" }
+          }
+        }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "required": ["capability", "environment", "provider", "resources"],
+      "properties": {
+        "capability": { "$ref": "#/$defs/identifier" },
+        "environment": { "type": "string" },
+        "provider": {
+          "type": "object",
+          "required": ["name"],
+          "properties": {
+            "name": { "type": "string" },
+            "project": { "type": "string" },
+            "region": { "type": "string" }
+          }
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "type", "providerId"],
+            "properties": {
+              "id": { "type": "string" },
+              "type": { "type": "string" },
+              "providerId": { "type": "string" },
+              "generation": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "lineage": {
+          "type": "object",
+          "properties": {
+            "aliases": { "type": "array", "items": { "$ref": "#/$defs/identifier" } },
+            "replaces": { "type": "array", "items": { "type": "string" } },
+            "tombstones": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["providerId", "generation", "deletedAt"],
+                "properties": {
+                  "providerId": { "type": "string" },
+                  "resourceType": { "type": "string" },
+                  "generation": { "type": "integer", "minimum": 1 },
+                  "deletedAt": { "$ref": "#/$defs/timestamp" },
+                  "deletionOperationId": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "adopted": { "type": "boolean" }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "required": ["kind", "capability", "path", "value", "source", "observedAt", "ttlSeconds"],
+      "properties": {
+        "kind": { "const": "Observation" },
+        "capability": { "$ref": "#/$defs/identifier" },
+        "path": { "type": "string" },
+        "value": {},
+        "source": { "enum": ["provider-api", "probe", "manual"] },
+        "derivation": {
+          "enum": ["config-intent", "measured"],
+          "description": "D44: evidence quality, mirroring candidate provenance (D5) — a config-derived fact is not a measurement"
+        },
+        "observedAt": { "$ref": "#/$defs/timestamp" },
+        "ttlSeconds": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "operationReceipt": {
+      "type": "object",
+      "required": ["kind", "operationId", "capability", "target", "startedAt", "status"],
+      "properties": {
+        "kind": { "const": "OperationReceipt" },
+        "operationId": { "type": "string" },
+        "idempotencyKey": { "type": "string" },
+        "capability": { "$ref": "#/$defs/identifier" },
+        "target": { "type": "string" },
+        "startedAt": { "$ref": "#/$defs/timestamp" },
+        "lastSeenAt": { "$ref": "#/$defs/timestamp" },
+        "status": { "enum": ["pending", "succeeded", "failed", "unknown", "retryable"] }
+      }
+    }
+  }
+}

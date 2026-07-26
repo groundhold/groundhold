@@ -1,0 +1,43 @@
+Groundhold
+Copyright the Groundhold authors.
+
+This product is dual-licensed by component:
+- go/ (the runtime)          — Mozilla Public License 2.0 (see LICENSE-runtime)
+- everything else            — Apache License 2.0 (see LICENSE)
+  (spec/, conformance/, ref/, docs/, website/, examples/, .github/, and the
+  root documentation files)
+
+================================================================================
+Third-party components
+================================================================================
+
+The runtime and reference implementation depend on the following, each under
+its own license (unmodified, used as libraries):
+
+- gopkg.in/yaml.v3 (Go)
+  Dual-licensed MIT and Apache License 2.0.
+  https://gopkg.in/yaml.v3
+
+- PyYAML (Python; runtime dependency of the reference implementation)
+  MIT License.
+  https://pyyaml.org/
+
+No other third-party code is vendored or embedded. The runtime is otherwise
+Go standard library only; the reference implementation is Python standard
+library plus PyYAML.
+
+================================================================================
+Cryptography notice
+================================================================================
+
+This distribution contains cryptographic functionality: optional detached
+Ed25519 signatures over ledger events and snapshots, and SHA-256 hashing for
+content-addressed identity and the ledger hash chain. These use the Go standard
+library (crypto/ed25519, crypto/sha256) only — no third-party or custom
+cryptographic implementation is included.
+
+Because the complete corresponding source code is published and freely
+available, this software is classified as publicly available encryption source
+code under U.S. Export Administration Regulations (EAR) License Exception TSU
+(15 CFR 740.13(e)). Redistributors are responsible for their own compliance in
+their jurisdiction.

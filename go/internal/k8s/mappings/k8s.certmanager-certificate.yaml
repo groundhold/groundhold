@@ -1,0 +1,40 @@
+# Schema-driven mapping: cert-manager Certificate (cert-manager.io/v1) ->
+# capability.certificate.tls. THE PAYOFF (slice 5): a CRD with NO hand-coded Go
+# driver, covered by a mapping document + one small reviewed lens. It maps to an
+# EXISTING vocabulary (certificate.tls), so no new capability type — proof that new
+# resource coverage is a YAML file, not a driver. The primary domain is
+# spec.dnsNames[0] (array indexing -> a lens, not a fieldpath op); auto-renewal is
+# a const (cert-manager auto-renews by design). The private key is never touched
+# (secrets structurally excluded). Issuance status (Ready) is a probe/status
+# concern, not this observe.
+mapping: v0.1
+fieldpath: groundhold/fieldpath/v1
+service: certmanager-cert
+provider: k8s
+capability: capability.certificate.tls
+vocab:
+  capability.certificate.tls: "0.1"
+
+resource:
+  group: cert-manager.io
+  version: v1
+  kind: Certificate
+  plural: certificates
+  scope: Namespaced
+
+schema:
+  source: "cert-manager.io/v1 Certificate CRD (spec.versions[].schema)"
+  mappedSurface: sha256:cb21874945e3ed6f731b9af6c61f5726b0487852967cc8ea6e502aa5afabb33a
+
+lenses:
+  - k8s.certmanager.primaryDomain
+
+attributes:
+  auto.renew:
+    op: const
+    value: true            # a cert-manager Certificate auto-renews by design (renewBefore)
+    derivation: config-intent
+  service.managed:
+    op: const
+    value: true
+    derivation: measured

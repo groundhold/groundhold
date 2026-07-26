@@ -1,0 +1,82 @@
+# Attribute vocabulary for capability.monitoring.logmetric, spec v0.1 (D109).
+#
+# A LOG-BASED METRIC: a named metric derived from log entries that match a filter.
+# The fourth observability domain, after the alert (D106), the dashboard (D107) and the
+# uptime check (D108): an alert watches a metric, a dashboard displays metrics, an
+# uptime check probes an endpoint, and a log-based metric MANUFACTURES a metric out of
+# logs — count the ERROR lines, extract the latency field. The primary 3-cloud twin is
+# the GCP Cloud Logging log-based metric and the AWS CloudWatch Logs metric filter, both
+# of which turn a log filter into a continuous metric stream. Azure has no continuous
+# metric-from-logs primitive; its honest realization is a scheduled query rule that
+# EVALUATES the same query on a schedule rather than streaming — a genuine per-cloud
+# shape difference the domain states rather than hides.
+#
+# The FILTER is opaque DATA (a provider-specific log query), passed through, never
+# interpreted by groundhold — no expression language is built on it (invariant #4); a
+# contract can only pin it with equals (the metric filters exactly this). What groundhold
+# verifies is the metric's IDENTITY (metric.name) and its KIND (counter vs gauge), which
+# is what a contract wants to guarantee: "there is an error-count metric, and it counts".
+
+capability: capability.monitoring.logmetric
+version: 0.1
+stateful: false  # a log-based metric holds no data and removing it loses none — it is a
+                 # derivation rule, re-creatable. (Historical metric points age out of
+                 # the metric store; the rule itself owns nothing durable.)
+
+attributes:
+
+  metric.name:
+    kind: string
+    description: >
+      The name of the metric this rule manufactures — the semantic identity. Other
+      capabilities (an alert, a dashboard) reference it by this name.
+    mappings:
+      gcp.logging: the log-based metric name
+      aws.cloudwatch: the metricTransformations metricName
+      azure.monitor: the scheduled query rule / metric name
+
+  metric.filter:
+    kind: string
+    description: >
+      The log filter/query that selects the matching entries — opaque, provider-specific
+      DATA, passed through and never interpreted (no expression language is built on it).
+      A contract pins it with equals to guarantee the metric counts the right thing.
+    mappings:
+      gcp.logging: the metric's filter (Logging query language)
+      aws.cloudwatch: the metric filter's filterPattern (over a log group)
+      azure.monitor: the scheduled query rule's KQL query
+
+  metric.kind:
+    kind: string
+    enum: [counter, gauge]
+    description: >
+      counter counts matching entries; gauge extracts a numeric VALUE from a field (which
+      field is implementation detail — implementation.value_field, required for gauge).
+      A closed enum.
+    mappings:
+      gcp.logging: metricDescriptor.metricKind DELTA (counter) vs a valueExtractor (gauge)
+      aws.cloudwatch: metricValue "1" (counter) vs "$field" (gauge)
+      azure.monitor: count() (counter) vs a metricMeasureColumn (gauge)
+
+  service.managed:
+    kind: bool
+    description: Managed cloud logging metrics vs a self-operated pipeline
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: >
+      Projected monthly cost — log-based metrics are near-free (charged per metric or per
+      query run on some clouds); the figure exists for symmetry.
+    verification: static against a pricing catalog; billing after deploy
+
+# Deliberately absent in v0.1 — REFUSED, and the refusal is the point:
+#   - the ALERT / dashboard ON the metric: separate capabilities (D106/D107) that
+#     REFERENCE this metric by name. v0 keeps manufacture and consumption apart.
+#   - label extractors / bucketing (histogram buckets, distribution metrics): a richer
+#     metric shape each cloud models differently — implementation-block detail, deferred.
+#   - the log SOURCE (log group / Log Analytics workspace / bucket): topology in the
+#     implementation block (implementation.log_group on AWS, implementation.scope on
+#     Azure), not capability semantics.
+#   - parsing/transforming the FILTER: it is opaque data; groundhold never builds operators
+#     over a log query (that is the expression language, invariant #4).

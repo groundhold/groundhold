@@ -1,0 +1,348 @@
+package aws
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+func rdsAttrs() map[string]any {
+	return map[string]any{
+		"engine.protocol":        "postgresql/16",
+		"location.region":        "eu-central-1",
+		"network.publicExposure": false,
+		"encryption.atRest":      true,
+		"availability.class":     "zonal",
+		"service.managed":        true,
+	}
+}
+
+func rdsImpl() map[string]any {
+	return map[string]any{
+		"instance_class":  "db.t3.micro",
+		"master_username": "admin",
+		"master_password": "secret123!",
+	}
+}
+
+func TestBuildRDSGolden(t *testing.T) {
+	id, body, err := BuildRDSCreate("000000000000", "prod", "db", rdsAttrs(), rdsImpl(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dbIDOK.MatchString(id) {
+		t.Fatalf("db id invalid: %q", id)
+	}
+	for _, want := range []string{
+		"Action=CreateDBInstance", "Engine=postgres", "EngineVersion=16",
+		"StorageEncrypted=true", "PubliclyAccessible=false", "MultiAZ=false",
+		"DBInstanceClass=db.t3.micro", "DeletionProtection=true",
+		"groundhold-capability", "MasterUsername=admin",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("create body missing %q\nbody: %s", want, body)
+		}
+	}
+}
+
+func TestBuildRDSEngineMapping(t *testing.T) {
+	for proto, eng := range map[string]string{
+		"postgresql/16": "postgres", "mysql/8.0": "mysql", "mariadb/10": "mariadb",
+	} {
+		a := rdsAttrs()
+		a["engine.protocol"] = proto
+		_, body, err := BuildRDSCreate("a", "e", "db", a, rdsImpl(), 1)
+		if err != nil || !strings.Contains(body, "Engine="+eng) {
+			t.Errorf("%s -> Engine=%s failed: err=%v", proto, eng, err)
+		}
+	}
+}
+
+func TestBuildRDSRefusals(t *testing.T) {
+	cases := map[string]struct {
+		a func(map[string]any)
+		i func(map[string]any)
+	}{
+		"unknown engine":  {func(a map[string]any) { a["engine.protocol"] = "oracle/19" }, nil},
+		"no encryption":   {func(a map[string]any) { a["encryption.atRest"] = false }, nil},
+		"multi-regional":  {func(a map[string]any) { a["availability.class"] = "multi-regional" }, nil},
+		"unknown attr":    {func(a map[string]any) { a["network.foo"] = "x" }, nil},
+		"no class":        {nil, func(i map[string]any) { delete(i, "instance_class") }},
+		"no username":     {nil, func(i map[string]any) { delete(i, "master_username") }},
+		"no password":     {nil, func(i map[string]any) { delete(i, "master_password") }},
+		"nonbool delprot": {nil, func(i map[string]any) { i["deletion_protection"] = "false" }},
+		"inTransit no pg": {func(a map[string]any) { a["encryption.inTransit"] = true }, nil},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			a, i := rdsAttrs(), rdsImpl()
+			if c.a != nil {
+				c.a(a)
+			}
+			if c.i != nil {
+				c.i(i)
+			}
+			if _, _, err := BuildRDSCreate("a", "e", "db", a, i, 1); err == nil {
+				t.Fatalf("expected refusal for %q", name)
+			}
+		})
+	}
+}
+
+// TestBuildRDSInTransitParamGroup: encryption.inTransit=true is honored when the
+// operator brings a pre-created DB parameter group (rds.force_ssl=1) — the driver
+// references it on CreateDBInstance (DBParameterGroupName), the same operand shape
+// as db_subnet_group/kms_key_id.
+func TestBuildRDSInTransitParamGroup(t *testing.T) {
+	a := rdsAttrs()
+	a["encryption.inTransit"] = true
+	i := rdsImpl()
+	i["db_parameter_group"] = "force-ssl-pg16"
+	_, body, err := BuildRDSCreate("000000000000", "prod", "db", a, i, 1)
+	if err != nil {
+		t.Fatalf("inTransit with a param group must be honored: %v", err)
+	}
+	if !strings.Contains(body, "DBParameterGroupName=force-ssl-pg16") {
+		t.Fatalf("create body missing DBParameterGroupName=force-ssl-pg16\nbody: %s", body)
+	}
+}
+
+// TestObserveRDSInTransit: observe reads rds.force_ssl from the attached DB
+// parameter group (DescribeDBParameters) and reports the MEASURED reality —
+// force_ssl=1 => inTransit true, absent/0 => false.
+func TestObserveRDSInTransit(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		force string
+		want  bool
+	}{
+		{"forced", "1", true},
+		{"not forced", "0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					body := make([]byte, r.ContentLength)
+					r.Body.Read(body)
+					action := ""
+					for _, kv := range strings.Split(string(body), "&") {
+						if strings.HasPrefix(kv, "Action=") {
+							action = strings.TrimPrefix(kv, "Action=")
+						}
+					}
+					switch action {
+					case "DescribeDBInstances":
+						_, _ = w.Write([]byte(`<DescribeDBInstancesResponse><DescribeDBInstancesResult><DBInstances><DBInstance>` +
+							`<DBInstanceIdentifier>db-x</DBInstanceIdentifier>` +
+							`<DBInstanceStatus>available</DBInstanceStatus>` +
+							`<Engine>postgres</Engine><EngineVersion>16.3</EngineVersion>` +
+							`<StorageEncrypted>true</StorageEncrypted><PubliclyAccessible>false</PubliclyAccessible>` +
+							`<MultiAZ>false</MultiAZ>` +
+							`<DBParameterGroups><DBParameterGroup><DBParameterGroupName>force-ssl-pg16</DBParameterGroupName></DBParameterGroup></DBParameterGroups>` +
+							`</DBInstance></DBInstances></DescribeDBInstancesResult></DescribeDBInstancesResponse>`))
+					case "DescribeDBParameters":
+						param := ""
+						if tc.force != "" {
+							param = `<Parameter><ParameterName>rds.force_ssl</ParameterName>` +
+								`<ParameterValue>` + tc.force + `</ParameterValue></Parameter>`
+						}
+						_, _ = w.Write([]byte(`<DescribeDBParametersResponse><DescribeDBParametersResult>` +
+							`<Parameters>` + param + `</Parameters>` +
+							`</DescribeDBParametersResult></DescribeDBParametersResponse>`))
+					default:
+						w.WriteHeader(404)
+					}
+				}))
+			defer srv.Close()
+			d := rdsTestDriver(t, srv)
+			obs, _, err := d.observeRDS("db", "rds:eu-central-1:db-abcd1234")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]any{}
+			for _, o := range obs {
+				got[o.Path] = o.Value
+			}
+			if got["encryption.inTransit"] != tc.want {
+				t.Fatalf("encryption.inTransit = %v, want %v", got["encryption.inTransit"], tc.want)
+			}
+		})
+	}
+}
+
+// TestObserveRDSCMK: observe traces the instance's KMS key to KMS (DescribeKey ->
+// KeyManager) and MEASURES encryption.customerManagedKeys — CUSTOMER => true,
+// AWS-managed default => false.
+func TestObserveRDSCMK(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		manager string
+		want    bool
+	}{
+		{"customer key", "CUSTOMER", true},
+		{"aws default", "AWS", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					body := make([]byte, r.ContentLength)
+					r.Body.Read(body)
+					if strings.Contains(string(body), "Action=DescribeDBInstances") {
+						_, _ = w.Write([]byte(`<DescribeDBInstancesResponse><DescribeDBInstancesResult><DBInstances><DBInstance>` +
+							`<DBInstanceIdentifier>db-x</DBInstanceIdentifier>` +
+							`<DBInstanceStatus>available</DBInstanceStatus>` +
+							`<Engine>postgres</Engine><EngineVersion>16.3</EngineVersion>` +
+							`<StorageEncrypted>true</StorageEncrypted><PubliclyAccessible>false</PubliclyAccessible>` +
+							`<MultiAZ>false</MultiAZ>` +
+							`<KmsKeyId>arn:aws:kms:eu-central-1:000000000000:key/abc</KmsKeyId>` +
+							`</DBInstance></DBInstances></DescribeDBInstancesResult></DescribeDBInstancesResponse>`))
+						return
+					}
+					w.WriteHeader(404)
+				}))
+			defer srv.Close()
+			kms := httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"` + tc.manager + `"}}`))
+				}))
+			defer kms.Close()
+			d := rdsTestDriver(t, srv)
+			d.KMSBaseURL = kms.URL
+			obs, _, err := d.observeRDS("db", "rds:eu-central-1:db-abcd1234")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]any{}
+			for _, o := range obs {
+				got[o.Path] = o.Value
+			}
+			if got["encryption.customerManagedKeys"] != tc.want {
+				t.Fatalf("customerManagedKeys = %v, want %v", got["encryption.customerManagedKeys"], tc.want)
+			}
+		})
+	}
+}
+
+// rdsServer answers the Query protocol. describeStatus controls the polled
+// DBInstanceStatus; the first N describes return "creating" then "available".
+func rdsServer(t *testing.T, createErr, delProtect string) *httptest.Server {
+	t.Helper()
+	describes := 0
+	return httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			body := make([]byte, r.ContentLength)
+			r.Body.Read(body)
+			action := ""
+			for _, kv := range strings.Split(string(body), "&") {
+				if strings.HasPrefix(kv, "Action=") {
+					action = strings.TrimPrefix(kv, "Action=")
+				}
+			}
+			switch action {
+			case "CreateDBInstance":
+				if createErr != "" {
+					w.WriteHeader(400)
+					_, _ = w.Write([]byte("<ErrorResponse><Error><Code>" + createErr + "</Code></Error></ErrorResponse>"))
+					return
+				}
+				_, _ = w.Write([]byte(`<CreateDBInstanceResponse></CreateDBInstanceResponse>`))
+			case "DescribeDBInstances":
+				describes++
+				status := "creating"
+				if describes >= 2 {
+					status = "available"
+				}
+				_, _ = w.Write([]byte(`<DescribeDBInstancesResponse><DescribeDBInstancesResult><DBInstances><DBInstance>` +
+					`<DBInstanceIdentifier>db-x</DBInstanceIdentifier>` +
+					`<DBInstanceStatus>` + status + `</DBInstanceStatus>` +
+					`<Engine>postgres</Engine><EngineVersion>16.3</EngineVersion>` +
+					`<StorageEncrypted>true</StorageEncrypted><PubliclyAccessible>false</PubliclyAccessible>` +
+					`<MultiAZ>false</MultiAZ><DeletionProtection>` + delProtect + `</DeletionProtection>` +
+					`<TagList><Tag><Key>groundhold-capability</Key><Value>db</Value></Tag>` +
+					`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag></TagList>` +
+					`</DBInstance></DBInstances></DescribeDBInstancesResult></DescribeDBInstancesResponse>`))
+			case "DeleteDBInstance":
+				_, _ = w.Write([]byte(`<DeleteDBInstanceResponse></DeleteDBInstanceResponse>`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+}
+
+func rdsTestDriver(t *testing.T, srv *httptest.Server) *Driver {
+	t.Helper()
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	d := NewDriver("eu-central-1")
+	d.RDSBaseURL = srv.URL
+	// KMS trace defaults to the same fake (different protocol -> 404 -> CMK
+	// unreadable -> diagnostic); CMK-measuring tests override KMSBaseURL. Keeps the
+	// suite hermetic.
+	d.KMSBaseURL = srv.URL
+	d.Account = "000000000000"
+	d.PollInterval = time.Millisecond
+	return d
+}
+
+func TestCreateRDSPollsToAvailable(t *testing.T) {
+	srv := rdsServer(t, "", "false")
+	defer srv.Close()
+	d := rdsTestDriver(t, srv)
+	res := d.createRDS("eu-central-1", "000000000000", "prod", "db", rdsAttrs(), rdsImpl(), 1)
+	if res.Status != "succeeded" || !strings.HasPrefix(res.ProviderID, "rds:eu-central-1:") {
+		t.Fatalf("got %+v, want succeeded once available", res)
+	}
+}
+
+func TestObserveRDS(t *testing.T) {
+	srv := rdsServer(t, "", "false")
+	defer srv.Close()
+	d := rdsTestDriver(t, srv)
+	obs, _, err := d.observeRDS("db", "rds:eu-central-1:db-abcd1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]any{}
+	for _, o := range obs {
+		got[o.Path] = o.Value
+	}
+	if got["engine.protocol"] != "postgresql/16.3" {
+		t.Fatalf("engine.protocol = %v", got["engine.protocol"])
+	}
+	if got["network.publicExposure"] != false || got["encryption.atRest"] != true {
+		t.Fatalf("exposure/encryption = %v / %v", got["network.publicExposure"], got["encryption.atRest"])
+	}
+}
+
+func TestDeleteRDSProtectedRefused(t *testing.T) {
+	srv := rdsServer(t, "", "true") // deletion protection on
+	defer srv.Close()
+	d := rdsTestDriver(t, srv)
+	res := d.deleteRDS("db", "prod", "rds:eu-central-1:db-abcd1234")
+	if res.Status != "failed" || !strings.Contains(res.Reason, "deletion protection") {
+		t.Fatalf("protected instance must refuse delete, got %+v", res)
+	}
+}
+
+func TestDeleteRDSOurs(t *testing.T) {
+	srv := rdsServer(t, "", "false")
+	defer srv.Close()
+	d := rdsTestDriver(t, srv)
+	res := d.deleteRDS("db", "prod", "rds:eu-central-1:db-abcd1234")
+	if res.Status != "succeeded" {
+		t.Fatalf("delete of an owned unprotected instance must succeed, got %+v", res)
+	}
+}
+
+func TestSplitRDSProviderID(t *testing.T) {
+	if _, _, err := splitRDSProviderID("rds:eu-central-1:db-abcd1234"); err != nil {
+		t.Fatalf("valid id rejected: %v", err)
+	}
+	for _, bad := range []string{"eu:db", "s3:eu-central-1:db", "rds:eu-central-1:9bad", "rds:bad:db"} {
+		if _, _, err := splitRDSProviderID(bad); err == nil {
+			t.Errorf("accepted malformed rds id %q", bad)
+		}
+	}
+}

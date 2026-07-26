@@ -1,0 +1,41 @@
+# Schema-driven mapping: Flux Kustomization (kustomize.toolkit.fluxcd.io/v1) ->
+# capability.gitops.application. The EQUAL twin of k8s.argocd-application: the same
+# neutral capability, a different controller, its own normalising lens. This is the
+# proof the GitOps witness is vendor-agnostic — Flux and ArgoCD are peers, neither
+# privileged, and a third controller (Fleet, Jenkins X) is just another mapping.
+# Flux is condition-based: the lens reads status.conditions (Ready/Reconciling) and
+# projects them onto the neutral sync/health enums. source.repoURL maps to the
+# sourceRef NAME (URL resolution across the GitRepository object is a future lens).
+# Observe-only: groundhold witnesses Flux, never authors the Kustomization.
+mapping: v0.1
+fieldpath: groundhold/fieldpath/v1
+service: flux-kustomization
+provider: k8s
+capability: capability.gitops.application
+vocab:
+  capability.gitops.application: "0.1"
+
+resource:
+  group: kustomize.toolkit.fluxcd.io
+  version: v1
+  kind: Kustomization
+  plural: kustomizations
+  scope: Namespaced
+
+schema:
+  source: "kustomize.toolkit.fluxcd.io/v1 Kustomization CRD (spec.versions[].schema)"
+  mappedSurface: ""   # drift-guard PENDING CRD schema vendoring (loud diagnostic until pinned).
+
+lenses:
+  - k8s.gitops.fluxStatus
+
+attributes:
+  source.repoURL:
+    field: spec.sourceRef.name
+    op: copy
+    type: string
+    derivation: measured
+  service.managed:
+    op: const
+    value: true
+    derivation: measured

@@ -1,0 +1,7 @@
+# Default owner for everything, until the maintainer set grows.
+#
+# Must be a USER or a TEAM (@org/team): a bare organization handle is not a
+# valid code owner, so the rule that stood here before assigned nobody. Branch
+# protection on the public repo requires a review from an owner named here
+# before anything reaches main.
+* @jpazdyga

@@ -1,0 +1,95 @@
+# Attribute vocabulary for capability.search.index, spec v0.1 (D113).
+#
+# A managed full-text search service — the twin is AWS OpenSearch Service and
+# Azure AI Search (formerly Cognitive Search). This is an HONEST TWO-CLOUD domain:
+# GCP has NO managed search-service twin (Vertex AI Search is an ML/RAG product,
+# not an operable search cluster), so a gcp candidate is REFUSED (the gcp driver
+# has no search service — fail-closed dispatch), never a faked third mapping. The
+# agnostic+symmetric discipline holds where the twin genuinely exists; it is not
+# manufactured where it does not.
+#
+# The cluster/replica/partition sizing, instance type, index schema and analyzers
+# are implementation noise; residency, exposure, availability and encryption are
+# the capability.
+
+capability: capability.search.index
+version: 0.1
+stateful: true   # a search cluster holds indexed data; retirement loses the index
+                 # (rebuildable from the source of truth, but a real data footprint —
+                 # D47 delete friction, softer than a database).
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Primary region of the search service
+    mappings:
+      aws.opensearch: provider region (the domain is regional)
+      azure.aisearch: the search service location
+
+  availability.class:
+    kind: string
+    enum: [zonal, regional]
+    description: >
+      Failure domain the service survives. zonal = a single availability zone;
+      regional = replicated across zones in the region.
+    mappings:
+      aws.opensearch: ClusterConfig.ZoneAwarenessEnabled (regional) vs single-AZ (zonal)
+      azure.aisearch: Standard SKU with >=3 replicas (zone-redundant, regional) vs Basic (zonal)
+
+  network.publicExposure:
+    kind: bool
+    description: Whether the search endpoint is reachable over the public internet
+    mappings:
+      aws.opensearch: no VPCOptions (public endpoint) vs VPC placement (private)
+      azure.aisearch: publicNetworkAccess = enabled | disabled
+    note: >
+      static verification proves configuration intent; an anonymous-reach probe
+      proves the actual absence of a public path post-deploy.
+
+  encryption.atRest:
+    kind: bool
+    description: >
+      Indexed data is encrypted at rest. Always on for both twins; a candidate
+      asserting false is refused, never silently downgraded.
+    mappings:
+      aws.opensearch: EncryptionAtRestOptions.Enabled
+      azure.aisearch: always encrypted at rest
+
+  encryption.inTransit:
+    kind: bool
+    description: >
+      Client connections must be TLS-encrypted, not merely permitted. A provider
+      default that also allows cleartext does NOT satisfy it.
+    mappings:
+      aws.opensearch: DomainEndpointOptions.EnforceHTTPS
+      azure.aisearch: always HTTPS-only
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: >
+      Indexed data encrypted with a CUSTOMER-managed key (CMEK/KMS), not the
+      provider default. The key id is implementation detail (implementation.kms_*),
+      never a capability path.
+    mappings:
+      aws.opensearch: EncryptionAtRestOptions.KmsKeyId (a customer key)
+      azure.aisearch: encryptionWithCmk.enforcement = Enabled (all objects must use CMK)
+
+  service.managed:
+    kind: bool
+    description: Managed service vs self-operated
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost of the capability
+    verification: static against a pricing catalog; provider-api (billing) after deploy
+
+# Deliberately absent in v0.1 (implementation detail / modelling, not capability
+# semantics): instance/node type & count, storage size, partition/shard & replica
+# counts, index schema, analyzers, dedicated-master topology, fine-grained access
+# control roles. A candidate may carry them under `implementation:`; the verifier
+# ignores them.
+#   - engine.protocol (opensearch/N vs elasticsearch/N): OpenSearch exposes it, but
+#     Azure AI Search is a proprietary engine with no compatible protocol version —
+#     no honest uniform value, so it is DEFERRED rather than made OpenSearch-only.

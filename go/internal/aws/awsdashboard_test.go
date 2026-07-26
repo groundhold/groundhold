@@ -1,0 +1,119 @@
+package aws
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func awsDashAttrs() map[string]any {
+	return map[string]any{
+		"dashboard.metrics":     []any{"AWS/EC2/CPUUtilization", "AWS/ELB/RequestCount"},
+		"dashboard.widgetCount": float64(2),
+		"service.managed":       true,
+	}
+}
+
+func awsDashImpl() map[string]any { return map[string]any{"region": "eu-central-1"} }
+
+func TestBuildCWDashboardHonors(t *testing.T) {
+	p, err := BuildCWDashboard("prod", "golden", awsDashAttrs(), awsDashImpl(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Metrics) != 2 || !dashNameOK.MatchString(p.DashboardName) || p.Region != "eu-central-1" {
+		t.Fatalf("plan = %+v", p)
+	}
+	body := p.body()
+	if !strings.Contains(body, `"CPUUtilization"`) || !strings.Contains(body, `"AWS/EC2"`) ||
+		!strings.Contains(body, `"eu-central-1"`) {
+		t.Fatalf("body = %s", body)
+	}
+}
+
+func TestBuildCWDashboardRefusals(t *testing.T) {
+	cases := map[string]struct {
+		extra map[string]any
+		impl  map[string]any
+	}{
+		"widgetcount-lie": {map[string]any{"dashboard.widgetCount": float64(9)}, awsDashImpl()},
+		"empty-metrics":   {map[string]any{"dashboard.metrics": []any{}}, awsDashImpl()},
+		"no-namespace":    {map[string]any{"dashboard.metrics": []any{"CPUUtilization"}}, awsDashImpl()},
+		"no-region":       {nil, map[string]any{}},
+		"unmanaged":       {map[string]any{"service.managed": false}, awsDashImpl()},
+		"layout-attr":     {map[string]any{"dashboard.layout": "custom"}, awsDashImpl()},
+	}
+	for name, c := range cases {
+		a := awsDashAttrs()
+		for k, v := range c.extra {
+			a[k] = v
+		}
+		if _, err := BuildCWDashboard("prod", "golden", a, c.impl, 1); err == nil {
+			t.Errorf("%s: expected refusal, got none", name)
+		}
+	}
+	a := awsDashAttrs()
+	delete(a, "dashboard.metrics")
+	if _, err := BuildCWDashboard("prod", "golden", a, awsDashImpl(), 1); err == nil {
+		t.Error("missing dashboard.metrics must refuse")
+	}
+}
+
+func cwDashServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	body := ""
+	return httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			_ = r.ParseForm()
+			switch r.PostForm.Get("Action") {
+			case "PutDashboard":
+				body = r.PostForm.Get("DashboardBody")
+				_, _ = w.Write([]byte(`<PutDashboardResponse><PutDashboardResult></PutDashboardResult></PutDashboardResponse>`))
+			case "GetDashboard":
+				_, _ = w.Write([]byte(`<GetDashboardResponse><GetDashboardResult><DashboardBody>` + body +
+					`</DashboardBody></GetDashboardResult></GetDashboardResponse>`))
+			case "DeleteDashboards":
+				_, _ = w.Write([]byte(`<DeleteDashboardsResponse></DeleteDashboardsResponse>`))
+			default:
+				w.WriteHeader(400)
+			}
+		}))
+}
+
+func cwDashDriver(t *testing.T, srv *httptest.Server) *Driver {
+	t.Helper()
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	d := NewDriver("eu-central-1")
+	d.CloudWatchDashBaseURL = srv.URL
+	return d
+}
+
+func TestCreateObserveDeleteCWDashboard(t *testing.T) {
+	srv := cwDashServer(t)
+	defer srv.Close()
+	d := cwDashDriver(t, srv)
+	res := d.createCWDashboard("prod", "golden", awsDashAttrs(), awsDashImpl(), 1)
+	if res.Status != "succeeded" || !strings.HasPrefix(res.ProviderID, "cwdash:pv-golden-prod-") {
+		t.Fatalf("create: %+v", res)
+	}
+	obs, _, err := d.observeCWDashboard("golden", res.ProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]any{}
+	for _, o := range obs {
+		got[o.Path] = o.Value
+	}
+	if got["dashboard.widgetCount"] != float64(2) {
+		t.Fatalf("widgetCount: %+v", got)
+	}
+	metrics, _ := got["dashboard.metrics"].([]string)
+	if len(metrics) != 2 || metrics[0] != "AWS/EC2/CPUUtilization" {
+		t.Fatalf("metrics not reflected: %+v", got["dashboard.metrics"])
+	}
+	if del := d.deleteCWDashboard("golden", "prod", res.ProviderID); del.Status != "succeeded" {
+		t.Fatalf("delete: %+v", del)
+	}
+}

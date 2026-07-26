@@ -1,0 +1,81 @@
+# Attribute vocabulary for capability.cluster.kubernetes, spec v0.1.
+#
+# The Kubernetes SUBSTRATE — the managed cluster itself — distinct from
+# capability.cluster.namespace (in-cluster governance) and
+# capability.workload.container (what RUNS on the cluster). What an
+# organization contracts about a managed control plane: residency, API-server
+# exposure, version currency, secrets encryption, and node HA topology. Instance
+# types, AMIs, addon versions, and node counts beyond a floor are implementation
+# noise.
+#
+# One capability TYPE, MANY services (D76): aws.eks, gcp.gke, azure.aks and
+# self-managed substrates (Talos) all fulfil it — the API differs, what an org
+# governs is identical. aws.eks v0 (slice 1) OBSERVES an adopted cluster;
+# provisioning the composite (cluster + node groups + IAM + OIDC) is slice 2.
+#
+# STATEFUL: a cluster holds etcd state and hosts bound workloads — retirement is
+# destructive, so the delete_stateful gates and allow_replace_stateful consent
+# bind it exactly as they bind a database.
+
+capability: capability.cluster.kubernetes
+version: 0.1
+stateful: true
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Region the control plane runs in (data residency)
+    mappings:
+      aws.eks: cluster region
+
+  cluster.version:
+    kind: string
+    description: Kubernetes minor version the control plane runs — governed for end-of-life, CVE and compliance currency
+    mappings:
+      aws.eks: DescribeCluster cluster.version
+
+  network.apiExposure:
+    kind: string
+    enum: [public, private, mixed]
+    description: How the API server endpoint is reachable (public internet, VPC-private, or both)
+    mappings:
+      aws.eks: resourcesVpcConfig endpointPublicAccess / endpointPrivateAccess
+    recommended:
+      op: in
+      value: [private, mixed]
+      scope: prod
+      rationale: "In production, keep the Kubernetes API server off the fully public internet; restrict it to private or mixed access."
+      ruleId: PV_R0013
+      ruleVersion: 1
+      controls:
+        CIS-EKS: ["5.4.1"]
+
+  encryption.secrets:
+    kind: bool
+    description: Whether Kubernetes Secrets are envelope-encrypted with a managed key at rest
+    mappings:
+      aws.eks: encryptionConfig with resources=[secrets] and a KMS key
+    recommended:
+      op: equals
+      value: true
+      scope: prod
+      rationale: "In production, envelope-encrypt Kubernetes secrets so etcd contents are not stored in the clear."
+      ruleId: PV_R0014
+      ruleVersion: 1
+      controls:
+        FSBP: ["EKS.3"]
+        GDPR: ["Art.32"]
+
+  availability.class:
+    kind: string
+    enum: [zonal, regional, multi-regional]
+    description: Node topology across availability zones (HA)
+    mappings:
+      aws.eks: node group subnet AZ spread (observed with node groups, slice 2)
+
+  service.managed:
+    kind: bool
+    description: Whether groundhold manages this cluster
+    mappings:
+      aws.eks: const true when observed through the driver

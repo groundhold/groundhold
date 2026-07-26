@@ -1,0 +1,177 @@
+# Attribute vocabulary for capability.storage.object, spec v0.1 (D60).
+# What an organization can REQUIRE of an object store: durability,
+# retention, exposure, residency. Bucket names, storage-class knobs and
+# lifecycle rule syntax are implementation noise.
+
+capability: capability.storage.object
+version: 0.1
+stateful: true   # objects ARE the data; retirement is data loss
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Primary region of the bucket/container
+    mappings:
+      gcp.gcs: bucket location
+      aws.s3: region
+
+  durability.class:
+    kind: string
+    enum: [single-zone, regional, multi-regional]
+    description: Physical redundancy of stored objects
+    mappings:
+      gcp.gcs: location type (region/dual-region/multi-region)
+      aws.s3: storage class redundancy
+
+  versioning.enabled:
+    kind: bool
+    description: Object versions survive overwrites and deletes
+    mappings:
+      gcp.gcs: versioning.enabled
+      aws.s3: versioning status
+    recommended:
+      op: equals
+      value: true
+      scope: all
+      rationale: "Enable object versioning so an accidental overwrite or delete can be recovered."
+      ruleId: PV_R0006
+      ruleVersion: 1
+      controls:
+        FSBP: ["S3.14"]
+        CIS-AWS_5.0.0: ["2.1.3"]
+
+  retention.minimum:
+    kind: duration
+    description: >
+      Objects cannot be deleted before this age (compliance hold)
+    mappings:
+      gcp.gcs: retentionPolicy.retentionPeriod
+      aws.s3: >
+        Object Lock DefaultRetention, honored AT BIRTH (create-time). The bucket
+        is created object-lock-enabled (x-amz-bucket-object-lock-enabled) and a
+        PutObjectLockConfiguration sets DefaultRetention.Days (duration rounded to
+        whole days). Mode is GOVERNANCE (a bypassable floor) unless retention.locked
+        is true. PRESUPPOSES versioning.enabled (S3 only retention-protects versioned
+        objects). Create-time-only: a change is a bucket replacement.
+
+  retention.maximum:
+    kind: duration
+    description: >
+      Objects must NOT outlive this age — data minimization (GDPR-style
+      "delete after N"). The exact dual of retention.minimum: a ceiling,
+      not a floor. Fulfilled by a lifecycle expiration rule, NOT object
+      CRUD (the rule is the capability, individual objects are not).
+    mappings:
+      gcp.gcs: lifecycle rule action=Delete condition.age (days)
+      aws.s3: lifecycle rule Expiration.Days
+
+  retention.locked:
+    kind: bool
+    description: >
+      WORM: the retention period cannot be shortened or removed, even by an
+      admin (a one-way compliance lock). PRESUPPOSES retention.minimum — you
+      cannot lock nothing. Honoring it is a create-time, irreversible lock of
+      the SAME bucket resource.
+    mappings:
+      gcp.gcs: retentionPolicy.isLocked (buckets.lockRetentionPolicy)
+      aws.s3: >
+        Object Lock retention Mode, honored AT BIRTH. true => COMPLIANCE (a hard
+        WORM no principal — not even the account root — can shorten or remove);
+        false/unset => GOVERNANCE (a floor overridable with
+        s3:BypassGovernanceRetention). PRESUPPOSES retention.minimum (you cannot
+        lock nothing) and versioning.enabled. Object Lock is enabled at CreateBucket
+        (create-time-only, irreversible), so a change is a bucket replacement.
+
+  network.publicExposure:
+    kind: bool
+    description: Whether any public read path to objects exists
+    mappings:
+      gcp.gcs: iamConfiguration.publicAccessPrevention + IAM bindings
+      aws.s3: public access block + bucket policy
+    note: >
+      static verification proves configuration intent; an outcome probe
+      (anonymous GET attempt) proves the actual absence of public reads.
+    recommended:
+      op: equals
+      value: false
+      scope: all
+      rationale: "Block public access to object storage; publicly readable buckets are a leading cause of data exposure."
+      ruleId: PV_R0005
+      ruleVersion: 1
+      controls:
+        FSBP: ["S3.2"]
+        CIS-AWS_5.0.0: ["2.1.5"]
+        GDPR: ["Art.32"]
+
+  replication.enabled:
+    kind: bool
+    description: >
+      Objects are asynchronously replicated to a bucket in ANOTHER region — a
+      cross-region DR / multi-region durability layer. PRESUPPOSES
+      versioning.enabled (CRR only replicates versioned objects), the same way
+      retention.locked presupposes retention.minimum. The replica bucket is a
+      SEPARATE capability.storage.object instance in the other region; its ARN
+      and the replication IAM role are implementation detail
+      (implementation.replication_destination_bucket_arn /
+      implementation.replication_role_arn), never capability paths.
+    mappings:
+      gcp.gcs: not honored — GCS has no native cross-region async replica of a
+        chosen second region (dual/multi-region is a durability.class, not a
+        replica you point at a region); probe-only
+      aws.s3: bucket replication configuration (PutBucketReplication)
+
+  replication.destinationRegion:
+    kind: string
+    description: >
+      The region replicas land in — the SUBSTANCE of DR data residency.
+      Asserted against an EU allowlist with the membership operator (`in`), the
+      SAME closed-set pattern as the Bedrock D1 residency rule. OBSERVED, never
+      declared on faith: an S3 replication rule holds its destination as an
+      arn:aws:s3:::<bucket> ARN, which carries NO region, so the driver measures
+      it with GetBucketLocation on the destination bucket (residency measured,
+      not theatre). Meaningful only when replication.enabled is true.
+    mappings:
+      gcp.gcs: n/a (see replication.enabled)
+      aws.s3: GetBucketLocation on the replication destination bucket
+
+  encryption.atRest:
+    kind: bool
+    mappings:
+      gcp.gcs: always true (CMEK optional)
+      aws.s3: default encryption
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: >
+      Objects are encrypted with a CUSTOMER-managed key (CMEK/KMS), not
+      merely the provider's default key. The key id itself is implementation
+      detail (implementation.kms_key_name / implementation.kms_key_id),
+      never a capability path. The provider-default key does NOT satisfy this.
+    mappings:
+      gcp.gcs: encryption.defaultKmsKeyName
+      aws.s3: ServerSideEncryptionConfiguration SSE-KMS with a customer key
+    recommended:
+      op: equals
+      value: true
+      scope: prod
+      rationale: "In production, encrypt objects with a customer-managed key so key rotation and revocation are yours to control."
+      ruleId: PV_R0007
+      ruleVersion: 1
+      controls:
+        FSBP: ["S3.17"]
+        GDPR: ["Art.32"]
+        ISO27001_2022: ["A.8.24"]
+
+  service.managed:
+    kind: bool
+    description: Managed service vs self-operated
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    verification: static against a pricing catalog; billing after deploy
+
+# Deliberately absent in v0.1 (implementation noise):
+# bucket names, storage-class tiers, lifecycle rule syntax, CORS
+# configuration shape, signed-URL mechanics.

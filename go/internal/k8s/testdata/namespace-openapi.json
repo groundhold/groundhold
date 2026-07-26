@@ -1,0 +1,23 @@
+{
+  "components": { "schemas": {
+    "io.k8s.api.core.v1.Namespace": {
+      "type": "object",
+      "x-kubernetes-group-version-kind": [{"group":"","version":"v1","kind":"Namespace"}],
+      "properties": {
+        "spec": {"$ref": "#/components/schemas/io.k8s.api.core.v1.NamespaceSpec"},
+        "metadata": {"$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"}
+      }
+    },
+    "io.k8s.api.core.v1.NamespaceSpec": {
+      "type": "object",
+      "properties": {"finalizers": {"type": "array", "items": {"type": "string"}}}
+    },
+    "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "labels": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    }
+  }}
+}

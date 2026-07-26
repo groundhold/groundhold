@@ -1,0 +1,923 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "groundhold/outputs/v0",
+  "title": "Groundhold CLI output shapes (D64)",
+  "description": "One $def per verb. The `code` field is the machine contract (spec/errors.md); `reasons` and `explain` are prose and MUST NOT be parsed for control flow. Additive-only: consumers must tolerate unknown fields.",
+  "$defs": {
+    "code": {
+      "type": "string",
+      "enum": [
+        "structural-error",
+        "not-executable",
+        "nothing-to-change",
+        "observation-required",
+        "reconcile-required",
+        "reconcile-pending",
+        "consent-required",
+        "confirmation-required",
+        "read-set-mismatch",
+        "stale-decision",
+        "lease-conflict",
+        "clock-regress",
+        "binding-conflict",
+        "adoption-mismatch",
+        "provider-refused",
+        "provider-permission-denied",
+        "preflight-inconclusive",
+        "unsupported-operation",
+        "apply-failed",
+        "ledger-corrupted",
+        "survey-drift",
+        "provider-again-later",
+        "mapping-schema-drift",
+        "reference-invalid",
+        "reference-unresolved",
+        "unknown-operand",
+        "run-unknown",
+        "run-running",
+        "run-stalled",
+        "run-needs-reconcile",
+        "run-done",
+        "run-failed",
+        "wait-timeout"
+      ]
+    },
+    "explain": {
+      "type": "object",
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "remediation": {
+          "type": "string"
+        }
+      }
+    },
+    "planRefusal": {
+      "description": "stdout on plan exit 2 (D65): exactly one JSON object; the success document is self-discriminating via its top-level plan key",
+      "type": "object",
+      "required": [
+        "status",
+        "reasons"
+      ],
+      "properties": {
+        "status": {
+          "const": "refused"
+        },
+        "code": {
+          "$ref": "#/$defs/code"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "verifyReport": {
+      "type": "object",
+      "required": [
+        "specVersion",
+        "contractHash",
+        "candidateHash",
+        "executable",
+        "verdicts",
+        "summary"
+      ],
+      "properties": {
+        "specVersion": {
+          "type": "string"
+        },
+        "contractHash": {
+          "type": "string"
+        },
+        "candidateHash": {
+          "type": "string"
+        },
+        "executable": {
+          "type": "boolean"
+        },
+        "blockingReasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verdicts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "constraint",
+              "severity",
+              "verdict"
+            ],
+            "properties": {
+              "constraint": {
+                "type": "string"
+              },
+              "subject": {
+                "type": "string",
+                "description": "capability the verdict is about (D91)"
+              },
+              "path": {
+                "type": "string",
+                "description": "attribute path the verdict is about; join key to observations (D91)"
+              },
+              "verifyMethod": {
+                "type": "string",
+                "description": "how the constraint can be proven: static | provider-api | probe (D94)"
+              },
+              "severity": {
+                "type": "string"
+              },
+              "verdict": {
+                "enum": [
+                  "satisfied",
+                  "violated",
+                  "unknown",
+                  "unverifiable"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "basis": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "confidence": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "observed": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pathInVocabulary": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "summary": {
+          "type": "object"
+        }
+      }
+    },
+    "applyResult": {
+      "type": "object",
+      "required": [
+        "status",
+        "events"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "applied",
+            "refused",
+            "failed",
+            "unknown",
+            "corrupted"
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/code"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "bindings": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "preflight": {
+          "type": "object",
+          "description": "D75 permission-preflight outcome on a successful apply",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "passed",
+                "inconclusive",
+                "skipped"
+              ]
+            },
+            "checked": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "unattested": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "D78: queried permissions the provider check could not attest (a non-authoritative omission, not a denial)"
+            },
+            "reason": {
+              "type": "string"
+            }
+          }
+        },
+        "explain": {
+          "$ref": "#/$defs/explain"
+        }
+      }
+    },
+    "adoptResult": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "adopted",
+            "unadopted",
+            "refused"
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/code"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "bindings": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "explain": {
+          "$ref": "#/$defs/explain"
+        }
+      }
+    },
+    "resumeResult": {
+      "type": "object",
+      "required": [
+        "status",
+        "resolved",
+        "events"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "resumed",
+            "still-unknown",
+            "nothing-to-resume",
+            "refused"
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/code"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "resolved": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "capability",
+              "operationId",
+              "operation",
+              "status"
+            ],
+            "properties": {
+              "capability": {
+                "type": "string"
+              },
+              "operationId": {
+                "type": "string"
+              },
+              "operation": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "succeeded",
+                  "failed",
+                  "unknown"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "providerId": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "bindings": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "explain": {
+          "$ref": "#/$defs/explain"
+        }
+      }
+    },
+    "probeResult": {
+      "type": "object",
+      "required": [
+        "status",
+        "measurements",
+        "failures",
+        "events"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "probed",
+            "refused"
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/code"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "measurements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "capability",
+              "path",
+              "value",
+              "method"
+            ],
+            "properties": {
+              "capability": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "method": {
+                "type": "string"
+              },
+              "evidence": {
+                "type": "string"
+              },
+              "intrusive": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "failures": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "capability",
+              "path",
+              "method",
+              "reason",
+              "retryable"
+            ]
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "explain": {
+          "$ref": "#/$defs/explain"
+        }
+      }
+    },
+    "auditResult": {
+      "type": "object",
+      "required": [
+        "status",
+        "verdicts",
+        "violations",
+        "events"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "clean",
+            "violations-found"
+          ]
+        },
+        "verdicts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "constraint",
+              "capability",
+              "path",
+              "severity",
+              "verdict"
+            ],
+            "properties": {
+              "verdict": {
+                "enum": [
+                  "satisfied",
+                  "violated",
+                  "unknown",
+                  "unverifiable"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "observedAt": {
+                "type": "string"
+              },
+              "derivation": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "violations": {
+          "type": "integer"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "convergeResult": {
+      "type": "object",
+      "required": [
+        "status",
+        "phases"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "applied",
+            "converged",
+            "refused",
+            "stale-or-conflict",
+            "failed",
+            "corrupted"
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/code"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "phases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "explain": {
+          "$ref": "#/$defs/explain"
+        }
+      }
+    },
+    "discoverResult": {
+      "type": "object",
+      "required": [
+        "discovery",
+        "discoveryHash"
+      ],
+      "properties": {
+        "discovery": {
+          "type": "object",
+          "required": [
+            "provider",
+            "at",
+            "resources"
+          ]
+        },
+        "discoveryHash": {
+          "type": "string",
+          "pattern": "^sha256:"
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "hintsResult": {
+      "type": "object",
+      "required": [
+        "kind",
+        "apiVersion",
+        "source",
+        "hints"
+      ],
+      "properties": {
+        "kind": {
+          "const": "AdoptionHints"
+        },
+        "apiVersion": {
+          "const": "hints/v0"
+        },
+        "source": {
+          "type": "object",
+          "required": [
+            "format"
+          ]
+        },
+        "hints": {
+          "type": "array"
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "exportRecord": {
+      "description": "One NDJSON line of `export --format ndjson`",
+      "type": "object",
+      "required": [
+        "index",
+        "id",
+        "type",
+        "event"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^sha256:"
+        },
+        "type": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "event": {
+          "type": "object"
+        }
+      }
+    },
+    "deposedResult": {
+      "type": "object",
+      "required": [
+        "deposed"
+      ],
+      "properties": {
+        "deposed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "capability",
+              "providerId",
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "deposed",
+                  "pending-delete"
+                ]
+              },
+              "generation": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "observeResult": {
+      "type": "object",
+      "required": [
+        "observations"
+      ],
+      "properties": {
+        "observations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "capability",
+              "path",
+              "value",
+              "source",
+              "derivation",
+              "observedAt",
+              "ttlSeconds"
+            ]
+          }
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "partial": {
+          "type": "boolean",
+          "description": "D242: true when at least one bound capability could not be read this run; observe stays exit 0 (best-effort) and the gap is resolved downstream (verify unknown, plan observation-required)"
+        },
+        "unreadable": {
+          "type": "array",
+          "description": "D242: capabilities whose primary read failed this run — NOT observations and never fabricated values; the reason is free diagnostic text (never hashed, never an event)",
+          "items": {
+            "type": "object",
+            "required": [
+              "capability",
+              "reason"
+            ]
+          }
+        }
+      }
+    },
+    "repairDiagnosis": {
+      "type": "object",
+      "required": [
+        "status",
+        "events",
+        "validPrefixLines",
+        "findings",
+        "fingerprint"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "healthy",
+            "corrupt"
+          ]
+        },
+        "events": {
+          "type": "integer"
+        },
+        "validPrefixLines": {
+          "type": "integer"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "line",
+              "kind",
+              "detail",
+              "remediation"
+            ],
+            "properties": {
+              "line": {
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "torn-final-line",
+                  "unparseable-line",
+                  "missing-prev",
+                  "chain-broken",
+                  "rule-rejected",
+                  "bad-timestamp"
+                ]
+              },
+              "capability": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              },
+              "remediation": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "repairResult": {
+      "type": "object",
+      "required": [
+        "status",
+        "keptLines",
+        "droppedLines",
+        "findings"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "healthy",
+            "repaired",
+            "refused"
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/code"
+        },
+        "keptLines": {
+          "type": "integer"
+        },
+        "droppedLines": {
+          "type": "integer"
+        },
+        "quarantinedTo": {
+          "type": "string"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "explain": {
+          "$ref": "#/$defs/explain"
+        }
+      }
+    },
+    "anchorDocument": {
+      "type": "object",
+      "required": [
+        "apiVersion",
+        "kind",
+        "events",
+        "head",
+        "heads",
+        "decisionHeads"
+      ],
+      "properties": {
+        "apiVersion": {
+          "const": "state/v0"
+        },
+        "kind": {
+          "const": "LedgerAnchor"
+        },
+        "events": {
+          "type": "integer"
+        },
+        "head": {
+          "type": "string"
+        },
+        "heads": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "decisionHeads": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "anchorCheck": {
+      "type": "object",
+      "required": [
+        "status",
+        "anchorEvents",
+        "ledgerEvents"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "verified",
+            "truncated",
+            "diverged"
+          ]
+        },
+        "anchorEvents": {
+          "type": "integer"
+        },
+        "ledgerEvents": {
+          "type": "integer"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "publishResult": {
+      "type": "object",
+      "required": [
+        "status",
+        "events"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "published",
+            "refused"
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/code"
+        },
+        "contractHash": {
+          "type": "string"
+        },
+        "actor": {
+          "type": "string"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "explain": {
+          "$ref": "#/$defs/explain"
+        }
+      }
+    }
+  }
+}

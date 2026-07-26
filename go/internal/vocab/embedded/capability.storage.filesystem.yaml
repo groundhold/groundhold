@@ -1,0 +1,96 @@
+# Attribute vocabulary for capability.storage.filesystem, spec v0.1 (D111).
+#
+# A managed, regional NETWORK FILE SHARE — the 3-cloud twin is a shared POSIX/
+# SMB filesystem: GCP Filestore, AWS EFS, Azure Files. The sibling of
+# capability.storage.object, but the medium is a mounted filesystem, not an
+# object API, so it carries residency / encryption / availability / wire-protocol
+# semantics and refuses the same implementation noise (capacity GiB, throughput
+# mode, performance/service tier, mount-target topology — all sizing/tuning,
+# never capability semantics).
+#
+# One honest per-cloud GAP this domain forces (documented, never faked):
+#   - protocol smb/N is REFUSED on GCP (Filestore) and AWS (EFS) — neither has a
+#     managed SMB filesystem (that is AWS FSx for Windows / no GCP twin). SMB is
+#     an Azure-only capability; nfs/N is the 3-cloud path. Azure Files, created as
+#     a storage-account composite, honors BOTH nfs and smb (NFS needs a Premium
+#     FileStorage account) — and, since it creates the account, honors CMK too.
+
+capability: capability.storage.filesystem
+version: 0.1
+stateful: true   # the share IS the data; retirement is data loss (D47 friction)
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Primary region of the file share
+    mappings:
+      gcp.filestore: instance location (zone/region)
+      aws.efs: provider region (mount targets span its AZs)
+      azure.files: the enclosing storage account's location
+
+  protocol:
+    kind: protocol
+    description: >
+      File-access wire protocol, e.g. nfs/4.1 or smb/3. nfs/N is the 3-cloud
+      path; smb/N is honored ONLY on azure and REFUSED on gcp/aws (no managed
+      SMB filesystem there).
+    mappings:
+      gcp.filestore: NFSv3 (fileShares) — SMB refused
+      aws.efs: NFSv4.1 — SMB refused
+      azure.files: SMB 3.x or NFS 4.1 (NFS needs a Premium FileStorage account)
+
+  availability.class:
+    kind: string
+    enum: [zonal, regional]
+    description: >
+      Failure domain the share survives. zonal = single-zone storage; regional =
+      the data is replicated across zones in the region.
+    mappings:
+      gcp.filestore: tier BASIC/ZONAL=zonal, ENTERPRISE/REGIONAL=regional
+      aws.efs: OneZone storage class=zonal, Standard (multi-AZ)=regional
+      azure.files: LRS=zonal, ZRS (zone-redundant)=regional
+
+  encryption.atRest:
+    kind: bool
+    description: >
+      Provider-side encryption of stored file data. Always on for all three; a
+      candidate asserting false is refused, never silently downgraded.
+    mappings:
+      gcp.filestore: always encrypted at rest (CMEK optional)
+      aws.efs: Encrypted (default true)
+      azure.files: storage-account encryption (always on)
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: >
+      File data encrypted with a CUSTOMER-managed key (CMEK/KMS), not the
+      provider default. The key id is implementation detail
+      (implementation.kms_key_name / kms_key_id), never a capability path.
+      Honored on all three. Azure carries CMK on the storage account it creates
+      (account Key Vault encryption covers the file share).
+    mappings:
+      gcp.filestore: kmsKeyName
+      aws.efs: KmsKeyId (a customer key, with Encrypted=true)
+      azure.files: storage-account Key Vault encryption (keySource=Microsoft.Keyvault)
+
+  service.managed:
+    kind: bool
+    description: Managed service vs self-operated
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost of the capability
+    verification: static against a pricing catalog; provider-api (billing) after deploy
+
+# Deliberately absent in v0.1 (implementation detail / topology, not capability
+# semantics): capacity/quota GiB, throughput/IOPS mode, performance & service
+# tier, mount-target / private-endpoint topology, backup schedule, POSIX
+# root-squash. A candidate may carry them under `implementation:` — the verifier
+# ignores them.
+#   - network.publicExposure: DEFERRED. Reachability differs fundamentally across
+#     the three (EFS/Filestore are VPC-private always; Azure Files has a public
+#     account endpoint gated at the account, not the share), so no honest uniform
+#     bool exists at the share level yet — added later with per-cloud honesty,
+#     never a ledger promise it cannot keep.

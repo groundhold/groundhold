@@ -1,0 +1,151 @@
+# Actionable refusals (D230): a refusal carries an advisory `next` — the exact
+# invocation-specific step that would unblock this run. Asserted STRUCTURALLY
+# (the operator's paths in argv vary per tempdir; the byte-exact argv is pinned by
+# the perrnext unit goldens). Go-runtime, impl: go.
+suite: refusal-next
+cases:
+  - name: observation-required-offers-the-observe-command
+    impl: go
+    description: >
+      D230: a stale bound observation refuses observation-required; because a
+      ledger + clock are known, `next` is a runnable `observe --ledger ... --at
+      ... --record` command, and `retry` echoes the operator's own plan.
+    plan:
+      at: "2026-07-11T17:05:00Z"
+      withLedger: true
+      bindings: { db: "fake:db-1" }
+      observations:
+        - capability: db
+          path: availability.class
+          value: zonal
+          source: provider-api
+          derivation: measured
+          observedAt: "2026-07-11T10:00:00Z"
+          ttlSeconds: 900
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: rn1, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-avail
+              subject: db
+              path: availability.class
+              op: equals
+              value: regional
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: rn1
+        capabilities:
+          db:
+            attributes:
+              availability.class: regional
+    expect:
+      error: plan
+      code: observation-required
+      next:
+        kind: command
+        runnable: true
+        argvContains: ["groundhold", "observe", "--record", "--ledger"]
+        retryContains: ["groundhold", "plan"]
+
+  - name: consent-required-offers-the-contract-edit
+    impl: go
+    description: >
+      D230: a stateful replacement without consent refuses consent-required; the
+      `next` is an EDIT (never a runnable command — consent is a human decision),
+      pointing at autonomy.allow_replace_stateful with the exact capability.
+    plan:
+      at: "2026-07-11T20:05:00Z"
+      bindings: { db: "acme:us-east1:db-old" }
+      observations:
+        - { capability: db, path: location.region, value: "us-east1",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-11T20:00:00Z", ttlSeconds: 900 }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: rn2, environment: test, version: 3 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-region
+              subject: db
+              path: location.region
+              op: equals
+              value: europe-west1
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: rn2
+        capabilities:
+          db:
+            provider: gcp
+            service: cloudsql
+            attributes:
+              location.region: europe-west1
+            implementation:
+              tier: db-custom-2-8192
+    expect:
+      error: plan
+      code: consent-required
+      next:
+        kind: edit
+        editPointer: autonomy.allow_replace_stateful
+
+  - name: reference-invalid-offers-the-candidate-edit
+    impl: go
+    description: >
+      D230: an invalid intra-plan $ref refuses reference-invalid; the `next` is an
+      EDIT pointing at exactly the operand slot in the candidate to fix.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: rn3, environment: test, version: 1 }
+        capabilities:
+          - id: network
+            type: capability.network.private
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-n
+              subject: network
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-d
+              subject: db
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: rn3
+        capabilities:
+          network:
+            attributes: { service.managed: true }
+          db:
+            attributes: { service.managed: true }
+            implementation:
+              subnetIds:
+                $ref: { capability: network, output: bogusOutput }
+    expect:
+      error: plan
+      code: reference-invalid
+      next:
+        kind: edit
+        editPointer: capabilities.db.implementation.subnetIds

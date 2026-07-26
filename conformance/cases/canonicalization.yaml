@@ -1,0 +1,326 @@
+# D34 + spec/canonicalization.md: identity is the hash of the semantic
+# model. Literal hashes below are the language-independent truth — both
+# implementations must reproduce them byte for byte.
+
+cases:
+  - name: hashes-are-pinned-literals
+    description: >
+      The canonical hash of this contract/candidate pair is fixed by the
+      spec. Any implementation producing a different byte sequence fails.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: h1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+          requirements:
+            engine.protocol:
+              op: compatible-with
+              value: postgresql/16
+      constraints:
+        hard:
+          - id: c-rpo
+            subject: db
+            path: recovery.rpo
+            op: lte
+            value: 5m
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: h1
+      capabilities:
+        db:
+          attributes:
+            engine.protocol: postgresql/16.4
+            recovery.rpo: 5m
+    expect:
+      executable: true
+      contractHash: sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825
+      candidateHash: sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8
+
+  - name: equivalent-spelling-hashes-identically
+    description: >
+      Same semantics, different spelling: 300s instead of 5m, constraints
+      in reverse order, requirements sugar written as its explicit
+      normalized constraint (D8). The hashes MUST equal the previous
+      case's literals — identity follows meaning, not notation (D34).
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: h1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: req-db-engine.protocol
+            subject: db
+            path: engine.protocol
+            op: compatible-with
+            value: postgresql/16
+            verify: { method: static }
+          - id: c-rpo
+            subject: db
+            path: recovery.rpo
+            op: lte
+            value: 300s
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: h1
+      capabilities:
+        db:
+          attributes:
+            recovery.rpo: 300s
+            engine.protocol: postgresql/16.4
+    expect:
+      executable: true
+      contractHash: sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825
+      candidateHash: sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8
+
+  - name: implementation-block-changes-candidate-identity
+    description: >
+      D26 + D34: the implementation block is part of candidate identity —
+      same attributes, different provider detail, different hash (compare
+      with candidateHash of hashes-are-pinned-literals).
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: h1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+          requirements:
+            engine.protocol:
+              op: compatible-with
+              value: postgresql/16
+      constraints:
+        hard:
+          - id: c-rpo
+            subject: db
+            path: recovery.rpo
+            op: lte
+            value: 5m
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: h1
+      capabilities:
+        db:
+          attributes:
+            engine.protocol: postgresql/16.4
+            recovery.rpo: 5m
+          implementation:
+            tier: db-custom-4-16384
+    expect:
+      executable: true
+      contractHash: sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825
+      candidateHash: sha256:73a178f86d7fd0958a721a6f04e6e9b64b74a5d87e84d6b66f726ed7b96b9c79
+
+  # ---- NUMSTR and string-escaping pins. The float-formatting divergence
+  # trap (D34) lives exactly here: every literal below contains fractional
+  # values, non-ASCII text or escapes that both implementations must
+  # render byte-identically.
+
+  - name: fractional-numstr-in-contract-hash-is-pinned
+    document:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: frac, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-slo
+            subject: db
+            path: availability.slo
+            op: gte
+            value: 99.95%
+          - id: c-cpu
+            subject: db
+            path: utilization.cpuTarget
+            op: lte
+            value: 0.8
+      budget:
+        - id: c-budget
+          subject: db
+          path: cost.monthly
+          op: lte
+          value: { amount: 1500.5, currency: EUR }
+    expect:
+      hash: sha256:fbe8b8f01be5b8b57a1b7561b73d3602942df78abcd9ef0d814e73638b597188
+
+  - name: unicode-and-fractions-in-candidate-hash-is-pinned
+    document:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: frac
+      capabilities:
+        db:
+          attributes:
+            availability.slo: 99.95%
+            utilization.cpuTarget: 0.8
+            location.region: "kraków-1"
+            cost.monthly:
+              value: 1500.25 EUR
+              status: inferred
+              source: "cennik częściowy — połówki"
+              confidence: 0.85
+    expect:
+      hash: sha256:860cd247c9fd3cffcd9ef97ad790dae87959bccd5c062020138478154334252a
+
+  - name: null-tabs-and-nested-lists-in-event-hash-is-pinned
+    document:
+      apiVersion: state/v0
+      kind: LedgerEvent
+      event:
+        type: observation.recorded
+        environment: test
+        capabilities: [db]
+        occurredAt: "2026-07-11T12:00:00Z"
+        actor: { id: sonda-1, type: runtime }
+        body:
+          note: null
+          ratio: 0.5
+          tags: [a, b, [c, 1.25]]
+          komentarz: "zażółć gęślą jaźń\tz tabem"
+    expect:
+      hash: sha256:2882b2066080639a639812d548c5f9391464f1d68844360e9625c18034dd8425
+
+  - name: signature-is-excluded-from-event-identity
+    description: >
+      D102: a detached signature attests an event's identity — it is not
+      part of it. The same event with a top-level `sig` envelope must
+      hash to the same pinned literal as its unsigned twin above.
+    document:
+      apiVersion: state/v0
+      kind: LedgerEvent
+      sig:
+        alg: ed25519
+        pub: "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
+        sig: "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00"
+        ledger: "sha256:2882b2066080639a639812d548c5f9391464f1d68844360e9625c18034dd8425"
+      event:
+        type: observation.recorded
+        environment: test
+        capabilities: [db]
+        occurredAt: "2026-07-11T12:00:00Z"
+        actor: { id: sonda-1, type: runtime }
+        body:
+          note: null
+          ratio: 0.5
+          tags: [a, b, [c, 1.25]]
+          komentarz: "zażółć gęślą jaźń\tz tabem"
+    expect:
+      hash: sha256:2882b2066080639a639812d548c5f9391464f1d68844360e9625c18034dd8425
+
+  - name: malformed-signature-envelope-is-refused
+    description: >
+      D102, fail-closed (D19): when `sig` is present it must be a
+      well-formed envelope (alg ed25519, hex pub and sig of the right
+      width). A truncated signature is refused at load, not carried.
+    document:
+      apiVersion: state/v0
+      kind: LedgerEvent
+      sig:
+        alg: ed25519
+        pub: "3d4017c3"
+        sig: "92a009a9"
+      event:
+        type: observation.recorded
+        environment: test
+        capabilities: [db]
+        occurredAt: "2026-07-11T12:00:00Z"
+        actor: { id: sonda-1, type: runtime }
+        body: { note: signed }
+    expect:
+      error: document
+
+  - name: number-spelling-int-hash-is-pinned
+    description: >
+      D66/D34: identity follows meaning, not notation. A constraint value written as
+      the plain integer 3 and the plain 0 canonicalizes to the NUMSTR "3"/"0". This
+      case pins the literal hash; its float/negative-zero twin below MUST match it,
+      proving 3==3.0 and 0==-0.0 hash identically WITHIN an implementation (differential
+      only proves the two implementations agree on ONE spelling).
+    document:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: numspell, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-count
+            subject: db
+            path: replicas.count
+            op: gte
+            value: 3
+            verify: { method: static }
+          - id: c-floor
+            subject: db
+            path: scaling.floor
+            op: gte
+            value: 0
+            verify: { method: static }
+    expect:
+      hash: sha256:deed2306741a704fa2af1d55abbeb12791d99ff42974e400575b00851db438f9
+
+  - name: number-spelling-float-and-negzero-hashes-identically
+    description: >
+      The twin of number-spelling-int: 3.0 (an integer-valued float) and -0.0 (negative
+      zero) must produce the SAME contract hash — canonical NUMSTR collapses both to
+      "3" and "0". A future float-formatting change that let 3.0 or -0.0 diverge from
+      their integer spelling would break this equality (D66).
+    document:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: numspell, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-count
+            subject: db
+            path: replicas.count
+            op: gte
+            value: 3.0
+            verify: { method: static }
+          - id: c-floor
+            subject: db
+            path: scaling.floor
+            op: gte
+            value: -0.0
+            verify: { method: static }
+    expect:
+      hash: sha256:deed2306741a704fa2af1d55abbeb12791d99ff42974e400575b00851db438f9
+
+  - name: sub-1e-17-float-is-refused-not-collided
+    description: >
+      A non-integral magnitude too small to round-trip as a fixed-point decimal
+      (below ~1e-17) has no lossless canonical form in the fixed-point scheme (the
+      loop never round-trips), so the canonicalizer would fall to a lossy "0.000…0"
+      — a FALSE canonical form that collides EVERY such value onto one string:
+      1e-18 and 1e-20 would hash identically, forging a shared document identity.
+      Both implementations REFUSE it, the same fail-closed stance as a >2^53
+      magnitude — the canonicalizer must stay injective, never emit a canonical
+      form the value does not have. Encode tiny values as strings.
+    document:
+      apiVersion: state/v0
+      kind: LedgerEvent
+      event:
+        type: observation.recorded
+        environment: test
+        capabilities: [db]
+        occurredAt: "2026-07-11T12:00:00Z"
+        actor: { id: sonda-1, type: runtime }
+        body: { confidence: 1e-18 }
+    expect:
+      error: document

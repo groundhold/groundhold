@@ -1,0 +1,81 @@
+# Attribute vocabulary for capability.monitoring.logs, spec v0.1.
+#
+# A managed LOG GROUP with a retention guarantee — the honest 2-cloud twin is AWS
+# CloudWatch Logs (a log group) and GCP Cloud Logging (a log bucket). Unlike a metric
+# FILTER (capability.monitoring.logmetric, a query OVER a log group), this capability is
+# the log group ITSELF: the durable container the logs live in. What an organization
+# genuinely governs and audits about it: WHERE the logs are stored (residency), HOW LONG
+# they are kept (retention — simultaneously a compliance control AND a cost control: a
+# group with no retention policy keeps every log line forever and bills for it forever),
+# and whether they are encrypted with a CUSTOMER-managed key. Acme requires retention on
+# AWS-native logs (VPC flow logs, EKS control-plane logs, ...) for compliance and cost;
+# those groups are exactly this capability.
+#
+# STATEFUL: a log group HOLDS logs, so destroying it loses history — the sharpest kind of
+# observability data loss. Retirement is conservative-honest (D47).
+#
+# retention.days is a DURATION, not a bare number. Retention is first-class semantics an
+# org writes constraints against ("keep logs at least 90 days" -> retention.days gte 90d);
+# a duration carries its unit, so the four-valued verifier compares it without coercion
+# and a contract can never silently mean seconds. CloudWatch Logs accepts only a FIXED set
+# of retention day counts (1,3,5,7,14,30,60,90,120,150,180,365,400,545,731,1096,1827,2192,
+# 2557,2922,3288,3653); the AWS driver maps the duration to whole days and REFUSES a value
+# outside that set rather than silently rounding to a neighbour (over- or under-delivering
+# on a retention guarantee).
+
+capability: capability.monitoring.logs
+version: 0.1
+stateful: true   # a log group HOLDS logs — destroying it loses history (D47 friction on
+                 # delete, conservative-honest retirement).
+
+attributes:
+
+  location.region:
+    kind: string
+    description: Region the log group (and its stored log events) live in.
+    mappings:
+      aws.cwlogs: derived from the provider region
+      gcp.logging: the log bucket location
+
+  retention.days:
+    kind: duration
+    description: >
+      How long log events are retained before they expire. A duration (e.g. "90d",
+      "2160h") — first-class semantics an org writes retention constraints against. On AWS
+      it maps to CloudWatch Logs retentionInDays and MUST resolve to one of the fixed day
+      counts the service accepts (otherwise the create is refused, never silently rounded);
+      absent, a group never expires (unbounded cost + an unstated compliance posture), so
+      the AWS driver requires it at create.
+    mappings:
+      aws.cwlogs: PutRetentionPolicy retentionInDays (a fixed set of allowed day counts)
+      gcp.logging: the log bucket retentionDays
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: >
+      Log events are encrypted with a CUSTOMER-managed key (CMK/CMEK), not merely the
+      provider's default key. The key id is implementation detail
+      (implementation.kmsKeyArn), never a capability path. Optional.
+    mappings:
+      aws.cwlogs: AssociateKmsKey kmsKeyId (a customer key; the default key exposes no id)
+      gcp.logging: CMEK on the log bucket
+
+  service.managed:
+    kind: bool
+    description: Managed logging service vs a self-operated log store.
+    mappings:
+      aws.cwlogs: const true when observed through the driver
+
+  cost.monthly:
+    kind: money
+    evidence: projection      # D311: a forecast, never resource state
+    description: Projected monthly cost (log storage — retention drives it directly).
+    verification: static against a pricing catalog; billing after deploy
+
+# Deliberately absent in v0.1 (implementation detail / opaque config — NOT log-group
+# capability semantics): the log group NAME (an operand — deterministic, or a pinned
+# implementation.log_group for an AWS-dictated group such as a flow-logs or EKS group);
+# the KMS key id itself (a customer key reference is impl); metric FILTERS, subscription
+# filters, and export tasks over the group (each a separate concern — the metric filter is
+# capability.monitoring.logmetric); and the individual log streams/events (they are the
+# data, not the capability).
