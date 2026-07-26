@@ -18,19 +18,26 @@ is golden-tested only; there has been one pilot, no external security audit and
 no production record.
 ## TL;DR — see it work in 60 seconds, no cloud account
 
-Grab a binary — no toolchain, no clone. The link always resolves to the newest
-release, so it does not go stale:
+Grab a binary — no toolchain, no clone — from
+[**github.com/groundhold/groundhold/releases**](https://github.com/groundhold/groundhold/releases),
+then:
 
 ```sh
-curl -Lo groundhold https://github.com/groundhold/groundhold/releases/latest/download/groundhold_linux_amd64
-chmod +x groundhold
+gh release download v0.1.4 --repo groundhold/groundhold --pattern 'groundhold_linux_amd64'
+chmod +x groundhold_linux_amd64
 ```
 
-Swap `linux_amd64` for `linux_arm64`, `darwin_amd64` or `darwin_arm64`. Every
-release also carries `SHA256SUMS`, a CycloneDX SBOM, `BUILDINFO.txt` for a
+Swap `linux_amd64` for `linux_arm64`, `darwin_amd64` or `darwin_arm64`. While
+the project is pre-1.0 every build is published as a **prerelease**, and GitHub
+deliberately excludes those from `/releases/latest` — so the tag is named
+explicitly above rather than pretending a permanent "latest" link works. Each
+release also ships version-less asset names, so the moment a stable release
+exists this becomes a one-liner that never goes stale:
+`curl -Lo groundhold …/releases/latest/download/groundhold_linux_amd64`.
+
+Every release carries `SHA256SUMS`, a CycloneDX SBOM, `BUILDINFO.txt` for a
 reproducible rebuild, and a keyless SLSA build-provenance attestation
-(`gh attestation verify groundhold --repo groundhold/groundhold`). All releases:
-[**github.com/groundhold/groundhold/releases/latest**](https://github.com/groundhold/groundhold/releases/latest).
+(`gh attestation verify <file> --repo groundhold/groundhold`).
 
 Prefer to build it yourself? Go ≥ 1.25 and nothing else:
 
@@ -97,9 +104,13 @@ The two dimmed rows are **provenance rendered as brightness**: `s-cost` and
 counts them — `2 verdict(s) rest on assumed/inferred values`. Where a number
 came from travels with the number.
 
-The dim line under `c-rto` **teaches in passing** — every refusal explains
-itself, carries a machine error code, and names a next step, which is what lets
-an agent recover from a rejection instead of guessing.
+The dim line under `c-rto` **teaches in passing**. Every refusal explains itself
+and carries a machine error code whose remediation is documented
+(`groundhold explain <code>`), which is what lets an agent recover from a
+rejection instead of guessing. Where an honest invocation-specific step exists
+the refusal also carries a structured `next` — a runnable command, an edit to
+make, or permissions to grant — and where one does not, it is **omitted rather
+than guessed**.
 
 And none of it involves a model. **The verifier is deterministic** — no LLM, no
 network, no heuristics — so the same documents always produce the same verdict.
@@ -374,110 +385,14 @@ provable by a restore test:
   BLOCKED: c-rto unknown — recovery.rto requires probe verification
 ```
 
-## Roadmap (vertical slice, in order)
+## Where this is now
 
-> This is the ORIGINAL vertical slice (through ~D64/D75), kept for the shape of
-> the thesis. The system has since grown far past it: breadth drivers across
-> three clouds (~128 service mappings), an EKS reference substrate, an
-> adversarial-hardening series (D182–D195), intra-plan operand references so a
-> contract wires itself instead of pasting ARNs (D226/D275–D286), and the field
-> hardening a real AWS pilot forced (D248–D283). `docs/DESIGN.md` is the current
-> record — every decision and why; `docs/MATURITY.md` says what is proven vs
-> merely built, and names the gaps.
-
-- [x] Contract spec v0.1 + four-valued verifier + conformance suite
-- [x] Implementation Candidate spec + candidate emission skill for Claude Code
-- [x] Go verifier, validated against the same conformance suite (D24 —
-      everything below is born in Go)
-- [x] Canonicalization + hashing spec with domain separation (D34,
-      `spec/canonicalization.md`; reports carry contractHash/candidateHash)
-- [x] State Model v0 as spec: ledger events, bindings, observations,
-      operation receipts, heads/CAS, lease/fencing semantics (D27–D33, D35;
-      `spec/state-model.md`)
-- [x] Minimal Sealed Plan IR: read/write-sets, preconditions, toolchain
-      versions, idempotency keys, multi-dimensional risk (D33, D36;
-      `spec/sealed-plan.md`)
-- [x] Concurrency conformance: deterministic scenario engine (D37) — CAS
-      conflicts, stale plans, expired leases, resumed stale workers,
-      receipt reconciliation
-- [x] Compiler v0: verified candidate → Sealed Plan (D39 — standalone
-      runtime, no Terraform on the execution path; `.tf.json` demoted to
-      an optional future export)
-- [x] Forecast v0: the preview stage — deterministic prediction with
-      explicit epistemics (D40/D41; `spec/forecast.md`)
-- [x] Executor v0: apply gated by the ledger — decision-heads CAS, leases
-      with fencing, write-ahead receipts, per-action bindings (D42;
-      `spec/executor.md`; deterministic fake provider)
-- [x] Permission preflight (D75): the plan declares the provider permissions
-      each action needs; apply checks the acting identity holds them (GCP
-      `testIamPermissions`) before the lease — refuse before mutating. A
-      preflight refusal is trustworthy; a pass is evidence, not proof.
-- [x] GCP Cloud SQL driver (D43; `spec/providers/gcp.md`) — pure mapping
-      core with golden tests, stdlib-only narrow auth, label-gated 409
-      continuation, unknown-not-failure operation semantics
-- [x] `observe` (D44): reverse mapping as a pure golden-tested function,
-      derivation-tagged facts (config-intent vs measured), never
-      fabricating measurements from intent
-- [x] Forecast consumes observations (D45): four-valued attribute
-      predictions (match/differ/unknown/unverifiable), freshness
-      degradation, drift made loud — the ledger closes the loop
-- [x] Update end to end (D46): compiler classifies bound capabilities
-      against fresh observations, reviewed change-sets in plans,
-      settingsVersion-pinned patches, will-update forecasts
-- [x] Retirement and delete (D47): explicit `state: retired` (never
-      absence), pinned delete targets, unconditional autonomy gate,
-      structured tombstones, deletion protection default-on
-- [x] Replace as create-before-destroy composition (D48): reviewed
-      reasons, generation-discriminated names, scoped stateful consent
-- [x] First real-cloud integration run (2026-07-11, GCP Cloud SQL,
-      MySQL 8.0): full lifecycle — create, observe, convergence-refusal,
-      retirement with a real tombstone. One bug found and pinned:
-      retirement plans read provider identity from bindings
-- [x] Authoring boundary made productive (D49): emit-candidate +
-      draft-contract skills (the agent proposes, the human publishes),
-      workdir convention, porcelain never-hide rules
-- [x] MCP server (D50): the lifecycle as gated tools — stdlib JSON-RPC,
-      draft-only inline YAML, two-step apply with single-use tokens,
-      read-only by default
-- [x] Converge porcelain (D51): one verb for the whole loop; a
-      converged world is success; destruction takes explicit
-      --allow-data-loss on top of contract consents
-- [x] Brownfield onboarding (D52): discover → draft with
-      observed-not-intent markers → adopt (must not lie) → converged
-      no-op as proof of takeover; unadopt releases without deleting
-- [x] Terraform/pulumi import (D53): `groundhold hints` — state parses
-      into adoption hints, never a contract; live observations win
-      every disagreement
-- [x] Ledger exporters + audit (D54): `export` streams the ledger as
-      ndjson/CloudEvents (hash as id); `audit` judges recorded reality
-      against the contract and emits violation.detected — drift becomes
-      an alert without knowing which alerting system exists
-- [x] Identity vocab (D55): SSO + OAuth-client capability types — MFA,
-      enforced federation, grant discipline, scope allowlists; the
-      verifier needed zero changes
-- [x] Executor resilience (D56-D58): coordination clock refuses
-      backdated writes; `resume` concludes lost outcomes read-only and
-      never guesses; `deposed` surfaces orphans of failed replacements
-- [x] Corruption + tail hardening (D69-D72): `repair` diagnoses and
-      quarantines a corrupt ledger under fingerprint consent; `anchor`
-      closes the last-line boundary from outside the file;
-      `plan --deposed` compiles pinned orphan deletes; update receipts
-      carry a verifiable target shape so resume concludes them
-- [x] Outcome probes (D59): `probe` — restore tests and connection
-      attempts as measured observations; double-consent for intrusive;
-      a claim becomes a measurement and the thesis loop closes
-- [x] Breadth vocabularies (D60): object-storage, private-network,
-      container-workload — including the first stateless capability
-- [x] Voice track (D61): transcript-to-contract skill — the runtime
-      never hears the meeting; a misheard word can only produce a
-      wrong draft, never a wrong apply
-- [x] Pre-launch review (D62): 9 bugs found and pinned before anyone
-      else could find them
-- [x] Hardening for launch (D64): machine error codes, --explain,
-      output schemas, CI examples
-- [x] Docs site (website/) and the voice worked example
-      (examples/voice/: transcript → draft with supersession)
-- [ ] Launch: public org, publish, Pages
+The original vertical slice — intent to contract to verify to compile to sealed
+apply to observe to converge — is closed, and has run against real clouds. The
+complete record of decisions and their reasons is `docs/DESIGN.md` (D1–D350);
+[`docs/MATURITY.md`](docs/MATURITY.md) says what is proven versus merely built
+and names the gaps. What follows is the short version of everything that came
+after the slice.
 
 ## Since the vertical slice (the short version)
 
@@ -517,12 +432,57 @@ provable by a restore test:
   the receipt; an attribute's evidence class moved out of ~190 hand-copied driver
   cases into the vocabulary that defines it.
 
+## What's next
+
+- **`capability.ai.speech` drivers** — the GCP recogniser and the Azure account.
+  The type and its semantics landed first (D350); AWS has no ASR resource to
+  author, so it is witnessed there rather than faked.
+- **A capability for customer-managed IAM policy.** The recurring field ask, and
+  the honest shape: the policy document is an implementation operand, never
+  contract semantics, because the constraint operator set is closed.
+- **Invoke mode and response streaming** on `capability.function.serverless` — a
+  silent mismatch between a function URL's setting and the container's own
+  breaks streaming while every health signal stays green.
+- **Multi-cloud field validation.** AWS is pilot-proven; the same pilot's Azure
+  and GCP deployments are next, and they are what would move Azure past
+  "golden-tested only".
+- **Launch mechanics** — make the public repository public, protect `main`, wire
+  Pages, and cut the first stable release, which is also what turns the download
+  link above into a permanent one.
+
+Questions left deliberately open are recorded in `docs/DESIGN.md`. The largest is
+a delegated executor for two-phase or airgapped provisioning, where the second
+phase must execute from inside a runner the first phase created — a change of
+execution locus mid-plan that the single-vantage executor cannot express today.
+
 ## Non-goals for v0.x
 
-Cross-capability references, an expression language, contract inheritance,
-organizational policy layers, a full capability taxonomy. Vertical before
-horizontal: one full loop (intent → contract → verify → compile → sealed
-apply → outcome) on a narrow slice beats a wide spec that executes nothing.
+**No expression language in constraints**, and no interpolation or logical
+connectives. Complexity is expressed as more constraints, not richer ones. This
+is an invariant, not a scheduling decision.
+
+**No cross-capability references inside constraints.** A constraint names one
+subject and one path. References between capabilities do exist — an operand in
+the candidate may point at another capability's typed output (D226) — but they
+are structured, kind-checked nodes in the implementation block, never a way to
+compute one verdict from two subjects.
+
+**No contract inheritance.** `compose` merges a base with per-environment
+overlays into one flat contract; the result is a document, not a hierarchy
+resolved at verify time.
+
+**No organizational policy layer.** Groundhold governs a contract, not an
+estate: there is no equivalent of an SCP or an org policy, and a rule that must
+hold across accounts is expressed as constraints in each contract.
+
+**Not a complete capability taxonomy.** Vocabularies grow from demand that
+arrives with a use case. A capability that cannot be honestly witnessed on a
+supported cloud is refused rather than faked — which is why some clouds carry a
+declared structural gap instead of a third mapping.
+
+**Not a Terraform generator** (D39). The compiler targets the Sealed Plan IR and
+the executor speaks provider APIs; `.tf.json` is at most an optional export,
+never on the execution path.
 
 ## License
 

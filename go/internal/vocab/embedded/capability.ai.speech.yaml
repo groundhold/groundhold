@@ -1,0 +1,84 @@
+# Attribute vocabulary for capability.ai.speech, spec v0.1 (D350).
+#
+# Managed speech recognition (ASR) as a governed capability. The demand came from
+# the field: a product whose value is proving "in which medium and at which MINUTE
+# an agreed criterion was met" runs transcription over customer audio, and voice is
+# personal data — so where it is processed, whether it is encrypted with a key the
+# customer controls, and how long it survives are exactly the facts an organization
+# must be able to state and prove. Before this type existed the contract could not
+# express any of it (`capability.ai.speech` was an unknown type), so the invariant
+# lived in a README and a DR rebuild would not have reproduced it.
+#
+# AUTHORED ON SOME CLOUDS, WITNESSED ON OTHERS — the important decision here.
+# The three clouds do not agree on whether ASR is a RESOURCE:
+#   * GCP Speech-to-Text v2 has `recognizers` — a regional resource with full
+#     create/get/patch/delete. Capability-shaped; groundhold can author it.
+#   * Azure AI Speech is a Cognitive Services account — likewise a real resource.
+#   * AWS Transcribe has NO equivalent. It creates only vocabularies, vocabulary
+#     filters, language models and call-analytics categories; transcription itself
+#     is StartTranscriptionJob, an EPHEMERAL job. There is no ASR endpoint to
+#     provision.
+# Mapping AWS onto CreateVocabulary to manufacture a third mapping would fake
+# compliance, which is the one unforgivable bug. So this capability follows the
+# author-vs-witness doctrine (D177, as `capability.gitops.application` already
+# does): where a resource exists groundhold authors it; where none exists the
+# attributes are still OBSERVED and still gate the contract. An organization on AWS
+# gets what it actually needs — the invariant stated in the contract and PROVEN
+# against reality — without groundhold pretending to provision something that does
+# not exist.
+#
+# DELIBERATELY ABSENT: whether the provider may train on customer audio. It is a
+# first-order governance question for voice, but on AWS it is an Organizations-level
+# AI services opt-out POLICY, not a property of any resource a member account can
+# read — so it cannot be honestly observed per capability, and a vocabulary
+# attribute that cannot be witnessed on a supported cloud is a claim, not a fact.
+# Revisit when there is an honest read on all three.
+#
+# One TYPE, many services (D76). STATELESS: the recognizer/account is configuration,
+# the audio is not stored by the capability itself.
+
+capability: capability.ai.speech
+version: 0.1
+stateful: false
+
+attributes:
+
+  location.region:
+    kind: string
+    description: The region audio is processed in — the residency surface. Voice is personal data, so this is the attribute a residency invariant constrains.
+    mappings:
+      gcp.speechtotext: the recognizer's location
+      azure.aispeech: the Cognitive Services account's location
+      aws.transcribe: the region the transcription job runs in (observed; AWS has no ASR resource to author)
+
+  encryption.atRest:
+    kind: bool
+    description: Whether audio and transcripts held by the service are encrypted at rest
+    mappings:
+      gcp.speechtotext: platform encryption, always on; CMEK reported separately
+      azure.aispeech: account encryption state
+      aws.transcribe: job output encryption state (observed)
+
+  encryption.customerManagedKeys:
+    kind: bool
+    description: Data is encrypted with a CUSTOMER-managed key (CMEK/KMS), not merely the provider's default key — an independently revocable key, which is what a BYOK control actually means
+    mappings:
+      gcp.speechtotext: the location config's KMS key, when set
+      azure.aispeech: the account's customer-managed key state
+      aws.transcribe: the job's OutputEncryptionKMSKeyId, when a customer key (observed)
+
+  retention.maximum:
+    kind: duration
+    description: The longest audio or transcripts may be retained by the capability before deletion — the ceiling a data-minimisation rule asserts with lte
+    mappings:
+      gcp.speechtotext: configured retention of recognition results
+      azure.aispeech: account data-retention setting
+      aws.transcribe: retention of job output (observed)
+
+  service.managed:
+    kind: bool
+    description: Managed speech service vs self-operated ASR
+    mappings:
+      gcp.speechtotext: const true when observed through the driver
+      azure.aispeech: const true when observed through the driver
+      aws.transcribe: const true when observed through the driver

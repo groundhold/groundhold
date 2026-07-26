@@ -42,6 +42,7 @@ CAPABILITY_TYPES_V01 = {
     "capability.cluster.kubernetes",
     "capability.email.sending",
     "capability.ai.inference",
+    "capability.ai.speech",
     "capability.cost.budget",
     "capability.cluster.addon",
     "capability.identity.podidentity",

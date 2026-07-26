@@ -27,6 +27,13 @@ capabilities:
       fulfilled: [vertexai]
     azure:
       fulfilled: [azureopenai]
+  capability.ai.speech:
+    aws:
+      unbuilt: true
+    gcp:
+      unbuilt: true
+    azure:
+      unbuilt: true
   capability.apigateway.http:
     aws:
       fulfilled: [apigateway]

@@ -10126,3 +10126,200 @@ output is an animation, not a document: a faithful still needs a real VT emulato
 stacks every frame. Rather than ship a screenshot that misrepresents what the terminal shows, converge
 stays a text block and the animated display is recorded here as a known limit of static capture. Only
 the honest image shipped.
+
+## D349. "Always the latest release" is incompatible with shipping prereleases
+D347 added a download-first path to the README on the assumption that
+`/releases/latest/download/<asset>` is a permanent link, and the release workflow grew version-less
+asset copies to make that name fixed. Cutting the first real release proved the assumption wrong in a
+way no amount of reasoning would have: GitHub's "latest release" DELIBERATELY EXCLUDES prereleases,
+and this project marks every pre-1.0 build `--prerelease` on purpose. The endpoint returns 404 while
+the only release is a prerelease, and `gh release download` with no tag skips them for the same
+reason — so neither the curl one-liner nor a CLI equivalent works.
+Two ways out, and the cheap one is wrong. Dropping `--prerelease` would make the link work today at
+the cost of presenting the first public artifacts of an admittedly experimental v0.x as finished
+releases — buying convenience with a claim about maturity, which is the trade this project exists to
+refuse. So the README names the tag explicitly and links the releases PAGE, and says plainly why:
+pre-1.0 builds are prereleases, GitHub excludes those from "latest", and the permanent one-liner
+becomes true the moment a stable release exists. The version-less assets stay, because they are what
+makes that future link work — they were the right mechanism attached to the wrong promise.
+Recorded because the failure mode generalises: a link is a claim, and a claim about a platform's
+behaviour deserves the same verification as a claim about our own. The first release was cut,
+downloaded, and its SHA-256 checked against the published `SHA256SUMS` before any of this was written
+down — which is how the prerelease exclusion surfaced at all.
+
+## D350. capability.ai.speech — a capability authored on some clouds and only witnessed on others
+Asked for from the field: a product whose value is proving "in which medium and at which MINUTE an
+agreed criterion was met" runs ASR over customer audio. Voice is personal data, so where it is
+processed, whether the key encrypting it is one the customer can revoke, and how long it survives are
+exactly the facts the organization must state and prove — and none of them could be expressed, because
+`capability.ai.speech` was an unknown type. The invariant lived in a README, which means a DR rebuild
+would not have reproduced it. That is the gap this closes.
+The design question was not the attribute list; it was whether ASR is capability-shaped AT ALL, and
+the three clouds disagree. Checked against the authoritative API definitions rather than assumed: GCP
+Speech-to-Text v2 has `recognizers`, a regional resource with create/get/patch/delete. Azure AI Speech
+is a Cognitive Services account. AWS Transcribe has NO equivalent — it creates only vocabularies,
+vocabulary filters, language models and call-analytics categories, while transcription itself is
+`StartTranscriptionJob`, an ephemeral job. There is no ASR endpoint to provision.
+Two wrong answers were available. Mapping AWS onto `CreateVocabulary` to manufacture a third mapping
+would fake compliance — the one unforgivable bug, and the same mistake the parity work already refused
+once for container.job/AWS. Declaring AWS a structural gap would be honest but useless precisely to
+the organization that asked, which runs on AWS. The resolution is the author-vs-witness doctrine
+(D177), which this repo already applies to `capability.gitops.application`: where a resource exists
+groundhold AUTHORS it; where none exists the attributes are still OBSERVED and still gate the
+contract. An AWS user gets what they actually needed — the invariant stated in the contract and proven
+against reality — without groundhold pretending to provision something that does not exist. This is
+the first capability type whose author/witness split is a property of the CLOUD rather than of the
+doctrine (gitops is witnessed everywhere), and it is the honest shape rather than a compromise.
+Five attributes, each of which an organization governs and a driver can witness: `location.region`,
+`encryption.atRest`, `encryption.customerManagedKeys`, `retention.maximum`, `service.managed`.
+Retention is a duration compared with `lte`, because data minimisation is a CEILING — a recogniser
+holding transcripts for 30 days under a 24h rule is `violated` at verify, and the kind-mismatch case
+pins that a bare number is a load error rather than a coerced comparison (invariant #2): on a
+retention ceiling, coercion would silently decide whether a data-minimisation rule passes.
+DELIBERATELY OMITTED: whether the provider may train on customer audio. It is a first-order governance
+question for voice and it was tempting to include, but on AWS it is an Organizations-level AI-services
+opt-out POLICY, not a property any member account can read from the resource — so it cannot be
+honestly witnessed on a supported cloud, and an attribute that cannot be witnessed is a claim rather
+than a fact. Left out and recorded, per the vocabulary rule, until there is an honest read on all
+three.
+Shipped as the vocabulary slice only (D10): the type, its registration in both implementations, three
+DUAL conformance cases, and a regenerated parity matrix that says `unbuilt` on all three clouds — the
+truthful state, since no driver exists yet. The GCP recogniser and Azure account drivers are the next
+slice and are held to the five-layer authoring standard rather than smuggled in beside a vocabulary.
+
+## D351. Published prose is a claim, and a claim needs a gate
+The non-goals section listed "cross-capability references" as something the project does not do. D226
+had shipped exactly that — the candidate schema says so in its own description — and the roadmap two
+sections below described it as a feature. The document contradicted itself in public, and nothing
+noticed, because nothing checks prose.
+That is the same failure the counts gate (D324) exists for, one level up: not a number that rotted but
+a CLAIM that was never true. Reviewing the README for others of its kind found the front page making a
+second one, written the same day it was fixed: "every refusal names a next step". It does not, and
+spec/errors.md is explicit that it must not — a `next` is advisory and OMITTED when no honest
+invocation-specific step exists, because the alternative is fabricating one. The corrected sentence is
+the stronger claim anyway: every refusal carries a code whose remediation is documented, and a
+structured `next` appears only where it can be honest.
+Three other load-bearing front-page claims were checked and HELD, which is worth recording so the next
+audit does not re-litigate them: no flag lets an unproven hard constraint through (`--no-vocab`, the
+only candidate, still returns BLOCKED); the verifier imports no network package; and permission
+preflight is implemented by all three cloud drivers, not the one D75 was written against.
+So the mechanical part of this audit becomes permanent. Two gates, deliberately narrow: every relative
+link in a published document resolves, and every documented `groundhold <verb>` is a verb the CLI has
+(parsed from the binary's own usage text, so it cannot drift the way a hand-kept list would). They gate
+only what a machine can decide without judgement; claims about BEHAVIOUR are not regex-checkable and
+belong where they already live, in the conformance suite and examples/check.sh.
+The scope is the export whitelist, and getting that wrong was itself instructive: the first cut walked
+the repository root, which swept in CLAUDE.md — deliberately not exported — and stale copies of the
+whole tree under .claude/worktrees. A gate whose own description was false, inside a change about false
+descriptions. It is now an explicit list with a floor assertion, so a broken scope fails loudly instead
+of quietly passing on nothing. Proven to have teeth by planting a dead link and an invented verb and
+watching both tests name them.
+
+## D352. The honesty document was the one nobody was checking
+D351 gated links and verbs in published prose; it did not gate numbers outside README.md and CLAUDE.md.
+Continuing the audit into `docs/MATURITY.md` — the file whose entire purpose is to state what is proven
+versus merely built — found three drifted counts. The conformance suite was described as 446 cases when
+it is 494. GCP was listed at 41 services when the drivers certify 42. And AWS was listed at "46
+services" when 46 is the capability-TYPE count and the service count is 50 — precisely the
+services-versus-types confusion D324 was written to stop, reappearing in the document that judges this
+project's own honesty. Nothing here was a lie when written; each was true once and nothing was watching.
+That is the point: a document trusted BECAUSE it is candid earns no exemption from being checked. Its
+counts are now read the same way the README's are — per-cloud service totals from the drivers' certified
+`ServiceCapabilities()` maps (D317: ask the drivers, never scrape the source), and the suite's size
+counted from the case files themselves, which are the source of truth for how big the suite is.
+The derived approximations beside them ("the other ~34 services are golden-only") were corrected by hand
+and deliberately left ungated: they are prose about a moving subset, and a gate that forced them exact
+would invite a false precision the sentence does not claim. Gate what is stated as fact; leave what is
+stated as approximation visibly approximate.
+Proven to have teeth by reverting AWS to the old 46 and watching the test name the drift.
+
+## D353. The docs site overstated dual verification — on the page offering evidence for it
+Continuing the audit into `website/pages/`. The conformance page opened by describing the suite as
+something "two independent implementations must pass identically", and put its size at 407 cases. Both
+were wrong: the suite is 494, and 274 of those carry `impl: go`. Fifty-five per cent of it is checked
+by one implementation, because the executor, the porcelain and the drivers have no second
+implementation to disagree with. The page's own "The rules" section, eighteen lines below, said exactly
+that — the opener contradicted its own body, which is how a document keeps a false sentence for months:
+nobody reads it end to end at once.
+The honesty page carried the same overstatement, and there it was sharper. It listed eight named
+conformance cases as evidence that "BOTH implementations must pass" every pinned rule. FIVE of the
+eight are `impl: go`. The claim failed precisely where the page offered proof of it — the worst place
+to be wrong, because a reader who checks is exactly the reader that page is written for.
+The fix is not softer wording but a visible split. The evidence table gained a `runs on` column marking
+each case `both` or `runtime`, and the prose now says which half a promise belongs to: verification-core
+rules are checked by both implementations and must agree exactly; runtime rules are checked by the Go
+binary alone, and saying otherwise would overstate what dual verification covers. The page reads
+stronger for admitting it, which is the general shape of every honest correction in this project.
+Three gates land with it, all reading the suite rather than a hand-kept number: the suite's size and its
+dual subset as stated on the docs site, and — the interesting one — every row of the honesty page's
+evidence table, proving the case exists and that its `runs on` value matches whether it carries
+`impl: go`. That last gate means a future edit cannot quietly promote a runtime-only case to "both". The
+parser was validated against both runners before being trusted: 494 total, 220 dual, 274 Go-only,
+matching `make conformance` and `make conformance-go` exactly. Teeth proven by flipping one row to
+`both` and watching the test name the case and both verdicts.
+
+## D354. A green step is not evidence the artifact exists — the release notes now prove their own claim
+The first external report against a published groundhold release was that a security claim was false.
+v0.1.4's notes said "each binary carries a keyless SLSA build-provenance attestation — verify with
+`gh attestation verify`". The command returns 404. The binary was the right one — the published SHA-256
+matched byte for byte — so the failure was not in the build; it was in what the notes asserted about it.
+The cause is worth stating precisely, because the workflow looked correct. The
+`actions/attest-build-provenance` step reported SUCCESS. GitHub simply does not produce a retrievable
+attestation for a private repository on a free plan, and the action does not fail when it cannot. So the
+pipeline published a claim on the strength of a step's green tick, which is not the same fact. This
+project already refuses that move everywhere else: a mutation that returns 200 is not `succeeded` until a
+confirm read agrees (D29), an example that verifies is not executable until `plan` agrees (D346), and a
+pass in the permission preflight is called evidence rather than proof (D75). The release pipeline was the
+one place still trusting an intermediate signal.
+The fix is to run the reader's own command. After attesting, the workflow executes
+`gh attestation verify` against the built binary and composes the notes from the RESULT: the claim
+appears only when the verification succeeded, and when it did not the notes say plainly that no
+attestation is available and why, leaving the checksums and the reproducible build as the evidence —
+which are real and did hold. A test pins the shape so the unconditional sentence cannot return, proven by
+reverting the guard and watching it fail.
+The live v0.1.4 notes were corrected immediately rather than waiting for this change to ship, because a
+false security claim in front of a user is not a backlog item. They now state what was wrong, why, and
+what the actual evidence is. Two lessons recorded rather than absorbed quietly: a claim about a PLATFORM's
+behaviour needs the same verification as a claim about our own code (D349 said this about a download link;
+this is the same failure with higher stakes), and the first bug an early adopter finds is the cheapest
+audit this project will ever get.
+
+## D355. A published artifact may not depend on one that stays private
+Third instance of a single pattern inside one day. `.gitleaks.toml` was read by an exported workflow and
+was not itself exported (D345). The canary workflows crossed while their runner scripts did not (D345).
+And the `adopt-candidate` SKILL crosses — it is one of eight the export publishes — while telling an
+agent to run `scripts/adopt-candidate.sh`, which does not. The published skill was broken at its central
+step, and the failure mode is worse than a dead link: an agent follows instructions, so it does not
+notice the absence, it just fails.
+The script itself was the easy part. It is a thin wrapper over groundhold verbs, clean of every denied
+token and shellcheck-clean at warning level, so it crosses now as a NAMED exception to the
+otherwise-denied `scripts/` tree — the whitelist admitting a document must admit what the document
+requires, which is the same rule D345 stated and then failed to generalise.
+Generalising it is the actual work here. The class is mechanically decidable: read the whitelist from the
+exporter itself — never a second copy kept in sync — and assert that no published instruction references a
+path that does not cross. Two calibrations were needed and both are worth recording. `docs/DESIGN.md` is
+EXEMPT: it is the record, it narrates the internal mechanisms that produced decisions, and its entries are
+never rewritten, so holding a historical narrative to "everything you name must be openable" would corrupt
+the record to satisfy a linter. And the pattern had to match BARE paths, not just backticked ones — the
+first cut matched only `` `path` `` and therefore passed happily with the whitelist entry removed, because
+the defect that motivated the gate lives inside a fenced code block as a command line. A gate that cannot
+catch its own founding bug is decoration; testing its teeth is what turned that up.
+
+## D356. The boundary gate could not survive its own boundary
+D355 added a test asserting that no published instruction depends on a path which stays private. Its
+first real run was the export's standalone gate, and it FAILED there — because the test reads the
+whitelist from `scripts/export-public.sh`, and the exporter does not cross its own boundary. A gate
+against "a crossing artifact depending on a private path" was itself a crossing artifact depending on a
+private path.
+The correction is a skip, not a weakening. In the public tree there is no boundary left to check and
+nothing to check it against: everything present there has already crossed by definition, so the only
+honest verdict is "not applicable here". Same shape as the counts gate skipping when CLAUDE.md is absent
+(D324) — a gate that cannot see its subject says so rather than inventing one. In the private repo, where
+the boundary is defined, the teeth are unchanged: removing the whitelist entry still names
+`.claude/skills/adopt-candidate/SKILL.md -> scripts/adopt-candidate.sh`.
+Worth recording for what it says about the export gate rather than about this test. Nothing was published
+broken: the standalone `make check` (D63) refused the export and printed "do not publish", which is
+precisely the job it exists for, and it caught a defect written by the same session that had just
+finished congratulating itself on gating that defect class. The lesson is not "be more careful" — it is
+that a gate is only trustworthy where its subject exists, and asking WHERE a check is meaningful is part
+of writing it, not a detail to discover in production.

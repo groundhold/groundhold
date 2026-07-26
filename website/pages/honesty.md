@@ -3,9 +3,15 @@
 Groundhold asks you to let software — proposed by an AI — touch
 production. That only works if the system never earns your trust with
 adjectives. So every promise below is enforced by a mechanism, and
-every mechanism is pinned by conformance cases that both
-implementations must pass. Not one of them is a policy or a habit;
-they are the shape of the system.
+every mechanism is pinned by a conformance case. Not one of them is a
+policy or a habit; they are the shape of the system.
+
+Where a promise belongs to the verification core, its cases run against
+BOTH implementations and they must agree exactly. Where it belongs to
+the runtime — the executor, the porcelain, the drivers — the case runs
+against the Go binary alone, because no second implementation of those
+parts exists. The table below marks which is which rather than letting
+"both implementations" stand for the whole system.
 
 **1. It never pretends to have checked something.**
 Every verdict is `satisfied`, `violated`, `unknown` or `unverifiable`
@@ -76,20 +82,22 @@ anchor you hold (`--check`). A verifier that proves less says so.
 
 ## Don't believe this page — run it
 
-Every rule above is pinned by named conformance cases that BOTH
-implementations (Go runtime, Python reference) must pass through
-their own binaries. A sample, verbatim from `conformance/cases/`:
+Every rule above is pinned by a named conformance case, run through the
+implementations' own binaries rather than their internals. The `runs on`
+column says whether a case is checked by both implementations or by the
+Go runtime alone — a distinction this page would rather state than blur.
+A sample, verbatim from `conformance/cases/`:
 
-| rule | case |
-|---|---|
-| unknown blocks (1, 3) | `probe-gated-hard-constraint-blocks-execution` |
-| provenance survives (2) | `assumed-value-satisfies-but-carries-basis` |
-| no type coercion (1) | `unit-mismatch-is-unverifiable-not-false` |
-| measurement closes claims (3) | `probe-closes-the-thesis-loop` |
-| sealed plans (7) | `apply-refuses-stale-plan` |
-| consent for destruction (7) | `plan-refuses-delete-stateful-under-autonomy` |
-| tamper-evident history (8) | `repair-quarantines-a-chain-break` |
-| honest death (9) | `apply-unknown-outcome-is-not-failure` |
+| rule | case | runs on |
+|---|---|---|
+| unknown blocks (1, 3) | `probe-gated-hard-constraint-blocks-execution` | both |
+| provenance survives (2) | `assumed-value-satisfies-but-carries-basis` | both |
+| no type coercion (1) | `unit-mismatch-is-unverifiable-not-false` | both |
+| measurement closes claims (3) | `probe-closes-the-thesis-loop` | runtime |
+| sealed plans (7) | `apply-refuses-stale-plan` | runtime |
+| consent for destruction (7) | `plan-refuses-delete-stateful-under-autonomy` | runtime |
+| tamper-evident history (8) | `repair-quarantines-a-chain-break` | runtime |
+| honest death (9) | `apply-unknown-outcome-is-not-failure` | runtime |
 
 ```sh
 make check          # every gate: all suites, both implementations

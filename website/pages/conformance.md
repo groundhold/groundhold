@@ -1,9 +1,15 @@
 # The conformance suite
 
 `conformance/cases/*.yaml` is the source of truth — **the suite defines
-what "correct" means**, and two independent implementations (the Python
-reference and the Go runtime) must pass it identically, driven through
-their own CLIs. 407 cases, plus seeded differential fuzzing.
+what "correct" means**, and it is run through the implementations' own
+CLIs, not their internals. 494 cases, plus seeded differential fuzzing.
+
+Of those, **220 run against BOTH implementations** — the Python reference
+and the Go runtime must agree on them exactly. The rest carry `impl: go`
+because they cover components that exist only in the runtime (the
+executor, the porcelain, the drivers); there is no second implementation
+for them to disagree with, and claiming otherwise would overstate what
+dual verification actually covers.
 
 ## Why this shape
 
