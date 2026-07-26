@@ -852,3 +852,70 @@ func TestHonestyHarnessAzureDisk(t *testing.T) {
 	}
 	certifynet.CertifyDriverNet(t, p)
 }
+
+// vmssHarnessFake answers the happy path for the fleet probe: the scale-set PUT,
+// the read-back that gives its resource id, the autoscale-setting PUT and the
+// deletes.
+func vmssHarnessFake() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut, http.MethodDelete:
+			_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded"}}`))
+		default:
+			if strings.Contains(r.URL.Path, "autoscalesettings") {
+				// the setting carries the ownership tags the driver writes, so the
+				// foreign-upsert check (D254) sees its own resource rather than a stranger's
+				_, _ = w.Write([]byte(`{"tags":{"groundhold-capability":"web-fleet","groundhold-environment":"prod"},` +
+					`"properties":{"enabled":true,"profiles":[{"capacity":{"minimum":"2","maximum":"10"}}]}}`))
+				return
+			}
+			// the probe creates in environment "prod", and the foreign-upsert
+			// refusal (D254) compares tags — a fake carrying another environment
+			// would fail the baseline for the right reason at the wrong moment
+			_, _ = w.Write([]byte(strings.Replace(vmssDoc("web-fleet", 2, false),
+				`"groundhold-environment":"production"`, `"groundhold-environment":"prod"`, 1)))
+		}
+	}))
+}
+
+// The adversarial honesty pass for the Azure third of a fleet (D372). ARM's PUT
+// is an UPSERT, so the foreign-upsert refusal (D254) is what stands between a
+// name collision and overwriting somebody else's fleet — and the stake on this
+// type is a bill that grows on its own.
+func TestHonestyHarnessAzureVMSS(t *testing.T) {
+	pid := azureVMSSProviderID(testSub, "rg1", "pv-vmss-web-fleet-prod-abcd1234")
+	p := &certifynet.Probe{
+		Name:            "azure/azvmss",
+		AssertTransient: true, // D237 sweep
+		Classify:        armRole,
+		OwnerTagValue:   "web-fleet",
+		DeterministicID: true, // the scale-set name is a deterministic hash
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver(testSub)
+			d.BaseURL = happyURL
+			d.HTTP = &http.Client{Transport: rt}
+			d.token = "test-token"
+			d.Now = time.Now
+			d.PollInterval = time.Millisecond
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Ops: []certifynet.Op{
+			{
+				Name:  "create",
+				Happy: vmssHarnessFake,
+				Run: func(pr provider.Provider) provider.CreateResult {
+					return pr.Create("azvmss", "web-fleet", "prod", vmssAttrs(), vmssImpl(), "k", 1)
+				},
+			},
+			{
+				Name:  "delete",
+				Happy: vmssHarnessFake,
+				Run: func(pr provider.Provider) provider.CreateResult {
+					return pr.Delete("azvmss", "web-fleet", "prod", pid, "k")
+				},
+			},
+		},
+	}
+	certifynet.CertifyDriverNet(t, p)
+}

@@ -36,6 +36,7 @@ var azureServices = map[string]bool{
 	"azvm":             true, // capability.compute.instance (Microsoft.Compute/virtualMachines)
 	"azdisk":           true, // capability.storage.block (Microsoft.Compute/disks)
 	"azimage":          true, // capability.compute.image (Microsoft.Compute/images) — WITNESS
+	"azvmss":           true, // capability.compute.autoscaling (Microsoft.Compute/virtualMachineScaleSets)
 	"aisearch":         true, // capability.search.index (Microsoft.Search/searchServices)
 	"eventhubs":        true, // capability.streaming.pipe (Microsoft.EventHub namespace+hub)
 	"azkafka":          true, // capability.messaging.kafka (Event Hubs namespace, kafkaEnabled)
@@ -144,6 +145,9 @@ func (d *Driver) Validate(service, capability, environment string,
 		return err
 	case "azimage":
 		return errWitnessOnlyAzure("azimage")
+	case "azvmss":
+		_, err := BuildVMSS(environment, capability, attrs, impl, generation)
+		return err
 	case "aisearch":
 		_, err := BuildAISearch(environment, capability, attrs, impl, generation)
 		return err
@@ -300,6 +304,8 @@ func (d *Driver) createService(service, capability, environment string,
 		return d.createAzureDisk(environment, capability, attrs, impl, generation)
 	case "azimage":
 		return provider.CreateResult{Status: "failed", Reason: errWitnessOnlyAzure("azimage").Error()}
+	case "azvmss":
+		return d.createAzureVMSS(environment, capability, attrs, impl, generation)
 	case "aisearch":
 		return d.createAISearch(environment, capability, attrs, impl, generation)
 	case "eventhubs":
@@ -434,6 +440,8 @@ func (d *Driver) observeDispatch(service, capability, providerID string) ([]prov
 		return d.observeAzureDisk(capability, providerID)
 	case "azimage":
 		return d.observeAzureImage(capability, providerID)
+	case "azvmss":
+		return d.observeAzureVMSS(capability, providerID)
 	case "aisearch":
 		return d.observeAISearch(capability, providerID)
 	case "eventhubs":
@@ -538,6 +546,8 @@ func (d *Driver) Delete(service, capability, environment, providerID, key string
 		// Deleting an image groundhold never created would destroy something a
 		// pipeline owns, on the strength of a record we only ever read.
 		return provider.CreateResult{Status: "failed", Reason: errWitnessOnlyAzure("azimage").Error()}
+	case "azvmss":
+		return d.deleteAzureVMSS(capability, environment, providerID)
 	case "aisearch":
 		return d.deleteAISearch(capability, environment, providerID)
 	case "eventhubs":
@@ -601,6 +611,8 @@ func (d *Driver) ClassifyChange(service, path string, current, desired any,
 		return classifyAzureDiskChange(path)
 	case "azimage":
 		return classifyAzureImageChange(path)
+	case "azvmss":
+		return classifyVMSSChange(path)
 	case "acr":
 		return classifyACRChange(path)
 	case "blob":

@@ -88,6 +88,7 @@ type Driver struct {
 	BedrockBaseURL               string // D150 ai.inference (Bedrock inference profiles, observe-first)
 	AppRunnerBaseURL             string // workload.container second backend (App Runner, Cloud Run twin)
 	LambdaBaseURL                string // capability.function.serverless (Lambda, container-image)
+	AutoScalingBaseURL           string // D371 compute.autoscaling (Auto Scaling groups)
 }
 
 // SetProgress wires the executor's intra-action heartbeat sink (D257 —

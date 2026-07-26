@@ -91,6 +91,8 @@ func (d *Driver) Reconcile(capability, environment string,
 		return d.reconcileAzureVM(capability, environment, pid)
 	case "azdisk":
 		return d.reconcileAzureDisk(capability, environment, pid)
+	case "azvmss":
+		return d.reconcileAzureVMSS(capability, environment, pid)
 	case "aisearch":
 		return d.reconcileAISearch(capability, environment, pid)
 	case "frontdoorwaf":
@@ -359,6 +361,23 @@ func (d *Driver) reconcileAzureDisk(capability, environment, pid string) provide
 	}
 	return d.reconcileStdARM(pid, sub, rg, d.azureDiskPath(name), azureDiskAPIVersion,
 		"managed disk "+name, capability, environment)
+}
+
+// reconcileAzureVMSS concludes a create whose outcome was lost: the fleet's name
+// is deterministic, so the standard ARM reconcile can find it, check that it is
+// ours and report whether the create actually landed (D372).
+//
+// It concludes the SCALE SET only. A fleet whose autoscale setting was lost is a
+// real fleet holding its floor, and that is what the create already reported —
+// the reconcile answers "does the fleet exist", not "does it scale", because the
+// second question is what `observe` is for.
+func (d *Driver) reconcileAzureVMSS(capability, environment, pid string) provider.ReconcileResult {
+	sub, rg, name, err := splitAzureVMSSProviderID(pid)
+	if err != nil {
+		return badPidReconcile("azvmss", err)
+	}
+	return d.reconcileStdARM(pid, sub, rg, d.azureVMSSPath(name), azureVMSSAPIVersion,
+		"scale set "+name, capability, environment)
 }
 
 func (d *Driver) reconcileAISearch(capability, environment, pid string) provider.ReconcileResult {

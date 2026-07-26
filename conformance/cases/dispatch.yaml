@@ -3250,3 +3250,203 @@ cases:
       actions:
         a-create-box:
           operation: create
+
+  - name: plan-emits-autoscaling-permissions-both-clouds
+    impl: go
+    description: >
+      A zone-spread, self-scaling fleet (capability.compute.autoscaling, D371)
+      on aws/asg — the last companion around the machine, and the type that
+      answers what the instance type refused: replicas.minimum is meaningless
+      on one machine and is exactly what a group is for.
+      The permission set says something the others do not. ec2:DescribeSubnets
+      and ec2:DescribeLaunchTemplateVersions are PREFLIGHTS, not extras: a
+      group's zone spread follows its subnets and its addressing follows its
+      launch template, so neither availability.class nor network.publicExposure
+      can be honored without reading a resource the group does not own. An
+      identity that cannot make those reads cannot create a group whose
+      contract is true, and the plan says so before anything is provisioned.
+      autoscaling:PutScalingPolicy is attribute-conditional — a fixed-size
+      fleet needs no policy and should not demand the permission to attach one.
+    plan:
+      at: "2026-07-26T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d371asg, environment: test, version: 1 }
+        capabilities:
+          - id: fleet
+            type: capability.compute.autoscaling
+        constraints:
+          hard:
+            - id: c-floor
+              subject: fleet
+              path: replicas.minimum
+              op: gte
+              value: 2
+              verify: { method: static }
+            - id: c-zone-survivable
+              subject: fleet
+              path: availability.class
+              op: equals
+              value: regional
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d371asg
+        capabilities:
+          fleet:
+            provider: aws
+            service: asg
+            attributes:
+              location.region: eu-central-1
+              availability.class: regional
+              replicas.minimum: 2
+              replicas.maximum: 10
+              autoscaling.enabled: true
+              network.publicExposure: false
+              service.managed: true
+            implementation:
+              subnet_ids: [subnet-0abc123456789def0, subnet-0fed987654321cba0]
+              launch_template_id: lt-0123456789abcdef0
+              target_cpu_utilization: 60
+    expect:
+      actions:
+        a-create-fleet:
+          operation: create
+          requiredPermissions:
+            - autoscaling:CreateAutoScalingGroup
+            - autoscaling:CreateOrUpdateTags
+            - autoscaling:DescribeAutoScalingGroups
+            - autoscaling:PutScalingPolicy
+            - ec2:DescribeLaunchTemplateVersions
+            - ec2:DescribeSubnets
+
+  - name: plan-emits-gcp-mig-permissions-fixed-size
+    impl: go
+    description: >
+      The same vocabulary on gcp/mig (D371), and the case that shows the
+      attribute-conditional half: a FIXED-SIZE fleet (autoscaling.enabled
+      false, floor == ceiling) needs no autoscaler, so compute.autoscalers.*
+      is absent from the permission set. A contract that does not ask for a
+      control loop should not demand the right to attach one.
+      Both operation scopes are present because a regional group is a
+      different resource at a different scope than a zonal one — the same
+      cross-cloud difference persistent disks showed (D368), reaching the
+      permission table rather than only the URL.
+    plan:
+      at: "2026-07-26T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d371mig, environment: test, version: 1 }
+        capabilities:
+          - id: fleet
+            type: capability.compute.autoscaling
+        constraints:
+          hard:
+            - id: c-fixed
+              subject: fleet
+              path: autoscaling.enabled
+              op: equals
+              value: false
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d371mig
+        capabilities:
+          fleet:
+            provider: gcp
+            service: mig
+            attributes:
+              location.region: europe-west1
+              availability.class: regional
+              replicas.minimum: 3
+              replicas.maximum: 3
+              autoscaling.enabled: false
+              service.managed: true
+            implementation:
+              instance_template: web-template
+    expect:
+      actions:
+        a-create-fleet:
+          operation: create
+          requiredPermissions:
+            - compute.instanceGroupManagers.create
+            - compute.instanceGroupManagers.get
+            - compute.instanceTemplates.get
+            - compute.regionOperations.get
+            - compute.zoneOperations.get
+
+  - name: plan-emits-azure-vmss-permissions-authored-exposure
+    impl: go
+    description: >
+      A self-scaling fleet on azure/azvmss (D372) — the third cloud, and the
+      one where network.publicExposure is AUTHORED rather than verified. On
+      AWS and GCP the fleet's machine shape lives in a separate template
+      groundhold does not own, so the driver must read it and refuse when it
+      contradicts the contract (D371); a scale set holds its VM profile
+      INLINE, so the driver simply writes the addressing the contract asked
+      for. The permission set shows it: there is no template read here, where
+      both twins require one.
+      Microsoft.Insights/autoscalesettings is attribute-conditional on create
+      and UNCONDITIONAL on delete — a setting left behind keeps evaluating
+      against a target that no longer exists.
+    plan:
+      at: "2026-07-26T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: d372vmss, environment: test, version: 1 }
+        capabilities:
+          - id: fleet
+            type: capability.compute.autoscaling
+        constraints:
+          hard:
+            - id: c-private
+              subject: fleet
+              path: network.publicExposure
+              op: equals
+              value: false
+              verify: { method: static }
+            - id: c-zone-survivable
+              subject: fleet
+              path: availability.class
+              op: equals
+              value: regional
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: d372vmss
+        capabilities:
+          fleet:
+            provider: azure
+            service: azvmss
+            attributes:
+              location.region: swedencentral
+              availability.class: regional
+              replicas.minimum: 2
+              replicas.maximum: 10
+              autoscaling.enabled: true
+              network.publicExposure: false
+              service.managed: true
+            implementation:
+              resource_group: rg
+              vm_size: Standard_D2s_v5
+              image_reference: Canonical:ubuntu-24_04-lts:server:latest
+              subnet_id: /subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet/subnets/app
+              admin_username: ops
+              ssh_public_key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabcdefghijklmnop ops@example
+              zones: ["1", "2"]
+              target_cpu_utilization: 60
+    expect:
+      actions:
+        a-create-fleet:
+          operation: create
+          requiredPermissions:
+            - Microsoft.Compute/virtualMachineScaleSets/read
+            - Microsoft.Compute/virtualMachineScaleSets/write
+            - Microsoft.Insights/autoscalesettings/read
+            - Microsoft.Insights/autoscalesettings/write

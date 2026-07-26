@@ -126,11 +126,11 @@ capabilities:
       unbuilt: true
   capability.compute.autoscaling:
     aws:
-      unbuilt: true
+      fulfilled: [asg]
     gcp:
-      unbuilt: true
+      fulfilled: [mig]
     azure:
-      unbuilt: true
+      fulfilled: [azvmss]
   capability.compute.image:
     aws:
       fulfilled: [ami]

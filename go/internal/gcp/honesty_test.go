@@ -1216,3 +1216,59 @@ func TestHonestyHarnessPD(t *testing.T) {
 	}
 	certifynet.CertifyDriverNet(t, p)
 }
+
+// migHonestyServer answers the happy path for the fleet probe: the template
+// preflight, the group insert, the autoscaler, the operation and the delete.
+func migHonestyServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/operations/"):
+			_, _ = w.Write([]byte(`{"name":"op-1","status":"DONE"}`))
+		case strings.Contains(r.URL.Path, "/instanceTemplates/"):
+			_, _ = w.Write([]byte(`{"properties":{"networkInterfaces":[{}]}}`))
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/autoscalers"):
+			_, _ = w.Write([]byte(`{"items":[]}`))
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"name":"g1","selfLink":"https://x/g1","targetSize":2,` +
+				`"instanceTemplate":"web-template","description":"` +
+				vpcOwnerMarker("web-fleet", "production") + `"}`))
+		default:
+			_, _ = w.Write([]byte(`{"name":"op-1"}`))
+		}
+	}))
+}
+
+// The adversarial honesty pass for the GCP half of a fleet (D371). The stake is
+// neither data nor a single machine: it is a BILL. A create wrongly reported
+// `failed` invites a retry, and a second fleet does not sit idle — it scales.
+func TestHonestyHarnessMIG(t *testing.T) {
+	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
+	pid := "mig:acme-prod:europe-west1:g1"
+	p := &certifynet.Probe{
+		Name:            "gcp/mig",
+		AssertTransient: true,      // D237 sweep
+		Classify:        gcpOpRole, // LRO create/delete parse the operation name
+		OwnerTagValue:   "web-fleet",
+		DeterministicID: true, // the group name is a chosen slug+hash
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			return newGcpHonestyDriver(happyURL, rt)
+		},
+		Ops: []certifynet.Op{
+			{
+				Name:  "create",
+				Happy: migHonestyServer,
+				Run: func(pr provider.Provider) provider.CreateResult {
+					return pr.Create("mig", "web-fleet", "production", migAttrs(), migImpl(), "k", 1)
+				},
+			},
+			{
+				Name:  "delete",
+				Happy: migHonestyServer,
+				Run: func(pr provider.Provider) provider.CreateResult {
+					return pr.Delete("mig", "web-fleet", "production", pid, "k")
+				},
+			},
+		},
+	}
+	certifynet.CertifyDriverNet(t, p)
+}

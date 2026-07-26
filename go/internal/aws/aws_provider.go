@@ -12,7 +12,7 @@ import (
 
 func (d *Driver) requireService(service string) error {
 	switch service {
-	case "s3", "rds", "ecs", "apprunner", "vpc", "sns", "sqs", "secretsmanager", "elasticache", "elasticache-serverless", "route53", "route53record", "rolepolicy", "custompolicy", "cloudwatch", "cloudwatchdash", "route53health", "cwlogfilter", "ecr", "efs", "dynamodb", "opensearch", "opensearch-serverless", "kinesis", "msk", "waf", "acm", "cloudfront", "apigateway", "iam", "redshiftserverless", "eventbridgescheduler", "kms", "vpngateway", "backupvault", "changefeed", "loadbalancer", "eks", "eks-addon", "eks-podidentity", "ses-sending", "ses-inbound", "aurora", "bedrock", "budgets", "cloudtrail", "backupplan", "guardduty", "cwlogs", "lambda", "ec2", "ebs", "ami":
+	case "s3", "rds", "ecs", "apprunner", "vpc", "sns", "sqs", "secretsmanager", "elasticache", "elasticache-serverless", "route53", "route53record", "rolepolicy", "custompolicy", "cloudwatch", "cloudwatchdash", "route53health", "cwlogfilter", "ecr", "efs", "dynamodb", "opensearch", "opensearch-serverless", "kinesis", "msk", "waf", "acm", "cloudfront", "apigateway", "iam", "redshiftserverless", "eventbridgescheduler", "kms", "vpngateway", "backupvault", "changefeed", "loadbalancer", "eks", "eks-addon", "eks-podidentity", "ses-sending", "ses-inbound", "aurora", "bedrock", "budgets", "cloudtrail", "backupplan", "guardduty", "cwlogs", "lambda", "ec2", "ebs", "ami", "asg":
 		if d.Region != "" && !regionOK.MatchString(d.Region) {
 			return fmt.Errorf("aws driver: pinned region %q is not valid", d.Region)
 		}
@@ -144,6 +144,9 @@ func (d *Driver) Validate(service, capability, environment string,
 		return err
 	case "ebs":
 		_, err := BuildEBSVolumeCreate(environment, capability, attrs, impl, generation)
+		return err
+	case "asg":
+		_, err := BuildASGCreate(environment, capability, attrs, impl, generation)
 		return err
 	// "ami" needs no arm: the witness gate above refuses it before the switch, and a
 	// second refusal here could only drift from the first.
@@ -452,6 +455,12 @@ func (d *Driver) createService(service, capability, environment string,
 			return *r
 		}
 		return d.createEBSVolume(region, account, environment, capability, attrs, impl, generation)
+	case "asg":
+		region, account, r := d.createScope(attrs)
+		if r != nil {
+			return *r
+		}
+		return d.createASG(region, account, environment, capability, attrs, impl, generation)
 	case "ami":
 		return provider.CreateResult{Status: "failed",
 			Reason: errWitnessOnly("ami", "capability.compute.image").Error()}
@@ -732,6 +741,8 @@ func (d *Driver) Observe(service, capability, providerID string) ([]provider.Obs
 		return d.observeEC2Instance(capability, providerID)
 	case "ebs":
 		return d.observeEBSVolume(capability, providerID)
+	case "asg":
+		return d.observeASG(capability, providerID)
 	case "ami":
 		return d.observeAMI(capability, providerID)
 	case "efs":
@@ -848,6 +859,8 @@ func (d *Driver) Delete(service, capability, environment, providerID, key string
 		return d.deleteEC2Instance(capability, environment, providerID)
 	case "ebs":
 		return d.deleteEBSVolume(capability, environment, providerID)
+	case "asg":
+		return d.deleteASG(capability, environment, providerID)
 	case "ami":
 		// Deleting an image groundhold never created would destroy something a
 		// pipeline owns, on the strength of a record we only ever read.
@@ -938,6 +951,8 @@ func (d *Driver) ClassifyChange(service, path string, current, desired any,
 		return classifyEC2InstanceChange(path)
 	case "ebs":
 		return classifyEBSVolumeChange(path)
+	case "asg":
+		return classifyASGChange(path)
 	case "ami":
 		return classifyAMIChange(path)
 	case "s3":

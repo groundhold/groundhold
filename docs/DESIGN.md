@@ -10736,3 +10736,86 @@ authored — Azure's Validate-fixture and reconcile-row gates, GCP's observe-has
 now exempt witnesses, and every exemption is DERIVED from `CanAuthor` rather than a list of names, so a
 service that stops being a witness is caught again the moment it does. A hardcoded exemption would have
 been three more places to forget.
+
+## D371. The fleet: when the contract governs a fact the resource does not hold
+`capability.compute.autoscaling` (D363) on AWS and GCP — the last companion around the machine, and the
+one that answers what the instance type refused. `replicas.minimum` is meaningless on a single machine
+and is exactly what a group is for; `availability.class: regional` is refused on an instance (D358/D359)
+and honored here, because spreading across zones is something a GROUP does.
+THE SHAPE WORTH NAMING, because it is new to this family and will recur: three of the seven governed
+attributes are NOT properties of the group resource. They live in resources the group merely
+references — resources groundhold does not author.
+`network.publicExposure` lives in the launch template (AWS) or the instance template (GCP). The group
+inherits the template's addressing and cannot override it. There were three options: refuse the
+attribute (making the type unusable for anyone who cares about exposure), accept the declared value
+silently (the exact silent-ignoring this project refuses everywhere else), or READ the template and
+refuse when it contradicts the contract. The third is the only honest one, and it costs a preflight
+call. The rule it establishes: when a governed fact lives in an operand, the driver verifies the
+operand rather than trusting the declaration or dropping the attribute.
+`availability.class` on AWS is a CONSEQUENCE, not a setting. An ASG has no zonal/regional switch — it
+spreads across whatever zones its subnets sit in. So the check splits across layers: the pure core
+counts subnets (regional needs more than one), and only the network shell can resolve them to zones and
+catch two subnets in the SAME zone, which would produce a group that looks spread and survives nothing.
+GCP needs neither check, because there the class is a different RESOURCE at a different scope — the API
+cannot produce a "regional" group confined to one zone. Same attribute, same verdict, one cloud
+verifying what the other declares.
+`autoscaling.enabled` needs a POLICY whose tuning the vocabulary deliberately excludes (D363: a control
+loop with its own tuning is not capability semantics). The contract governs THAT a policy exists; the
+operator supplies WHICH, through an operand. Inventing a CPU target would attach a control loop nobody
+reviewed to a fleet the operator pays for — and the reverse case is refused too: a target supplied with
+`autoscaling.enabled: false` would be silently ignored, leaving the operator believing the fleet scales.
+One asymmetry is worth recording because it looks like a bug and is not: a GCP managed instance group
+with NO autoscaler has no capacity envelope at all, only `targetSize`. So a fixed-size group requires
+`replicas.minimum == replicas.maximum`, and observe reports the single size back on both bounds.
+Accepting a range there would declare an envelope the resource cannot hold.
+A create is TWO mutations when scaling is wanted (group, then policy), and the ORDER is chosen: a
+failure between them leaves a real fleet at its declared floor — under-scaled but running, which is the
+survivable half. The reverse order is impossible, and the outcome is reported rather than rolled back.
+THE HARNESS EARNED ITS KEEP AGAIN. The adversarial pass (D87) found two real bugs the unit tests did
+not: an unresolved create dropped the knowable providerId (the group name is deterministic, so the
+handle exists even when the outcome does not — and an operator without it retries, which is how a
+SECOND fleet gets created), and a throttle or permission gap on the POLICY call was reported as a
+definitive refusal, when the call never reached a decision. Both are the same underlying mistake in
+different places: treating "we did not find out" as "we found out no". The stake on this type is neither
+data nor a machine — it is a bill, and a duplicate fleet does not sit idle, it scales.
+
+## D372. The scale set: the third mechanism, and three bugs the harness found in one driver
+The Azure third of `capability.compute.autoscaling`, which completes the whole compute family — machine,
+disk, image, fleet — on all three clouds.
+The design point is what the group OWNS. On AWS and GCP the fleet's machine shape lives in a SEPARATE
+resource (a launch template, an instance template) that groundhold does not author, so
+`network.publicExposure` has to be VERIFIED: read that resource and refuse when it contradicts the
+contract (D371). A scale set holds its VM profile INLINE. There is nothing to read and nothing to
+contradict — the driver simply builds the addressing the contract asked for. One governed attribute,
+three clouds, and on this one it is AUTHORED rather than checked. The permission table shows the
+difference plainly: no template read here, where both twins require one.
+`classifyChange` follows the same fact and lands on a third answer. The twins call
+`network.publicExposure` immutable because it lives somewhere they cannot write; here it is CAVEATED —
+the profile can be patched, but the patch re-addresses machines the fleet is already running, so new
+instances get the new profile and existing ones need a rolling upgrade. That is a real caveat, not a
+softer "immutable".
+The remaining two properties are each shared with one twin: the class is DECLARED (in `zones`) and so is
+cross-checked in both directions like the managed disk's SKU (D369), and a fixed-size fleet has no
+envelope, only `sku.capacity`, so `minimum` must equal `maximum` exactly as on a GCP MIG (D371).
+THREE BUGS, ALL FOUND BY THE ADVERSARIAL HARNESS (D87), none by the unit tests. Worth recording together
+because they share one root:
+First, `putAndPoll` was wrong for the autoscale setting. A Microsoft.Insights resource is SYNCHRONOUS and
+carries no `provisioningState`, so the poll would wait for a "Succeeded" that never arrives and report
+every healthy create as `unknown` at the timeout — in production, on every single create. The sibling
+Insights drivers (alert, dashboard, webtest, scheduled query) already use the synchronous shape; the
+driver now does too.
+Second, a throttle or permission gap on the setting's PUT was reported as a definitive refusal. The call
+never reached a decision, so the outcome is unresolved.
+Third, and the most instructive: the setting's DELETE was written as "best effort" — errors swallowed,
+so a fleet retirement reported `succeeded` even when the setting's removal had not resolved. The
+justification felt reasonable while writing it ("a broken setting delete must not block retiring the
+fleet"), and it is wrong. A setting whose target is gone keeps evaluating against a resource that no
+longer exists, so swallowing the error reports a clean retirement while leaving an orphan behind. The
+setting now goes first and must RESOLVE (2xx or 404) before the fleet is touched; anything else is
+`unknown`, and the fleet is left in place. Fail-closed, and reconcilable.
+All three are the same mistake in different disguises: treating "we did not find out" as "we found out
+no". It is the mistake this project is most prone to, because it always arrives dressed as pragmatism —
+a poll that assumes success, a status treated as an answer, an error swallowed to keep things moving.
+Unit tests do not catch it, because a unit test asserts what the code does on the paths its author
+thought of. The harness asks what the code says when it does not know, which is a question an author who
+believed they knew will not think to ask.

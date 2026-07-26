@@ -8,7 +8,7 @@ import (
 
 // gcpCertifyServices is the authoritative set of SERVICE tokens the GCP driver
 // observes/provisions — both certification gates run over the same set.
-var gcpCertifyServices = []string{"loadbalancer", "assetfeed", "cloudsql", "cloudrun", "gcs", "vpc", "cloudfunctions", "cloudfunctions-fn", "pubsub-topic", "pubsub-queue", "secretmanager", "memorystore", "clouddns", "clouddnsrecord", "iambinding", "customrole", "monitoring", "dashboard", "uptime", "logmetric", "artifactregistry", "filestore", "firestore", "managedkafka", "cloudarmor", "certmanager", "cloudrunjobs", "serviceaccount", "bigquery", "cloudscheduler", "cloudkms", "vpngateway", "backupvault", "billingbudget", "logbucket", "auditlogs", "scc", "vertexai", "gke", "gke-addon", "gke-workloadidentity", "backupplan", "gce", "pd", "computeimage"}
+var gcpCertifyServices = []string{"loadbalancer", "assetfeed", "cloudsql", "cloudrun", "gcs", "vpc", "cloudfunctions", "cloudfunctions-fn", "pubsub-topic", "pubsub-queue", "secretmanager", "memorystore", "clouddns", "clouddnsrecord", "iambinding", "customrole", "monitoring", "dashboard", "uptime", "logmetric", "artifactregistry", "filestore", "firestore", "managedkafka", "cloudarmor", "certmanager", "cloudrunjobs", "serviceaccount", "bigquery", "cloudscheduler", "cloudkms", "vpngateway", "backupvault", "billingbudget", "logbucket", "auditlogs", "scc", "vertexai", "gke", "gke-addon", "gke-workloadidentity", "backupplan", "gce", "pd", "computeimage", "mig"}
 
 // The GCP driver must pass the driver-agnostic certification (fail-closed
 // dispatch + well-formed permission tables for every service it declares).
