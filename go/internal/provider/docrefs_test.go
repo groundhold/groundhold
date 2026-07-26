@@ -1,6 +1,7 @@
 package provider_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -392,5 +393,72 @@ func TestPublishedDocsDoNotDependOnPrivatePaths(t *testing.T) {
 		t.Errorf("%d published document(s) depend on a path that does NOT cross the "+
 			"export boundary — a reader of the public repo cannot follow them:\n  %s",
 			len(broken), strings.Join(broken, "\n  "))
+	}
+}
+
+// An action published as several SUBPATHS must be pinned to ONE commit across
+// every workflow that uses it.
+//
+// github/codeql-action ships `init` and `analyze` from the same release and
+// requires them to match; a mismatch fails the run. Dependabot bumps each
+// subpath in its OWN pull request, so merging one without the other splits them
+// — which is exactly what happened when `analyze` moved to v4 while `init` stayed
+// on v3.
+//
+// Nothing caught it. The `analyze` check reports `skipping` on a private
+// repository, so CI is green on a workflow that cannot work, and the break would
+// have surfaced the moment the repo went public — the worst possible time to
+// discover it.
+//
+// The rule is general rather than a codeql special case: if one repository is
+// referenced through more than one path, the pins must agree. A second action
+// with subpaths gets the same protection for free.
+func TestActionSubpathsSharePin(t *testing.T) {
+	dir := filepath.Join(repoRoot(t), ".github", "workflows")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Skipf("no workflows directory here: %v", err)
+	}
+	// owner/repo -> sha -> the "owner/repo/subpath@sha  (file)" sightings
+	pins := map[string]map[string][]string{}
+	uses := regexp.MustCompile(`uses:\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(/[A-Za-z0-9_./-]+)?@([A-Za-z0-9._-]+)`)
+
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yml") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		for _, m := range uses.FindAllStringSubmatch(string(raw), -1) {
+			repo, sub, sha := m[1], m[2], m[3]
+			if sub == "" {
+				continue // no subpath: nothing to keep consistent with
+			}
+			if pins[repo] == nil {
+				pins[repo] = map[string][]string{}
+			}
+			pins[repo][sha] = append(pins[repo][sha],
+				fmt.Sprintf("%s%s@%s (%s)", repo, sub, sha, e.Name()))
+		}
+	}
+	if len(pins) == 0 {
+		t.Skip("no subpath-referenced actions in these workflows — nothing to check")
+	}
+	for repo, bySHA := range pins {
+		if len(bySHA) < 2 {
+			continue
+		}
+		var sightings []string
+		for _, ss := range bySHA {
+			sightings = append(sightings, ss...)
+		}
+		sort.Strings(sightings)
+		t.Errorf("%s is pinned to %d different commits across its subpaths:\n\t%s\n"+
+			"An action's subpaths ship from one release and must move together — "+
+			"dependabot bumps them in separate pull requests, so merging one alone "+
+			"splits them, and a check that `skips` on a private repo will not notice.",
+			repo, len(bySHA), strings.Join(sightings, "\n\t"))
 	}
 }

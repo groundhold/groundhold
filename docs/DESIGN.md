@@ -10819,3 +10819,22 @@ a poll that assumes success, a status treated as an answer, an error swallowed t
 Unit tests do not catch it, because a unit test asserts what the code does on the paths its author
 thought of. The harness asks what the code says when it does not know, which is a question an author who
 believed they knew will not think to ask.
+
+## D373. Dependabot belongs to the working repo, because the mirror cannot keep what it merges
+The public repository is a ONE-WAY export (D63/D345). Everything in it — `.github`, `go/go.mod`,
+`website/requirements.txt` — arrives from the working repo and is overwritten by the next sync. So a
+dependency bump merged on the far side has exactly two futures: silently reverted, or clobbered before
+anyone notices. Dependabot was running there anyway, because `.github` crosses wholesale and carries
+`dependabot.yml` with it. Five of its pull requests were open when this was noticed, every one of them
+unmergeable in any durable sense.
+The config is now stripped at export, alongside the cloud canaries and for the same structural reason:
+the parent directory crosses as a unit, so the whitelist cannot exclude a single file inside it and the
+exporter removes it explicitly. Bumps happen here and reach the mirror the way everything else does.
+What this does NOT turn off is the part that matters: Dependabot ALERTS come from GitHub's advisory
+database, not from `dependabot.yml`. The public repo still reports vulnerable dependencies; it simply
+stops opening pull requests nobody can merge.
+The general rule, which is the reason this is written down rather than quietly fixed: a mirror must not
+host automation that WRITES to it. Anything that opens pull requests, bumps versions, or reformats code
+on the far side of a one-way boundary is generating work whose only possible outcomes are being
+discarded or being lost. The test to apply to any bot before enabling it on the public repo is not "is
+this useful" but "can what it produces survive the next sync".
