@@ -75,6 +75,28 @@ func (d *Driver) Reconcile(capability, environment string,
 		return d.reconcileWAF(capability, environment, gen)
 	case "budgets":
 		return d.reconcileBudget(capability, environment, gen)
+	// ---- batch 9 (D374): the compute family, the two serverless services and the
+	// two whose identity the receipt alone cannot rebuild ----
+	case "ec2":
+		return d.reconcileEC2Instance(capability, environment, gen)
+	case "asg":
+		return d.reconcileASG(capability, environment, gen)
+	case "apprunner":
+		return d.reconcileAppRunner(capability, environment, gen)
+	case "elasticache-serverless":
+		return d.reconcileElastiCacheServerless(capability, environment, gen)
+	case "opensearch-serverless":
+		return d.reconcileOpenSearchServerless(capability, environment, gen)
+	case "ebs":
+		// a volume id is server-assigned and DescribeVolumes has no client-token
+		// filter, so the pinned targetProviderId is the only honest handle.
+		pid, _ := receipt["targetProviderId"].(string)
+		return d.reconcileEBSVolume(capability, environment, pid)
+	case "route53record":
+		// the record identity is attribute-derived (zone + name + type); the pinned
+		// targetProviderId is the only handle.
+		pid, _ := receipt["targetProviderId"].(string)
+		return d.reconcileRoute53Record(capability, environment, pid)
 	case "rolepolicy":
 		// the attachment identity is attribute-derived; the only handle is the
 		// pinned targetProviderId (absent on a bare create receipt -> unknown).

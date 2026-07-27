@@ -18,9 +18,41 @@ permissions:
 
 jobs:
   release:
+    # D383: this ran on GitHub-hosted minutes, so when the organisation's Actions
+    # budget hit 100% the release path went down with everything else — silently,
+    # because nobody cuts a tag every day. The self-hosted pool was probed for what
+    # this job actually needs before the move: go, make, python3, curl, jq, tar and
+    # sha256sum are all present, and the SBOM action produces a real 45 KB document
+    # there. `gh` is the one thing missing, so it is installed below rather than
+    # assumed.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The hosted image ships `gh`; this pool's does not. Two steps below depend
+      # on it — publishing the release, and D354's check that runs the reader's own
+      # `gh attestation verify` rather than trusting a step's green tick. Both are
+      # worth keeping exactly as they are, so the tool is fetched at a pinned
+      # version and checked against a digest recorded here, not against whatever
+      # the download happens to serve.
+      - name: Install gh (pinned)
+        env:
+          GH_VERSION: "2.96.0"
+          GH_SHA256: "83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8bd60"
+        run: |
+          set -euo pipefail
+          tgz="gh_${GH_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "/tmp/${tgz}" \
+            "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${tgz}"
+          echo "${GH_SHA256}  /tmp/${tgz}" | sha256sum -c -
+          tar -xzf "/tmp/${tgz}" -C /tmp
+          # Into the runner's own temp dir, not /usr/local/bin: this job must not
+          # assume it is root, and must not leave anything behind on a pool it
+          # shares with other repositories.
+          mkdir -p "${RUNNER_TEMP}/bin"
+          install -m 0755 "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" "${RUNNER_TEMP}/bin/gh"
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/bin/gh" --version
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:

@@ -173,3 +173,38 @@ func TestObserveCompleteness(t *testing.T) {
 			"discover-only service (say so here) or a stale case", "gcp", phantom)
 	}
 }
+
+// Every service that CAN be authored must be able to conclude a lost create.
+// The AWS twin carries the same gate and the same reasoning (see its
+// completeness_test.go): a service missing from the Reconcile dispatch falls to
+// the default — `unknown`, reconcile manually — so `resume` cannot finish what
+// `apply` started.
+//
+// WITNESS services (D177) are exempt, DERIVED from `CanAuthor` rather than
+// listed: a witness never creates anything, so there is no lost outcome to
+// conclude.
+func TestEveryAuthoredServiceCanReconcile(t *testing.T) {
+	// GCP dispatches reconcile through a MAP rather than a switch, so the gate reads
+	// the registry directly — no source parsing, and nothing to go vacuous if the
+	// dispatch is reshaped. cloudsql is handled ahead of the map (it needs the whole
+	// receipt), so it is named here explicitly.
+	dispatch := map[string]bool{"cloudsql": true}
+	for svc := range reconcileAdapters {
+		dispatch[svc] = true
+	}
+	var missing []string
+	for _, svc := range gcpCertifyServices {
+		if !provider.CanAuthor("gcp", svc) {
+			continue // a witness has no create to conclude
+		}
+		if !dispatch[svc] {
+			missing = append(missing, svc)
+		}
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		t.Errorf("gcp services that can be created but cannot conclude a lost create: %v\n"+
+			"Each falls to the reconcile default (`unknown` — reconcile manually), so "+
+			"`resume` cannot finish what `apply` started.", missing)
+	}
+}

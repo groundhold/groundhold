@@ -74,6 +74,18 @@ var awsOutputs = map[string][]provider.OutputSpec{
 		{Name: "functionName", Kind: "string", Sample: "pv-api-prod-1a2b3c4d"},
 		{Name: "functionUrl", Kind: "string", Sample: "https://abc123.lambda-url.eu-central-1.on.aws/"},
 		{Name: "functionUrlDomain", Kind: "string", Sample: "abc123.lambda-url.eu-central-1.on.aws"},
+		// D381. AWS creates /aws/lambda/<fn> itself, on first invocation, with NO
+		// retention — it keeps every line forever. groundhold never made that group,
+		// so nothing in a contract could reach it: the log-group capability could
+		// only ever create a SEPARATE group, which a Lambda does not write to. A
+		// field partner shipped a contract declaring 365-day retention while their
+		// actual logs never expired, and the declaration read as satisfied.
+		//
+		// The name is fully derivable from the function name — no read — so the
+		// producer publishes it and a capability.monitoring.logs consumes it by
+		// $ref (D226) into `implementation.log_group`. No interpolation, no join:
+		// the whole value comes from here, which is what invariant #4 requires.
+		{Name: "logGroupName", Kind: "string", Sample: "/aws/lambda/pv-api-prod-1a2b3c4d"},
 	},
 	// cloudfront (capability.cdn.distribution): distributionArn is derivable from
 	// the cf:account:distId pid (no read). domainName (the public dXXXX.cloudfront.net
@@ -249,6 +261,10 @@ func (d *Driver) deriveOutputs(service, pid string) (map[string]any, error) {
 		out := map[string]any{
 			"functionArn":  lambdaArn(region, account, name),
 			"functionName": name,
+			// D381: the group AWS will create for this function. Derived, not read —
+			// it exists only after the first invocation, and a contract must be able
+			// to govern its retention before a single line is written to it.
+			"logGroupName": lambdaLogGroupName(name),
 		}
 		// The Function URL is present only for a public function; its host is
 		// server-assigned (one read). A definitive 404 (a private function) omits

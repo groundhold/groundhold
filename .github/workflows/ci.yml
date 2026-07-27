@@ -17,7 +17,7 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -52,7 +52,7 @@ jobs:
   race:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26.5"
@@ -60,17 +60,44 @@ jobs:
       - name: go test -race
         run: make race
 
-  # Portability: the release cross-builds darwin/arm64 but never tested it. macos-latest
-  # is arm64, so this exercises the exact platform that only ever compiled. Go-only (no
-  # Python) — the conformance source-of-truth still runs in `gate`.
+  # Portability, linux half: builds and tests on the self-hosted fleet, every time.
+  # Go-only (no Python) — the conformance source-of-truth still runs in `gate`.
   portability:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: go/go.sum
+      - name: build + test
+        working-directory: go
+        run: go build ./... && go test ./...
+
+  # Portability, darwin/arm64: the release cross-builds it and nothing else tests it,
+  # so macos-latest (arm64) exercises the exact platform that only ever compiled.
+  #
+  # This is the ONLY job in the repository that still runs on GitHub-hosted minutes,
+  # and macOS bills at a 10x multiplier — there is no self-hosted darwin. Running it
+  # on every push to every branch made it the single largest line in this repo's CI
+  # bill for a check that guards a RELEASE artifact. It now runs when something lands
+  # on the default branch: a pull request that breaks darwin is caught at merge,
+  # before any tag.
+  #
+  # NOT on tags, whatever an earlier version of this comment claimed — `on:` above
+  # has no `tags:` filter, so a release tag never reaches this job. The default
+  # branch is the only place darwin is ever exercised.
+  #
+  # It is currently FAILING, and honestly: with the organisation's Actions budget at
+  # 100% no hosted runner can be acquired, so the job dies at assignment with zero
+  # steps and an empty runner name. darwin/arm64 is therefore UNVERIFIED, and the
+  # release still cross-builds it. That red is not papered over — restoring it is a
+  # billing decision, not a code change.
+  portability-darwin:
+    if: github.event_name == 'push'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26.5"
@@ -84,7 +111,7 @@ jobs:
   tidy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26.5"

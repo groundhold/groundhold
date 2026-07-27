@@ -614,6 +614,104 @@ var reconcileAdapters = map[string]reconcileAdapter{
 			return genProbe{readable: true, found: true, ours: ours, ready: true}
 		},
 	},
+	// A DNS record is a SUB-RESOURCE: it has no identity or labels of its own, so
+	// ownership is its parent managed zone's. That is the same handle the create and
+	// delete paths use — a record inside a zone we own is ours, and a record inside
+	// somebody else's zone is not something this contract may claim.
+	"clouddnsrecord": {
+		probe: func(d *Driver, cap, env, pid string) genProbe {
+			project, zone, recordType, name, err := splitGDNSRecProviderID(pid)
+			if err != nil {
+				return probeUnreadable(err.Error())
+			}
+			if err := d.sameProject(project); err != nil {
+				return probeUnreadable(err.Error())
+			}
+			owned, oerr := d.recordZoneOwnedByUs(project, zone, cap, env)
+			if oerr != nil {
+				return probeUnreadable("managed zone read gave no answer: " + oerr.Error())
+			}
+			_, found, rerr := d.getRecordSet(project, zone, name, recordType)
+			if rerr != nil {
+				return probeUnreadable("record set read gave no answer: " + rerr.Error())
+			}
+			return genProbe{readable: true, found: found, ours: found && owned, ready: true}
+		},
+	},
+
+	// ---- compute family (D374). Each providerId carries a SCOPE the receipt does
+	// not: an instance's zone, a disk's zone-or-region, a group's zone-or-region.
+	// So createPID is deliberately absent — a create whose receipt never persisted
+	// an id cannot have one rebuilt, and guessing a scope would probe the wrong
+	// resource and report a create landed that did not.
+	"gce": {
+		probe: func(d *Driver, cap, env, pid string) genProbe {
+			project, zone, name, err := splitGCEProviderID(pid)
+			if err != nil {
+				return probeUnreadable(err.Error())
+			}
+			if err := d.sameProject(project); err != nil {
+				return probeUnreadable(err.Error())
+			}
+			doc, found, rerr := d.getGCEInstance(project, zone, name)
+			if rerr != nil {
+				return probeUnreadable("instance read gave no answer: " + rerr.Error())
+			}
+			if !found {
+				return genProbe{readable: true, found: false}
+			}
+			return genProbe{readable: true, found: true,
+				ours: ownsLabels(doc.Labels, cap, env),
+				// A machine still provisioning is not a concluded create: RUNNING is
+				// the terminal-good state the create path itself waits for.
+				ready: doc.Status == "" || doc.Status == "RUNNING"}
+		},
+	},
+	"pd": {
+		probe: func(d *Driver, cap, env, pid string) genProbe {
+			project, scope, name, err := splitPDProviderID(pid)
+			if err != nil {
+				return probeUnreadable(err.Error())
+			}
+			if err := d.sameProject(project); err != nil {
+				return probeUnreadable(err.Error())
+			}
+			doc, found, rerr := d.getPD(project, scope, name)
+			if rerr != nil {
+				return probeUnreadable("disk read gave no answer: " + rerr.Error())
+			}
+			if !found {
+				return genProbe{readable: true, found: false}
+			}
+			return genProbe{readable: true, found: true,
+				ours: ownsLabels(doc.Labels, cap, env),
+				// READY is terminal-good; a disk still CREATING has not concluded, and
+				// on a stateful capability calling that done invites a second disk.
+				ready: doc.Status == "" || doc.Status == "READY"}
+		},
+	},
+	"mig": {
+		probe: func(d *Driver, cap, env, pid string) genProbe {
+			project, scope, name, err := splitMIGProviderID(pid)
+			if err != nil {
+				return probeUnreadable(err.Error())
+			}
+			if err := d.sameProject(project); err != nil {
+				return probeUnreadable(err.Error())
+			}
+			doc, found, rerr := d.getMIG(project, scope, name)
+			if rerr != nil {
+				return probeUnreadable("instance group read gave no answer: " + rerr.Error())
+			}
+			if !found {
+				return genProbe{readable: true, found: false}
+			}
+			// A managed instance group carries no labels, so ownership is the
+			// description marker — the same handle the create and delete paths use.
+			return genProbe{readable: true, found: true,
+				ours: markerOurs(doc.Description, cap, env), ready: true}
+		},
+	},
 	"vpc": {
 		probe: func(d *Driver, cap, env, pid string) genProbe {
 			project, _, name, err := splitVPCProviderID(pid)

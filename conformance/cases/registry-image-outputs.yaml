@@ -198,3 +198,76 @@ cases:
               capability: registry
               output: repositoryUri
               kind: string
+
+  - name: log-retention-binds-to-the-group-the-function-actually-writes-to
+    impl: go
+    description: >
+      D381. AWS creates /aws/lambda/<fn> itself, on first invocation, with NO
+      retention — it keeps every line forever. groundhold never made that group,
+      so nothing in a contract could reach it: capability.monitoring.logs could
+      only ever create a SEPARATE group, which a Lambda does not write to. A
+      field partner shipped a contract declaring 365-day retention while their
+      real logs never expired, and the declaration read as satisfied — the
+      "declared but not proven" gap this project exists to close, on the wrong
+      side of it.
+      The Lambda now publishes `logGroupName` as a typed create output, derived
+      from the function name with no read, so the log capability points at the
+      group that actually holds the logs via $ref (D226) — no interpolation and
+      no join, because the whole value comes from the producer, which is what
+      invariant #4 requires. The retention guarantee lands where the lines are.
+    plan:
+      at: "2026-07-27T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: logbind, environment: test, version: 1 }
+        capabilities:
+          - id: api
+            type: capability.function.serverless
+          - id: logs
+            type: capability.monitoring.logs
+        constraints:
+          hard:
+            - id: c-retention
+              subject: logs
+              path: retention.days
+              op: gte
+              value: 365d
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: logbind
+        capabilities:
+          api:
+            provider: aws
+            service: lambda
+            attributes:
+              location.region: eu-central-1
+              service.managed: true
+            implementation:
+              image_uri: 000000000000.dkr.ecr.eu-central-1.amazonaws.com/api:v1
+              role_arn: arn:aws:iam::000000000000:role/api-exec
+          logs:
+            provider: aws
+            service: cwlogs
+            attributes:
+              location.region: eu-central-1
+              retention.days: 365d
+              service.managed: true
+            implementation:
+              log_group:
+                $ref: { capability: api, output: logGroupName }
+    expect:
+      actions:
+        a-create-api:
+          operation: create
+        a-create-logs:
+          operation: create
+          dependsOn: [a-create-api]
+          references:
+            - slot: log_group
+              producerAction: a-create-api
+              capability: api
+              output: logGroupName
+              kind: string

@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"groundhold/internal/provider"
 )
 
 // serviceCases extracts the service tokens dispatched in a `func (d *Driver)
@@ -188,5 +190,49 @@ func TestObserveCompleteness(t *testing.T) {
 	if len(phantom) > 0 {
 		t.Errorf("%s services with an observe dispatch but no create: %v — either a "+
 			"discover-only service (say so here) or a stale case", "aws", phantom)
+	}
+}
+
+// Every service that CAN be authored must be able to conclude a lost create.
+//
+// `resume` exists to get out of `unknown`: a create whose outcome the executor
+// never learned is reconciled by re-deriving the resource's deterministic
+// identity and asking the provider whether it landed. A service missing from the
+// Reconcile dispatch falls to the default — `unknown` with "not wired yet,
+// reconcile manually" — which is fail-closed and honest, and also means the whole
+// resume machinery does not apply to it.
+//
+// Azure has carried this gate for a while; AWS and GCP did not, and accumulated
+// eleven gaps between them. The absence of the check is the whole explanation:
+// the drivers are not worse, nothing was asking. Two of the eleven were added by
+// someone who had just finished writing down that the gap existed.
+//
+// WITNESS services (D177) are exempt, and the exemption is DERIVED from
+// `CanAuthor` rather than listed: a witness never creates anything, so there is
+// no lost outcome to conclude. A service that stops being a witness is caught
+// again the moment it does.
+func TestEveryAuthoredServiceCanReconcile(t *testing.T) {
+	src, err := os.ReadFile("reconcile_aws.go")
+	if err != nil {
+		t.Fatalf("read reconcile_aws.go: %v", err)
+	}
+	dispatch := serviceCases(t, string(src), "Reconcile")
+	var missing []string
+	for _, svc := range awsCertifyServices {
+		if !provider.CanAuthor("aws", svc) {
+			continue // a witness has no create to conclude
+		}
+		if !dispatch[svc] {
+			missing = append(missing, svc)
+		}
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		t.Errorf("aws services that can be created but cannot conclude a lost create: %v\n"+
+			"Each falls to the reconcile default (`unknown` — reconcile manually), so "+
+			"`resume` cannot finish what `apply` started. On a STATEFUL capability that "+
+			"is worse than an inconvenience: the operator's natural next step is to "+
+			"create another one, which is how data ends up split across two resources.",
+			missing)
 	}
 }

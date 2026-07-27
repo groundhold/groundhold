@@ -17,15 +17,15 @@ The honest one-line summary: **the verification + state core is proven and
 adversarially hardened; execution has now closed the loop against ALL THREE
 clouds — GCP (author-run), AWS (one external pilot operator on their own
 account, 36 findings) and Azure (author-run, 2026-07-24, which immediately
-found that its whole observe family had never worked outside tests); there has been one external pilot, no external security audit, and no
-production incident record. This is `v0.x`, experimental — an RFC you can run,
+found that its whole observe family had never worked outside tests); there has been one external pilot, no external security audit, and ONE
+production incident (2026-07-26, recorded below). This is `v0.x`, experimental — an RFC you can run,
 not a product with an SLA.**
 
 ## Core (the deterministic spine)
 
 | Subsystem | verdict | basis | evidence / honest gap |
 |---|---|---|---|
-| Four-valued verifier, typed scalars, no-coercion | **proven** | measured | Dual impl (Go + Python) through one 513-case conformance suite; Strong-Kleene + injective canonicalization adversarially audited (D178–D179). The strongest claim in the system. |
+| Four-valued verifier, typed scalars, no-coercion | **proven** | measured | Dual impl (Go + Python) through one 514-case conformance suite; Strong-Kleene + injective canonicalization adversarially audited (D178–D179). The strongest claim in the system. |
 | Canonicalization + hashing (cross-language identity) | **proven** | config-intent | Byte-identical hashes pinned across both impls + `make differential`; audited for round-trip injectivity (D179). "measured" would mean external cryptographic review — not done. |
 | Ledger / state model (hash chain, replay, snapshot, anchor) | **proven** | config-intent | Adversarially audited D182–D185 (forest-anchor, snapshot projections, replay); snapshot-equivalence fuzz. It is a local deterministic engine — "real cloud" does not apply; "measured" would mean an external tamper-evidence review. |
 | Capsules, ed25519 signatures, DR restore/merge | **proven** | config-intent | Recompute-from-bytes verify, fail-closed signatures, fork-refusal + write-then-replay restore; audited D187. No external crypto review. |
@@ -62,9 +62,22 @@ not a product with an SLA.**
    external operator, on one account, for a few weeks, and the engagement is
    currently paused — so the most recent fixes (D281 IAM-propagation retry,
    D283 fold branch, D286 wiring split) are pinned by tests but have NOT been
-   re-run in the field. No external security audit exists; no production
-   incident record exists.
-3. **The field found things the gates did not.** The pilot filed 36 findings,
+   re-run in the field. No external security audit exists.
+3. **There has been one production incident, and groundhold contributed to it.**
+   On 2026-07-26 the pilot lost roughly five minutes of production after
+   deploying a bad image. groundhold did not cause the bad image. What it did
+   was remove the signal that would have surfaced it: every `converge` run had
+   been ending `DIED` on a permanently-refusing action, so the status looked
+   IDENTICAL whether the deployment had worked or killed the API, and a sibling
+   action had already applied. They found the outage by querying AWS by hand.
+   Reported by the pilot; the causal chain and the fix are D378 (a refusal that
+   was decidable from the candidate fired mid-DAG instead of at preflight). The
+   deeper half — that a run's status collapses per-action outcomes into one bit
+   — is NOT yet fixed, and is the more important of the two.
+   The general lesson has a name in this document already: a gate that is
+   always red stops being a gate. Here it stopped being one at the exact moment
+   it was needed.
+4. **The field found things the gates did not.** The pilot filed 36 findings,
    including bugs every hermetic suite passed — a poll against a path that
    does not exist in the cloud API (the unit fake mirrored the driver's wrong
    assumption, so it was blind by construction, D273), and a transport
@@ -72,15 +85,15 @@ not a product with an SLA.**
    Two mechanisms now exist because of that (a live smoke and an
    endpoint-reality gate, D272/D274), but the lesson stands: internal gates
    under-sample reality.
-4. **Some declared attributes cannot be read back.** Several capability
+5. **Some declared attributes cannot be read back.** Several capability
    attributes the drivers can SET they cannot OBSERVE, so a reconcile of a
    bound resource reports them unverifiable rather than checked. The system is
    honest about it (D249/D136), but honest-about-a-gap is still a gap.
-5. **One reference verifier, one runtime.** The *verifier* is dual (Go + Python)
+6. **One reference verifier, one runtime.** The *verifier* is dual (Go + Python)
    and that is what conformance pins. The *runtime* (executor, ledger, drivers)
    is Go-only by design (D24) — there is no second implementation to differ against
    below the verifier.
-6. **The README summarises; DESIGN.md is the record.** The roadmap section is
+7. **The README summarises; DESIGN.md is the record.** The roadmap section is
    deliberately frozen at the ORIGINAL vertical slice (~D64/D75) for the shape of
    the thesis, with a "Since the vertical slice" summary carrying breadth, the
    self-wiring contracts, field hardening and both adversarial sweeps. That
@@ -90,10 +103,10 @@ not a product with an SLA.**
    the D287 failure in miniature. Corrected in D324, together with a service
    count that had drifted: the drivers certify 133 service mappings, not the
    ~128 the README claimed, which had silently counted capability TYPES.)
-7. **Probes have not measured a real failure.** The restore-test / reachability
+8. **Probes have not measured a real failure.** The restore-test / reachability
    machinery is built and consent-gated, but "a claim becomes a measurement" has
    not yet happened against a real recovery event.
-8. **Capsule DR and ledger compaction are mutually exclusive.** A capsule proves a
+9. **Capsule DR and ledger compaction are mutually exclusive.** A capsule proves a
    chain from GENESIS, so once `snapshot` compacts a ledger (D137) `backup` refuses
    every capability whose history predates the snapshot — in practice all of them.
    Emitting from the archive does not substitute: those capsules end at the

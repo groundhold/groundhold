@@ -368,3 +368,12 @@ func (p LambdaPlan) updateConfigBody() map[string]any {
 	}
 	return body
 }
+
+// lambdaLogGroupName is the CloudWatch Logs group AWS creates for a function
+// (D381). The shape is fixed by the service — `/aws/lambda/<functionName>` — so
+// it is derivable with no read, and derivable BEFORE the group exists: AWS makes
+// it on first invocation, and a retention guarantee that only applies after the
+// first log line is not a guarantee.
+func lambdaLogGroupName(functionName string) string {
+	return "/aws/lambda/" + functionName
+}
