@@ -1,54 +1,88 @@
 # Security + quality linting: gosec + staticcheck on top of golangci-lint's
-# default set (errcheck, staticcheck, unused, ineffassign, gosimple, govet).
+# default set (errcheck, staticcheck, unused, ineffassign, govet).
 # BLOCKING in CI (.github/workflows/security.yml). Every exclusion below is a
 # deliberate, documented decision — not a way to hide a real defect.
+#
+# Migrated to the v2 schema (D380) by `golangci-lint migrate`, then re-annotated:
+# the migrator preserves rules and strips comments, and in this file the comments
+# ARE the decisions. It is a semantics-preserving move — see `staticcheck.checks`.
+version: "2"
+
 run:
   timeout: 5m
 
 linters:
   enable:
     - gosec
-    - staticcheck
+  # staticcheck is in v2's default set, so it is not listed under `enable` —
+  # it runs either way. What changed is its SCOPE: v2 folded stylecheck (ST*)
+  # and quickfix (QF*) into it, neither of which this repo ever ran.
+  settings:
+    staticcheck:
+      # Semantics-preserving: SA* is what v1's `staticcheck` meant. Turning on
+      # ST*/QF* is a real decision with 25 findings attached (22 QF, 3 ST1005) —
+      # mostly "could use a tagged switch" plus three capitalised error strings.
+      # It may well be worth taking; it is not something a version bump should
+      # decide, and it is not something to decide inside a migration.
+      checks:
+        - all
+        - -ST*
+        - -QF*
+    errcheck:
+      exclude-functions:
+        # Releasing an flock in a defer: the unlock error is unactionable (the fd
+        # is being closed regardless).
+        - syscall.Flock
+  exclusions:
+    generated: lax
+    # golangci-lint's curated defaults (the v1 `exclude-use-default: true`).
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Test files are not the production security/error surface: httptest writers,
+      # fixture WriteFile, deterministic fuzz seeds (G404), self-signed httptest
+      # InsecureSkipVerify (G402), and 0644 tamper fixtures (G306) are all correct
+      # in tests.
+      - path: _test\.go
+        linters: [gosec, errcheck]
+      # The tool's PURPOSE is reading user-named files (contracts, candidates, state,
+      # ledgers, capsules) and running its OWN binary (the converge self-runner) or a
+      # user-configured notify command. Path/subprocess "taint" is inherent, not a bug.
+      - linters: [gosec]
+        text: G304|G204
+      # crypto/md5 is required by the S3 REST API (the Content-MD5 header), not used
+      # as a security primitive.
+      - linters: [gosec]
+        text: G401|G501
+      # secretManagerBaseURL is a public API endpoint URL, not a credential.
+      - path: internal/gcp/secretmanager\.go
+        linters: [gosec]
+        text: G101
+      # secretscan.go holds the DETECTION patterns for credentials (D364) — regexes
+      # describing the SHAPE of a secret, never a secret. gosec reads "AKIA…",
+      # "GOCSPX-" and the PEM headers and concludes the opposite of what they are.
+      # The irony is instructive but the finding is false.
+      - path: internal/contract/secretscan\.go
+        linters: [gosec]
+        text: G101
+      # Bounded integer conversions: the pace backoff shift (attempt is a small,
+      # capped retry counter) and the canonicalizer (numeric values are already
+      # constrained to the JSON-safe range upstream — D66).
+      - linters: [gosec]
+        text: G115
+    # `examples$` is in the migrator's default list and is DELIBERATELY absent
+    # here: this repo ships examples/ as a gated deliverable (D346), and if it
+    # ever gains Go it should be linted like anything else.
+    paths:
+      - third_party$
+      - builtin$
 
-linters-settings:
-  errcheck:
-    exclude-functions:
-      # Releasing an flock in a defer: the unlock error is unactionable (the fd
-      # is being closed regardless).
-      - syscall.Flock
-
-issues:
-  # keep golangci-lint's curated defaults (EXC0001..) and add ours.
-  exclude-use-default: true
-  exclude-rules:
-    # Test files are not the production security/error surface: httptest writers,
-    # fixture WriteFile, deterministic fuzz seeds (G404), self-signed httptest
-    # InsecureSkipVerify (G402), and 0644 tamper fixtures (G306) are all correct
-    # in tests.
-    - path: _test\.go
-      linters: [gosec, errcheck]
-    # The tool's PURPOSE is reading user-named files (contracts, candidates, state,
-    # ledgers, capsules) and running its OWN binary (the converge self-runner) or a
-    # user-configured notify command. Path/subprocess "taint" is inherent, not a bug.
-    - linters: [gosec]
-      text: "G304|G204"
-    # crypto/md5 is required by the S3 REST API (the Content-MD5 header), not used
-    # as a security primitive.
-    - linters: [gosec]
-      text: "G401|G501"
-    # secretManagerBaseURL is a public API endpoint URL, not a credential.
-    - path: internal/gcp/secretmanager\.go
-      linters: [gosec]
-      text: "G101"
-    # secretscan.go holds the DETECTION patterns for credentials (D364) — regexes
-    # describing the SHAPE of a secret, never a secret. gosec reads "AKIA…",
-    # "GOCSPX-" and the PEM headers and concludes the opposite of what they are.
-    # The irony is instructive but the finding is false.
-    - path: internal/contract/secretscan\.go
-      linters: [gosec]
-      text: "G101"
-    # Bounded integer conversions: the pace backoff shift (attempt is a small,
-    # capped retry counter) and the canonicalizer (numeric values are already
-    # constrained to the JSON-safe range upstream — D66).
-    - linters: [gosec]
-      text: "G115"
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$

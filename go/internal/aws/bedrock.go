@@ -174,6 +174,28 @@ func BuildBedrock(environment, capability string,
 				return BedrockPlan{}, fmt.Errorf("model.access must be a bool")
 			}
 			p.NeedsAccess = b
+			if b {
+				// D378. REFUSED HERE, in the pure core, not at create time.
+				//
+				// The refusal is a pure function of the candidate — no network, no
+				// live state — so it is knowable the moment the document is read.
+				// Deferring it to the create meant `apply` discovered it mid-DAG,
+				// AFTER sibling actions had already mutated production, and did so
+				// identically on every retry. A field partner deployed a bad image
+				// under exactly that shape and lost five minutes of production while
+				// the run's status said only what this refusal said.
+				//
+				// `Validate` is apply's up-front preflight (D43), so raising it here
+				// refuses the whole run before the first mutation — which is what
+				// "refusals happen before mutation" was always supposed to mean.
+				return BedrockPlan{}, fmt.Errorf(
+					"model.access=true cannot be created — access to a Bedrock model is a " +
+						"MANUAL gate granted through the console use-case form, and groundhold " +
+						"observes it rather than provisioning it. Grant the access, then adopt " +
+						"the profile (groundhold adopt) so the contract verifies it against " +
+						"reality; a create that cannot honor the attribute is refused before " +
+						"anything is mutated, not part-way through the plan")
+			}
 		case "service.managed":
 			if raw != true {
 				return BedrockPlan{}, fmt.Errorf("service.managed=false cannot be honored — groundhold manages the inference profile it stands up")

@@ -20,7 +20,7 @@ jobs:
     # symbol (stdlib or dependency). The toolchain is pinned in go/go.mod.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26.5"
@@ -36,13 +36,16 @@ jobs:
     # remaining exclusion is documented in go/.golangci.yml.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26.5"
-      - uses: golangci/golangci-lint-action@971e284b6050e8a5849b72094c50ab08da042db8 # v6.1.1
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v1.64.8
+          # v9 of the action installs from the /v2 module path, so the pinned
+          # version must be a v2 release — a v1 tag simply does not exist there,
+          # which is why the bare action bump failed to install anything (D380).
+          version: v2.6.2
           # goinstall builds golangci-lint with the runner's Go (1.26.5); the prebuilt
           # binary is compiled with go1.24 and refuses a module targeting a newer Go.
           install-mode: goinstall
@@ -56,7 +59,7 @@ jobs:
     # fails the build. gitleaks exits non-zero when it finds a leak.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: gitleaks
         env:
           GITLEAKS_VERSION: 8.30.1

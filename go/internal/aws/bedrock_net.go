@@ -261,14 +261,12 @@ func (d *Driver) createBedrock(region, environment, capability string,
 	if err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
-	// MANUAL-GATE: model.access cannot be provisioned nor honestly verified through
-	// these APIs — refuse rather than fabricate a grant. This is the honest posture
-	// the vocab demands (the driver OBSERVES access, it does not create it).
-	if plan.NeedsAccess {
-		return provider.CreateResult{Status: "failed",
-			Reason: "model access is a manual gate — grant it via the Bedrock console use-case form; " +
-				"groundhold observes model.access, it does not provision it (refusing to fake model.access=true)"}
-	}
+	// The MANUAL-GATE refusal used to live here and now lives in BuildBedrock
+	// (D378): it is a pure function of the candidate, so raising it in the pure
+	// core makes apply's up-front Validate refuse the whole run before the first
+	// mutation, instead of discovering it mid-DAG with siblings already applied.
+	// `plan.NeedsAccess` therefore cannot be true by the time this line runs —
+	// BuildBedrock returned an error above.
 
 	body := jsonBody(map[string]any{
 		"inferenceProfileName": plan.ProfileName,

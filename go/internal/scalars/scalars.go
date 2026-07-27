@@ -146,6 +146,29 @@ func Parse(v any) (*Scalar, error) {
 			items = append(items, s)
 		}
 		return &Scalar{List, items, x}, nil
+	case []string:
+		// D376. A DRIVER produces Go values, not decoded YAML, and the natural Go
+		// type for a set of regions or metric names is []string. Refusing it here
+		// made every `adopt` of such an attribute fail with "observation
+		// unparseable" — reported from the field on capability.ai.inference, and
+		// true of six observations across four capability types.
+		//
+		// The seam is why nothing caught it: the conformance suite supplies
+		// observations as YAML, which decodes to []any, so the values a test sees
+		// are never the values a driver emits. Widening here rather than boxing in
+		// each driver keeps the boundary honest — a list of strings IS a list, and
+		// the next driver should not have to know that.
+		items := make([]*Scalar, 0, len(x))
+		boxed := make([]any, 0, len(x))
+		for _, it := range x {
+			s, err := Parse(it)
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, s)
+			boxed = append(boxed, it)
+		}
+		return &Scalar{List, items, boxed}, nil
 	case map[string]any:
 		// money object form: {amount, currency}
 		if _, hasA := x["amount"]; hasA {

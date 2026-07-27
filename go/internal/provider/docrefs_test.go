@@ -462,3 +462,187 @@ func TestActionSubpathsSharePin(t *testing.T) {
 			repo, len(bySHA), strings.Join(sightings, "\n\t"))
 	}
 }
+
+// A self-hosted runner label must never survive the export (D377).
+//
+// The working repo runs its gates on the organisation's self-hosted fleet; the
+// public repo has no such runners. A workflow that asks for a label nobody offers
+// does not fail — it QUEUES, indefinitely. That is worse than a red check: a red
+// check says something, a permanently pending one says nothing while looking like
+// it is about to.
+//
+// The exporter rewrites the label, and this gate proves the rewrite still covers
+// every label the workflows actually use. A new self-hosted label added to a
+// workflow without a matching rewrite rule fails here, in the working repo, rather
+// than silently on the far side where nobody is watching the queue.
+func TestSelfHostedLabelsAreRewrittenOnExport(t *testing.T) {
+	root := repoRoot(t)
+	exporter, err := os.ReadFile(filepath.Join(root, "scripts", "export-public.sh"))
+	if err != nil {
+		t.Skip("no exporter here — this is the exported tree, where the rule has already applied")
+	}
+	dir := filepath.Join(root, ".github", "workflows")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Skipf("no workflows directory: %v", err)
+	}
+	// GitHub-hosted labels are the ones GitHub itself provides; anything else is a
+	// label only this organisation can satisfy.
+	hosted := map[string]bool{
+		"ubuntu-latest": true, "ubuntu-24.04": true, "ubuntu-22.04": true,
+		"macos-latest": true, "macos-14": true, "macos-15": true,
+		"windows-latest": true,
+	}
+	runsOn := regexp.MustCompile(`(?m)^\s*runs-on:\s*([A-Za-z0-9._-]+)\s*$`)
+	seen := map[string][]string{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yml") {
+			continue
+		}
+		// the canary workflows never cross the boundary, so their labels cannot
+		// strand anything on the far side
+		if strings.HasPrefix(e.Name(), "canary-") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		for _, m := range runsOn.FindAllStringSubmatch(string(raw), -1) {
+			if label := m[1]; !hosted[label] {
+				seen[label] = append(seen[label], e.Name())
+			}
+		}
+	}
+	// The exporter rewrites `runs-on:` with a sed PATTERN, not a literal list, so
+	// the gate has to apply that pattern rather than grep for the label. An earlier
+	// version checked for a literal mention and failed the moment the exporter
+	// generalised its rule to a family — a gate that only understands one spelling
+	// of the fix is a gate that fires on the fix.
+	rewrite := regexp.MustCompile(`runs-on: \)([^/]+)\$/`)
+	m := rewrite.FindSubmatch(exporter)
+	if m == nil {
+		t.Fatal("the exporter has no `runs-on:` rewrite rule — every self-hosted label " +
+			"would cross the boundary and queue forever on the far side")
+	}
+	covered, err := regexp.Compile("^" + string(m[1]) + "$")
+	if err != nil {
+		t.Fatalf("the exporter's rewrite pattern %q is not a valid regexp: %v", m[1], err)
+	}
+	for label, files := range seen {
+		sort.Strings(files)
+		if !covered.MatchString(label) {
+			t.Errorf("workflow label %q (in %v) is self-hosted and the exporter's rewrite "+
+				"pattern %q does not cover it — the public tree would carry a label nobody "+
+				"there can satisfy, and its checks would queue forever instead of failing.",
+				label, files, m[1])
+		}
+	}
+}
+
+// D384. A pool name that reaches the public tree is a small, permanent disclosure
+// of the private build estate, and the export's `runs-on:` guard cannot catch it:
+// that guard reads workflow FILES, and the leak was PROSE — a design entry
+// explaining which pool died and what else in the organisation runs on it.
+//
+// The export redacts entries marked `<!-- internal: ci-infrastructure -->`. This
+// gate holds the other end: if an entry NAMES the estate and is not marked, the
+// author is told here, at `make check`, rather than by the export refusing later
+// with a leak already written to disk.
+//
+// THE LABELS ARE NOT WRITTEN DOWN HERE. This file is exported; the exporter is not.
+// A gate that spelled them out would be the very disclosure it exists to prevent —
+// which is exactly what the first version of it did, caught by the export's own
+// denylist. It reads them from the exporter, and so cannot drift from it either.
+//
+// THE LIMIT, stated because it was measured: deleting the `build-estate:` tag blinds
+// this gate and it says so. Deleting ONE label from that line does not — the gate
+// simply stops asking about that label, and a later entry naming it would pass here
+// and pass the export. Deriving from a single source buys agreement between the two
+// ends; it cannot defend the source against being edited. That edit is a visible
+// one-line diff in the exporter, which is where the defence actually lives.
+func buildEstatePatterns(t *testing.T, root string) *regexp.Regexp {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(root, "scripts", "export-public.sh"))
+	if os.IsNotExist(err) {
+		// The exporter is deliberately not exported, so in the public tree this
+		// gate has nothing to read and nothing to guard: the redaction has already
+		// happened upstream. Skipping is the honest outcome, and it is the reason
+		// the labels can live in the exporter at all.
+		t.Skip("export-public.sh is private-side only; this gate does not apply here")
+	}
+	if err != nil {
+		t.Fatalf("read export-public.sh: %v", err)
+	}
+	var alts []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "DENY=") ||
+			!strings.Contains(line, "build-estate:") {
+			continue
+		}
+		// DENY="$DENY|a|b"   # build-estate: ...
+		open := strings.Index(line, `"`)
+		close := strings.Index(line[open+1:], `"`)
+		if open < 0 || close < 0 {
+			t.Fatalf("cannot parse the build-estate denylist line: %s", line)
+		}
+		body := strings.TrimPrefix(line[open+1:open+1+close], "$DENY|")
+		for _, alt := range strings.Split(body, "|") {
+			if alt = strings.TrimSpace(alt); alt != "" {
+				alts = append(alts, alt)
+			}
+		}
+	}
+	if len(alts) == 0 {
+		t.Fatal("no `build-estate:` entry in the export denylist — either the tag was " +
+			"dropped or the pools stopped being denied; both mean this gate is blind")
+	}
+	return regexp.MustCompile(strings.Join(alts, "|"))
+}
+
+func TestDesignEntriesNamingTheBuildEstateAreMarkedInternal(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "docs", "DESIGN.md"))
+	if err != nil {
+		t.Fatalf("read DESIGN.md: %v", err)
+	}
+	estate := buildEstatePatterns(t, root)
+	const marker = "<!-- internal: ci-infrastructure -->"
+
+	heading := regexp.MustCompile(`(?m)^## D\d+\.[^\n]*$`)
+	locs := heading.FindAllStringIndex(string(raw), -1)
+	if len(locs) == 0 {
+		t.Fatal("no design entries found — DESIGN.md structure changed")
+	}
+	for i, loc := range locs {
+		end := len(raw)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		entry := string(raw[loc[0]:end])
+		if !estate.MatchString(entry) {
+			continue
+		}
+		if !strings.Contains(entry, marker) {
+			t.Errorf("%s names the private build estate but carries no %s "+
+				"— the export would publish it", string(raw[loc[0]:loc[1]]), marker)
+		}
+	}
+}
+
+// The marker this gate tells authors to write must still be the one the export
+// acts on. If the two spellings diverge, every marked entry publishes in full.
+func TestExportRedactsTheMarkerThisGateTellsAuthorsToWrite(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "scripts", "export-public.sh"))
+	if os.IsNotExist(err) {
+		t.Skip("export-public.sh is private-side only; this gate does not apply here")
+	}
+	if err != nil {
+		t.Fatalf("read export-public.sh: %v", err)
+	}
+	if !strings.Contains(string(raw), "internal: ci-infrastructure") {
+		t.Error("export-public.sh no longer redacts internal design entries — " +
+			"the marker this gate tells authors to write would do nothing")
+	}
+}

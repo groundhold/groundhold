@@ -2,6 +2,7 @@ package aws
 
 import (
 	"encoding/json"
+	"groundhold/internal/scalars"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -354,11 +355,26 @@ func TestBedrock_CreateManualGateRefuses(t *testing.T) {
 		"modelSource":          "arn:aws:bedrock:eu-central-1:000000000000:inference-profile/" + bedrockProfile1,
 	}
 	res := d.createBedrock(bedrockRegion, "prod", bedrockCap, attrs, impl, 1)
-	if res.Status != "failed" || !strings.Contains(res.Reason, "manual gate") {
+	if res.Status != "failed" || !strings.Contains(res.Reason, "MANUAL gate") {
 		t.Fatalf("model.access=true create must honest-refuse the manual gate, got %+v", res)
 	}
 	if len(f.order) != 0 {
 		t.Fatalf("a manual-gate refusal must issue no Bedrock mutation; saw %v", f.order)
+	}
+
+	// D378, and the half that matters: the refusal must come from VALIDATE, which
+	// apply runs as an up-front preflight over every action (D43). Raised only at
+	// create time it fires mid-DAG, after sibling actions have already mutated —
+	// which is how a field partner deployed a bad image and lost production while
+	// the run reported nothing but this refusal.
+	//
+	// Validate takes no network and no fake: if it refuses, the whole run refuses
+	// before the first mutation.
+	if err := NewDriver(bedrockRegion).Validate("bedrock", bedrockCap, "prod", attrs, impl, 1); err == nil {
+		t.Fatal("Validate accepted a create that can only ever be refused — apply would " +
+			"mutate every sibling action first and discover this half-way through the plan")
+	} else if !strings.Contains(err.Error(), "MANUAL gate") {
+		t.Errorf("Validate refusal = %q, want the manual-gate reason", err)
 	}
 }
 
@@ -618,5 +634,33 @@ func TestBedrock_CreateAdoptsExisting(t *testing.T) {
 	res := d.createBedrock(bedrockRegion, "prod", bedrockCap, attrs, impl, 1)
 	if res.Status != "succeeded" || res.ProviderID != bedrockProviderID(bedrockRegion, profID) {
 		t.Fatalf("create-adoption must bind the existing owned profile, got %+v", res)
+	}
+}
+
+// D376. Every observation this driver emits must survive the SAME parse `adopt`
+// puts it through. Reported from the field: adopting a Bedrock inference profile
+// refused with `inference.destinationRegions: observation unparseable`, because
+// the driver emits a Go []string and the scalar parser accepted only []any.
+//
+// The driver's own tests all passed — they compare the Value directly and never
+// parse it. This assertion closes that gap where it was found: observe, then run
+// every value through the parser, exactly as adoption does.
+func TestBedrock_ObservationsSurviveTheAdoptParse(t *testing.T) {
+	f := newFakeBedrock()
+	srv := f.handler(t, newCapture())
+	defer srv.Close()
+	d := bedrockDriver(t, srv)
+
+	obs, _, err := d.observeBedrock(bedrockCap, bedrockProviderID(bedrockRegion, bedrockProfile1))
+	if err != nil {
+		t.Fatalf("observe: %v", err)
+	}
+	if len(obs) == 0 {
+		t.Fatal("no observations — this assertion would be vacuous")
+	}
+	for _, o := range obs {
+		if _, perr := scalars.Parse(o.Value); perr != nil {
+			t.Errorf("%s carries a value adopt cannot parse (%T): %v", o.Path, o.Value, perr)
+		}
 	}
 }

@@ -625,7 +625,10 @@ func Converge(o Options) int {
 			continue
 		}
 		status, exit := exitStatus(code)
-		reasons := append(lines(stderr), applyReasons(stdout)...)
+		// D379: what APPLIED goes first. A run that stopped part-way has already
+		// changed the world, and the refusal that stopped it says nothing about that.
+		reasons := append(lines(stderr), appliedSummary(stdout)...)
+		reasons = append(reasons, applyReasons(stdout)...)
 		// Part C: a STALE/reconcile/observation refusal carries a `next` — surface
 		// the exact remedy command (resume/observe with --at) instead of a dead end.
 		reasons = append(reasons, applyNext(stdout)...)
@@ -1003,6 +1006,54 @@ func applyReasons(stdout string) []string {
 		return res.Reasons
 	}
 	return nil
+}
+
+// appliedSummary lifts apply's PER-ACTION outcomes (Part A `outcomes`) and folds
+// them into one advisory line naming what actually happened (D379).
+//
+// apply has emitted this map since fail-isolation landed; nothing read it. So a
+// partially-applied run reported only its refusal, and the operator could not
+// tell from the status that a sibling action had already changed production —
+// which is how a field partner deployed a bad image and found the outage by
+// hand. `reasons` names every non-success; the SUCCESSES were nowhere.
+//
+// Advisory only: it never changes the status or the exit code. Those stay the
+// machine contract; this is the sentence a human needed and did not get.
+func appliedSummary(stdout string) []string {
+	var res struct {
+		Outcomes map[string]string `json:"outcomes"`
+	}
+	if json.Unmarshal([]byte(stdout), &res) != nil || len(res.Outcomes) == 0 {
+		return nil
+	}
+	byOutcome := map[string][]string{}
+	for id, oc := range res.Outcomes {
+		byOutcome[oc] = append(byOutcome[oc], id)
+	}
+	total := len(res.Outcomes)
+	succeeded := byOutcome["succeeded"]
+	sort.Strings(succeeded)
+
+	// The line leads with what CHANGED, because that is the fact an operator
+	// needs first when a run did not finish cleanly.
+	var out []string
+	if len(succeeded) > 0 {
+		out = append(out, fmt.Sprintf(
+			"%d of %d actions applied before the run stopped — the world HAS changed: %s",
+			len(succeeded), total, strings.Join(succeeded, ", ")))
+	} else {
+		out = append(out, fmt.Sprintf(
+			"0 of %d actions applied — nothing was changed", total))
+	}
+	for _, oc := range []string{"failed", "unknown", "throttled", "skipped"} {
+		ids := byOutcome[oc]
+		if len(ids) == 0 {
+			continue
+		}
+		sort.Strings(ids)
+		out = append(out, fmt.Sprintf("  %s: %s", oc, strings.Join(ids, ", ")))
+	}
+	return out
 }
 
 // applyNext lifts the advisory `next` (D230) the apply/plan child emitted for a

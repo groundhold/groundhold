@@ -10838,3 +10838,194 @@ host automation that WRITES to it. Anything that opens pull requests, bumps vers
 on the far side of a one-way boundary is generating work whose only possible outcomes are being
 discarded or being lost. The test to apply to any bot before enabling it on the public repo is not "is
 this useful" but "can what it produces survive the next sync".
+
+## D374. Reconcile parity, and why the gate mattered more than the eleven fixes
+`resume` exists to get a lost create out of `unknown`: re-derive the resource's identity, ask the
+provider whether it landed, conclude. Eleven services could create a resource and could not do that.
+They fell to the dispatch default — `unknown`, "not wired yet, reconcile manually" — which is
+fail-closed and honest, and also means the whole resume machinery did not apply to them.
+THE DISTRIBUTION IS THE FINDING. Azure had zero gaps; GCP had four; AWS had seven. Not because the
+Azure drivers are better, but because Azure's test suite required a reconcile row for every service in
+the create dispatch and the other two did not. D369 recorded this too narrowly — as "`ec2` and `gce`
+are not wired" — when the real fact was that nothing was asking anywhere except on one cloud.
+Worse, and worth stating plainly: FOUR of the eleven were added in the same session that noticed the
+pattern. `ebs` and `pd` predate the observation; `asg` and `mig` came after it was written down. The
+Azure half of the same family got its reconcile because the Azure gate refused the pull request. That is
+what an absent gate does — it does not merely preserve old debt, it lets someone who has just described
+the problem add to it.
+Both gates now exist, derived from `CanAuthor` so WITNESS services (D177) are exempt automatically: a
+witness never creates anything, so there is no lost outcome to conclude, and a service that stops being
+a witness is caught again the moment it does.
+On the eleven fixes, identity was the whole problem and it split three ways.
+A DETERMINISTIC NAME can be rebuilt from (environment, capability, generation), so a create with no
+persisted id is still concludable — asg, apprunner, the two serverless services, the three GCP compute
+groups.
+A SERVER-ASSIGNED id cannot be rebuilt, but EC2 accepts a `client-token` FILTER and the token this
+project derives is deterministic and generation-salted. So an instance is findable by the very handle
+that made its create idempotent — the token doing the second half of the job it exists for.
+NEITHER, for a volume (server-assigned id, and DescribeVolumes has no client-token filter) and a DNS
+record (attribute-derived identity). Both conclude ONLY from a pinned providerId. The tempting shortcut
+is a search by ownership tags, and it is wrong: the tags carry no generation, so it would match a
+PREVIOUS generation's resource and report that a create landed when it never ran. On a stateful
+capability that error puts a second disk beside the data. Refusing to conclude is the correct answer
+when the only available handle cannot distinguish generations.
+
+## D376. The seam between what a driver produces and what the parser accepts
+Reported from the field: adopting a Bedrock inference profile refused with
+`ai-inference.inference.destinationRegions: observation unparseable`, and the reporter's `converge` had
+been dying on every run since. Their diagnosis was that system CRIS profiles need special handling.
+They were wrong, and the truth is worse: the driver emits a Go `[]string`, and `scalars.Parse` accepted
+`[]any` but not `[]string`. EVERY adopt of that attribute failed — system profile or application
+profile, and on all three clouds. Six observations across four capability types were in the same state:
+`inference.destinationRegions` on Bedrock, Vertex AI and Azure OpenAI, and `dashboard.metrics` on all
+three.
+WHY NOTHING CAUGHT IT is the part worth keeping. The conformance suite supplies observations as YAML,
+and YAML decodes to `[]any`. A driver produces Go values directly, and the natural Go type for a set of
+regions is `[]string`. The two sets of types never met: driver tests compare an observation's Value and
+never parse it; conformance cases parse values that no driver produced. The seam had no test on either
+side of it, which is why a value every driver test accepted was refused by `adopt`.
+The fix is a widening at the boundary rather than boxing in each driver: a list of strings IS a list,
+and the next driver should not have to know that the parser is fussier than the type system. The
+property that makes the widening safe is pinned directly — a `[]string` and the `[]any` YAML decodes to
+must produce scalars with equal Kind, Value and RAW, because Raw is what canonicalization and hashing
+see. If they differed, the identical fact would hash differently depending on where it came from, and a
+contract satisfied through one path would be violated through the other.
+Three tests, each proven against the original defect: the origin-equality property; a behavioural
+round-trip in the driver where it was reported (observe, then parse every value exactly as adoption
+does); and a source-scanning gate asserting that every Go type the drivers use as an observation Value
+is one the parser accepts. The gate lists the accepted types explicitly and deliberately does NOT list
+`[]float64` — the parser refuses it and no driver emits it, so claiming it would assert support that
+does not exist, and leaving it out means the gate fails loudly the day a driver needs it.
+No conformance case accompanies this, and the reason is the finding itself: a conformance document
+cannot express a Go type. The defect lived precisely where the cross-language suite cannot reach, so
+the test that pins it has to be Go-side. That is a limit of the dual suite worth stating rather than
+papering over — it proves the two implementations agree on documents, not on the values their drivers
+construct.
+## D377. The gates run on the fleet the organisation already pays for
+_Internal CI infrastructure — this entry describes the private build estate rather than groundhold, and its body is omitted from the public record._
+
+## D378. A refusal that is knowable from the document must be raised before anything is mutated
+A field partner's `converge` ended `DIED` on every run because `capability.ai.inference` on AWS tried to
+CREATE a Bedrock application inference profile and refused: model access is a manual gate granted in a
+console, and the driver rightly declines to fake it. During one of those runs they deployed a bad image
+and lost roughly five minutes of production. The run's status was useless as a signal, because it looked
+identical whether the deployment had worked or killed the API — the permanently-failing action dominated
+it while a sibling action had already applied.
+The refusal was raised in `createBedrock`, at apply time, in the middle of the action DAG. But
+`plan.NeedsAccess` comes straight from `attrs["model.access"]` in `BuildBedrock` — a PURE function of the
+candidate, no network, no live state. The refusal was decidable the moment the document was read, and it
+was deferred to the one moment when refusing is most expensive: after siblings have mutated.
+Worse, it was deferred DELIBERATELY. The old comment said the value was "recorded as NeedsAccess so the
+create can honest-refuse the manual-gate". Honest, yes — and in the wrong place, every single run,
+forever, because nothing about the answer ever changes.
+The fix is to raise it in the pure core. `Validate` is apply's UP-FRONT preflight (D43): it runs over
+every action (lines 417-544) hundreds of lines before the first `prov.Create` (850+), so a refusal there
+aborts the whole run with an empty ledger. Moving one error out of the network shell and into
+`BuildBedrock` turns "mutate, then refuse, then repeat tomorrow" into "refuse before touching anything".
+The partner's incident could not have happened: no sibling would have run, no image would have shipped.
+THE GENERAL RULE, which is bigger than Bedrock: `refusals happen before mutation` held per-ACTION and
+not per-RUN. A driver may only defer a refusal to execution time when the answer depends on something it
+cannot know earlier — live state, a server-assigned id, a response. A refusal computable from the
+candidate alone belongs in the builder, where the preflight can see it. When in doubt the question is
+not "is this refusal honest" but "could this refusal have been given before we changed anything".
+A gap in the existing tests is closed alongside it. `TestApplyRefusesWhenDriverValidateRejects` used a
+SINGLE-action plan, where "nothing was appended to the ledger" is also what an interleaved
+validate-then-execute implementation would produce. It could not distinguish the two, and the difference
+is the whole point. The new case uses two actions and refuses the second: if validation were interleaved,
+the first would already have run and left events behind.
+## D380. A version bump must not decide what the gate enforces
+Dependabot's bump of `golangci-lint-action` to v9 failed to install anything:
+`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v1.64.8`. The action's v9 installs
+from the `/v2` module path, and a v1 tag does not exist there. So the bump was never a bump — it was a
+MIGRATION wearing one, and it sat red because the two halves (the action, the tool) had moved apart.
+The config migrated cleanly with `golangci-lint migrate`, and then needed two corrections the migrator
+cannot make.
+The first is that the migrator strips comments. In most repositories that is cosmetic; here the header
+says "every exclusion below is a deliberate, documented decision", and six exclusions each carry the
+reasoning that justifies them — why md5 is the S3 Content-MD5 header and not a primitive, why the
+credential-DETECTION patterns trip the credential detector. Losing those turns a documented decision
+into an unexplained suppression, which is the thing the file exists to prevent. They are restored.
+The second matters more. v2 folded stylecheck (ST*) and quickfix (QF*) into `staticcheck`, so the same
+word now means considerably more: 25 findings appeared that v1 never reported — 22 "could use a tagged
+switch", three capitalised error strings. None is a defect; several are arguably improvements. But a
+version bump that silently acquires 25 new opinions has changed what the gate ENFORCES, and that is a
+decision, not a consequence. `staticcheck.checks` is pinned to `all, -ST*, -QF*` — exactly the SA* scope
+v1's `staticcheck` meant — and the migrated config then reports zero issues, which is the proof that the
+move preserved the gate rather than merely passing it.
+Turning ST*/QF* on may well be worth doing. It should be its own change, with its own diff, reviewed by
+someone who has looked at the 25.
+One smaller thing, recorded because silence about it would be the same mistake: the migrator's default
+excluded-paths list contains `examples$`, and this repo SHIPS `examples/` as a gated deliverable (D346).
+It is deliberately absent from the exported list, so that if those examples ever gain Go they are linted
+like anything else.
+## D379. A run that stopped part-way has already changed the world, and must say so
+The same field incident as D378, from the other end. `converge` reported `DIED` on a permanently-refusing
+action while a sibling action had already deployed an image. The status was identical whether the
+deployment had worked or killed the API, so the operator had no reason to look, and found the outage by
+hand several minutes later. Their words: not irritation — "loss of the only signal from the last
+deployment step".
+The information was never missing. `apply` has emitted a per-action `outcomes` map since fail-isolation
+landed (Part A): `succeeded | failed | unknown | throttled | skipped`, keyed by action id. Nothing read
+it. `converge` lifted only `code`, `reasons` and `next` from its child, and `reasons` names every
+NON-success by construction — so the successes were nowhere, and "a sibling already applied" was a fact
+the system held and never said.
+So converge now lifts it, and the summary LEADS with what changed: "1 of 2 actions applied before the run
+stopped — the world HAS changed: a-update-api". A run that mutated nothing says that instead, plainly,
+because the distinction is the entire value of the line. It is advisory: the status and the exit code are
+the machine contract and are untouched.
+This is a presentation fix for a presentation failure, and it is deliberately NOT the whole repair. The
+larger half remains open and is recorded here so it is not mistaken for done: on the apply-failure path
+converge returns immediately (converge.go, phase 5), skipping observe-evidence, the convergence check and
+the REACHABILITY PROBE — the mechanism built precisely to catch "applied, but the public edge does not
+answer". Evidence-gathering is conditioned on the run succeeding when it should be conditioned on
+anything having mutated. In the incident, converge changed production and then declined to look at what
+it had changed. Fixing that means restructuring converge's control flow rather than adding a line to its
+output, and it deserves its own slice.
+The general shape, worth carrying: a status is a summary, and a summary of a partial outcome is a lie
+unless it names the part that happened. Four-valued verdicts exist so the system can say "I do not know";
+this is the neighbouring failure — the system knew, and had no sentence in which to say it.
+## D381. A retention guarantee has to land on the group that holds the lines
+Reported from the field, and it belongs to the category this project exists to close: DECLARED but not
+PROVEN — with `converge` green on the wrong side of it.
+A contract declared `capability.monitoring.logs` with `retention.days: 365d`. groundhold created a log
+group, set 365 days on it, and reported APPLIED. The group had zero bytes and zero streams and never
+held anything. The application's logs were in `/aws/lambda/<fn>`, which AWS creates itself on first
+invocation, with NO retention — kept forever. The partner's contract said 365 days to an auditor while
+the real logs never expired. Their sentence is the right one: worse than no declaration, because a
+declaration lulls you.
+The capability was not wrong and neither were they. The vocabulary says plainly that this type is the
+log group ITSELF, and names AWS-native groups (flow logs, EKS control-plane) as the case it was built
+for; the driver has always accepted `implementation.log_group` to point at an existing one. The gap is
+narrower and sharper: for a Lambda the group is named after the FUNCTION, and the function name is
+assigned by groundhold at create. So the operand could not be written — not because the medium lacked
+expressiveness, but because the value did not exist when the document was written.
+That is precisely what intra-plan references are for (D226), and the whole fix is to publish the fact:
+the Lambda driver now declares `logGroupName` as a typed create output, derived from the function name
+with no read. A log capability then points at it with `{$ref: {capability: api, output: logGroupName}}`.
+No interpolation, no join, no new binding concept — the producer computes the entire value, which is the
+only shape invariant #4 permits.
+Deriving it rather than reading it is deliberate: the group does not exist until the first invocation,
+and a retention guarantee that only attaches after the first log line is not a guarantee.
+ON TESTING, because the discipline earned its keep. The conformance case pins the compile-time wiring —
+the declared output, the reference's type, the dependency edge. It does NOT pin the VALUE: gutting the
+resolver leaves the case green, which I confirmed by gutting it. Removing the DECLARATION does fail it.
+So the value is pinned separately, in a driver test with a fake, and mutation-checked against a wrong
+string. Two halves, two tests, because one test covering "the feature works" would have covered neither.
+The partner's own rule, adopted here: a test nobody has seen fail is not guarding anything.
+Left open, deliberately: metrics and traces have no capability. They flagged a boundary worth recording
+before one exists — on serverless the sensible shape is NOT an OTLP endpoint, because the execution
+environment is frozen after the response and a periodic exporter never gets to flush. If a metrics type
+is ever designed, it should name a destination, not assume a collector.
+
+## D382. Which pool is alive is a measurement, not a belief
+_Internal CI infrastructure — this entry describes the private build estate rather than groundhold, and its body is omitted from the public record._
+
+## D383. The release path was down and nobody was going to notice
+_Internal CI infrastructure — this entry describes the private build estate rather than groundhold, and its body is omitted from the public record._
+
+## D384. The export guarded file contents and forgot prose
+_Internal CI infrastructure — this entry describes the private build estate rather than groundhold, and its body is omitted from the public record._
+
+## D385. The leak gate was the leak
+_Internal CI infrastructure — this entry describes the private build estate rather than groundhold, and its body is omitted from the public record._
+

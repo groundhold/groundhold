@@ -126,14 +126,32 @@ func TestLambdaFunctionURLOutputs(t *testing.T) {
 		t.Fatalf("functionUrlDomain = %v", outs["functionUrlDomain"])
 	}
 
-	// private function: no URL -> the two pid outputs only, no error.
+	// private function: the URL outputs are OMITTED, never fabricated. Asserted by
+	// their absence rather than by counting the map — the derived outputs (arn,
+	// name, log group) are a growing set, and a count would fail on every honest
+	// addition while catching nothing.
 	hasURL = false
 	outs, err = d.deriveOutputs("lambda", pid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(outs) != 2 || outs["functionUrl"] != nil {
+	if outs["functionUrl"] != nil || outs["functionUrlDomain"] != nil {
 		t.Fatalf("a private function must omit URL outputs, got %v", outs)
+	}
+	// the derived-from-the-pid outputs are present either way
+	for _, want := range []string{"functionArn", "functionName", "logGroupName"} {
+		if outs[want] == nil {
+			t.Errorf("%s is missing for a private function; it derives from the "+
+				"providerId and does not depend on a URL", want)
+		}
+	}
+	// D381, and the assertion the conformance case cannot make: it pins the
+	// declared output and the reference's type, not the VALUE. This string is what
+	// a retention guarantee lands on — a wrong one sets 365 days on a group nobody
+	// writes to while the real logs keep forever.
+	if outs["logGroupName"] != "/aws/lambda/pv-api-prod-1a2b3c4d" {
+		t.Errorf("logGroupName = %v, want the group AWS creates for this function",
+			outs["logGroupName"])
 	}
 }
 
