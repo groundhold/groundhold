@@ -11029,3 +11029,6 @@ _Internal CI infrastructure — this entry describes the private build estate ra
 ## D385. The leak gate was the leak
 _Internal CI infrastructure — this entry describes the private build estate rather than groundhold, and its body is omitted from the public record._
 
+## D386. Darwin runs in the one repository that can run it
+_Internal CI infrastructure — this entry describes the private build estate rather than groundhold, and its body is omitted from the public record._
+
