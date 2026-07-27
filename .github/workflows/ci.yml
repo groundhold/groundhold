@@ -73,28 +73,41 @@ jobs:
       - name: build + test
         working-directory: go
         run: go build ./... && go test ./...
+      # D386: darwin/arm64 COMPILES here, on a linux runner, and that is all this
+      # step claims. It is not a test — nothing is executed, no behaviour is
+      # observed. It exists because the darwin TEST now runs downstream (see
+      # below), and a compile break caught at merge beats the same break caught at
+      # the next sync. Cheap, and honest about being the lesser check.
+      - name: darwin/arm64 cross-compiles
+        working-directory: go
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+        run: go build ./... && go vet ./...
 
-  # Portability, darwin/arm64: the release cross-builds it and nothing else tests it,
-  # so macos-latest (arm64) exercises the exact platform that only ever compiled.
+  # Portability, darwin/arm64: the release cross-builds it, so something has to
+  # actually RUN it. macos-latest (arm64) exercises the exact platform that would
+  # otherwise only ever have compiled.
   #
-  # This is the ONLY job in the repository that still runs on GitHub-hosted minutes,
-  # and macOS bills at a 10x multiplier — there is no self-hosted darwin. Running it
-  # on every push to every branch made it the single largest line in this repo's CI
-  # bill for a check that guards a RELEASE artifact. It now runs when something lands
-  # on the default branch: a pull request that breaks darwin is caught at merge,
-  # before any tag.
+  # D386: it runs on the PUBLIC MIRROR ONLY, and the condition says so literally.
+  # There is no self-hosted darwin, this repository's organisation has stopped
+  # buying GitHub-hosted minutes, and the mirror's Actions budget is separate and
+  # healthy — the job passes there today, on this same code, with real steps.
+  #
+  # DELETING the job would have been the obvious way to honour "everything
+  # self-hosted", and it would have been wrong: the mirror's ci.yml is EXPORTED
+  # FROM THIS FILE, so removing the job here removes darwin coverage from the only
+  # place it still works. The `if` keeps one definition running in exactly the one
+  # repository that can run it.
+  #
+  # THE COST, stated: a darwin break is now caught at the next sync rather than at
+  # merge into this repository. The cross-compile step above narrows that window to
+  # breaks that compile but misbehave — it does not close it.
   #
   # NOT on tags, whatever an earlier version of this comment claimed — `on:` above
-  # has no `tags:` filter, so a release tag never reaches this job. The default
-  # branch is the only place darwin is ever exercised.
-  #
-  # It is currently FAILING, and honestly: with the organisation's Actions budget at
-  # 100% no hosted runner can be acquired, so the job dies at assignment with zero
-  # steps and an empty runner name. darwin/arm64 is therefore UNVERIFIED, and the
-  # release still cross-builds it. That red is not papered over — restoring it is a
-  # billing decision, not a code change.
+  # has no `tags:` filter, so a release tag never reaches this job.
   portability-darwin:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.repository_owner == 'groundhold'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
