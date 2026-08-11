@@ -139,6 +139,11 @@ jobs:
       # assumption). A release that cannot reach the endpoint is a release worth
       # pausing.
       - name: Live protocol + endpoint-reality (no credentials, egress only)
+        # Live AWS reachability needs the private CI pool's egress — the notes below frame
+        # AWS egress as a private-box concern, and the public mirror's runner does not
+        # provide it. This runs on the private source before the sync; skip on the mirror,
+        # like the mutation and export gates above.
+        if: github.repository_owner != 'groundhold'
         working-directory: go
         env:
           GROUNDHOLD_LIVE_AWS_SMOKE: "1"
