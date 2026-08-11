@@ -157,16 +157,37 @@ func (d *Driver) observeAuditLogs(capability, providerID string) ([]provider.Obs
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"log sink not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"log sink not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		// a project-level sink captures audit logs across every region (GCP audit logs
 		// are project-global) — measured structurally, not fabricated.
 		{Path: "scope.multiRegion", Value: true, Derivation: "measured"},
-		{Path: "delivery.assured", Value: !doc.Disabled, Derivation: "measured"},
+		// D738: `!disabled` is the sink's own configuration flag, not a measurement that
+		// anything is delivered. This driver creates the sink with
+		// `uniqueWriterIdentity=true` and says so in its own create comment — "the
+		// operator grants it write access on the destination, a separate capability" —
+		// and NOTHING ever checks that the grant happened. Until it does, the sink
+		// exists, reports `disabled: false`, and writes zero entries to the destination
+		// forever, which is the shape D725 fixed for CloudTrail one cloud over.
+		//
+		// GCP publishes no delivery status for a sink, so there is no reading to
+		// upgrade to. What can be corrected is the CLAIM: this is config-intent, and
+		// after D722 a hard constraint asking for provider-api evidence gets `unknown`
+		// and blocks, instead of `satisfied` on an audit trail that may deliver nothing.
+		{Path: "delivery.assured", Value: !doc.Disabled, Derivation: "config-intent"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
 	diags := []string{
+		"delivery.assured is config-intent: it reads the sink's own `disabled` flag. The " +
+			"sink's writer identity must hold write access on the destination for anything " +
+			"to arrive, and that grant is a separate capability this driver does not verify",
 		"location.region omitted — a log sink is global; residency lives in the destination operand (a separate capability), not derivable from the sink",
 		"integrity.logValidation omitted — GCP has no CloudTrail log-file-validation equivalent (unsupported, never fabricated)",
 		"encryption.customerManagedKeys omitted — CMEK is a property of the destination operand (a separate capability), not the sink",
@@ -321,7 +342,7 @@ func (d *Driver) discoverAuditLogs(region string) ([]provider.Discovered, []stri
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.audit.trail",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

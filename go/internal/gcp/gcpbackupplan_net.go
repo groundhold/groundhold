@@ -141,9 +141,15 @@ func (d *Driver) observeBackupPlanGCP(capability, providerID string) ([]provider
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"backup plan not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"backup plan not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: location, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		// A backupdr backup plan has no cross-region copy — the posture is always false,
@@ -303,58 +309,49 @@ func (d *Driver) deleteBackupPlanGCP(capability, environment, providerID string)
 // never hides the plans another location returned. Plans are regional, so region
 // filters on the swept location.
 func (d *Driver) discoverBackupPlansGCP(region string) ([]provider.Discovered, []string, error) {
-	var locations []string
-	var diags []string
-	if region != "" {
-		locations = []string{region}
-	} else {
-		locs, err := d.backupDRDiscoverLocations()
-		if err != nil {
-			return nil, nil, err
-		}
-		locations = locs
-	}
-	var out []provider.Discovered
-	for _, loc := range locations {
-		status, body, err := d.call("GET", fmt.Sprintf(
-			"%s/projects/%s/locations/%s/backupPlans", d.backupDRBase(), d.Project, loc), nil)
-		if err != nil {
-			diags = append(diags, "backupPlans.list "+loc+": "+err.Error())
-			continue
-		}
-		if status != http.StatusOK {
-			diags = append(diags, fmt.Sprintf("backupPlans.list %s: HTTP %d", loc, status))
-			continue
-		}
-		var resp struct {
-			BackupPlans []struct {
-				Name string `json:"name"`
-			} `json:"backupPlans"`
-		}
-		if err := json.Unmarshal(body, &resp); err != nil {
-			diags = append(diags, loc+": "+readBody("backupPlans.list", status).Error())
-			continue
-		}
-		for _, pl := range resp.BackupPlans {
-			planID := leafName(pl.Name)
-			if planID == "" {
-				continue
+	return d.sweepEachLocation(region, d.backupDRDiscoverLocations,
+		func(loc string) ([]provider.Discovered, []string, error) {
+			var out []provider.Discovered
+			var diags []string
+			status, body, err := d.call("GET", fmt.Sprintf(
+				"%s/projects/%s/locations/%s/backupPlans", d.backupDRBase(), d.Project, loc), nil)
+			if err != nil {
+				// D642: the LIST failed — this location was not read.
+				return nil, nil, fmt.Errorf("%s", "backupPlans.list "+loc+": "+err.Error())
 			}
-			pid := gbpProviderID(d.Project, loc, planID)
-			obs, odiags, oerr := d.observeBackupPlanGCP("", pid)
-			if oerr != nil {
-				diags = append(diags, planID+": "+oerr.Error())
-				continue
+			if status != http.StatusOK {
+				// D642: the LIST failed — this location was not read.
+				return nil, nil, fmt.Errorf("%s", fmt.Sprintf("backupPlans.list %s: HTTP %d", loc, status))
 			}
-			for _, dg := range odiags {
-				diags = append(diags, planID+": "+dg)
+			var resp struct {
+				BackupPlans []struct {
+					Name string `json:"name"`
+				} `json:"backupPlans"`
 			}
-			out = append(out, provider.Discovered{
-				ProviderID:   pid,
-				ResourceType: "capability.backup.plan",
-				Observations: obs,
-			})
-		}
-	}
-	return out, diags, nil
+			if err := json.Unmarshal(body, &resp); err != nil {
+				// D642: the LIST failed — this location was not read.
+				return nil, nil, fmt.Errorf("%s", loc+": "+readBody("backupPlans.list", status).Error())
+			}
+			for _, pl := range resp.BackupPlans {
+				planID := leafName(pl.Name)
+				if planID == "" {
+					continue
+				}
+				pid := gbpProviderID(d.Project, loc, planID)
+				obs, odiags, oerr := d.observeBackupPlanGCP("", pid)
+				if oerr != nil {
+					diags = append(diags, planID+": "+oerr.Error())
+					continue
+				}
+				for _, dg := range odiags {
+					diags = append(diags, planID+": "+dg)
+				}
+				out = append(out, provider.Discovered{
+					ProviderID:   pid,
+					ResourceType: "capability.backup.plan",
+					Observations: provider.WithoutAbsence(obs),
+				})
+			}
+			return out, diags, nil
+		})
 }

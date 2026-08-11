@@ -243,6 +243,21 @@ func (d *Driver) ensureSESInboundActive(region, pid string, plan SESInboundPlan,
 // is NO "failed" branch: the rule already exists, so a failed activation is never a
 // clean nothing-happened.
 func (d *Driver) setActiveOutcome(region, pid, ruleSet string) provider.CreateResult {
+	// D997: SES has exactly ONE active receipt rule set per region, and activating
+	// ours REPLACES whatever is active — silently stopping the inbound mail that set
+	// routes. The delete path already refuses to touch a stranger's rule for exactly
+	// this reason ("a rule set is where inbound mail is ROUTED"); this is the missing
+	// symmetric guard on activation. Read the active set first and only (re-)activate
+	// over one that is ours (the generated prefix), empty, or none. A foreign active
+	// set is left untouched and our rule stays INACTIVE — honest (it receives nothing)
+	// rather than hijacking someone else's mail routing under a "succeeded".
+	if active, aerr := d.activeReceiptRuleSetName(region); aerr != nil {
+		return provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: "rule exists but the region's active rule set could not be read — refusing to activate blind, since replacing an unknown active set could stop its mail; reconcile: " + aerr.Error()}
+	} else if active != "" && active != ruleSet && !strings.HasPrefix(active, sesInboundGeneratedPrefix) {
+		return provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("rule exists but is INACTIVE — region %s already has active receipt rule set %q (not groundhold's), which routes inbound mail; activating ours would silently disable it. Deactivate that set (or drop this capability) first — refusing to hijack the region's mail routing", region, active)}
+	}
 	st, body, err := d.sesInbCall(region, "SetActiveReceiptRuleSet", map[string]string{"RuleSetName": ruleSet})
 	switch {
 	case err != nil:
@@ -272,9 +287,15 @@ func (d *Driver) observeSESInbound(capability, providerID string) ([]provider.Ob
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"receipt rule not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"receipt rule not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "spam.filtered", Value: r.ScanEnabled, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
@@ -306,6 +327,19 @@ func (d *Driver) deleteSESInbound(capability, environment, providerID string) pr
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 
+	// OWNERSHIP (D446). A SES receipt rule carries NO TAGS — the API offers none — so
+	// its deterministic NAME is the only ownership evidence, exactly as for budgets
+	// (D443), IAM policies and metric filters (D444). The comment below already reasoned
+	// that "the NAME is the ownership marker"; it just never checked that the name is one
+	// we would produce. A rule set is where inbound mail is ROUTED, so deleting a
+	// stranger's rule silently stops delivering their mail.
+	if !strings.HasPrefix(ruleSet, sesInboundGeneratedPrefix) ||
+		!strings.HasPrefix(rule, sesInboundGeneratedPrefix) {
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("receipt rule %q in rule set %q is not named by groundhold — "+
+				"refusing to delete a rule this contract does not own (a receipt rule carries "+
+				"no tags, so its name is the only ownership evidence there is)", rule, ruleSet)}
+	}
 	_, found, rerr := d.describeReceiptRule(region, ruleSet, rule)
 	if rerr != nil {
 		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: "pre-delete read gave no answer — reconcile: " + rerr.Error()}
@@ -373,6 +407,19 @@ func (d *Driver) updateSESInbound(capability, environment, providerID string,
 	plan.RuleSetName, plan.RuleName = ruleSet, rule
 
 	// ownership re-check: the NAME is the marker; the rule must still exist.
+	// OWNERSHIP (D446). A SES receipt rule carries NO TAGS — the API offers none — so
+	// its deterministic NAME is the only ownership evidence, exactly as for budgets
+	// (D443), IAM policies and metric filters (D444). The comment below already reasoned
+	// that "the NAME is the ownership marker"; it just never checked that the name is one
+	// we would produce. A rule set is where inbound mail is ROUTED, so deleting a
+	// stranger's rule silently stops delivering their mail.
+	if !strings.HasPrefix(ruleSet, sesInboundGeneratedPrefix) ||
+		!strings.HasPrefix(rule, sesInboundGeneratedPrefix) {
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("receipt rule %q in rule set %q is not named by groundhold — "+
+				"refusing to delete a rule this contract does not own (a receipt rule carries "+
+				"no tags, so its name is the only ownership evidence there is)", rule, ruleSet)}
+	}
 	_, found, rerr := d.describeReceiptRule(region, ruleSet, rule)
 	if rerr != nil {
 		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
@@ -469,7 +516,7 @@ func (d *Driver) discoverSESInbound(region string) ([]provider.Discovered, []str
 				diags = append(diags, ruleSet+"/"+rule+": "+dg)
 			}
 			found = append(found, provider.Discovered{
-				ProviderID: pid, ResourceType: "capability.email.inbound", Observations: obs})
+				ProviderID: pid, ResourceType: "capability.email.inbound", Observations: provider.WithoutAbsence(obs)})
 		}
 	}
 	return found, diags, nil

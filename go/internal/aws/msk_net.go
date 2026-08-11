@@ -19,6 +19,19 @@ import (
 
 const mskPath = "/api/v2/clusters"
 
+// mskDeletePath — MSK carries two API versions and they do NOT cover the same verbs.
+// Create, List and Describe have V2 forms under /api/v2/clusters; DeleteCluster has
+// only the V1 form. Measured against real AWS with no credentials (D717):
+//
+//	GET    /api/v2/clusters/<arn> -> "Missing Authentication Token"                real
+//	DELETE /v1/clusters/<arn>     -> "Missing Authentication Token"                real
+//	DELETE /api/v2/clusters/<arn> -> "Unable to determine service/operation name"  absent
+//
+// An unmatched route answers 403, which the mutation classifier reads as a denied
+// permission — so a wrong URL here does not look like a wrong URL. It looks like the
+// account is missing an IAM grant.
+const mskDeletePath = "/v1/clusters"
+
 func (d *Driver) mskBase(region string) string {
 	if d.MSKBaseURL != "" {
 		return d.MSKBaseURL
@@ -52,24 +65,28 @@ func (d *Driver) mskDo(method, region, path string, body []byte) (int, []byte, e
 		map[string]string{"Content-Type": "application/json"}, body)
 }
 
+// D879: restJson1 camelCase wire names. PascalCase tags parsed every field to its
+// zero value on a real ListClustersV2 response — an empty ClusterName never matched
+// our name (so a live cluster read as absent) and State/tags/encryption read blank,
+// the same golden-hidden defect as apigateway (D878), here in the read direction.
 type mskCluster struct {
-	ClusterArn  string            `json:"ClusterArn"`
-	ClusterName string            `json:"ClusterName"`
-	State       string            `json:"State"`
-	Tags        map[string]string `json:"Tags"`
+	ClusterArn  string            `json:"clusterArn"`
+	ClusterName string            `json:"clusterName"`
+	State       string            `json:"state"`
+	Tags        map[string]string `json:"tags"`
 	Provisioned struct {
 		CurrentBrokerSoftwareInfo struct {
-			KafkaVersion string `json:"KafkaVersion"`
-		} `json:"CurrentBrokerSoftwareInfo"`
+			KafkaVersion string `json:"kafkaVersion"`
+		} `json:"currentBrokerSoftwareInfo"`
 		EncryptionInfo struct {
 			EncryptionInTransit struct {
-				ClientBroker string `json:"ClientBroker"`
-			} `json:"EncryptionInTransit"`
+				ClientBroker string `json:"clientBroker"`
+			} `json:"encryptionInTransit"`
 			EncryptionAtRest struct {
-				DataVolumeKMSKeyId string `json:"DataVolumeKMSKeyId"`
-			} `json:"EncryptionAtRest"`
-		} `json:"EncryptionInfo"`
-	} `json:"Provisioned"`
+				DataVolumeKMSKeyId string `json:"dataVolumeKMSKeyId"`
+			} `json:"encryptionAtRest"`
+		} `json:"encryptionInfo"`
+	} `json:"provisioned"`
 }
 
 // getMSKByName resolves the cluster our deterministic name identifies (ListClustersV2
@@ -78,11 +95,18 @@ type mskCluster struct {
 func (d *Driver) getMSKByName(region, name string) (mskCluster, bool, error) {
 	const op = "ListClustersV2"
 	st, resp, err := d.mskDo("GET", region, mskPath+"?clusterNameFilter="+url.QueryEscape(name), nil)
-	if err != nil || st != http.StatusOK {
+	// D521: this read `err != nil || st != StatusOK` and handed BOTH to
+	// readTransport, which dereferences err.Error() — so every HTTP error
+	// response (err nil, status not 200) panicked the process. The third
+	// instance of this exact shape; the absence probe is what reaches it.
+	if err != nil {
 		return mskCluster{}, false, readTransport(op, err)
 	}
+	if st != http.StatusOK {
+		return mskCluster{}, false, readHTTP(op, st, awsErrCode(resp))
+	}
 	var out struct {
-		ClusterInfoList []mskCluster `json:"ClusterInfoList"`
+		ClusterInfoList []mskCluster `json:"clusterInfoList"`
 	}
 	if json.Unmarshal(resp, &out) != nil {
 		return mskCluster{}, false, readBody(op, st)
@@ -179,13 +203,19 @@ func (d *Driver) observeMSK(capability, providerID string) ([]provider.Observati
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"cluster not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"cluster not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		// an MSK cluster is always multi-AZ.
-		{Path: "availability.class", Value: "regional", Derivation: "config-intent"},
+		{Path: "availability.class", Value: "regional", Derivation: "platform-invariant"},
 	}
 	var diags []string
 	// encryption.inTransit reads Provisioned.EncryptionInfo.ClientBroker.
@@ -231,7 +261,13 @@ func (d *Driver) deleteMSK(capability, environment, providerID string) provider.
 		return provider.CreateResult{Status: "failed",
 			Reason: "cluster tags do not match — refusing to delete a resource that is not ours"}
 	}
-	st, resp, e := d.mskDo("DELETE", region, mskPath+"/"+url.PathEscape(c.ClusterArn), nil)
+	// D880: the cluster ARN is single-encoded on the wire (rfc3986: colons AND slashes,
+	// one path segment), exactly as botocore serializes DeleteCluster against the
+	// non-greedy /v1/clusters/{clusterArn} route — raw slashes would split into extra
+	// segments and 404. The signer double-encodes the canonical (%253A/%252F) to match
+	// what AWS computes. url.PathEscape was wrong twice over: it left colons raw and it
+	// single-encoded a wire the old signer then single-encoded again — a guaranteed 403.
+	st, resp, e := d.mskDo("DELETE", region, mskDeletePath+"/"+rfc3986(c.ClusterArn), nil)
 	if e != nil {
 		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("delete outcome unknown: %v", e)}
 	}
@@ -247,5 +283,19 @@ func (d *Driver) deleteMSK(capability, environment, providerID string) provider.
 		}
 		return provider.CreateResult{Status: "failed", Reason: fmt.Sprintf("delete HTTP %d (%s)", st, mskErr(resp))}
 	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// ---- poll to absence (D968 class, D974) ----
+	// The delete is async: the cluster enters DELETING, not gone. Reporting succeeded
+	// here tombstones a data-bearing Kafka cluster still live. Poll to a confirmed
+	// not-found as createMSK polls to ACTIVE; unknown on timeout keeps the handle.
+	deadline := d.Now().Add(d.PollTimeout)
+	for {
+		if _, found, rerr := d.getMSKByName(region, cluster); rerr == nil && !found {
+			return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // confirmed gone
+		}
+		if d.Now().After(deadline) {
+			return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+				Reason: "cluster still deleting at poll timeout — reconcile via ListClusters"}
+		}
+		time.Sleep(d.PollInterval)
+	}
 }

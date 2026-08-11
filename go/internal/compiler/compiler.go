@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"groundhold/internal/canonical"
 	"sort"
 	"strings"
 
@@ -104,6 +105,12 @@ type Action struct {
 	// is validated against the deposed projection, not the binding —
 	// which by definition points at the orphan's successor.
 	Deposed bool `json:"deposed,omitempty"`
+	// FieldReclaim (D699) carries the contract's scoped allow_field_reclaim consent
+	// into the SEALED plan, so a write refused by another field manager may take the
+	// fields this mapping declares. It is sealed rather than re-derived at apply for
+	// the reason every consent here is: granting it after sealing must produce a
+	// DIFFERENT plan, not silently change what an existing one does.
+	FieldReclaim bool `json:"fieldReclaim,omitempty"`
 	// RequiredPermissions (D75): the provider permissions this action's
 	// driver call sequence needs — deterministic, sorted, deduped, from
 	// provider.PermissionsFor. Enters the plan hash; the executor preflights
@@ -159,6 +166,28 @@ type Toolchain struct {
 // candAttrs is the raw attribute map for a capability — feeds the
 // attribute-aware permission table (D75/D76: e.g. a public Cloud Run
 // service needs IAM permissions a private one does not).
+// permAttrs is candAttrs plus the capability's implementation OPERANDS, namespaced
+// under an "impl:" prefix no attribute path can collide with (D852).
+//
+// The permission table was operand-blind, and that blindness cost real accuracy in
+// both directions: it forced supersets where a create's needs depend on an operand,
+// and it could not express a need that exists ONLY because an operand is present.
+// The `invokers` operand is the second kind — a private function with declared
+// callers needs lambda:AddPermission and lambda:GetPolicy, and a private function
+// without them needs neither, which an existing conformance case pins.
+//
+// Only the compiler's call is operand-aware. `apply` recomputes the same table with
+// attributes alone and UNIONS the result with the sealed declaration, so a narrower
+// recomputation there can never drop a permission the plan already carries.
+func permAttrs(cand *contract.Candidate, capID string) map[string]any {
+	out := candAttrs(cand, capID)
+	impl, _ := cand.Extras[capID]["implementation"].(map[string]any)
+	for k, v := range impl {
+		out["impl:"+k] = v
+	}
+	return out
+}
+
 func candAttrs(cand *contract.Candidate, capID string) map[string]any {
 	out := map[string]any{}
 	for p, v := range cand.Capabilities[capID] {
@@ -218,6 +247,10 @@ type Body struct {
 	Unverified    []UnverifiedCapability `json:"unverified,omitempty"` // D249
 	NoOp          []NoOpCapability       `json:"noop,omitempty"`       // Part B
 	Preconditions []Precondition         `json:"preconditions"`
+	// Advisories (D388) are things the compile NOTICED — not proven, not
+	// blocking, and carried IN THE PLAN so an agent reads them. They never
+	// touch preconditions, writes or any verdict.
+	Advisories []Advisory `json:"advisories,omitempty"`
 }
 
 // BlockedCapability (D249) is a BOUND capability the compile could not reconcile at
@@ -395,7 +428,15 @@ func Compile(c *contract.Contract, cand *contract.Candidate,
 		if capRaw, ok := c.Capabilities[capID]; ok {
 			if typ, _ := capRaw["type"].(string); typ != "" {
 				if voc, ok := vocabs[typ]; ok {
-					vocabVersions[typ] = voc.Version
+					// D634: pin the vocabulary's CONTENT, not just its version
+					// string. `stateful:` alone decides whether a delete is refused
+					// by the contract's own autonomy block, and a version string is
+					// not evidence about the file it names.
+					h, herr := canonical.HashVocabulary(voc)
+					if herr != nil {
+						return nil, herr
+					}
+					vocabVersions[typ] = voc.Version + " " + h
 				}
 			}
 		}
@@ -445,14 +486,58 @@ func Compile(c *contract.Contract, cand *contract.Candidate,
 				continue // a witness / retired-unbound capability was never authored
 			}
 			stateful := policy.StatefulOf(c, capID, vocabs)
+			protection := policy.ProtectionOf(c, capID, vocabs)
 			if policy.ForbidsDeleteStateful(c) && stateful {
 				return nil, fmt.Errorf(
 					"retiring %s destroys a stateful capability and the "+
 						"contract forbids delete_stateful", capID)
 			}
+			// D698: this capability's delete removes a CONTROL, not a resource.
+			// D47's rule — a protection is never auto-lifted; lifting it is an
+			// explicit prior step — is why a delete refuses while deletionProtection
+			// is on and why S3 refuses under a compliance hold. Threat detection is
+			// `stateful: false`, so none of that friction applied, and a plain
+			// retirement switched it off. The blast radius also depends on state
+			// nobody recorded: create adopts an already-on control silently, so this
+			// can disable a guard that predates groundhold entirely.
+			if policy.ProtectionOf(c, capID, vocabs) &&
+				!policy.AllowsProtectionLift(c, capID) {
+				return nil, fmt.Errorf(
+					"retiring %s would switch OFF a protection (its delete removes a "+
+						"control, not a resource) — a protection is never lifted as a "+
+						"side effect. Either add `autonomy.allow_protection_lift: [%s]` "+
+						"to say so deliberately, or drop the capability from the contract "+
+						"entirely, which stops asserting it and leaves the control ON "+
+						"(posture then reports it as unmanaged, which is true)",
+					capID, capID)
+			}
 			gen := in.Generations[capID]
 			if gen < 1 {
 				gen = 1
+			}
+			// D570: own BEFORE destroy, the same rule the replacement delete below
+			// states and follows. Adoption BINDS; it does not stamp ownership, and a
+			// driver refuses to delete an object carrying no ownership label — so
+			// adopt → retire with nothing in between produced a plan that could not
+			// apply. Found by following posture's own shadow note on a live cluster
+			// ("ADOPT it under a minimal contract, then declare state: retired and
+			// converge"), which describes exactly that sequence.
+			retireClaimID := ""
+			if in.Adopted[capID] && !in.Claimed[capID] {
+				if _, ok := in.providerFor(prov).(provider.Claimer); ok {
+					retireClaimID = "a-claim-" + capID
+					actions = append(actions, Action{
+						ID:                  retireClaimID,
+						Capability:          capID,
+						Operation:           "claim",
+						Target:              target,
+						IdempotencyKey:      idemKey(report.CandidateHash, capID+":claim"),
+						TargetProviderID:    in.Bindings[capID],
+						TargetGeneration:    gen,
+						RequiredPermissions: provider.PermissionsFor(prov, svc, "claim", permAttrs(cand, capID)),
+						Risk:                claimRisk(),
+					})
+				}
 			}
 			actions = append(actions, Action{
 				ID:                  "a-delete-" + capID,
@@ -460,21 +545,61 @@ func Compile(c *contract.Contract, cand *contract.Candidate,
 				Operation:           "delete",
 				Target:              target,
 				IdempotencyKey:      idemKey(report.CandidateHash, capID+":delete"),
+				DependsOn:           withClaim(nil, retireClaimID),
 				TargetProviderID:    in.Bindings[capID],
 				TargetGeneration:    gen,
-				RequiredPermissions: provider.PermissionsFor(prov, svc, "delete", candAttrs(cand, capID)),
-				Risk:                deleteRisk(stateful),
+				RequiredPermissions: provider.PermissionsFor(prov, svc, "delete", permAttrs(cand, capID)),
+				Risk:                deleteRisk(stateful, protection),
 			})
 			continue
 		}
 
 		if witness {
-			witnessed = append(witnessed, WitnessRecord{
+			// D640: a witness gets no ACTION — the driver would refuse one — but it
+			// must still be COMPARED. This branch used to `continue` before any drift
+			// check, so on a live cluster:
+			//
+			//   - a candidate naming a Flux Kustomization that does not exist
+			//     converged ("the world already matches the candidate", exit 0), and
+			//   - a BOUND witness whose declared source.repoURL differed from the
+			//     measured one converged too — while `adopt` refused the identical
+			//     mismatch with "adoption must not lie".
+			//
+			// Same fact, same ledger, two verdicts. A capability that cannot be
+			// written is exactly the one whose drift a human must be told about,
+			// because nothing will fix it automatically.
+			rec := WitnessRecord{
 				Capability: capID,
 				Provider:   prov,
 				Service:    svc,
 				Reason:     "not-authorable",
-			})
+			}
+			if in.Bindings[capID] == "" {
+				rec.Reason = "not-authorable-and-unbound"
+				blocked = append(blocked, BlockedCapability{
+					Capability: capID,
+					Reason: "witness capability is not bound — nothing has been " +
+						"observed to match the candidate against, and groundhold " +
+						"cannot create it (the driver only reads this service)",
+				})
+			} else if changes, _, _, _, cerr := classifyBound(
+				cand, capID, prov, svc, in, vocabs[capTypeOf(c, capID)]); cerr == nil &&
+				len(changes) > 0 {
+				rec.Reason = "not-authorable-and-drifted"
+				paths := make([]string, 0, len(changes))
+				for _, ch := range changes {
+					paths = append(paths, ch.Path)
+				}
+				sort.Strings(paths)
+				blocked = append(blocked, BlockedCapability{
+					Capability: capID,
+					Reason: "witness capability has drifted from the candidate on " +
+						strings.Join(paths, ", ") + " — groundhold can only READ this " +
+						"service, so nothing here will converge it; fix the resource " +
+						"or the candidate",
+				})
+			}
+			witnessed = append(witnessed, rec)
 			continue
 		}
 
@@ -485,7 +610,7 @@ func Compile(c *contract.Contract, cand *contract.Candidate,
 				Operation:           "create",
 				Target:              target,
 				IdempotencyKey:      idemKey(report.CandidateHash, capID),
-				RequiredPermissions: provider.PermissionsFor(prov, svc, "create", candAttrs(cand, capID)),
+				RequiredPermissions: provider.PermissionsFor(prov, svc, "create", permAttrs(cand, capID)),
 				Risk:                createRisk(cand, capID),
 			})
 			continue
@@ -509,7 +634,7 @@ func Compile(c *contract.Contract, cand *contract.Candidate,
 					Operation:           "create",
 					Target:              target,
 					IdempotencyKey:      idemKey(report.CandidateHash, capID),
-					RequiredPermissions: provider.PermissionsFor(prov, svc, "create", candAttrs(cand, capID)),
+					RequiredPermissions: provider.PermissionsFor(prov, svc, "create", permAttrs(cand, capID)),
 					Risk:                createRisk(cand, capID),
 				})
 				continue
@@ -553,7 +678,7 @@ func Compile(c *contract.Contract, cand *contract.Candidate,
 					IdempotencyKey:      idemKey(report.CandidateHash, capID+":claim"),
 					TargetProviderID:    in.Bindings[capID],
 					TargetGeneration:    in.Generations[capID],
-					RequiredPermissions: provider.PermissionsFor(prov, svc, "claim", candAttrs(cand, capID)),
+					RequiredPermissions: provider.PermissionsFor(prov, svc, "claim", permAttrs(cand, capID)),
 					Risk:                claimRisk(),
 				})
 			}
@@ -566,6 +691,7 @@ func Compile(c *contract.Contract, cand *contract.Candidate,
 			// typo must not quietly propose "create empty DB, delete
 			// old DB".
 			stateful := policy.StatefulOf(c, capID, vocabs)
+			protection := policy.ProtectionOf(c, capID, vocabs)
 			if stateful {
 				if policy.ForbidsDeleteStateful(c) {
 					return nil, fmt.Errorf(
@@ -597,7 +723,7 @@ func Compile(c *contract.Contract, cand *contract.Candidate,
 				TargetGeneration: newGen,
 				Replaces: &ReplaceInfo{ProviderID: in.Bindings[capID],
 					Generation: oldGen, Because: immutable},
-				RequiredPermissions: provider.PermissionsFor(prov, svc, "create", candAttrs(cand, capID)),
+				RequiredPermissions: provider.PermissionsFor(prov, svc, "create", permAttrs(cand, capID)),
 				Risk:                createRiskV,
 			})
 			actions = append(actions, Action{
@@ -609,8 +735,8 @@ func Compile(c *contract.Contract, cand *contract.Candidate,
 				DependsOn:           withClaim([]string{createID}, claimID), // create BEFORE destroy; own BEFORE delete
 				TargetProviderID:    in.Bindings[capID],
 				TargetGeneration:    oldGen,
-				RequiredPermissions: provider.PermissionsFor(prov, svc, "delete", candAttrs(cand, capID)),
-				Risk:                deleteRisk(stateful),
+				RequiredPermissions: provider.PermissionsFor(prov, svc, "delete", permAttrs(cand, capID)),
+				Risk:                deleteRisk(stateful, protection),
 			})
 			continue
 		}
@@ -625,6 +751,13 @@ func Compile(c *contract.Contract, cand *contract.Candidate,
 			}
 			continue // converged — no action for this capability
 		}
+		// D283 fold, applied to the update path: carry the resolved literals for
+		// any wired $ref operand so apply's foldedImplementation substitutes them
+		// before the driver builds the patch — otherwise the builder drops the raw
+		// $ref and a config re-push (e.g. Lambda's UpdateFunctionConfiguration)
+		// STRIPS the wired env var as collateral of an unrelated change. The
+		// classifyBound resolution above already succeeded, so this cannot err.
+		_, updFolds, _ := foldDriftRefs(capID, implementationOf(cand, capID), cand, in)
 		actions = append(actions, Action{
 			ID:                  "a-update-" + capID,
 			Capability:          capID,
@@ -632,12 +765,25 @@ func Compile(c *contract.Contract, cand *contract.Candidate,
 			Target:              target,
 			IdempotencyKey:      idemKey(report.CandidateHash, capID+":update"),
 			Changes:             changes,
+			Folds:               updFolds,
 			DependsOn:           withClaim(nil, claimID), // own BEFORE patch
-			RequiredPermissions: provider.PermissionsFor(prov, svc, "update", candAttrs(cand, capID)),
-			Risk:                updateRisk(),
+			RequiredPermissions: provider.PermissionsFor(prov, svc, "update", permAttrs(cand, capID)),
+			Risk:                updateRisk(changes),
+			// D699: sealed here, honoured by the driver at apply. Only an update can
+			// meet a field-ownership conflict on a live object.
+			FieldReclaim: policy.AllowsFieldReclaim(c, capID),
 		})
 	}
 	if len(actions) == 0 && len(blocked) == 0 && len(unverified) == 0 {
+		// D564: the silent-ignore guard runs BEFORE convergence is declared. D530
+		// made it iterate capabilities instead of actions precisely so a converged
+		// deployment would be covered — and this return sat sixty lines in front of
+		// it, so the FULLY converged case (the one reported from the field) still
+		// short-circuited. Its test called refuseUnknownOperands directly and so
+		// proved the function while the wiring stayed broken.
+		if err := refuseUnknownOperands(actions, cand, in); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("%s", ErrNothingToChange)
 	}
 	// actions == 0 with blocked/unverified present is NOT "nothing to change": a
@@ -723,6 +869,10 @@ func Compile(c *contract.Contract, cand *contract.Candidate,
 			Unverified:    unverified,
 			NoOp:          noop,
 			Preconditions: preconds,
+			Advisories: append(append(adviseUnattachedLogGroup(c, cand, in),
+				adviseExistenceNotWitnessed(in)...),
+				append(adviseUnprovableHardConstraint(c, vocabs),
+					adviseChargeableComponent(c, cand)...)...),
 		},
 	}, nil
 }
@@ -761,6 +911,7 @@ func CompileDeposed(c *contract.Contract, cand *contract.Candidate,
 		}
 		capID := dep.Capability
 		stateful := policy.StatefulOf(c, capID, vocabs)
+		protection := policy.ProtectionOf(c, capID, vocabs)
 		if policy.ForbidsDeleteStateful(c) && stateful {
 			return nil, fmt.Errorf(
 				"deleting deposed %s of %s destroys a stateful capability "+
@@ -817,8 +968,8 @@ func CompileDeposed(c *contract.Contract, cand *contract.Candidate,
 			TargetProviderID:    dep.ProviderID,
 			TargetGeneration:    dep.Generation,
 			Deposed:             true,
-			RequiredPermissions: provider.PermissionsFor(prov, svc, "delete", candAttrs(cand, capID)),
-			Risk:                deleteRisk(stateful),
+			RequiredPermissions: provider.PermissionsFor(prov, svc, "delete", permAttrs(cand, capID)),
+			Risk:                deleteRisk(stateful, protection),
 		})
 		if !written[capID] {
 			written[capID] = true
@@ -1069,7 +1220,16 @@ func classifyBound(cand *contract.Candidate, capID, prov, svc string,
 		// which the caller isolated as a block — a legal update silently collapsed to
 		// an empty SEALED plan (Acme field regression). The apply boundary already
 		// filters here (attributesRaw); the reconcile classifier must too.
-		targets, terr := od.OperandTargets(svc, nonProjectionAttrs(cand, capID, voc), impl)
+		// Resolve wired $ref operands to the bound producer's fresh output BEFORE
+		// deriving the desired shape (D283 fold, applied to the update path). The
+		// builder drops a raw $ref, so an unfolded desired would OMIT the wired var
+		// and plan to STRIP it — a silent env delete on a no-op converge. Refuse
+		// (re-observe first) when a wired value is not derivable; never strip.
+		foldedImpl, _, ferr := foldDriftRefs(capID, impl, cand, in)
+		if ferr != nil {
+			return nil, nil, "", nil, ferr
+		}
+		targets, terr := od.OperandTargets(svc, nonProjectionAttrs(cand, capID, voc), foldedImpl)
 		if terr != nil {
 			// building the desired operand shape refused (e.g. a partial VpcConfig)
 			// — isolate THIS capability (D249), never abort the whole compile.
@@ -1101,7 +1261,7 @@ func classifyBound(cand *contract.Candidate, capID, prov, svc string,
 				continue
 			}
 			class, note := in.providerFor(prov).ClassifyChange(
-				svc, tgt.Path, rec.Value, tgt.Desired, impl)
+				svc, tgt.Path, rec.Value, tgt.Desired, foldedImpl)
 			switch class {
 			case "mutable", "caveated":
 				changes = append(changes, Change{Path: tgt.Path, From: rec.Value,
@@ -1117,30 +1277,154 @@ func classifyBound(cand *contract.Candidate, capID, prov, svc string,
 	return changes, immutable, "", unverifiable, nil
 }
 
-func deleteRisk(stateful bool) Risk {
+func deleteRisk(stateful, protection bool) Risk {
 	dataLoss := "none"
 	if stateful {
 		dataLoss = "certain"
+	}
+	// D837: SecurityExposure was "none" for every delete, which is a CLAIM — the thing
+	// updateRisk's comment says never to make where the direction is not derivable. For a
+	// capability the vocabulary marks `protection: true` (D698) the direction is not merely
+	// derivable, it is the point: the resource IS a control, so removing it is the plainest
+	// exposure a plan can carry. Removing an ordinary resource is not an exposure by itself,
+	// so that answer stays "none" rather than becoming a shrug.
+	exposure := "none"
+	if protection {
+		exposure = "certain"
 	}
 	return Risk{
 		Reversibility:       "R4",
 		DataLoss:            dataLoss,
 		Downtime:            "certain",
-		SecurityExposure:    "none",
+		SecurityExposure:    exposure,
 		CostDelta:           Money{Amount: 0, Currency: "EUR"},
 		IdentityReplacement: true,
 	}
 }
 
-func updateRisk() Risk {
-	return Risk{
+// updateRisk derives an update's risk vector from its CHANGE SET (D628).
+//
+// It used to take no arguments and return a constant: every update, on every provider,
+// for every change, was `dataLoss: none, securityExposure: none`. So a single action
+// that turns encryption at rest OFF and public exposure ON reported no security
+// exposure, in the plan a human reviews before consenting — and an update that cuts a
+// log retention from ten years to seven days reported no data loss.
+//
+// What is derivable here is the DIRECTION of a change the compiler can already see.
+// Where the direction is not derivable, the answer is "possible", never "none": the
+// compiler has established nothing about it, and `none` is a claim.
+func updateRisk(changes []Change) Risk {
+	r := Risk{
 		Reversibility:       "R1",
-		DataLoss:            "none",
+		DataLoss:            "possible", // an update may drop data; see below
 		Downtime:            "possible", // Cloud SQL patches can restart
-		SecurityExposure:    "none",
+		SecurityExposure:    "possible",
 		CostDelta:           Money{Amount: 0, Currency: "EUR"},
 		IdentityReplacement: false,
 	}
+	if len(changes) == 0 {
+		return r
+	}
+	for _, c := range changes {
+		if weakensSecurity(c) {
+			r.SecurityExposure = "certain"
+		}
+		if dropsData(c) {
+			r.DataLoss = "certain"
+		}
+	}
+	return r
+}
+
+// securityPaths are attribute prefixes whose weakening is an exposure by definition:
+// the vocabulary groups them under these namespaces, and the DIRECTION is readable
+// from the change itself. An attribute outside them leaves SecurityExposure at
+// "possible" — unknown, not absent.
+var securityPaths = []string{"encryption.", "security.", "network.publicExposure",
+	"network.publicAccess", "iam.", "auth.",
+	// D945: the threat-detection posture toggles. detection.enabled / protection.kubernetes
+	// / protection.malware are bools that WEAKEN when switched OFF (true→false) — turning a
+	// security control off. Their paths were outside the list, so an in-place update that
+	// disabled GuardDuty/SCC/Defender rode through on plain --yes with securityExposure
+	// "possible" (the protection-lift gate D698 only binds on delete, not update).
+	"detection.", "protection."}
+
+// apiExposureLevel ranks a Kubernetes API-server endpoint's reachability so a move toward
+// a MORE public endpoint reads as exposing: private (0) < mixed (1, a public endpoint plus
+// authorized networks) < public (2, 0.0.0.0/0). An unrecognized value ranks between, so a
+// move to public still counts and a move to private still de-escalates.
+func apiExposureLevel(v any) int {
+	s, _ := v.(string)
+	switch s {
+	case "private":
+		return 0
+	case "public":
+		return 2
+	default: // mixed (or unknown)
+		return 1
+	}
+}
+
+func weakensSecurity(c Change) bool {
+	// D945: network.apiExposure is a STRING ENUM (public|private|mixed) that governs whether
+	// a cluster's API/control-plane endpoint is internet-reachable. It is neither a bool nor
+	// under network.public*, so the bool-only allow-list below missed it entirely — flipping
+	// a K8s API server private→public applied under plain --yes with no exposure consent,
+	// opening the control plane to 0.0.0.0/0. A move UP the exposure rank is a weakening.
+	if c.Path == "network.apiExposure" {
+		return apiExposureLevel(c.To) > apiExposureLevel(c.From)
+	}
+	relevant := false
+	for _, p := range securityPaths {
+		if strings.HasPrefix(c.Path, p) {
+			relevant = true
+			break
+		}
+	}
+	if !relevant {
+		return false
+	}
+	from, fromOK := c.From.(bool)
+	to, toOK := c.To.(bool)
+	if !fromOK || !toOK {
+		return false // not a boolean flip: direction unknown, stays "possible"
+	}
+	// publicExposure/publicAccess weaken when they go TRUE; everything else
+	// (encryption, security, auth) weakens when it goes FALSE.
+	if strings.HasPrefix(c.Path, "network.public") {
+		return !from && to
+	}
+	return from && !to
+}
+
+// dropsData reports a change that provably shortens how long data is kept or how much
+// of it there is. Only a comparable NUMERIC decrease counts; anything else stays
+// "possible".
+func dropsData(c Change) bool {
+	relevant := false
+	for _, p := range []string{"retention.", "backup.", "storage.", "capacity."} {
+		if strings.HasPrefix(c.Path, p) {
+			relevant = true
+			break
+		}
+	}
+	if !relevant {
+		return false
+	}
+	// Reuse the verifier's own comparator rather than writing a second numeric
+	// parser: it already knows durations, sizes and the no-coercion rule, and a
+	// second implementation of "is this smaller" would be one more copy to drift.
+	from, ferr := scalars.Parse(c.From)
+	to, terr := scalars.Parse(c.To)
+	if ferr != nil || terr != nil {
+		return false
+	}
+	lte, err := scalars.Operators["lte"](to, from)
+	if err != nil || !lte {
+		return false // incomparable, or it grew — either way not a provable drop
+	}
+	eq, err := scalars.Operators["equals"](to, from)
+	return err == nil && !eq
 }
 
 // claimRisk: taking authorship of an already-existing resource stamps an
@@ -1425,7 +1709,160 @@ func wireReferences(actions []Action, cand *contract.Candidate, in Inputs, candi
 	return detectRefCycle(actions)
 }
 
+// foldDriftRefs resolves the $ref operands in a BOUND capability's implementation
+// to concrete literals BEFORE the operand-drift classifier derives the desired
+// operand shape (F-LC3). It applies the SAME D283 fold as wireReferences' create
+// path — a bound producer's FRESH outputs.<name> observation, kind-checked — and
+// like that path REFUSES (never a literal fallback, never a stale reading) when
+// the value is not derivable.
+//
+// Without it, a driver's builder DROPS a raw $ref (BuildLambda: isRefShape → skip,
+// because a $ref is resolved only on the create path). So the DESIRED env would
+// OMIT a wired var, drift against the create-time-resolved observation, and the
+// reconcile would plan to STRIP it — a no-op converge silently deleting a wired
+// env var and reporting success (the $ref-on-update data loss). Refusing here
+// keeps wireReferences (create) and the drift classifier (update) resolving a
+// wired operand identically; they must stay in sync.
+func foldDriftRefs(consumerCap string, impl map[string]any, cand *contract.Candidate, in Inputs) (map[string]any, []OperandFold, error) {
+	var folds []OperandFold
+	resolve := func(slot string, ref outRef) (any, error) {
+		if ref.Capability == consumerCap {
+			return nil, refErr(consumerCap, slot, fmt.Sprintf(
+				"%s.%s references its own output — a dependency cycle (D226)", consumerCap, slot))
+		}
+		pExtras := cand.Extras[ref.Capability]
+		pProv, _ := pExtras["provider"].(string)
+		if pProv == "" {
+			pProv = in.BindingProviders[ref.Capability]
+		}
+		pSvc, _ := pExtras["service"].(string)
+		kind, ok := outputKind(in.providerFor(pProv), pSvc, ref.Output)
+		if !ok {
+			return nil, refErr(consumerCap, slot, fmt.Sprintf(
+				"%s.%s references output %q that capability %q does not produce (D226)",
+				consumerCap, slot, ref.Output, ref.Capability))
+		}
+		if in.Bindings[ref.Capability] == "" {
+			// Unbound producer: a wired operand of a bound resource can only be
+			// reconciled once its producer is bound — otherwise there is no concrete
+			// value to compare against, and dropping the $ref would strip the var.
+			return nil, refErr(consumerCap, slot, fmt.Sprintf(
+				"%s.%s references %q, which the ledger does not bind — create/adopt the "+
+					"producer before reconciling a resource wired to it (D283)",
+				consumerCap, slot, ref.Capability))
+		}
+		if in.EvalClock <= 0 {
+			return nil, fmt.Errorf("%s.%s: evaluation clock unset — cannot judge the wired "+
+				"output's staleness (N1)", consumerCap, slot)
+		}
+		rec, has := in.Outputs[ref.Capability][ref.Output]
+		if !has {
+			return nil, fmt.Errorf("%s.%s: bound producer %q has no outputs.%s observation "+
+				"(observe records a bound resource's declared outputs) — re-observe first",
+				consumerCap, slot, ref.Capability, ref.Output)
+		}
+		obsClock, terr := ledger.ParseTs(rec.ObservedAt)
+		if terr != nil || in.EvalClock-obsClock > rec.TTLSeconds {
+			return nil, fmt.Errorf("%s.%s: outputs.%s of %q — observation is stale — re-observe first",
+				consumerCap, slot, ref.Output, ref.Capability)
+		}
+		if in.EvalClock-obsClock < 0 {
+			return nil, fmt.Errorf("%s.%s: outputs.%s of %q — observation dated after the "+
+				"evaluation time — cannot reconcile against it", consumerCap, slot, ref.Output, ref.Capability)
+		}
+		val, kindErr := provider.OutputValueOfKind(rec.Value, kind)
+		if kindErr != "" {
+			return nil, refErr(consumerCap, slot, fmt.Sprintf(
+				"%s.%s: outputs.%s of %q %s (D226)", consumerCap, slot, ref.Output, ref.Capability, kindErr))
+		}
+		// Record the fold so the UPDATE action carries it (like a create's D283
+		// fold): apply's foldedImplementation substitutes the literal before the
+		// driver builds the patch, and foldStaleReason re-judges it at apply's --at.
+		folds = append(folds, OperandFold{
+			Slot: slot, Capability: ref.Capability, Output: ref.Output,
+			Value: val, ObservedAt: rec.ObservedAt, TTLSeconds: rec.TTLSeconds,
+		})
+		return val, nil
+	}
+
+	// Walk operand slots exactly as wireReferences does: a top-level $ref, or a
+	// $ref nested one level in a map operand (e.g. environment[DB_HOST]). Copy on
+	// write so the candidate's stored implementation is never mutated.
+	var out map[string]any
+	ensure := func() {
+		if out == nil {
+			out = make(map[string]any, len(impl))
+			for k, v := range impl {
+				out[k] = v
+			}
+		}
+	}
+	slots := make([]string, 0, len(impl))
+	for k := range impl {
+		slots = append(slots, k)
+	}
+	sort.Strings(slots)
+	for _, slot := range slots {
+		ref, isRef, err := parseOutputRef(impl[slot])
+		if err != nil {
+			return nil, nil, refErr(consumerCap, slot, fmt.Sprintf("%s.%s: %v", consumerCap, slot, err))
+		}
+		if isRef {
+			val, rerr := resolve(slot, ref)
+			if rerr != nil {
+				return nil, nil, rerr
+			}
+			ensure()
+			out[slot] = val
+			continue
+		}
+		sub, ok := impl[slot].(map[string]any)
+		if !ok {
+			continue
+		}
+		var subOut map[string]any
+		subKeys := make([]string, 0, len(sub))
+		for k := range sub {
+			subKeys = append(subKeys, k)
+		}
+		sort.Strings(subKeys)
+		for _, sk := range subKeys {
+			r, isR, e := parseOutputRef(sub[sk])
+			if e != nil {
+				return nil, nil, refErr(consumerCap, slot+"."+sk,
+					fmt.Sprintf("%s.%s.%s: %v", consumerCap, slot, sk, e))
+			}
+			if !isR {
+				continue
+			}
+			val, rerr := resolve(slot+"."+sk, r)
+			if rerr != nil {
+				return nil, nil, rerr
+			}
+			if subOut == nil {
+				subOut = make(map[string]any, len(sub))
+				for k, v := range sub {
+					subOut[k] = v
+				}
+			}
+			subOut[sk] = val
+		}
+		if subOut != nil {
+			ensure()
+			out[slot] = subOut
+		}
+	}
+	if len(folds) > 1 {
+		sort.Slice(folds, func(x, y int) bool { return folds[x].Slot < folds[y].Slot })
+	}
+	if out == nil {
+		return impl, folds, nil
+	}
+	return out, folds, nil
+}
+
 // refuseUnknownOperands is the SILENT-IGNORE GUARD. The candidate's
+// implementation block is free-form (D26), but a driver silently drops any
 // implementation block is free-form (D26), but a driver silently drops any
 // operand key it does not read — a candidate with e.g. implementation.vpcSubnetIds
 // on a driver that never reads it would compile clean, preflight "ready" and
@@ -1441,23 +1878,53 @@ func wireReferences(actions []Action, cand *contract.Candidate, in Inputs, candi
 // that declares no consumed set (the Fake double, which reads no operands) is
 // exempt; the guard binds the real cloud drivers.
 func refuseUnknownOperands(actions []Action, cand *contract.Candidate, in Inputs) error {
+	// D530: iterate CAPABILITIES, not actions. The first version walked the action
+	// list, so the check applied at the moment a resource was created or updated
+	// and at no moment after — and a converged deployment has no actions at all.
+	// A partner declared `memory_mb` on a bound, converged function: validate said
+	// OK, plan sealed with zero actions and zero warnings, the operand was ignored,
+	// and the Lambda kept being killed for running out of the default 128 MB. The
+	// guard covered the first second of a resource's life and left the rest of it
+	// uncovered, which is where a deployment actually lives.
+	//
+	// The action list still matters for ordering-independent reasons: a delete or
+	// claim reads no implementation, so a capability whose ONLY action is one of
+	// those is skipped, exactly as before.
+	if cand == nil {
+		return nil
+	}
+	capIDs := make([]string, 0, len(cand.Extras))
+	for capID := range cand.Extras {
+		capIDs = append(capIDs, capID)
+	}
+	sort.Strings(capIDs)
+	deleteOnly := map[string]bool{}
 	for i := range actions {
-		a := &actions[i]
-		if a.Operation != "create" && a.Operation != "update" {
-			continue
+		switch actions[i].Operation {
+		case "create", "update":
+			deleteOnly[actions[i].Capability] = false
+		default:
+			if _, seen := deleteOnly[actions[i].Capability]; !seen {
+				deleteOnly[actions[i].Capability] = true
+			}
 		}
-		impl := implementationOf(cand, a.Capability)
+	}
+	for _, capID := range capIDs {
+		if deleteOnly[capID] {
+			continue // its only actions read no implementation
+		}
+		impl := implementationOf(cand, capID)
 		if len(impl) == 0 {
 			continue
 		}
-		extras := cand.Extras[a.Capability]
+		extras := cand.Extras[capID]
 		prov, _ := extras["provider"].(string)
 		if prov == "" {
-			prov = in.BindingProviders[a.Capability]
+			prov = in.BindingProviders[capID]
 		}
 		svc, _ := extras["service"].(string)
 		if svc == "" {
-			svc = in.BindingServices[a.Capability]
+			svc = in.BindingServices[capID]
 		}
 		oc, ok := in.providerFor(prov).(provider.OperandConsumer)
 		if !ok {
@@ -1484,8 +1951,8 @@ func refuseUnknownOperands(actions []Action, cand *contract.Candidate, in Inputs
 					"%s.%s is not an operand the %s/%s driver reads — refusing rather "+
 						"than silently dropping it (unknown-operand); declare it under a "+
 						"key the driver consumes, or remove it",
-					a.Capability, k, prov, svc),
-				RefPointer: fmt.Sprintf("capabilities.%s.implementation.%s", a.Capability, k),
+					capID, k, prov, svc),
+				RefPointer: fmt.Sprintf("capabilities.%s.implementation.%s", capID, k),
 				Note: fmt.Sprintf(
 					"the %s/%s driver does not read operand %q — declare it under a key "+
 						"the driver consumes, or remove it (an ignored operand is refused, "+

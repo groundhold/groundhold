@@ -2,6 +2,8 @@ package aws
 
 import (
 	"encoding/json"
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 	"groundhold/internal/scalars"
 	"io"
 	"net/http"
@@ -15,8 +17,8 @@ import (
 const (
 	bedrockCap       = "capability.ai.inference"
 	bedrockRegion    = "eu-central-1"
-	bedrockProfile1  = "eu.anthropic.claude-sonnet" // a SYSTEM (cross-region) profile
-	bedrockAppID     = "abcd1234efgh"               // an AWS-assigned APPLICATION profile id
+	bedrockProfile1  = "eu.anthropic.claude-sonnet-4-20250514-v1:0" // a SYSTEM profile — the ':0' version suffix (every real id carries one) is the D1000 regression case
+	bedrockAppID     = "abcd1234efgh"                               // an AWS-assigned APPLICATION profile id
 	bedrockModelBase = "anthropic.claude-3-5-sonnet-20241022-v2:0"
 )
 
@@ -44,6 +46,8 @@ type fakeBedrock struct {
 
 	createBody string
 	order      []string
+
+	getEscapedPath string // D1000: the RAW request path the GET arrived on, to pin wire encoding
 }
 
 func newFakeBedrock() *fakeBedrock {
@@ -106,6 +110,7 @@ func (f *fakeBedrock) handler(t *testing.T, rec *capture) *httptest.Server {
 			out, _ := json.Marshal(map[string]any{"inferenceProfileSummaries": summaries})
 			_, _ = w.Write(out)
 		case p == getPath && m == http.MethodGet: // GetInferenceProfile
+			f.getEscapedPath = r.URL.EscapedPath() // D1000: the wire encoding, undecoded
 			if f.unreadable {
 				http.Error(w, `{"message":"InternalServerError"}`, http.StatusInternalServerError)
 				return
@@ -191,6 +196,38 @@ func TestBedrock_ObserveReverseMap(t *testing.T) {
 		t.Fatalf("every Bedrock request must be SigV4-signed; %d were not", rec.unsign)
 	}
 	_ = diags
+}
+
+// TestBedrock_ColonIdSingleEncodedOnWire (D1000): a profile id carries a ':' version
+// suffix (eu.anthropic...v1:0). The signer double-encodes the canonical path for every
+// non-S3 service (%3A→%253A, D880), so the WIRE must carry the SINGLE-encoded %3A — then
+// AWS re-encodes it to %253A and the signature matches. A raw ':' on the wire (AWS
+// re-encodes to %3A) or a double-encoded %253A both 403. ACME-034 measured the raw-':'
+// regression against real AWS. The fake decodes r.URL.Path, so only the raw request
+// path (EscapedPath) reveals the wire encoding — which is why the old test, whose id had
+// no ':', could not catch this.
+func TestBedrock_ColonIdSingleEncodedOnWire(t *testing.T) {
+	if !strings.Contains(bedrockProfile1, ":") {
+		t.Fatal("this regression test needs a ':' in the profile id")
+	}
+	f := newFakeBedrock()
+	srv := f.handler(t, nil)
+	defer srv.Close()
+	d := bedrockDriver(t, srv)
+
+	if _, _, err := d.observeBedrock(bedrockCap, bedrockProviderID(bedrockRegion, bedrockProfile1)); err != nil {
+		t.Fatalf("observe: %v", err)
+	}
+	got := f.getEscapedPath
+	if !strings.Contains(got, "%3A") {
+		t.Fatalf("wire path %q must single-encode the colon as %%3A (the signer double-encodes to %%253A to match AWS)", got)
+	}
+	if strings.Contains(got, "%253A") {
+		t.Fatalf("wire path %q double-encodes the colon — AWS would re-encode to %%25253A and 403", got)
+	}
+	if strings.Contains(got, "v1:0") {
+		t.Fatalf("wire path %q carries a RAW colon — AWS re-encodes to %%3A while we signed %%253A (ACME-034 403)", got)
+	}
 }
 
 // TestBedrock_ManualGateHonesty: model.access IS reported (never omitted), OBSERVED
@@ -315,11 +352,14 @@ func TestBedrock_ObserveNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("not-found must not error, got %v", err)
 	}
-	if len(obs) != 0 {
-		t.Fatalf("not-found must yield no observations, got %v", obs)
+	// Corrected with D520: this asserted SILENCE for an absent bound resource,
+	// which is the defect F-LC3 exists to prevent — the compile sees an empty set,
+	// plans nothing, and converge reports a world that no longer contains it.
+	if !absentMarked(obs) {
+		t.Fatalf("not-found must mark the resource absent, got %v", obs)
 	}
-	if len(diags) == 0 || !strings.Contains(diags[0], "nothing to observe") {
-		t.Fatalf("not-found must carry a nothing-to-observe diagnostic, got %v", diags)
+	if len(diags) == 0 || !strings.Contains(diags[0], "bound resource is gone") {
+		t.Fatalf("not-found must carry a gone diagnostic, got %v", diags)
 	}
 }
 
@@ -593,10 +633,12 @@ func TestBedrock_ReconcileEmptyRegion(t *testing.T) {
 // the name already exists AND a profile with that name carries our ownership tags,
 // create BINDS it (succeeded + pid) — a lost-ledger converge re-adopts reality
 // instead of stranding an unknown. Ownership is tags, never candidate attributes.
-func TestBedrock_CreateAdoptsExisting(t *testing.T) {
-	const profID = "oxw790j932py"
-	const profName = "acme-eu-sonnet"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// bedrockExistingServer is the create-adoption fixture: the profile already exists and
+// carries our ownership tags, so the create POST is answered 409 and the driver must
+// list, recognise and bind it. Shared by the per-driver test and the D391 class gate.
+func bedrockExistingServer(t *testing.T, profID, profName string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, m := r.URL.Path, r.Method
 		switch {
 		case p == bedrockProfilesPath && m == http.MethodPost: // create -> already exists
@@ -625,6 +667,12 @@ func TestBedrock_CreateAdoptsExisting(t *testing.T) {
 			w.WriteHeader(400)
 		}
 	}))
+}
+
+func TestBedrock_CreateAdoptsExisting(t *testing.T) {
+	const profID = "oxw790j932py"
+	const profName = "acme-eu-sonnet"
+	srv := bedrockExistingServer(t, profID, profName)
 	defer srv.Close()
 	d := bedrockDriver(t, srv)
 
@@ -663,4 +711,62 @@ func TestBedrock_ObservationsSurviveTheAdoptParse(t *testing.T) {
 			t.Errorf("%s carries a value adopt cannot parse (%T): %v", o.Path, o.Value, perr)
 		}
 	}
+}
+
+// bedrockRole classifies the Bedrock REST surface: GET is the ownership read, anything
+// else changes the world.
+func bedrockRole(req *http.Request, _ []byte) certifynet.Role {
+	if req.Method == http.MethodGet {
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingBedrock enrols Bedrock in the D391 gate. Bedrock adopts REACTIVELY —
+// it sends the create, AWS answers 409, and the driver then lists and binds the owned
+// profile. So one mutation is the mechanism, not a duplicate, and the load-bearing proof
+// here is the PID: it must be the EXISTING profile's id, never a freshly minted one.
+func TestAdoptsExistingBedrock(t *testing.T) {
+	const profID = "oxw790j932py"
+	const profName = "acme-eu-sonnet"
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/bedrock",
+		Classify: bedrockRole,
+		ExistingServer: func() *httptest.Server {
+			return bedrockExistingServer(t, profID, profName)
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver(bedrockRegion)
+			d.HTTP = &http.Client{Transport: rt}
+			d.BedrockBaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.PollInterval = 0
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("bedrock", bedrockCap, "prod",
+				map[string]any{"location.region": bedrockRegion, "service.managed": true},
+				map[string]any{"inferenceProfileName": profName,
+					"modelSource": "arn:aws:bedrock:eu-central-1:000000000000:inference-profile/" + bedrockProfile1},
+				"inf", 1)
+		},
+		PID:              bedrockProviderID(bedrockRegion, profID),
+		AllowedMutations: 1, // the create POST AWS answers 409 — the detection itself
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
+
+// absentMarked reports whether an observation set carries the F-LC3 marker set
+// true — the one way a driver says a BOUND resource is authoritatively gone.
+func absentMarked(obs []provider.Observation) bool {
+	for _, o := range obs {
+		if o.Path == provider.ResourceAbsentPath {
+			gone, _ := o.Value.(bool)
+			return gone
+		}
+	}
+	return false
 }

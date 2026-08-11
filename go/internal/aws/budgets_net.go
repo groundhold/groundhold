@@ -2,7 +2,7 @@
 // capability.cost.budget driver. AWS Budgets is a GLOBAL service — one endpoint
 // (budgets.amazonaws.com), SigV4 signed for service "budgets" in region
 // us-east-1, addressed by X-Amz-Target AWSBudgetServiceGateway.<Action>. A
-// create is two calls: CreateBudget then CreateNotificationWithSubscribers.
+// create is two calls: CreateBudget then CreateNotification.
 // Honesty per D29/D87: the budget name is deterministic, so the providerId is
 // knowable BEFORE the response (carried on every ambiguous outcome). A partial
 // (budget created, notification failed) is unknown WITH the providerId, never a
@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"groundhold/internal/provider"
+	"regexp"
 )
 
 // budgetSigningRegion is the SigV4 region for the global Budgets endpoint.
@@ -131,7 +132,7 @@ func (d *Driver) budgetThreshold(account, name string) (threshold float64, found
 	return 0, false, nil
 }
 
-// createBudget: CreateBudget then CreateNotificationWithSubscribers. Ownership
+// createBudget: CreateBudget then CreateNotification. Ownership
 // is the deterministic name; a DuplicateRecordException on the budget re-checks
 // via DescribeBudget (a budget at our name is ours). A partial (budget landed,
 // notification failed) is unknown WITH the providerId — never a silent success.
@@ -173,11 +174,11 @@ func (d *Driver) createBudget(account, environment, capability string,
 			Reason: fmt.Sprintf("create budget HTTP %d (%s): %s", st, ecsErr(resp), mutDetail(resp))}
 	}
 
-	// ---- CreateNotificationWithSubscribers (the alert sink) ----
+	// ---- CreateNotification (the alert sink) ----
 	// The budget has landed; from here ANY notification failure is a PARTIAL —
 	// unknown WITH the providerId (reconcile), never failed, never a silent
 	// success.
-	st, resp, err = d.budgetCall("CreateNotificationWithSubscribers",
+	st, resp, err = d.budgetCall("CreateNotification",
 		jsonBody(plan.createNotificationBody(account)))
 	switch {
 	case err != nil:
@@ -202,14 +203,23 @@ func (d *Driver) observeBudget(capability, providerID string) ([]provider.Observ
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := d.sameAccount(account); err != nil {
+		return nil, nil, err
+	}
 	desc, found, rerr := d.describeBudget(account, name)
 	if rerr != nil {
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"budget not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"budget not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
 	if desc.BudgetLimit.Amount != "" && desc.BudgetLimit.Unit != "" {
@@ -237,6 +247,27 @@ func (d *Driver) deleteBudget(capability, environment, providerID string) provid
 	account, name, err := splitBudgetProviderID(providerID)
 	if err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if err := d.sameAccount(account); err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	// OWNERSHIP (D443). A budget carries NO TAGS — AWS offers none on this resource —
+	// so the deterministic NAME is the entire ownership marker, and the create path
+	// already treats it as one (a DuplicateRecordException is resolved as "ours, by
+	// name"). The delete did not check it at all: it split the providerId, read the
+	// budget and deleted it. A providerId naming ANY budget in the account therefore
+	// destroyed that budget, and a providerId is not a secret — it comes from the
+	// ledger, which a hand-authored plan is explicitly allowed to supply (D47/D48).
+	//
+	// The generation is not known here, so the full name cannot be rebuilt; the
+	// capability+environment SLUG can be, and it is what distinguishes our budgets from
+	// everyone else's. A name outside our scheme for this capability is refused.
+	if !budgetNameLooksOurs(name, capability, environment) {
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("budget %q is not named by groundhold for %s/%s — refusing "+
+				"to delete a budget this contract does not own (a budget carries no tags, "+
+				"so its name is the only ownership evidence there is)",
+				name, capability, environment)}
 	}
 	_, found, rerr := d.describeBudget(account, name)
 	if rerr != nil {
@@ -279,6 +310,9 @@ func (d *Driver) updateBudget(capability, environment, providerID string,
 	if err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
+	if err := d.sameAccount(account); err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
 	plan, err := BuildBudget(environment, capability, attrs, impl, 1)
 	if err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
@@ -287,7 +321,17 @@ func (d *Driver) updateBudget(capability, environment, providerID string,
 	// not a re-derived one — pin the plan to it so the patch bodies address the
 	// existing budget regardless of the generation discriminator.
 	plan.Name = name
-	// ownership re-check: the name IS the marker (no tags on the object).
+	// ownership re-check: the name IS the marker (no tags on the object). D459 — this
+	// comment was here, and the check under it was an EXISTENCE check. An update on a
+	// budget outside our naming scheme replaced a stranger's whole budget definition
+	// with ours; the delete beside it had carried the name check since D444.
+	if !budgetNameLooksOurs(name, capability, environment) {
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("budget %q is not named by groundhold for %s/%s — refusing "+
+				"to update a budget this contract does not own (a budget carries no tags, "+
+				"so its name is the only ownership evidence there is)",
+				name, capability, environment)}
+	}
 	_, found, rerr := d.describeBudget(account, name)
 	if rerr != nil {
 		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
@@ -299,9 +343,10 @@ func (d *Driver) updateBudget(capability, environment, providerID string,
 	}
 	for _, path := range changes {
 		switch path {
-		case "budget.limit":
+		case "budget.limit", "budget.period":
 			// UpdateBudget replaces the whole definition; we re-send the full,
-			// deterministic budget with the new limit.
+			// deterministic budget — which carries the new limit AND the new TimeUnit
+			// (D806), so both are honoured by the same call.
 			st, resp, cerr := d.budgetCall("UpdateBudget", jsonBody(map[string]any{
 				"AccountId": account,
 				"NewBudget": plan.createBudgetBody(account)["Budget"],
@@ -320,7 +365,7 @@ func (d *Driver) updateBudget(capability, environment, providerID string,
 			}
 			if !tFound {
 				// no notification to update — create it (idempotent on duplicate).
-				st, resp, cerr := d.budgetCall("CreateNotificationWithSubscribers",
+				st, resp, cerr := d.budgetCall("CreateNotification",
 					jsonBody(plan.createNotificationBody(account)))
 				if cerr == nil && strings.Contains(ecsErr(resp), "DuplicateRecordException") {
 					continue
@@ -419,8 +464,71 @@ func (d *Driver) discoverBudgets(region string) ([]provider.Discovered, []string
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.cost.budget",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
+}
+
+// nameLooksOurs is the shared ownership predicate for TAG-LESS resources (D444). AWS
+// offers no tags on budgets, IAM policies or log metric filters, so the deterministic
+// NAME is the only ownership evidence there is — and the delete path is where that has
+// to be checked, because the providerId it is handed comes from the ledger.
+//
+// The generation is not passed to a delete, so the trailing hash cannot be rebuilt; the
+// capability+environment slug can. The predicate is: our prefix, our slug, and a tail of
+// the expected shape and length. It cannot say WHICH generation made the resource and
+// does not try — it says the resource belongs to this contract's capability rather than
+// to somebody else entirely, which is exactly what a tag would have answered.
+func nameLooksOurs(name, capability, environment string, bad *regexp.Regexp, tailLen int, hexTail bool) bool {
+	slug := capability
+	if environment != "" {
+		slug += "-" + environment
+	}
+	slug = strings.Trim(bad.ReplaceAllString(strings.ToLower(slug), "-"), "-")
+	prefix := "pv-" + slug + "-"
+	if !strings.HasPrefix(name, prefix) {
+		return false
+	}
+	tail := name[len(prefix):]
+	if len(tail) != tailLen {
+		return false
+	}
+	for _, c := range tail {
+		ok := c >= 'a' && c <= 'z'
+		if hexTail {
+			ok = (c >= 'a' && c <= 'f') || (c >= '0' && c <= '9')
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// budgetNameLooksOurs reports whether name is one BudgetName would produce for this
+// capability and environment at SOME generation. The generation salts only the trailing
+// hash, so the check is: our prefix, our slug, and an 8-letter tail of the right shape.
+// It cannot prove which generation made it — it does not need to. It proves the budget
+// belongs to this contract's capability rather than to somebody else entirely, which is
+// the whole question a tag would have answered.
+func budgetNameLooksOurs(name, capability, environment string) bool {
+	slug := capability
+	if environment != "" {
+		slug += "-" + environment
+	}
+	slug = strings.Trim(budgetBad.ReplaceAllString(strings.ToLower(slug), "-"), "-")
+	prefix := "pv-" + slug + "-"
+	if len(name) != len(prefix)+8 || !strings.HasPrefix(name, prefix) {
+		// a truncated slug (the maxLen branch of BudgetName) still shares the prefix up
+		// to the truncation point, so fall back to a prefix-only test for long names.
+		return len(slug)+len("pv-")+9 > 100 && strings.HasPrefix(name, "pv-") &&
+			strings.HasPrefix(slug, strings.TrimPrefix(name[:len(name)-9], "pv-"))
+	}
+	for _, c := range name[len(prefix):] {
+		if c < 'a' || c > 'z' {
+			return false
+		}
+	}
+	return true
 }

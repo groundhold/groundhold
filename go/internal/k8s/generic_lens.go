@@ -349,11 +349,21 @@ func writeLensCertmanagerPrimaryDomain(obj, attrs, impl map[string]any) error {
 	if issuer == nil {
 		return fmt.Errorf("a Certificate requires implementation.issuerRef (the issuer is an operand, not a capability attribute — D26)")
 	}
-	spec := map[string]any{"dnsNames": []any{domain}, "issuerRef": issuer}
-	if sn, _ := impl["secretName"].(string); sn != "" {
-		spec["secretName"] = sn
+	// cert-manager requires spec.secretName as hard as it requires the issuer —
+	// without it the API server answers 422 `spec.secretName: Required value` and
+	// nothing is created. This refused for the issuer and silently omitted the
+	// secret, so every Certificate it built was invalid on every cluster (D511).
+	// Refuse the same way rather than inventing a name: the secret is what other
+	// workloads mount, so guessing it would be guessing at someone else's contract.
+	sn, _ := impl["secretName"].(string)
+	if sn == "" {
+		return fmt.Errorf("a Certificate requires implementation.secretName (where the issued " +
+			"key pair is stored — an operand, not a capability attribute; cert-manager rejects " +
+			"a Certificate without it)")
 	}
-	obj["spec"] = spec
+	obj["spec"] = map[string]any{
+		"dnsNames": []any{domain}, "issuerRef": issuer, "secretName": sn,
+	}
 	return nil
 }
 
@@ -414,7 +424,21 @@ func lensNetpolDefaultDeny(obj map[string]any) ([]provider.Observation, []string
 		}
 	}
 	if hasType(policyTypes, "Egress") {
-		obs = append(obs, provider.Observation{Path: "egress.restricted", Value: true, Derivation: "config-intent"})
+		// D987: mirror the ingress branch — an egress rule LIST that is empty
+		// (`egress: []`) denies all outbound (restricted=true), but a rule list with a
+		// wide-open rule (`egress: [{}]`) ALLOWS all outbound. Reading restricted=true
+		// from policyTypes alone reported an exfiltration control that a `[{}]` policy
+		// does not have, and unlike ingress.public there is no Prober to correct it. Only
+		// claim restricted for the genuinely empty list; defer otherwise.
+		egress, _ := spec["egress"].([]any)
+		if len(egress) == 0 {
+			obs = append(obs, provider.Observation{Path: "egress.restricted", Value: true, Derivation: "config-intent"})
+			if !allPods {
+				diags = append(diags, "the default-deny egress selects only some pods (podSelector is non-empty) — egress.restricted=true is config-intent for THOSE pods, not the whole namespace")
+			}
+		} else {
+			diags = append(diags, "the policy allows specific egress rules — an egress rule list may be allow-all ({}) or partial and cannot be reduced to 'restricted' from config alone; egress.restricted is left unread")
+		}
 	}
 	diags = append(diags, "network.private from a NetworkPolicy is CONFIG-INTENT: enforcement depends on the CNI — probe (verify: probe) to prove the actual reachability outcome")
 	return obs, diags

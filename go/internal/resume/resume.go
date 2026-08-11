@@ -75,6 +75,43 @@ func Run(c *contract.Contract, led *ledger.Ledger, ledgerPath string,
 	}
 	sort.Strings(caps)
 
+	// D637: resume must be run with the provider that STARTED the operation.
+	//
+	// `apply` pins `reads.provider` from the sealed plan and cross-checks it. `resume`
+	// — the verb an operator types by hand, under pressure, after something died —
+	// pinned nothing. So `resume --provider fake` over a ledger whose binding says
+	// `aws` concluded the AWS operation as SUCCEEDED (the fake reconciler answers
+	// succeeded unconditionally), bumped the binding generation, and rewrote
+	// `provider.name` from `aws` to `fake` — the very field the comment fifty lines
+	// below calls out as identity that "must survive (F4)".
+	//
+	// The ledger already records which provider owns each capability. Compare it.
+	for _, capID := range caps {
+		want := led.BoundProviderNames()[capID]
+		if want == "" {
+			// An operation that died before its binding landed has no bound provider
+			// yet — and that is the case where a wrong driver INVENTS a providerId
+			// and binds it. The pending receipt names the driver in its target
+			// ("fake.fakedb/db"), which is the only record of who started the work.
+			for _, body := range pending[capID] {
+				tgt, _ := body["target"].(string)
+				if i := strings.Index(tgt, "."); i > 0 {
+					want = tgt[:i]
+					break
+				}
+			}
+		}
+		if want == "" || want == prov.Name() {
+			continue
+		}
+		return refuse(perr.ReadSetMismatch, fmt.Sprintf(
+			"%s was started under provider %q and this run is --provider %q — resume "+
+				"concludes an operation another driver started, so it must be run "+
+				"with THAT driver; concluding it here would record an outcome nobody "+
+				"measured and overwrite the binding's provider identity",
+			capID, want, prov.Name()))
+	}
+
 	// Scope (D57, D72): creates conclude with bindings, deletes with
 	// tombstones, updates (whose receipts carry the verifiable target
 	// shape — pinned identity + desired values) with a generation bump
@@ -128,6 +165,26 @@ func Run(c *contract.Contract, led *ledger.Ledger, ledgerPath string,
 		}
 		return refuse(code, err.Error())
 	}
+	// D960: re-derive the pending set UNDER THE LEASE. `pending` was read from the
+	// entry-time ledger (line ~55); between then and AppendLease another run holding the
+	// lease could have CONCLUDED some of these receipts — and even updated the resource to
+	// a newer generation. Concluding a receipt that is no longer pending would re-write a
+	// STALE outcome: the create path reads `generation` from the stale receipt (gen 1) and,
+	// because the rebind guard below only catches a DIFFERENT providerId (not a same-id
+	// generation regression), would overwrite a live gen-2 binding with gen 1 — recorded as
+	// a successful resume (exit 0), so a later gen-pinned update/retire mis-targets. Only
+	// conclude what is STILL pending now that we hold the lease. w.Led was re-replayed under
+	// the lock by AppendLease, so it is the authoritative post-lease view.
+	livePending := map[string]map[string]bool{}
+	for capID, receipts := range w.Led.PendingReceipts() {
+		ids := map[string]bool{}
+		for _, r := range receipts {
+			if id, _ := r["operationId"].(string); id != "" {
+				ids[id] = true
+			}
+		}
+		livePending[capID] = ids
+	}
 	release := func() {
 		if err := w.Append("lease.released", caps, nil, tok); err != nil {
 			// a failed release is not fatal (the lease expires by TTL),
@@ -141,6 +198,12 @@ func Run(c *contract.Contract, led *ledger.Ledger, ledgerPath string,
 	for _, capID := range caps {
 		for _, receipt := range pending[capID] {
 			opID, _ := receipt["operationId"].(string)
+			// D960: skip a receipt that was concluded by another run in the window
+			// between our ledger load and our lease — re-concluding it would re-write a
+			// stale outcome over the state that run already advanced.
+			if !livePending[capID][opID] {
+				continue
+			}
 			op, _ := receipt["operation"].(string)
 			verdict := rec.Reconcile(capID, c.Environment, receipt)
 			entry := Resolved{Capability: capID, OperationID: opID,
@@ -352,6 +415,32 @@ func Run(c *contract.Contract, led *ledger.Ledger, ledgerPath string,
 		res.Reasons = []string{
 			"some outcomes remain unknown — pending receipts stay, " +
 				"apply keeps refusing until they conclude"}
+		return res
+	}
+	// D736: a receipt that CONCLUDED as a failure is not a resumed run. This reported
+	// `{"status":"resumed"}` and exit 0 whenever every receipt reached a terminal state,
+	// including when every one of them concluded FAILED — so an operator saw OK, moved
+	// on, and the next plan proposed creates for resources that already existed.
+	// Measured in the field on three budgets: the reconciler concluded `failed` for each
+	// (the budget object stood but its alert notification had not landed), resume
+	// answered success, and nothing was bound.
+	//
+	// The exit code is the whole product of this verb for a script. It now carries the
+	// worst outcome among the receipts it concluded, the way apply does.
+	var failed []string
+	for _, r := range res.Resolved {
+		if r.Status == "failed" {
+			failed = append(failed, r.Capability+" ("+r.Operation+"): "+r.Reason)
+		}
+	}
+	if len(failed) > 0 {
+		sort.Strings(failed)
+		res.Reasons = append(res.Reasons, append([]string{
+			fmt.Sprintf("%d operation(s) CONCLUDED AS FAILURES — resume cleared their "+
+				"pending receipts (which is what unblocks apply) but bound nothing, so "+
+				"the resources they were creating are NOT under management. Re-apply to "+
+				"heal them; until then their capability is unbound:", len(failed))},
+			failed...)...)
 	}
 	return res
 }

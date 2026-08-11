@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -23,6 +24,11 @@ import (
 )
 
 type Driver struct {
+	// D803: pages the provider said existed and this driver did not follow. A POINTER,
+	// so a scoped copy of the driver shares the record rather than losing it — the
+	// truncation belongs to the sweep, not to the struct that happened to see it.
+	trunc *truncRecord
+
 	Region       string
 	Account      string // acting identity's account id; resolved via STS, cached
 	HTTP         *http.Client
@@ -167,6 +173,7 @@ func NewDriver(region string) *Driver {
 		}
 	}
 	return &Driver{
+		trunc:         &truncRecord{}, // D803
 		Region:        region,
 		HTTP:          newResilientHTTPClient(),
 		Now:           time.Now,
@@ -210,6 +217,32 @@ func (d *Driver) hasCreds() bool {
 	return d.creds.AccessKeyID != "" && d.creds.SecretAccessKey != ""
 }
 
+// noCredentialsError says what is missing AND what to do about it (D731).
+//
+// This driver reads the three standard variables and nothing else — a narrow adapter,
+// documented as such since D346. But "no AWS credentials in the environment" is a true
+// sentence that teaches nothing, and it is FALSE about the operator's situation in the
+// one case they are most likely to be in: `AWS_PROFILE` set, the CLI working, and this
+// tool claiming there are no credentials. A pilot on MFA and Identity Center hit exactly
+// that and had to create a separate MFA-less role to get past it.
+//
+// Naming the bridge is the whole job of a refusal here (D730). `aws configure
+// export-credentials --format env` is the vendor's own command for turning any profile —
+// static, assume-role, MFA, SSO — into the three variables this driver reads.
+func noCredentialsError() error {
+	if p := os.Getenv("AWS_PROFILE"); p != "" {
+		return fmt.Errorf("AWS_PROFILE=%s is set, but this driver reads credentials ONLY "+
+			"from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN — it does "+
+			"not read ~/.aws/config or ~/.aws/credentials, so profiles, MFA and Identity "+
+			"Center are invisible to it. Bridge the profile with: eval \"$(aws configure "+
+			"export-credentials --profile %s --format env)\"", p, p)
+	}
+	return fmt.Errorf("no AWS credentials in the environment — this driver reads " +
+		"AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN only, and does not " +
+		"read ~/.aws/config or ~/.aws/credentials. From a configured profile: " +
+		"eval \"$(aws configure export-credentials --format env)\"")
+}
+
 // doSigned signs a request with SigV4 (for the given region) and executes it.
 func (d *Driver) doSigned(method, rawURL, service, region string,
 	headers map[string]string, body []byte) (int, []byte, error) {
@@ -217,12 +250,94 @@ func (d *Driver) doSigned(method, rawURL, service, region string,
 	return status, respBody, err
 }
 
+// routeSink is nil in production and stays nil: it is the seam through which a test
+// can record every (method, path, service) the drivers ACTUALLY construct, instead of
+// reading the paths back out of the source. D317 is the reason for the distinction —
+// a static scrape of these drivers gave four different wrong answers, so the question
+// "what routes do we call?" is asked of the drivers, at the one funnel they all pass
+// through. See routecapture_test.go.
+var routeSink func(method, rawURL, service, op, chain string)
+
+// awsCallChain names the functions INSIDE this driver that led to a request, outermost
+// first — "wafListByName>wafListPage>wafCall".
+//
+// D871: the paging ratchet needs to know which CODE issued an operation, and a join by
+// operation NAME cannot tell it. `ListTagsForResource` paginates for wafv2 and the literal
+// appears at twenty-three call sites across thirteen other services; `ListServices` belongs
+// to both App Runner and ECS; `ListClusters` to both ECS and EKS. Asking the recorder is
+// the same move D853 made for the operation itself, and D317's rule for the same reason:
+// ask the drivers, do not scrape them.
+//
+// The chain rather than one frame, because "the call site" is ambiguous by design — a read
+// that follows its pages may do so in the reader, in a per-page helper, or in the shared
+// loop. Paging is followed if ANY function in the chain handles the continuation.
+func awsCallChain() string {
+	var pcs [24]uintptr
+	n := runtime.Callers(3, pcs[:])
+	frames := runtime.CallersFrames(pcs[:n])
+	var names []string
+	for {
+		f, more := frames.Next()
+		if strings.Contains(f.Function, "groundhold/internal/aws.") &&
+			!strings.HasSuffix(f.File, "_test.go") {
+			// Test frames are dropped: they would make the chain per-TEST rather than
+			// per call site, and the same read reached from three fixtures is one read.
+			names = append(names, f.Function[strings.LastIndex(f.Function, ".")+1:])
+		}
+		if !more {
+			break
+		}
+	}
+	for i, j := 0, len(names)-1; i < j; i, j = i+1, j-1 {
+		names[i], names[j] = names[j], names[i]
+	}
+	return strings.Join(names, ">")
+}
+
 // doSignedH is doSigned that also returns the response headers — needed by services
 // whose concurrency token is an HTTP header (CloudFront's ETag), not the XML body.
+
+// truncRecord holds the pages a driver was told about and did not follow (D803). The
+// bookkeeping itself is shared (D818): a truncation is evidence of an incomplete answer
+// only if the continuation it handed back was never used, and that rule belongs to how
+// paging works rather than to any one provider.
+type truncRecord = provider.ListingRecord
+
+// noteTruncation records that a response said more results exist, along with the
+// continuation values that would prove a sweep went and read them. A driver built without
+// a record (a bare literal in a test) simply keeps none.
+func (d *Driver) noteTruncation(call string, values []string) {
+	d.trunc.Note(call, values)
+}
+
+// noteFollowed clears the note belonging to any continuation an OUTGOING request carries.
+func (d *Driver) noteFollowed(rawURL string, body []byte) {
+	d.trunc.Followed(provider.RequestValues(rawURL, body))
+}
+
+// TruncatedListings implements provider.ListingCompleteness. It RESETS the record, so one
+// sweep cannot report the next one's pages.
+func (d *Driver) TruncatedListings() []provider.TruncationNote {
+	return d.trunc.Take()
+}
+
 func (d *Driver) doSignedH(method, rawURL, service, region string,
 	headers map[string]string, body []byte) (int, []byte, http.Header, error) {
+	if routeSink != nil {
+		// FIRST, ahead of every refusal below: a route is constructed whether or not
+		// this process holds credentials, and a route we refuse to send is still a
+		// route the driver believes in.
+		//
+		// D853: for 27 of the 40 signed services the PATH names no operation — the
+		// Query protocol selects it with an `Action` field in the form body, the JSON
+		// protocol with an `X-Amz-Target` header. Recorded without it, every call to
+		// such a service collapsed to one line, `service POST /`, and the permission
+		// gate could say nothing about any of them. The hint travels here because this
+		// is the one place that holds the body AND the headers.
+		routeSink(method, rawURL, service, awsOperationHint(rawURL, headers, body), awsCallChain())
+	}
 	if !d.hasCreds() {
-		return 0, nil, nil, fmt.Errorf("no AWS credentials in the environment")
+		return 0, nil, nil, noCredentialsError()
 	}
 	// D209 refuse-before-mutate at the wire: a mutating request that omits a field
 	// AWS requires refuses HERE, before signing — never mid-flight after a sibling
@@ -250,6 +365,9 @@ func (d *Driver) doSignedH(method, rawURL, service, region string,
 	if body != nil {
 		rdr = bytes.NewReader(body)
 	}
+	// D818: a request that carries a continuation handed back earlier is the sweep
+	// saying it went and read the rest — that clears the note the response left.
+	d.noteFollowed(rawURL, body)
 	req, err := http.NewRequest(method, rawURL, rdr)
 	if err != nil {
 		return 0, nil, nil, err
@@ -267,6 +385,19 @@ func (d *Driver) doSignedH(method, rawURL, service, region string,
 		// a mid-body connection drop must not surface as a well-formed short
 		// body (which a decision-gating parse would misread) — it is an error.
 		return resp.StatusCode, nil, resp.Header, fmt.Errorf("response body read failed: %v", rerr)
+	}
+	// D803: the provider just said whether more results exist. Read it HERE, where every
+	// response arrives, rather than in the 139 sweeps that would each have to remember.
+	if resp.StatusCode == http.StatusOK {
+		if more, values := provider.ListingContinuation(respBody); more {
+			call := method + " " + u.Path
+			if a := awsActionOf(u, body); a != "" {
+				call = a // the query-protocol services name the operation this way
+			} else if t := headers["X-Amz-Target"]; t != "" {
+				call = t
+			}
+			d.noteTruncation(service+" "+call, values)
+		}
 	}
 	return resp.StatusCode, respBody, resp.Header, nil
 }
@@ -322,4 +453,42 @@ func between(s, a, b string) string {
 		return ""
 	}
 	return s[i : i+j]
+}
+
+// awsActionOf returns the operation a Query-protocol request names, from wherever that
+// service puts it (D818).
+//
+// EC2 puts Action in the query string; SNS, SQS, IAM, Auto Scaling, ElastiCache and RDS
+// put it in the form-encoded BODY, and every one of their operations is a POST to "/". So
+// reading only the query named every one of those truncations "POST /", which is exactly
+// the "sends nobody anywhere" that D803 set out to avoid.
+func awsActionOf(u *url.URL, body []byte) string {
+	if a := u.Query().Get("Action"); a != "" {
+		return a
+	}
+	if len(body) == 0 || bytes.HasPrefix(bytes.TrimSpace(body), []byte("{")) {
+		return ""
+	}
+	q, err := url.ParseQuery(string(body))
+	if err != nil {
+		return ""
+	}
+	return q.Get("Action")
+}
+
+// awsOperationHint names the operation a request carries when the path does not.
+// Empty for the REST services, whose path already says which operation it is (D853).
+func awsOperationHint(rawURL string, headers map[string]string, body []byte) string {
+	if t := headers["X-Amz-Target"]; t != "" {
+		// AWS JSON: `<targetPrefix>.<Operation>` — the suffix is the operation.
+		if i := strings.LastIndex(t, "."); i >= 0 && i+1 < len(t) {
+			return t[i+1:]
+		}
+		return t
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return awsActionOf(u, body)
 }

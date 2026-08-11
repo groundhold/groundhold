@@ -246,9 +246,16 @@ func TestClassifyASGChange(t *testing.T) {
 			t.Errorf("%s classified %q/%q, want mutable with a reason", path, class, why)
 		}
 	}
-	for _, path := range []string{"location.region", "availability.class", "network.publicExposure"} {
-		if class, why := classifyASGChange(path); class != "immutable" || why == "" {
-			t.Errorf("%s classified %q/%q, want immutable with a reason", path, class, why)
+	if class, why := classifyASGChange("location.region"); class != "immutable" || why == "" {
+		t.Errorf("location.region classified %q/%q, want immutable with a reason", class, why)
+	}
+	// D822: availability.class and network.publicExposure were pinned "immutable" here.
+	// Both were claims about AWS, and AWS contradicts both — UpdateAutoScalingGroup accepts
+	// VPCZoneIdentifier/AvailabilityZones, and public addressing lives in a launch template
+	// this tool does not author (a statement about groundhold, not a replacement AWS needs).
+	for _, path := range []string{"availability.class", "network.publicExposure"} {
+		if class, why := classifyASGChange(path); class != "unsupported" || why == "" {
+			t.Errorf("%s classified %q/%q, want unsupported with a reason", path, class, why)
 		}
 	}
 	if class, _ := classifyASGChange("service.managed"); class != "unsupported" {

@@ -60,6 +60,14 @@ type dbInstance struct {
 	BackupRetentionPeriod int    `xml:"BackupRetentionPeriod"`
 	DeletionProtection    bool   `xml:"DeletionProtection"`
 	KmsKeyId              string `xml:"KmsKeyId"`
+	// PendingModifiedValues carries the fields an accepted-but-not-yet-applied
+	// ModifyDBInstance is still going to change (D953). AWS populates it immediately on
+	// the async accept and empties it once the change lands, so a non-empty inner body
+	// is the honest "not applied yet" signal — field-agnostic (no per-field/version
+	// comparison) and race-safe (populated before the instance even enters "modifying").
+	PendingModifiedValues struct {
+		Inner string `xml:",innerxml"`
+	} `xml:"PendingModifiedValues"`
 	// Endpoint is the reachable address (the probe dials it); a private instance
 	// still reports one, so exposure is decided by PubliclyAccessible + a handshake.
 	Endpoint struct {
@@ -73,6 +81,12 @@ type dbInstance struct {
 		Key   string `xml:"Key"`
 		Value string `xml:"Value"`
 	} `xml:"TagList>Tag"`
+}
+
+// modifyPending reports whether an accepted ModifyDBInstance is still applying — the
+// PendingModifiedValues element carries children until the change lands (D953).
+func (i dbInstance) modifyPending() bool {
+	return strings.TrimSpace(i.PendingModifiedValues.Inner) != ""
 }
 
 // describeDB returns the instance, whether it was found, and why the read failed
@@ -206,9 +220,16 @@ func (d *Driver) observeRDS(capability, providerID string) ([]provider.Observati
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"instance not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"instance not found — bound resource is gone (will re-create)"}, nil
 	}
-	var obs []provider.Observation
+	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
+	}
 	obs = append(obs,
 		provider.Observation{Path: "location.region", Value: region, Derivation: "measured"},
 		provider.Observation{Path: "service.managed", Value: true, Derivation: "measured"},
@@ -222,13 +243,14 @@ func (d *Driver) observeRDS(capability, providerID string) ([]provider.Observati
 	class := caplens.AvailabilityClass(inst.MultiAZ)
 	obs = append(obs, provider.Observation{Path: "availability.class", Value: class, Derivation: "measured"})
 	var diags []string
-	// encryption.inTransit: TLS is enforced iff the attached DB parameter group
-	// sets rds.force_ssl=1. Read it (DescribeDBParameters) so a group WITHOUT
-	// force_ssl is caught as inTransit=false — the create trusts the operand,
+	// encryption.inTransit: TLS is enforced iff the attached DB parameter group sets
+	// the engine's enforcement parameter (rds.force_ssl for Postgres/SQL Server,
+	// require_secure_transport for MySQL/MariaDB — D952). Read it (DescribeDBParameters)
+	// so a group WITHOUT it is caught as inTransit=false — the create trusts the operand,
 	// observe verifies the reality (the loop closes on the measured value).
 	if len(inst.ParameterGroups) > 0 {
 		group := inst.ParameterGroups[0].Name
-		if force, perr := d.dbForceSSL(region, group); perr == nil {
+		if force, perr := d.dbTLSEnforced(region, group, inst.Engine); perr == nil {
 			obs = append(obs, provider.Observation{Path: "encryption.inTransit",
 				Value: force, Derivation: "measured"})
 		} else {
@@ -259,13 +281,20 @@ func (d *Driver) observeRDS(capability, providerID string) ([]provider.Observati
 	return obs, diags, nil
 }
 
-// dbForceSSL reads rds.force_ssl from a DB parameter group (DescribeDBParameters).
-// It returns (forced, ok): ok=false means the group was unreadable (observe emits
-// a diag, not a false negative); ok=true with forced=false means the parameter is
-// absent or 0. This verifies the db_parameter_group operand actually enforces TLS
-// rather than trusting its name.
-func (d *Driver) dbForceSSL(region, group string) (forced bool, err error) {
-	// DescribeDBParameters PAGINATES — rds.force_ssl can sit past the first page, so
+// dbTLSEnforced reads the engine's TLS-enforcement parameter from a DB parameter group
+// (DescribeDBParameters). It returns (forced, err): a read error means the group was
+// unreadable (observe emits a diag, not a false negative); no error with forced=false
+// means the parameter is absent or not set to an enforcing value. The parameter NAME is
+// engine-specific (D952) — a MySQL/MariaDB group enforcing TLS via require_secure_transport
+// is no longer misread as inTransit=false the way a hardcoded rds.force_ssl scan did. This
+// verifies the db_parameter_group operand actually enforces TLS rather than trusting its name.
+func (d *Driver) dbTLSEnforced(region, group, engine string) (forced bool, err error) {
+	param, ok := rdsTLSParam(engine)
+	if !ok {
+		return false, fmt.Errorf("no known TLS-enforcement parameter for RDS engine %q — "+
+			"refusing to read the wrong parameter and assert a false negative", engine)
+	}
+	// DescribeDBParameters PAGINATES — the parameter can sit past the first page, so
 	// follow the Marker until found or exhausted (a single-page scan false-negatived
 	// TLS and drifted a bound instance at reconcile).
 	marker := ""
@@ -293,8 +322,14 @@ func (d *Driver) dbForceSSL(region, group string) (forced bool, err error) {
 			return false, readBody(op, st)
 		}
 		for _, p := range resp.Params {
-			if p.Name == "rds.force_ssl" {
-				return p.Value == "1", nil
+			if p.Name == param {
+				// enforcing values differ in spelling across engines (1 / ON / true) —
+				// accept them all, and treat anything else as NOT enforcing.
+				switch strings.ToLower(strings.TrimSpace(p.Value)) {
+				case "1", "on", "true":
+					return true, nil
+				}
+				return false, nil
 			}
 		}
 		if resp.Marker == "" {
@@ -403,9 +438,33 @@ func (d *Driver) updateRDS(capability, environment, providerID string,
 		return provider.CreateResult{Status: "failed",
 			Reason: fmt.Sprintf("patch failed: HTTP %d (%s)", st, rdsErrCode(resp))}
 	}
-	// the modification is accepted (async — the instance enters "modifying"); a
-	// later observe/converge confirms the landed state.
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// D953: ModifyDBInstance is ASYNC — the 2xx only ACCEPTS the change (the instance
+	// enters "modifying"); it is not applied yet and can still fail async. Reporting
+	// succeeded on accept mis-stated a security-closing change like
+	// network.publicExposure=false as done while the instance was still publicly
+	// reachable. Poll to the APPLIED state (available with no PendingModifiedValues),
+	// matching the sibling async updaters (EKS/GKE/AKS/Lambda/CloudSQL); a change still
+	// applying at the timeout is unknown (reconcile), never a false succeeded.
+	deadline := d.Now().Add(d.PollTimeout)
+	for {
+		cur, found, rerr := d.describeDB(region, id)
+		if rerr == nil && found {
+			switch cur.Status {
+			case "available":
+				if !cur.modifyPending() {
+					return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+				}
+			case "failed", "incompatible-parameters", "incompatible-restore":
+				return provider.CreateResult{ProviderID: providerID, Status: "failed",
+					Reason: "instance entered status " + cur.Status + " during the modification"}
+			}
+		}
+		if d.Now().After(deadline) {
+			return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+				Reason: "modification still applying at poll timeout — reconcile via DescribeDBInstances"}
+		}
+		time.Sleep(d.PollInterval)
+	}
 }
 
 // deleteRDS: ownership (tags) + deletion-protection pre-check, then
@@ -452,7 +511,24 @@ func (d *Driver) deleteRDS(capability, environment, providerID string) provider.
 		return provider.CreateResult{Status: "failed",
 			Reason: fmt.Sprintf("delete: HTTP %d (%s)", st, rdsErrCode(resp))}
 	}
-	// deletion is async too; treat the accepted delete as success (the instance
-	// enters "deleting"). A reconcile/observe confirms final absence.
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// ---- poll to absence (D968) ----
+	// The delete is async: a 2xx means the instance entered "deleting", not that
+	// it is GONE. Reporting "succeeded" here writes a tombstone and drops the
+	// binding (apply.go), and the succeeded receipt clears the pending intent — so
+	// if the async deletion then FAILS (a dependency/replica error returns it to
+	// "available"), a billable stateful DB is orphaned from a ledger that says it
+	// is gone, with nothing scheduled to reconcile. Poll to a confirmed 404 exactly
+	// as createRDS polls to "available"; unknown on timeout keeps the handle for a
+	// reconcile — never a terminal success the world has not reached.
+	deadline := d.Now().Add(d.PollTimeout)
+	for {
+		if _, found, rerr := d.describeDB(region, id); rerr == nil && !found {
+			return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // confirmed gone
+		}
+		if d.Now().After(deadline) {
+			return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+				Reason: "instance still deleting at poll timeout — reconcile via DescribeDBInstances"}
+		}
+		time.Sleep(d.PollInterval)
+	}
 }

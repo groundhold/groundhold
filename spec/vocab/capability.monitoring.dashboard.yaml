@@ -34,9 +34,9 @@ attributes:
       set: a contract constrains it with subset-of (the dashboard charts only
       approved metrics) or equals (an exact set).
     mappings:
-      gcp.monitoring: one XyChart widget per metric in a mosaicLayout (metric.type filters)
-      aws.cloudwatch: one metric widget per metric in the DashboardBody (Namespace/MetricName)
-      azure.portal: one MonitoringChartPart tile per metric (on a target resource)
+      gcp.dashboard: one XyChart widget per metric in a mosaicLayout (metric.type filters)
+      aws.cloudwatchdash: one metric widget per metric in the DashboardBody (Namespace/MetricName)
+      azure.portaldash: one MonitoringChartPart tile per metric (on a target resource)
 
   dashboard.widgetCount:
     kind: number
@@ -47,9 +47,9 @@ attributes:
       count). DERIVED deterministically from the metric set; the driver refuses a
       declared count that contradicts the metrics it was given.
     mappings:
-      gcp.monitoring: the number of widgets in the layout
-      aws.cloudwatch: the number of widgets in the DashboardBody
-      azure.portal: the number of parts in the lens
+      gcp.dashboard: the number of widgets in the layout
+      aws.cloudwatchdash: the number of widgets in the DashboardBody
+      azure.portaldash: the number of parts in the lens
 
   service.managed:
     kind: bool

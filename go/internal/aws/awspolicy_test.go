@@ -155,3 +155,40 @@ func TestObserveCustomPolicyMeasuresPrivilege(t *testing.T) {
 		t.Fatalf("an iam: action must observe mutating+privileged: %+v", got)
 	}
 }
+
+// D797. The reader assumed every policy looks like the one this driver WRITES: a single
+// statement. But discover reverse-maps every customer-managed policy in the account, and
+// a real policy has several — so the grant that decides privilege was routinely in a
+// statement nobody read.
+func TestPolicyActionsUnionEveryAllowStatement(t *testing.T) {
+	doc := `{"Version":"2012-10-17","Statement":[
+	  {"Effect":"Allow","Action":["s3:GetObject"]},
+	  {"Effect":"Allow","Action":"iam:PassRole"},
+	  {"Effect":"Deny","Action":["kms:Decrypt"]}]}`
+	acts, complement, err := actionsFromDocument(doc)
+	if err != nil || complement {
+		t.Fatalf("acts=%v complement=%v err=%v", acts, complement, err)
+	}
+	if len(acts) != 2 || acts[0] != "iam:PassRole" || acts[1] != "s3:GetObject" {
+		t.Fatalf("statements past the first were not read (or Deny was counted): %v", acts)
+	}
+	if !awsPolicyPrivileged(acts) {
+		t.Fatal("an iam: grant in the SECOND statement reported the policy as unprivileged")
+	}
+}
+
+func TestPolicyActionsAcceptASingleStatementObject(t *testing.T) {
+	acts, _, err := actionsFromDocument(`{"Statement":{"Effect":"Allow","Action":"s3:*"}}`)
+	if err != nil || len(acts) != 1 || acts[0] != "s3:*" {
+		t.Fatalf("a single-object Statement (IAM accepts both forms) failed to read: %v %v", acts, err)
+	}
+}
+
+func TestPolicyComplementIsNotFoldedIntoAnActionList(t *testing.T) {
+	acts, complement, err := actionsFromDocument(
+		`{"Statement":[{"Effect":"Allow","NotAction":["iam:*"],"Resource":"*"}]}`)
+	if err != nil || !complement || acts != nil {
+		t.Fatalf("an everything-EXCEPT grant was reduced to a list: acts=%v complement=%v err=%v",
+			acts, complement, err)
+	}
+}

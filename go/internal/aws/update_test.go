@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // ---- ClassifyChange (PURE, per path per service) --------------------------
@@ -18,12 +20,16 @@ func TestClassifyChangeS3(t *testing.T) {
 		"network.publicExposure":         "mutable",
 		"encryption.customerManagedKeys": "mutable",
 		"location.region":                "immutable",
-		"durability.class":               "immutable",
-		"encryption.atRest":              "unsupported",
+		// D833: a bucket is regional by construction, so a replacement reaches the same
+		// class — the old expectation pinned destroying every object for nothing.
+		"durability.class":  "unsupported",
+		"encryption.atRest": "unsupported",
 		// WORM (Object Lock) is now honored at bucket birth (create-time only,
 		// irreversible) — a change is a replacement, not an in-place patch.
-		"retention.locked":  "immutable",
-		"retention.minimum": "immutable",
+		"retention.locked": "immutable",
+		// D824: the floor is raised in place (PutObjectLockConfiguration), so a
+		// replacement is a destroyed bucket for a change AWS supports.
+		"retention.minimum": "unsupported",
 	}
 	for path, exp := range want {
 		if got, _ := d.ClassifyChange("s3", path, nil, true, nil); got != exp {
@@ -434,5 +440,68 @@ func TestUpdateRDSServerErrorIsUnknownWithPid(t *testing.T) {
 		[]string{"network.publicExposure"})
 	if res.Status != "unknown" || res.ProviderID == "" {
 		t.Fatalf("a 5xx modify must be unknown WITH pid, got %+v", res)
+	}
+}
+
+// rdsPollServer serves an instance that reports PendingModifiedValues (still applying)
+// for the first `pendingDescribes` DescribeDBInstances calls, then applied (no pending).
+// pendingDescribes<0 means pending forever. Tags always match so ownership passes.
+func rdsPollServer(t *testing.T, pendingDescribes int) *httptest.Server {
+	t.Helper()
+	var mu sync.Mutex
+	calls := 0
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := make([]byte, r.ContentLength)
+		_, _ = io.ReadFull(r.Body, body)
+		switch queryAction(body) {
+		case "DescribeDBInstances":
+			mu.Lock()
+			calls++
+			pending := pendingDescribes < 0 || calls <= pendingDescribes
+			mu.Unlock()
+			pmv := "<PendingModifiedValues></PendingModifiedValues>"
+			if pending {
+				pmv = "<PendingModifiedValues><PubliclyAccessible>false</PubliclyAccessible></PendingModifiedValues>"
+			}
+			_, _ = w.Write([]byte(`<DescribeDBInstancesResponse><DescribeDBInstancesResult><DBInstances><DBInstance>` +
+				`<DBInstanceIdentifier>db-x</DBInstanceIdentifier><DBInstanceStatus>available</DBInstanceStatus>` +
+				`<Engine>postgres</Engine><EngineVersion>16.3</EngineVersion>` +
+				`<PubliclyAccessible>false</PubliclyAccessible>` + pmv +
+				`<TagList><Tag><Key>groundhold-capability</Key><Value>` + sanitizeTag("db") + `</Value></Tag>` +
+				`<Tag><Key>groundhold-environment</Key><Value>` + sanitizeTag("prod") + `</Value></Tag></TagList>` +
+				`</DBInstance></DBInstances></DescribeDBInstancesResult></DescribeDBInstancesResponse>`))
+		case "ModifyDBInstance":
+			_, _ = w.Write([]byte(`<ModifyDBInstanceResponse></ModifyDBInstanceResponse>`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+}
+
+// D953: the update must poll to APPLIED (available, no PendingModifiedValues), not report
+// succeeded on the async accept. Pre-read is describe #1; the modify is accepted; describe
+// #2 still shows pending; describe #3 is applied -> succeeded only then.
+func TestUpdateRDSPollsToApplied(t *testing.T) {
+	srv := rdsPollServer(t, 2) // pending through the pre-read and the first poll
+	defer srv.Close()
+	d := rdsTestDriver(t, srv)
+	res := d.updateRDS("db", "prod", "rds:eu-central-1:db-x", rdsAttrs(), rdsImpl(),
+		[]string{"network.publicExposure"})
+	if res.Status != "succeeded" {
+		t.Fatalf("must report succeeded only once applied (no pending), got %+v", res)
+	}
+}
+
+// D953: a change that never lands within the timeout is unknown (reconcile), never a
+// false succeeded — the whole point of polling to applied.
+func TestUpdateRDSStillApplyingIsUnknown(t *testing.T) {
+	srv := rdsPollServer(t, -1) // pending forever
+	defer srv.Close()
+	d := rdsTestDriver(t, srv)
+	d.PollTimeout = time.Millisecond // force a fast timeout rather than the 20-min default
+	res := d.updateRDS("db", "prod", "rds:eu-central-1:db-x", rdsAttrs(), rdsImpl(),
+		[]string{"network.publicExposure"})
+	if res.Status != "unknown" || res.ProviderID == "" {
+		t.Fatalf("a modify still applying at timeout must be unknown WITH pid, got %+v", res)
 	}
 }

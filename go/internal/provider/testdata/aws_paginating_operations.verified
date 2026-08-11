@@ -1,0 +1,65 @@
+# Operations the drivers CALL that AWS itself paginates, read from botocore's
+# SERVICE MODELS (a continuation in the input shape and one in the output
+# shape), fetched without credentials. One line per operation.
+# Subject: go/internal/aws/testdata/aws-routes.txt (D853).
+# Refresh: scripts/refresh-aws-paginating.sh
+# 59 operations, of which 4 are invisible to botocore's paginator data (D871)
+acm	ListCertificates
+aoss	ListCollections
+apprunner	ListServices
+autoscaling	DescribeAutoScalingGroups
+autoscaling	DescribePolicies
+budgets	DescribeBudgets
+budgets	DescribeNotificationsForBudget
+cloudtrail	ListTags
+cloudtrail	ListTrails
+dynamodb	ListTables
+dynamodb	ListTagsOfResource
+ec2	DescribeFlowLogs
+ec2	DescribeImages
+ec2	DescribeInstances
+ec2	DescribeInternetGateways
+ec2	DescribeLaunchTemplateVersions
+ec2	DescribeNatGateways
+ec2	DescribeRouteTables
+ec2	DescribeSecurityGroups
+ec2	DescribeSnapshots
+ec2	DescribeSubnets
+ec2	DescribeVolumes
+ec2	DescribeVpcEndpoints
+ec2	DescribeVpcs
+ecr	DescribeRepositories
+ecs	ListClusters
+ecs	ListServices
+elasticache	DescribeCacheSubnetGroups
+elasticache	DescribeReplicationGroups
+elasticache	DescribeServerlessCaches
+elasticloadbalancing	DescribeListeners
+elasticloadbalancing	DescribeLoadBalancers
+elasticloadbalancing	DescribeTargetGroups
+events	ListTargetsByRule
+iam	ListAttachedRolePolicies
+iam	ListPolicies
+iam	ListRoles
+iam	SimulatePrincipalPolicy
+kinesis	ListStreams
+kms	ListKeys
+kms	ListResourceTags
+logs	DescribeLogGroups
+logs	DescribeMetricFilters
+monitoring	DescribeAlarms
+monitoring	ListDashboards
+rds	DescribeDBClusterParameters
+rds	DescribeDBClusterSnapshots
+rds	DescribeDBClusters
+rds	DescribeDBInstances
+rds	DescribeDBParameters
+rds	DescribeDBSnapshots
+rds	DescribeDBSubnetGroups
+redshift-serverless	ListWorkgroups
+secretsmanager	ListSecrets
+ses	ListReceiptRuleSets
+sns	ListTopics
+sqs	ListQueues
+wafv2	ListTagsForResource
+wafv2	ListWebACLs

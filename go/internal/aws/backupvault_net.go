@@ -2,10 +2,10 @@
 // capability.backup.vault driver. CreateBackupVault is PUT /backup-vaults/{name};
 // GET/DELETE follow; the retention lock is PUT /backup-vaults/{name}/vault-lock. The
 // name is deterministic, so the pid is knowable BEFORE the response (D29). Ownership is
-// tags read via ListTags (GET /tags/{arn}) — the ARN is pre-encoded into the path so
-// the wire and the SigV4 canonical URI agree. Delete refuses a non-empty or
-// compliance-locked vault (never forced). No live AWS Backup validation in this env —
-// code + honesty-harness certified.
+// tags read via ListTags (GET /tags/{arn}/) — the ARN is single-encoded on the wire and
+// the SigV4 signer double-encodes its canonical to match (D880). Delete refuses a non-empty
+// or compliance-locked vault (never forced). D880 proved on a real account: create → retire
+// deletes; before it, retire returned unknown forever and leaked the vault.
 package aws
 
 import (
@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"groundhold/internal/provider"
 )
@@ -58,7 +59,13 @@ type bkvDescribe struct {
 	BackupVaultArn   string `json:"BackupVaultArn"`
 	EncryptionKeyArn string `json:"EncryptionKeyArn"`
 	Locked           bool   `json:"Locked"`
-	MinRetentionDays int    `json:"MinRetentionDays"`
+	// LockDate is the moment the lock becomes immutable. AWS: "If you applied Vault
+	// Lock to your vault without specifying a lock date, you can change any of your
+	// Vault Lock settings, or delete Vault Lock from the vault entirely, at any time."
+	// It is the ONLY field that tells the two modes apart — `Locked` is true for both
+	// (D724).
+	LockDate         float64 `json:"LockDate"`
+	MinRetentionDays int     `json:"MinRetentionDays"`
 }
 
 // describeBkv reads a vault. found=false + readable=true is authoritative "does not
@@ -82,11 +89,16 @@ func (d *Driver) describeBkv(region, name string) (bkvDescribe, bool, error) {
 	return doc, true, nil
 }
 
-// bkvTags reads ownership tags via ListTags (GET /tags/{arn}). The ARN is rfc3986-
+// bkvTags reads ownership tags via ListTags (GET /tags/{resourceArn}/). D880: the ARN is
+// single-encoded on the wire (rfc3986: %3A) with the model's trailing slash, EXACTLY as
+// botocore serializes it — and the SigV4 signer double-encodes the canonical (%253A) to
+// match what AWS computes from the received request. The original 403 was the signer
+// single-encoding its canonical while the wire carried %3A; a delete/adopt that cannot
+// read ownership tags returns unknown forever, leaking every backup vault and plan it made.
 // encoded into the path so it signs and transmits identically.
 func (d *Driver) bkvTags(region, arn string) (map[string]string, error) {
 	const op = "ListTags"
-	st, resp, err := d.backupCall("GET", region, "/tags/"+rfc3986(arn), nil)
+	st, resp, err := d.backupCall("GET", region, "/tags/"+rfc3986(arn)+"/", nil)
 	if err != nil || st != http.StatusOK {
 		if err != nil {
 			return nil, readTransport(op, err)
@@ -179,30 +191,58 @@ func (d *Driver) observeBackupVault(capability, providerID string) ([]provider.O
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"backup vault not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"backup vault not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
+	var diags []string
 	if doc.MinRetentionDays > 0 {
 		obs = append(obs, provider.Observation{Path: "retention.minimum",
 			Value: fmt.Sprintf("%dh", doc.MinRetentionDays*24), Derivation: "measured"})
 	}
 	if doc.Locked {
-		// a vault-lock in force enforces the minimum immutably (compliance). The
-		// governance grace window is a transient state Describe does not distinguish.
-		obs = append(obs, provider.Observation{Path: "retention.lockMode", Value: "compliance", Derivation: "measured"})
+		// D724: `Locked` alone said COMPLIANCE, and it is true in BOTH modes — so a
+		// vault any administrator could unlock read as immutable WORM, and a contract
+		// demanding compliance was satisfied by a vault that gives none. LockDate is
+		// what separates them, and it was in this response all along.
+		switch {
+		case doc.LockDate == 0:
+			// no lock date: deletable at any time — governance, and that is measured.
+			obs = append(obs, provider.Observation{Path: "retention.lockMode",
+				Value: "governance", Derivation: "measured"})
+		case int64(doc.LockDate) <= d.Now().Unix():
+			// the lock date has passed: immutable, by the vendor's own words.
+			obs = append(obs, provider.Observation{Path: "retention.lockMode",
+				Value: "compliance", Derivation: "measured"})
+		default:
+			// compliance-CONFIGURED but still inside the cooling-off window, so the
+			// WORM guarantee is not in force yet. Claiming it now is the false reading
+			// this entry exists to remove: withhold the value and say why (D29).
+			diags = append(diags, fmt.Sprintf("retention.lockMode not observed: the vault "+
+				"lock is configured for compliance but becomes immutable only at %s — "+
+				"until then it can still be deleted",
+				time.Unix(int64(doc.LockDate), 0).UTC().Format(time.RFC3339)))
+		}
 	}
-	if doc.EncryptionKeyArn != "" && !strings.Contains(doc.EncryptionKeyArn, "aws/backup") {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: true, Derivation: "measured"})
-	}
-	return obs, nil, nil
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+		Value: doc.EncryptionKeyArn != "" && !strings.Contains(doc.EncryptionKeyArn, "aws/backup"), Derivation: "measured"})
+	return obs, diags, nil
 }
 
 func (d *Driver) deleteBackupVault(capability, environment, providerID string) provider.CreateResult {
 	region, account, name, err := splitBkvProviderID(providerID)
 	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if err := d.sameAccount(account); err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	_, found, rerr := d.describeBkv(region, name)

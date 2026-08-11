@@ -56,7 +56,7 @@ func TestObserveClusterRole(t *testing.T) {
 	defer srv.Close()
 	d := NewDriver(srv.URL, "tok")
 	pid := rbacProviderID(rbacGroup, rbacVersion, "ClusterRole", "", "platform-admin")
-	mp := d.genericMapping("rbac-clusterrole")
+	mp, _ := d.serviceMapping("rbac-clusterrole", forWrite)
 	if mp == nil {
 		t.Fatal("rbac-clusterrole must route through the schema-driven engine")
 	}

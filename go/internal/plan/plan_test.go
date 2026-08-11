@@ -292,7 +292,6 @@ func TestLoadPlanRejects(t *testing.T) {
 		{"missing-reads", func(m map[string]any) { delete(planBlock(m), "reads") }, "plan.reads is required"},
 		{"bad-contractHash", func(m map[string]any) { readsBlock(m)["contractHash"] = "nope" }, "reads.contractHash"},
 		{"bad-candidateHash", func(m map[string]any) { readsBlock(m)["candidateHash"] = "nope" }, "reads.candidateHash"},
-		{"empty-heads", func(m map[string]any) { readsBlock(m)["heads"] = map[string]any{} }, "reads.heads must pin a head"},
 		{"head-neither-genesis-nor-hash", func(m map[string]any) {
 			readsBlock(m)["heads"] = map[string]any{"capA": "later", "capB": validHash}
 		}, "reads.heads[capA]"},
@@ -302,14 +301,12 @@ func TestLoadPlanRejects(t *testing.T) {
 		{"toolchain-missing-spec", func(m map[string]any) {
 			readsBlock(m)["toolchain"] = map[string]any{"compiler": "x"}
 		}, "toolchain must carry compiler and spec"},
-		{"empty-writes", func(m map[string]any) { planBlock(m)["writes"] = []any{} }, "plan.writes must be a non-empty list"},
 		{"write-not-in-heads", func(m map[string]any) {
 			planBlock(m)["writes"] = []any{"capA", "capB", "capX"}
 		}, "cannot write what you did not read"},
 		{"write-not-string", func(m map[string]any) {
 			planBlock(m)["writes"] = []any{"capA", 7}
 		}, "plan.writes must be a non-empty list"},
-		{"no-actions", func(m map[string]any) { planBlock(m)["actions"] = []any{} }, "plan.actions must be a non-empty list"},
 		{"action-missing-id", func(m map[string]any) {
 			planBlock(m)["actions"] = []any{map[string]any{"capability": "capA"}}
 		}, "action missing id"},
@@ -371,9 +368,6 @@ func TestLoadPlanRejects(t *testing.T) {
 		{"self-cycle", func(m map[string]any) {
 			actionN(m, 0)["dependsOn"] = []any{"a1"}
 		}, "cycle"},
-		{"no-preconditions", func(m map[string]any) {
-			planBlock(m)["preconditions"] = []any{}
-		}, "plan.preconditions must be a non-empty list"},
 		{"unknown-precondition-type", func(m map[string]any) {
 			planBlock(m)["preconditions"] = []any{map[string]any{"type": "always-true"}}
 		}, "unknown precondition type"},

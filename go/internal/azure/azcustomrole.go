@@ -32,7 +32,7 @@ type AzureCustomRolePlan struct {
 // Every error is a preflight refusal, never a silent drop.
 func BuildAzureCustomRole(environment, capability string,
 	attrs, impl map[string]any, generation int) (AzureCustomRolePlan, error) {
-	p := AzureCustomRolePlan{RoleName: "groundhold " + capability + " (" + environment + ")"}
+	p := AzureCustomRolePlan{RoleName: azCustomRoleName(capability, environment)}
 	declaredMut, mutSet := false, false
 	declaredPriv, privSet := false, false
 	paths := make([]string, 0, len(attrs))
@@ -92,6 +92,32 @@ func azActionMutating(a string) bool {
 	return !strings.HasSuffix(a, "/read")
 }
 
+// azRoleActions unions the Actions of EVERY permission block on a role definition.
+//
+// D797. It used to read Permissions[0].Actions. Azure allows a role to carry several
+// permission blocks, and discover reverse-maps roles this driver did not author, so a
+// role whose wildcard lived in the second block reported access.privileged=false.
+//
+// NotActions are deliberately NOT subtracted. They can only NARROW what a role grants,
+// so ignoring them over-reports privilege — the safe side of a security attribute — and
+// the diagnostic says the narrowing exists rather than pretending the set is exact.
+func azRoleActions(doc azureCustomRoleDoc) (actions []string, narrowed bool) {
+	seen := map[string]bool{}
+	for _, p := range doc.Properties.Permissions {
+		if len(p.NotActions) > 0 {
+			narrowed = true
+		}
+		for _, a := range p.Actions {
+			if !seen[a] {
+				seen[a] = true
+				actions = append(actions, a)
+			}
+		}
+	}
+	sort.Strings(actions)
+	return actions, narrowed
+}
+
 func azRoleMutating(perms []string) bool {
 	for _, a := range perms {
 		if azActionMutating(a) {
@@ -118,6 +144,14 @@ func azRolePrivileged(perms []string) bool {
 		}
 	}
 	return false
+}
+
+// azCustomRoleName is the role's display name, and — through azRoleDefGUID — half of
+// its content-addressed identity. The delete path re-derives it to answer "is this
+// role one of ours?" without a read (D458), so it must stay a pure function of
+// (capability, environment).
+func azCustomRoleName(capability, environment string) string {
+	return "groundhold " + capability + " (" + environment + ")"
 }
 
 // azRoleDefGUID is the DETERMINISTIC roleDefinition name from (scope, roleName) — a

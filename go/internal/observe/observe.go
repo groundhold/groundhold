@@ -196,18 +196,31 @@ func outputDocs(prov provider.Provider, service, cap, providerID, at string,
 		return nil
 	}
 	docs := make([]Doc, 0, len(specs))
+	// D774, from the field: one unreadable output discarded EVERY readable one. The
+	// driver had just adopted a function BY its ARN and then recorded no outputs at all,
+	// including that ARN, because a second declared output was absent — so every $ref to
+	// the function refused and the plan blocked by a route that had nothing to do with
+	// the missing value. The reporter's sentence: "nie umiem jednego, więc nie zapisuję
+	// nic" zamienia lukę w blokadę.
+	//
+	// Record what was read; name what was not. A consumer that needs the missing output
+	// still refuses AT THE POINT OF USE ("bound producer has no outputs.X observation"),
+	// which is where the refusal belongs — not over the outputs that were there.
 	for _, s := range specs {
 		v, ok := raw[s.Name]
 		if !ok {
-			res.Diagnostics = append(res.Diagnostics, cap+": declared output "+
-				s.Name+" missing from the driver read — recording no outputs")
-			return nil
+			if !s.Conditional {
+				res.Diagnostics = append(res.Diagnostics, cap+": declared output "+
+					s.Name+" missing from the driver read — recording the outputs that "+
+					"were readable; a $ref to this one will refuse where it is used")
+			}
+			continue
 		}
 		got, kindErr := provider.OutputValueOfKind(v, s.Kind)
 		if kindErr != "" {
 			res.Diagnostics = append(res.Diagnostics, cap+": declared output "+
-				s.Name+" "+kindErr+" — recording no outputs")
-			return nil
+				s.Name+" "+kindErr+" — not recorded; the readable outputs are")
+			continue
 		}
 		docs = append(docs, Doc{
 			Capability: cap, Path: "outputs." + s.Name, Value: got,

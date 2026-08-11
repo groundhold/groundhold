@@ -24,6 +24,7 @@ package backup
 import (
 	"encoding/json"
 	"fmt"
+	"groundhold/internal/perr"
 	"os"
 	"path/filepath"
 	"sort"
@@ -58,14 +59,35 @@ type DocRef struct {
 
 // BackupReport is the deterministic receipt written to <out>/backup.json.
 type BackupReport struct {
-	APIVersion   string   `json:"apiVersion"`
-	Kind         string   `json:"kind"`
-	Status       string   `json:"status"` // backed-up | refused
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+	Status     string `json:"status"` // backed-up | refused
+	// Code (D624): the published coverage rule is "every JSON-emitting verb carries
+	// `code`". This report refused with reasons and no code, so a caller had to read
+	// prose to learn whether the ledger was damaged or the path was wrong.
+	Code         string   `json:"code,omitempty"`
 	LedgerID     string   `json:"ledgerId,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
 	Capsules     []string `json:"capsules,omitempty"`
-	Documents    []DocRef `json:"documents,omitempty"`
-	Reasons      []string `json:"reasons,omitempty"`
+	// CredentialWarnings counts EVENTS carrying credential-shaped values (D536).
+	// A count, never the values: a warning that quotes the secret defeats itself.
+	// The ledger is append-only, so a value that was a plaintext credential when it
+	// was recorded is still one inside every copy made afterwards — and a backup is
+	// made precisely to be moved off-host.
+	CredentialWarnings int              `json:"credentialWarnings"`
+	CredentialSites    []CredentialSite `json:"credentialSites,omitempty"`
+	Documents          []DocRef         `json:"documents,omitempty"`
+	Reasons            []string         `json:"reasons,omitempty"`
+}
+
+// CredentialSite locates one event whose recorded body carries a
+// credential-shaped value. The capsule and the event index are enough for an
+// operator to go and look; the VALUE is never carried (D536).
+type CredentialSite struct {
+	Capsule string `json:"capsule"`
+	Event   int    `json:"event"`
+	Kind    string `json:"kind"`    // what the pattern recognised, in prose
+	Pointer string `json:"pointer"` // the path inside the event body
 }
 
 // Run performs a backup, returning the report and the CLI exit code.
@@ -96,8 +118,21 @@ func Run(opts Options) (*BackupReport, int) {
 	// stale; and archive+live for one capability are disjoint sets, which merge
 	// adjudicates as a fork. Say that here, before creating anything, instead of
 	// discovering it capsule by capsule.
-	if snap, serr := ledger.LoadSnapshotFile(ledger.SnapshotPath(opts.LedgerPath)); serr == nil &&
-		snap != nil && len(snap.Heads) > 0 {
+	snap, snapState, serr := ledger.SnapshotStateOf(opts.LedgerPath)
+	if snapState == ledger.SnapshotUnreadable {
+		// D708: the sidecar EXISTS and could not be read, so this ledger cannot be
+		// shown to be uncompacted — and the refusal below exists because a compacted
+		// ledger cannot be backed up as capsules at all. The old test was
+		// `serr == nil && snap != nil`, which sent an unreadable snapshot down the
+		// same path as an absent one: capsules emitted, success reported, and nothing
+		// that could restore. A backup that reports success and cannot restore is the
+		// worst kind there is.
+		return refuse(rep, fmt.Sprintf("a snapshot sidecar exists beside this ledger "+
+			"and could not be read (%v) — capsule DR and compaction are mutually "+
+			"exclusive, so a backup cannot be shown to be restorable while that file "+
+			"is unreadable", serr))
+	}
+	if snapState == ledger.SnapshotPresent && len(snap.Heads) > 0 {
 		return refuse(rep, "this ledger has been compacted (a snapshot at "+
 			fmt.Sprintf("%d events", snap.BaseEvents)+"): capsule backup covers a "+
 			"chain from genesis, so every capability whose history predates the "+
@@ -131,6 +166,19 @@ func Run(opts Options) (*BackupReport, int) {
 			return op(rep, err.Error())
 		}
 		rep.Capsules = append(rep.Capsules, name)
+		rep.CredentialSites = append(rep.CredentialSites, scanCapsule(name, c)...)
+	}
+	// D536: say it out loud, and say what to DO. Never refuse — the finding is a
+	// pattern, the history is immutable by design, and redacting it would break the
+	// hash chain restore verifies against. Reported after the capsules so the count
+	// is over all of them.
+	rep.CredentialWarnings = len(rep.CredentialSites)
+	if rep.CredentialWarnings > 0 {
+		rep.Reasons = append(rep.Reasons, fmt.Sprintf(
+			"warning: %d recorded event(s) carry credential-shaped values — the ledger is "+
+				"append-only, so values that were plaintext when recorded travel in every "+
+				"copy. ENCRYPT this backup before moving it off-host; see credentialSites "+
+				"for where to look (values are never printed).", rep.CredentialWarnings))
 	}
 
 	// documents the ledger pins by hash — recorded always, copied when a store
@@ -279,11 +327,15 @@ type DocStatus struct {
 
 // VerifyReport is the receipt for VerifyDocuments.
 type VerifyReport struct {
-	APIVersion string      `json:"apiVersion"`
-	Kind       string      `json:"kind"`
-	Status     string      `json:"status"` // verified | refused
-	Documents  []DocStatus `json:"documents,omitempty"`
-	Reasons    []string    `json:"reasons,omitempty"`
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+	Status     string `json:"status"` // verified | refused
+	// Code (D624): the coverage rule again — a refusal that names no code makes a
+	// caller read prose to learn whether a document was tampered with or the set
+	// simply does not describe this ledger.
+	Code      string      `json:"code,omitempty"`
+	Documents []DocStatus `json:"documents,omitempty"`
+	Reasons   []string    `json:"reasons,omitempty"`
 }
 
 // VerifyDocuments re-verifies a backup's documents directory: for every CONTRACT
@@ -293,6 +345,78 @@ type VerifyReport struct {
 // are reported deferred; a contract that was never copied is reported absent
 // (honest, not fatal — the ledger itself restored). No manifest is an operator
 // error: there is nothing to verify against.
+// VerifyDocumentsAgainst re-verifies a documents directory against the hashes the
+// RESTORED LEDGER pins, not merely against the manifest that ships beside the blobs.
+//
+// D616: `VerifyDocuments(dir)` was handed only the directory. It read `manifest.json`
+// — a plain file the attacker controls if they control the backup — and compared each
+// blob to the hash written there. The ledger's own pinned `contractHash` values, which
+// restore has just replayed into memory, were never consulted. So a substituted
+// contract, renamed to its own (different) hash with a one-entry manifest to match,
+// came back `{"status":"verified"}` at exit 0 while the restored ledger pinned a
+// different document entirely. Two weaker variants of the same root: `[]` as the
+// manifest verified zero documents (vacuous), and flipping `"present": false` made the
+// blob unread and still "verified" — a guard conditional on a field the attacker sets,
+// the shape D312 closed for anchors.
+//
+// ledgerPath may be empty, in which case this degrades to the manifest-only check with
+// that stated in the report — an honest weaker answer, not a silent one.
+func VerifyDocumentsAgainst(docsDir, ledgerPath string) (*VerifyReport, int) {
+	rep, code := VerifyDocuments(docsDir)
+	if ledgerPath == "" {
+		rep.Reasons = append(rep.Reasons, "no ledger given: the manifest was checked "+
+			"against itself, which cannot detect a substituted document")
+		return rep, code
+	}
+	pinned, err := collectDocRefs(ledgerPath)
+	if err != nil {
+		rep.Status = "refused"
+		rep.Code = string(perr.LedgerCorrupted)
+		rep.Reasons = append(rep.Reasons, fmt.Sprintf(
+			"cannot read the restored ledger to learn which documents it pins: %v", err))
+		return rep, ExitRefused
+	}
+
+	inReport := map[string]bool{}
+	for _, d := range rep.Documents {
+		inReport[d.Hash] = true
+	}
+	missing := false
+	for _, r := range pinned {
+		if r.Kind != "contract" || inReport[r.Hash] {
+			continue
+		}
+		missing = true
+		rep.Documents = append(rep.Documents, DocStatus{Hash: r.Hash, Kind: r.Kind,
+			Status: "unaccounted",
+			Reason: "the restored ledger pins this contract and the manifest does " +
+				"not mention it — the manifest is not a description of this history"})
+	}
+	// A blob the ledger does NOT pin is not evidence about this ledger. Report it
+	// rather than counting it towards a clean verdict.
+	pinnedSet := map[string]bool{}
+	for _, r := range pinned {
+		pinnedSet[r.Hash] = true
+	}
+	for i, d := range rep.Documents {
+		if d.Status == "verified" && !pinnedSet[d.Hash] {
+			rep.Documents[i].Status = "foreign"
+			rep.Documents[i].Reason = "this document is not pinned anywhere in the " +
+				"restored ledger — it verifies against the manifest and says nothing " +
+				"about this history"
+			missing = true
+		}
+	}
+	if missing {
+		rep.Status = "refused"
+		rep.Code = string(perr.AdoptionMismatch)
+		rep.Reasons = append(rep.Reasons, "the documents do not correspond to the "+
+			"restored ledger — a manifest that agrees with itself is not evidence")
+		return rep, ExitRefused
+	}
+	return rep, code
+}
+
 func VerifyDocuments(docsDir string) (*VerifyReport, int) {
 	rep := &VerifyReport{APIVersion: "backup-verify/v0.1", Kind: "DocumentVerifyReport", Status: "refused"}
 	raw, err := os.ReadFile(filepath.Join(docsDir, "manifest.json"))
@@ -305,14 +429,30 @@ func VerifyDocuments(docsDir string) (*VerifyReport, int) {
 		rep.Reasons = append(rep.Reasons, fmt.Sprintf("unreadable documents manifest: %v", err))
 		return rep, ExitOperator
 	}
+	// D643: the DIRECTORY says what exists. The manifest is the artefact under
+	// test, so it cannot be what decides whether a blob is read: `present: false`
+	// and `kind: "candidate"` each left a substituted contract on disk unread and
+	// still reported `verified`, at the last step of a disaster recovery. A manifest
+	// entry may say a blob is ABSENT — it may not say a blob that is here should be
+	// ignored.
+	onDisk := map[string]bool{}
+	if ents, derr := os.ReadDir(docsDir); derr == nil {
+		for _, e := range ents {
+			if e.IsDir() || e.Name() == "manifest.json" {
+				continue
+			}
+			onDisk[e.Name()] = true
+		}
+	}
+
 	tampered := false
 	for _, r := range refs {
 		st := DocStatus{Hash: r.Hash, Kind: r.Kind}
 		switch {
-		case r.Kind != "contract":
+		case r.Kind != "contract" && !onDisk[r.Hash]:
 			st.Status = "deferred"
 			st.Reason = "candidate-blob backup deferred; preserve externally"
-		case !r.Present:
+		case !r.Present && !onDisk[r.Hash]:
 			st.Status = "absent"
 			st.Reason = "referenced but not copied into this backup"
 		default:
@@ -326,15 +466,44 @@ func VerifyDocuments(docsDir string) (*VerifyReport, int) {
 				st.Status, st.Reason, tampered = "tampered", herr.Error(), true
 				break
 			}
-			if h != r.Hash {
-				st.Status, st.Reason, tampered = "tampered", fmt.Sprintf("recomputed %s != pinned %s", h, r.Hash), true
-			} else {
+			switch {
+			case h != r.Hash:
+				st.Status, st.Reason, tampered = "tampered",
+					fmt.Sprintf("recomputed %s != pinned %s", h, r.Hash), true
+			case !r.Present || r.Kind != "contract":
+				// The blob is here and verifies, but the manifest describes it as
+				// something that should not have been read. The bytes are fine; the
+				// manifest is lying about the backup, which is what the check is for.
+				st.Status, st.Reason, tampered = "tampered", fmt.Sprintf(
+					"the blob is present and hashes correctly, but the manifest "+
+						"records it as kind=%q present=%v — a manifest that waves off "+
+						"a blob that is on disk is not a description of this backup",
+					r.Kind, r.Present), true
+			default:
 				st.Status = "verified"
 			}
 		}
+		delete(onDisk, r.Hash)
+		rep.Documents = append(rep.Documents, st)
+	}
+	// Whatever is left is a blob the manifest never mentioned. It is in the backup
+	// and it is not accounted for; the only honest thing to do is read it and say
+	// what it is.
+	for _, name := range sortedKeys(onDisk) {
+		st := DocStatus{Hash: name, Kind: "contract", Status: "tampered", Reason: "this blob is " +
+			"in the backup and the manifest does not mention it — an unlisted blob is " +
+			"exactly what a substitution leaves behind"}
+		if c, lerr := contract.LoadContract(filepath.Join(docsDir, name)); lerr == nil {
+			if h, herr := canonical.HashContract(c); herr == nil && h == name {
+				st.Reason = "this blob hashes to its own name but the manifest does " +
+					"not mention it — the manifest is not a description of this backup"
+			}
+		}
+		tampered = true
 		rep.Documents = append(rep.Documents, st)
 	}
 	if tampered {
+		rep.Code = string(perr.LedgerCorrupted)
 		rep.Reasons = append(rep.Reasons, "a document blob does not match its pinned hash — corruption cannot be laundered through recovery")
 		return rep, ExitRefused
 	}
@@ -344,11 +513,15 @@ func VerifyDocuments(docsDir string) (*VerifyReport, int) {
 
 func op(rep *BackupReport, reason string) (*BackupReport, int) {
 	rep.Reasons = append(rep.Reasons, reason)
+	rep.Status = "refused"
+	rep.Code = string(perr.StructuralError) // D624: an operator error, named
 	return rep, ExitOperator
 }
 
 func refuse(rep *BackupReport, reason string) (*BackupReport, int) {
 	rep.Reasons = append(rep.Reasons, reason)
+	rep.Status = "refused"
+	rep.Code = string(perr.LedgerCorrupted) // D624: the history, not the command line
 	return rep, ExitRefused
 }
 
@@ -372,5 +545,42 @@ func sortedKeys[V any](m map[string]V) []string {
 		out = append(out, k)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// scanCapsule reports the credential-shaped values recorded inside one capsule,
+// using the SAME detector the candidate path uses (contract.ScanValue, D364).
+// Two detectors would drift, and the one nobody exercised would be the one that
+// mattered.
+func scanCapsule(name string, c any) []CredentialSite {
+	raw, err := json.Marshal(c)
+	if err != nil {
+		return nil
+	}
+	var doc struct {
+		Events []map[string]any `json:"events"`
+	}
+	if json.Unmarshal(raw, &doc) != nil {
+		return nil
+	}
+	var out []CredentialSite
+	for i, ev := range doc.Events {
+		// A capsule event is the ledger envelope {apiVersion, kind, event}; the
+		// recorded body is one level in. Scanning the top level found nothing and
+		// looked exactly like a clean ledger — which is why the test that proves
+		// the WARNING fires had to exist before the code did.
+		inner, ok := ev["event"].(map[string]any)
+		if !ok {
+			continue
+		}
+		body, ok := inner["body"]
+		if !ok {
+			continue
+		}
+		for _, f := range contract.ScanValue("body", body) {
+			out = append(out, CredentialSite{
+				Capsule: name, Event: i, Kind: f.Kind, Pointer: f.Pointer})
+		}
+	}
 	return out
 }

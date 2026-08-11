@@ -231,8 +231,10 @@ func TestObserveAMIMissingIsNotAnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an image that is simply absent produced an error: %v", err)
 	}
-	if len(obs) != 0 {
-		t.Errorf("observations %v for an image that does not exist", obs)
+	// Corrected with D521: this asserted SILENCE for an absent bound resource,
+	// which is the defect F-LC3 exists to prevent.
+	if !absentMarked(obs) {
+		t.Errorf("observations %v do not mark an image that does not exist", obs)
 	}
 	if len(unread) == 0 {
 		t.Error("no diagnostic — the caller cannot tell an absent image from a silent one")

@@ -147,10 +147,16 @@ func (d *Driver) observeCustomRole(capability, providerID string) ([]provider.Ob
 		return nil, nil, rerr
 	}
 	if !found || doc.Deleted {
-		return nil, []string{"custom role not found (or soft-deleted) — nothing to observe"}, nil
+		// F-LC3 (D521): a BOUND resource the API says is GONE. A diagnostic
+		// alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"custom role not found (or soft-deleted) — bound resource is gone (will re-create)"}, nil
 	}
 	perms := doc.IncludedPermissions
 	return []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "role.permissions", Value: perms, Derivation: "measured"},
 		{Path: "access.mutating", Value: gcRoleMutating(perms), Derivation: "measured"},
 		{Path: "access.privileged", Value: gcRolePrivilegedSet(perms), Derivation: "measured"},
@@ -165,6 +171,15 @@ func (d *Driver) deleteCustomRole(capability, environment, providerID string) pr
 	}
 	if err := d.sameProject(project); err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	// OWNERSHIP (D451): a GCP custom role carries NO LABELS — IAM offers none — so its
+	// deterministic id is the only ownership evidence. Deleting a stranger's role revokes
+	// every permission it grants, from every principal bound to it, at once.
+	if !nameLooksOursGCP(roleID, capability, environment, "pv_", "_", gcRoleIDBad, 8) {
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("role %q is not named by groundhold for %s/%s — refusing to "+
+				"delete a role this contract does not own (a custom role carries no labels, "+
+				"so its id is the only ownership evidence there is)", roleID, capability, environment)}
 	}
 	url := fmt.Sprintf("%s/projects/%s/roles/%s", d.iamBase(), project, roleID)
 	st, body, e := d.call("DELETE", url, nil)

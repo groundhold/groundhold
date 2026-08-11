@@ -286,7 +286,14 @@ cases:
           at: "2026-07-12T14:10:00Z"
           map: { db: "fake:existing-db" }
           expect:
-            exit: 2
+            # D619: exit 3, not 2. `spec/errors.md` publishes
+            # `reconcile-required | 3/4` and its remediation names THIS condition in
+            # the parenthetical — "pending receipts block". The case pinned 2 because
+            # adopt's refusal helper hardcoded 2 for every code it refuses with, so
+            # the same code left `apply` as 3 and `adopt` as 2 and a caller could not
+            # branch on either. The code, the exit and the published table now agree;
+            # the refusal reason is unchanged.
+            exit: 3
             status: refused
             code: reconcile-required
             reasonContains: "must be reconciled first"

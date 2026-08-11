@@ -273,6 +273,14 @@ func (d *Driver) observePubSub(capability, providerID string) ([]provider.Observ
 	if err != nil {
 		return nil, nil, err
 	}
+	// F-LC3 (D519): a 404 here is a READABLE absence, not a failure to read.
+	// Folded into the generic error it made the binding block forever on
+	// unknown instead of re-creating; the contract reserves a marker for it.
+	if status == http.StatusNotFound {
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"bound resource is gone (will re-create)"}, nil
+	}
 	if status != http.StatusOK {
 		return nil, nil, fmt.Errorf("topics.get: HTTP %d", status)
 	}
@@ -281,10 +289,13 @@ func (d *Driver) observePubSub(capability, providerID string) ([]provider.Observ
 		return nil, nil, fmt.Errorf("topics.get: unparseable topic document")
 	}
 
-	var obs []provider.Observation
+	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
+	}
 	var diags []string
 	obs = append(obs,
-		provider.Observation{Path: "encryption.atRest", Value: true, Derivation: "config-intent"}, // always encrypts
+		provider.Observation{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"}, // always encrypts
 		provider.Observation{Path: "service.managed", Value: true, Derivation: "measured"},
 	)
 	// customerManagedKeys: present iff the topic carries a CMEK. Absent means the

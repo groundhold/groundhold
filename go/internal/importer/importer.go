@@ -210,7 +210,15 @@ func tfCloudSQL(addr string, attrs map[string]any) (Hint, []string, bool) {
 	}
 	backup := firstBlock(settings["backup_configuration"])
 	if enabled, ok := backup["enabled"].(bool); ok && enabled {
-		if pitr, _ := backup["point_in_time_recovery_enabled"].(bool); pitr {
+		// PITR has two engine-specific, mutually exclusive spellings (D950/D951);
+		// in terraform state (snake_case) they are point_in_time_recovery_enabled
+		// (Postgres/SQL Server) and binary_log_enabled (MySQL). Reading only the
+		// former emits a wrong 24h rpo hint for a MySQL instance that has PITR — the
+		// same defect D950 fixed on the pulumi (camelCase) path, in the sibling tfstate
+		// path the camelCase grep missed.
+		pitr, _ := backup["point_in_time_recovery_enabled"].(bool)
+		binlog, _ := backup["binary_log_enabled"].(bool)
+		if pitr || binlog {
 			notes = append(notes, addr+": PITR enabled — recovery.rpo "+
 				"value requires a probe, no hint emitted")
 		} else {
@@ -325,7 +333,13 @@ func pulumiCloudSQL(urn string,
 	}
 	backup, _ := settings["backupConfiguration"].(map[string]any)
 	if enabled, ok := backup["enabled"].(bool); ok && enabled {
-		if pitr, _ := backup["pointInTimeRecoveryEnabled"].(bool); pitr {
+		// PITR has two engine-specific, mutually exclusive spellings (D950):
+		// pointInTimeRecoveryEnabled (Postgres/SQL Server) and binaryLogEnabled
+		// (MySQL). Either means the window needs a probe — a MySQL instance read
+		// only for the Postgres spelling would emit a wrong 24h hint.
+		pitr, _ := backup["pointInTimeRecoveryEnabled"].(bool)
+		binlog, _ := backup["binaryLogEnabled"].(bool)
+		if pitr || binlog {
 			notes = append(notes, urn+": PITR enabled — recovery.rpo "+
 				"value requires a probe, no hint emitted")
 		} else {

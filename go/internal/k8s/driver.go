@@ -32,6 +32,16 @@ type Driver struct {
 	ClusterID   string // stable cluster identity (server URL / CA fingerprint) for sameCluster
 	HTTP        *http.Client
 	Now         func() time.Time
+	// PollTimeout/PollInterval bound the delete's poll-to-absence (D986): a k8s DELETE
+	// is accepted (200/202) while the object enters Terminating, and a finalizer can
+	// hold it there indefinitely. Zero means the default (2m / 2s); tests set them small.
+	PollTimeout  time.Duration
+	PollInterval time.Duration
+	// trunc records incomplete listings so the crawl can mark a scope a lower bound
+	// (D803/D873). k8s reads full lists (no `limit`), so it has no page-truncation to
+	// note — but a discovery sweep that FAILS is incompleteness all the same, and until
+	// D873 k8s had no channel to say so at all.
+	trunc *provider.ListingRecord
 	// Dial is the NetworkPolicy reachability probe's handshake (D59); nil =
 	// net.DialTimeout. Injectable so golden tests measure without a network.
 	Dial func(network, addr string, timeout time.Duration) (net.Conn, error)
@@ -44,7 +54,14 @@ type Driver struct {
 	// mapped service (defaults to the embedded set). A writeSafe mapping fully
 	// replaces its hand-coded twin.
 	Mappings map[string]*Mapping
+	// fieldReclaim (D699): the executor sets this per action from the SEALED plan's
+	// consent, and clears it after. Unexported so the only way to arm it is
+	// SetFieldReclaim — there is no field a caller can set by construction and forget.
+	fieldReclaim bool
 }
+
+// SetFieldReclaim implements provider.FieldReclaimer (D699).
+func (d *Driver) SetFieldReclaim(allowed bool) { d.fieldReclaim = allowed }
 
 // NewDriver builds a driver for an already-resolved API server + token. The
 // kubeconfig resolution (context selection, client-cert/CA wiring, exec-plugin
@@ -58,8 +75,13 @@ func NewDriver(server, token string) *Driver {
 		HTTP:        &http.Client{Timeout: 60 * time.Second},
 		Now:         time.Now,
 		Mappings:    embeddedMappings,
+		trunc:       &provider.ListingRecord{}, // D873
 	}
 }
+
+// TruncatedListings implements provider.ListingCompleteness (D803/D873): the calls whose
+// listings did not finish since the last reset — for k8s, discovery sweeps that failed.
+func (d *Driver) TruncatedListings() []provider.TruncationNote { return d.trunc.Take() }
 
 // The k8s driver is a full provider.Provider; every governance service routes
 // through the schema-driven engine (a mapping + its lenses), no hand-coded twins.
@@ -69,7 +91,49 @@ func (d *Driver) Name() string { return "k8s" }
 
 // requireService is the closed dispatch gate (D76 discipline): only wired
 // governance services route; anything else fails CLOSED, never a silent default.
+// intent says what a verb is about to do with a service. It exists so the read/write
+// question is ASKED rather than remembered: D550 gated a read on a write predicate at
+// three call sites, D574 found a fourth, and both were possible because each verb
+// picked its own helper and `genericMapping` does not say "write" in its name (D584).
+type intent int
+
+const (
+	forRead  intent = iota // observe, classify, ownership checks, probes
+	forWrite               // create, update, delete
+)
+
+// serviceMapping resolves the mapping a verb may use for its INTENT.
+//
+//	(m, nil)    — use the generic mapped path
+//	(nil, nil)  — not mapped; fall through to the hand-coded services
+//	(nil, err)  — refuse, worded for the intent that was asked for
+//
+// Reading admits every mapped service. Writing additionally requires a write lens,
+// and its refusal says so, because "unknown service" for one the driver demonstrably
+// serves sends the reader hunting a bug that is not there.
+func (d *Driver) serviceMapping(service string, in intent) (*Mapping, error) {
+	m := d.mappingFor(service)
+	if m == nil {
+		return nil, nil
+	}
+	if in == forWrite && !m.writeSafe() {
+		return nil, fmt.Errorf("k8s driver: service %q is observed but not written — its "+
+			"mapping has no write lens, so groundhold can read and adopt it but "+
+			"cannot create, update or delete it", service)
+	}
+	return m, nil
+}
+
 func (d *Driver) requireService(service string) error {
+	// D584: the mapped half is serviceMapping's business — including the refusal
+	// worded for a read-only service, which D550 added here and which now lives in
+	// the one place that knows read from write. What remains is the hand-coded
+	// dispatch this gate was originally written for (D76).
+	if m, err := d.serviceMapping(service, forWrite); err != nil {
+		return err
+	} else if m != nil {
+		return nil
+	}
 	switch service {
 	case "rbac-role", "rbac-grant", "rbac-clusterrole", "rbac-clustergrant", "netpol", "quota", "namespace":
 		return nil
@@ -175,7 +239,13 @@ func splitRBACProviderID(providerID, wantKind string) (group, version, namespace
 // its lenses); the hand-coded twins are gone. A service with no writeSafe mapping
 // falls to requireService, which fails closed with the wired-services list.
 func (d *Driver) Observe(service, capability, providerID string) ([]provider.Observation, []string, error) {
-	if m := d.genericMapping(service); m != nil {
+	// D550: reading asks the mapping registry, NOT genericMapping (registry AND
+	// write-safe). Gating a read on a write predicate made the driver contradict
+	// itself: `discover` enumerated an ArgoCD Application with measured values while
+	// `observe` on that same service refused it as unknown.
+	if m, err := d.serviceMapping(service, forRead); err != nil {
+		return nil, nil, err
+	} else if m != nil {
 		return d.observeMapped(m, providerID)
 	}
 	if err := d.requireService(service); err != nil {
@@ -186,7 +256,9 @@ func (d *Driver) Observe(service, capability, providerID string) ([]provider.Obs
 
 func (d *Driver) Validate(service, capability, environment string,
 	attributes, implementation map[string]any, generation int) error {
-	if m := d.genericMapping(service); m != nil {
+	if m, err := d.serviceMapping(service, forWrite); err != nil {
+		return err
+	} else if m != nil {
 		return m.validateMapped(attributes, implementation)
 	}
 	if err := d.requireService(service); err != nil {
@@ -197,7 +269,9 @@ func (d *Driver) Validate(service, capability, environment string,
 
 func (d *Driver) Create(service, capability, environment string,
 	attributes, implementation map[string]any, idempotencyKey string, generation int) provider.CreateResult {
-	if m := d.genericMapping(service); m != nil {
+	if m, err := d.serviceMapping(service, forWrite); err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	} else if m != nil {
 		return d.createMapped(m, capability, environment, attributes, implementation)
 	}
 	if err := d.requireService(service); err != nil {
@@ -212,7 +286,7 @@ func (d *Driver) Create(service, capability, environment string,
 // roleRef change is a replacement, not an in-place patch).
 func (d *Driver) ClassifyChange(service, path string, current, desired any,
 	implementation map[string]any) (string, string) {
-	if m := d.genericMapping(service); m != nil {
+	if m, _ := d.serviceMapping(service, forRead); m != nil { // classification is a read
 		if a, ok := m.Attributes[path]; ok {
 			if a.Change != "" {
 				return a.Change, ""
@@ -229,7 +303,9 @@ func (d *Driver) ClassifyChange(service, path string, current, desired any,
 
 func (d *Driver) Update(service, capability, environment, providerID string,
 	attributes, implementation map[string]any, changes []string, idempotencyKey string) provider.CreateResult {
-	if m := d.genericMapping(service); m != nil {
+	if m, err := d.serviceMapping(service, forWrite); err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	} else if m != nil {
 		return d.updateMapped(m, capability, environment, providerID, attributes, implementation)
 	}
 	if err := d.requireService(service); err != nil {
@@ -240,7 +316,9 @@ func (d *Driver) Update(service, capability, environment, providerID string,
 
 func (d *Driver) Delete(service, capability, environment, providerID string,
 	idempotencyKey string) provider.CreateResult {
-	if m := d.genericMapping(service); m != nil {
+	if m, err := d.serviceMapping(service, forWrite); err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	} else if m != nil {
 		return d.deleteMapped(m, capability, providerID)
 	}
 	if err := d.requireService(service); err != nil {

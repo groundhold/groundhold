@@ -223,7 +223,10 @@ func BuildCloudFunctionFnRequest(project, environment, capability string,
 	}
 
 	body := map[string]any{
-		"name":        name, // set for golden determinism; the URL rebuilds it
+		// D925: Cloud Functions v2 validates the body name against the FULL resource
+		// pattern projects/{p}/locations/{l}/functions/{f}; the bare deterministic name is
+		// rejected ("Invalid resource name ... for pattern projects/.../functions/{function}").
+		"name":        fmt.Sprintf("projects/%s/locations/%s/functions/%s", project, region, name),
 		"environment": "GEN_2",
 		"labels": map[string]any{
 			"groundhold-capability":  sanitizeLabel(capability),

@@ -104,24 +104,44 @@ func (d *Driver) getTrail(region, name string) (cloudTrailDesc, bool, error) {
 	return out.Trail, true, nil
 }
 
-// trailIsLogging reads GetTrailStatus. ok=false on any transport/HTTP/parse failure;
-// ok=true carries IsLogging (delivery.assured).
-func (d *Driver) trailIsLogging(region, name string) (isLogging bool, err error) {
+// trailDelivery is what GetTrailStatus says about a trail ACTUALLY delivering (D725).
+//
+// The vocabulary promises `delivery.assured` means "the trail is actually LOGGING
+// (delivering events), not merely configured", and this read used `IsLogging` alone.
+// AWS defines that as "Whether the CloudTrail trail is currently logging AWS API
+// calls" — i.e. StartLogging was called. A trail whose destination bucket policy denies
+// `s3:PutObject` keeps `IsLogging: true` forever and writes nothing.
+//
+// `LatestDeliveryError` is the field that knows: "Displays any Amazon S3 error that
+// CloudTrail encountered when attempting to deliver log files to the designated
+// bucket … This error occurs only when there is a problem with the destination S3
+// bucket." `LatestDeliveryAttemptSucceeded` looks like the right field and AWS marks it
+// "This field is no longer in use" — checked, not assumed.
+type trailDelivery struct {
+	IsLogging     bool
+	DeliveryError string
+	Delivered     bool // a log file has actually reached the bucket at least once
+}
+
+func (d *Driver) trailIsLogging(region, name string) (status trailDelivery, err error) {
 	const op = "GetTrailStatus"
 	st, resp, cerr := d.cloudTrailCall(region, "GetTrailStatus", map[string]any{"Name": name})
 	if cerr != nil {
-		return false, readTransport(op, cerr)
+		return trailDelivery{}, readTransport(op, cerr)
 	}
 	if st != http.StatusOK {
-		return false, readHTTP(op, st, awsErrCodeOf(resp))
+		return trailDelivery{}, readHTTP(op, st, awsErrCodeOf(resp))
 	}
 	var out struct {
-		IsLogging bool `json:"IsLogging"`
+		IsLogging           bool    `json:"IsLogging"`
+		LatestDeliveryError string  `json:"LatestDeliveryError"`
+		LatestDeliveryTime  float64 `json:"LatestDeliveryTime"`
 	}
 	if json.Unmarshal(resp, &out) != nil {
-		return false, readBody(op, st)
+		return trailDelivery{}, readBody(op, st)
 	}
-	return out.IsLogging, nil
+	return trailDelivery{IsLogging: out.IsLogging, DeliveryError: out.LatestDeliveryError,
+		Delivered: out.LatestDeliveryTime > 0}, nil
 }
 
 // trailTags reads a trail's ownership tags (ListTags with the trail ARN). ok=false on
@@ -251,9 +271,15 @@ func (d *Driver) observeCloudTrail(capability, providerID string) ([]provider.Ob
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"trail not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"trail not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "scope.multiRegion", Value: desc.IsMultiRegionTrail, Derivation: "measured"},
 		{Path: "integrity.logValidation", Value: desc.LogFileValidationEnabled, Derivation: "measured"},
@@ -261,8 +287,26 @@ func (d *Driver) observeCloudTrail(capability, providerID string) ([]provider.Ob
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
 	var diags []string
-	if isLogging, lerr := d.trailIsLogging(region, name); lerr == nil {
-		obs = append(obs, provider.Observation{Path: "delivery.assured", Value: isLogging, Derivation: "measured"})
+	if dv, lerr := d.trailIsLogging(region, name); lerr == nil {
+		switch {
+		case !dv.IsLogging:
+			obs = append(obs, provider.Observation{Path: "delivery.assured", Value: false, Derivation: "measured"})
+		case dv.DeliveryError != "":
+			// AWS is telling us the bucket is refusing the log files. The trail is on
+			// and the audit record is NOT being written — the whole point of the
+			// attribute (D725).
+			obs = append(obs, provider.Observation{Path: "delivery.assured", Value: false, Derivation: "measured"})
+			diags = append(diags, "delivery.assured=false: CloudTrail cannot write to the "+
+				"destination bucket ("+dv.DeliveryError+")")
+		case dv.Delivered:
+			obs = append(obs, provider.Observation{Path: "delivery.assured", Value: true, Derivation: "measured"})
+		default:
+			// Logging is on, nothing has failed, and nothing has been delivered yet.
+			// Claiming assured delivery on a trail that has never delivered is the
+			// smaller version of the same lie: withhold and say so (D29).
+			diags = append(diags, "delivery.assured not observed: the trail is logging and "+
+				"no delivery error is reported, but no log file has reached the bucket yet")
+		}
 	} else {
 		diags = append(diags, "delivery.assured not derivable ("+lerr.Error()+") — omitted rather than fabricated")
 	}
@@ -437,7 +481,7 @@ func (d *Driver) discoverCloudTrail(region string) ([]provider.Discovered, []str
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.audit.trail",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

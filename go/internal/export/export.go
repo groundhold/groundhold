@@ -58,6 +58,13 @@ func Run(o Options) (int, error) {
 		if err := ledger.VerifySnapshotTrust(snap); err != nil {
 			return 0, err
 		}
+		// D646: export streams those archived bytes (D645), so it checks them
+		// against the hash the snapshot pinned before emitting a single record.
+		if ai := ledger.CheckArchive(o.LedgerPath, snap); ai.Status == "mismatched" ||
+			ai.Status == "misnamed" {
+			return 0, fmt.Errorf("refusing to export from a ledger whose archive "+
+				"does not match its snapshot: %s", ai.Detail)
+		}
 		base = snap.BaseEvents
 		snapID = snap.LedgerId
 		snapHeads = snap.Heads
@@ -68,6 +75,33 @@ func Run(o Options) (int, error) {
 	if len(raw) > 0 && raw[len(raw)-1] != '\n' {
 		return 0, fmt.Errorf(
 			"ledger has a torn final line — repair required")
+	}
+	// D645: the compacted events live in the archives beside the ledger, and this
+	// verb read only the live file — so a --from/--to window over compacted history
+	// returned NOTHING at exit 0, and an incremental consumer lost everything
+	// between its cursor and the compaction. The archives are read back when the
+	// request can reach below the boundary; a cursor already past it asks for none
+	// of them, so a pruned archive does not block that consumer.
+	var pre []string
+	if base > 0 && o.Since < base {
+		got, note, aerr := ledger.ArchivedLines(o.LedgerPath, base)
+		if aerr != nil {
+			return 0, aerr
+		}
+		if note != "" {
+			// D645/D672: export produces a STREAM a consumer treats as complete, so
+			// a shortfall is fatal here even though a reporting verb tolerates it.
+			return 0, fmt.Errorf("%s — export cannot produce a complete stream, and "+
+				"a short one would read as \"nothing happened\" over the missing "+
+				"window", note)
+		}
+		pre = got
+		// The stream now starts at genesis: absolute indices count from 0 and the
+		// chain check runs from "genesis" rather than from the snapshot's heads,
+		// which is a STRONGER check — it also proves the sidecar's heads.
+		base = 0
+		snapHeads = nil
+		snapID = ""
 	}
 	want := map[string]bool{}
 	for _, t := range o.Types {
@@ -110,7 +144,7 @@ func Run(o Options) (int, error) {
 	// despite the non-zero exit (review fix).
 	var buf bytes.Buffer
 	emitted := 0
-	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	lines := append(pre, strings.Split(strings.TrimRight(string(raw), "\n"), "\n")...)
 	// export must be as strict as replay about CONTINUITY, not only
 	// signatures (review fix): a reordered or mid-deleted tail leaves
 	// every remaining signature valid (a sig covers only its own event),

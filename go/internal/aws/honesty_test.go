@@ -142,6 +142,10 @@ func TestHonestyHarnessS3(t *testing.T) {
 		Classify:        restXMLRole,
 		OwnerTagValue:   "assets",
 		AssertTransient: true, // D237: create/delete route through provider.MutationResult
+		// F-LC3 (D520): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("s3", "assets", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -175,6 +179,10 @@ func TestHonestyHarnessRDS(t *testing.T) {
 		Classify:        queryXMLRole,
 		OwnerTagValue:   "db",
 		DeterministicID: true, // the DB instance identifier is a chosen name
+		// F-LC3 (D520): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("rds", "db", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -208,6 +216,11 @@ func TestHonestyHarnessECS(t *testing.T) {
 		Classify:        jsonTargetRole,
 		OwnerTagValue:   "app",
 		DeterministicID: true, // cluster/service names are chosen
+		// F-LC3 (D522): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("ecs", "app", pid)
+		},
+		GoneCode: "ClusterNotFound", // this service's own not-found code (D522)
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -240,7 +253,13 @@ func TestHonestyHarnessElastiCache(t *testing.T) {
 		AssertTransient: true,         // D237 sweep
 		Classify:        queryXMLRole, // create/delete opaque; describe/list reads
 		OwnerTagValue:   "sessions",
-		DeterministicID: true, // the replication group id is chosen
+		DeterministicID: true,                            // the replication group id is chosen
+		GoneCode:        "ReplicationGroupNotFoundFault", // this service's own not-found code (D522)
+		// F-LC3 (D523): hand-wired — the providerId comes from the delete op.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("elasticache", "sessions", pid)
+		},
+		GoneEmptyList: true, // the read is a collection query (D523)
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -274,6 +293,10 @@ func TestHonestyHarnessASM(t *testing.T) {
 		Classify:        jsonTargetRole, // create/delete opaque, Describe/Get reads
 		OwnerTagValue:   "dbcreds",
 		DeterministicID: true, // the secret name is the idempotency key
+		// F-LC3 (D520): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("secretsmanager", "dbcreds", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -314,6 +337,10 @@ func TestHonestyHarnessSNS(t *testing.T) {
 		Classify:        queryXMLRole,
 		OwnerTagValue:   "events",
 		DeterministicID: true, // the topic ARN is deterministic (region+account+name)
+		// F-LC3 (D521): protocol-aware gone estate.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("sns", "events", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -354,6 +381,11 @@ func TestHonestyHarnessSQS(t *testing.T) {
 		Classify:        queryXMLRole, // CreateQueue is status-only (the URL is deterministic)
 		OwnerTagValue:   "orders",
 		DeterministicID: true, // the queue URL is deterministic (region+account+name)
+		// F-LC3 (D522): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("sqs", "orders", pid)
+		},
+		GoneCode: "NonExistentQueue", // this service's own not-found code (D522)
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -387,6 +419,10 @@ func TestHonestyHarnessVPC(t *testing.T) {
 		Classify:        queryXMLRole,
 		OwnerTagValue:   "net",
 		DeterministicID: false, // vpc-xxx / subnet-xxx are server-assigned
+		// F-LC3 (D521): protocol-aware gone estate.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("vpc", "net", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -443,6 +479,10 @@ func TestHonestyHarnessOpenSearch(t *testing.T) {
 		Classify:        openSearchRole,
 		OwnerTagValue:   "catalog",
 		DeterministicID: true, // the domain name is chosen
+		// F-LC3 (D520): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("opensearch", "catalog", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -476,6 +516,10 @@ func TestHonestyHarnessRoute53(t *testing.T) {
 		Classify:        route53Role,
 		OwnerTagValue:   "apex",
 		DeterministicID: false, // the hosted-zone id is server-assigned
+		// F-LC3 (D520): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("route53", "apex", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -509,6 +553,11 @@ func TestHonestyHarnessRolePolicy(t *testing.T) {
 		Classify:        queryXMLRole, // ListAttachedRolePolicies read; Attach/Detach opaque
 		OwnerTagValue:   "reader",     // content-addressed: no tag to poison (foreign-tag n/a)
 		DeterministicID: true,         // the pid is (roleName, policyArn)
+		// F-LC3 (D522): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("rolepolicy", "reader", pid)
+		},
+		GoneCode: "NoSuchEntity", // this service's own not-found code (D522)
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -542,6 +591,11 @@ func TestHonestyHarnessCustomPolicy(t *testing.T) {
 		Classify:        queryXMLRole, // GetPolicy/GetPolicyVersion read; Create/Delete opaque
 		OwnerTagValue:   "viewer",     // content-addressed by Arn (foreign-tag n/a)
 		DeterministicID: true,
+		// F-LC3 (D522): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("custompolicy", "viewer", pid)
+		},
+		GoneCode: "NoSuchEntity", // this service's own not-found code (D522)
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -575,6 +629,10 @@ func TestHonestyHarnessCloudWatchAlarm(t *testing.T) {
 		Classify:        queryXMLRole, // Describe/ListTags read; Put/Delete opaque
 		OwnerTagValue:   "cpu",
 		DeterministicID: true, // the alarm name is deterministic
+		// F-LC3 (D521): protocol-aware gone estate.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("cloudwatch", "cpu", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -608,6 +666,10 @@ func TestHonestyHarnessCWDashboard(t *testing.T) {
 		Classify:        queryXMLRole, // GetDashboard read; Put/Delete opaque
 		OwnerTagValue:   "golden",     // content-addressed by deterministic name (foreign-tag n/a)
 		DeterministicID: true,
+		// F-LC3 (D521): protocol-aware gone estate.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("cloudwatchdash", "golden", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -653,6 +715,10 @@ func TestHonestyHarnessRoute53HealthCheck(t *testing.T) {
 		Classify:        r53hcRole,
 		OwnerTagValue:   "api",
 		DeterministicID: false, // the health check Id is server-assigned
+		// F-LC3 (D520): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("route53health", "api", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -686,6 +752,11 @@ func TestHonestyHarnessCWLogFilter(t *testing.T) {
 		Classify:        jsonTargetRole, // DescribeMetricFilters read; Put/Delete opaque
 		OwnerTagValue:   "errors",       // content-addressed by (logGroup, filterName)
 		DeterministicID: true,
+		// F-LC3 (D522): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("cwlogfilter", "errors", pid)
+		},
+		GoneCode: "ResourceNotFound", // this service's own not-found code (D522)
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -719,6 +790,11 @@ func TestHonestyHarnessECR(t *testing.T) {
 		Classify:        jsonTargetRole, // Describe/ListTags read; Create/Delete opaque
 		OwnerTagValue:   "images",
 		DeterministicID: true, // the repository name is deterministic
+		// F-LC3 (D522): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("ecr", "images", pid)
+		},
+		GoneCode: "RepositoryNotFound", // this service's own not-found code (D522)
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -765,6 +841,11 @@ func TestHonestyHarnessEFS(t *testing.T) {
 		Classify:        efsRole,
 		OwnerTagValue:   "shared",
 		DeterministicID: false, // the file-system id is server-assigned
+		// F-LC3 (D522): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("efs", "shared", pid)
+		},
+		GoneCode: "FileSystemNotFound", // this service's own not-found code (D522)
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -801,6 +882,10 @@ func TestHonestyHarnessDynamoDB(t *testing.T) {
 		Classify:        jsonTargetRole,
 		OwnerTagValue:   "sessions",
 		DeterministicID: true, // the table name is chosen
+		// F-LC3 (D521): protocol-aware gone estate.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("dynamodb", "sessions", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -838,6 +923,10 @@ func TestHonestyHarnessKinesis(t *testing.T) {
 		Classify:        jsonTargetRole,
 		OwnerTagValue:   "events",
 		DeterministicID: true, // the stream name is chosen
+		// F-LC3 (D521): protocol-aware gone estate.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("kinesis", "events", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -874,7 +963,13 @@ func TestHonestyHarnessMSK(t *testing.T) {
 		AssertTransient: true,        // D237 sweep
 		Classify:        restXMLRole, // method-based: GET read, POST/DELETE opaque
 		OwnerTagValue:   "bus",
-		DeterministicID: true, // the cluster name is chosen
+		DeterministicID: true,       // the cluster name is chosen
+		GoneCode:        "NotFound", // this service's own not-found code (D522)
+		// F-LC3 (D523): hand-wired — the providerId comes from the delete op.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("msk", "bus", pid)
+		},
+		GoneEmptyList: true, // the read is a collection query (D523)
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -911,7 +1006,13 @@ func TestHonestyHarnessWAF(t *testing.T) {
 		AssertTransient: true, // D237 sweep
 		Classify:        jsonTargetRole,
 		OwnerTagValue:   "edge",
-		DeterministicID: true, // the WebACL name is chosen
+		DeterministicID: true,                          // the WebACL name is chosen
+		GoneCode:        "WAFNonexistentItemException", // this service's own not-found code (D522)
+		// F-LC3 (D523): hand-wired — the providerId comes from the delete op.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("waf", "edge", pid)
+		},
+		GoneEmptyList: true, // the read is a collection query (D523)
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := newHonestyDriver(happyURL, rt)
 			return d
@@ -962,6 +1063,10 @@ func TestHonestyHarnessACM(t *testing.T) {
 		Classify:        acmRole,
 		OwnerTagValue:   "web",
 		DeterministicID: false, // the CertificateArn is server-assigned
+		// F-LC3 (D521): protocol-aware gone estate.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("acm", "web", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := newHonestyDriver(happyURL, rt)
 			d.Region = "us-east-1"
@@ -1001,6 +1106,10 @@ func TestHonestyHarnessCloudFront(t *testing.T) {
 		Classify:        restXMLRole,
 		OwnerTagValue:   "edge",
 		DeterministicID: false, // the distribution id is server-assigned
+		// F-LC3 (D520): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("cloudfront", "edge", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := newHonestyDriver(happyURL, rt)
 			d.Region = "us-east-1"
@@ -1040,6 +1149,10 @@ func TestHonestyHarnessApiGWv2(t *testing.T) {
 		Classify:        restXMLRole,
 		OwnerTagValue:   "front",
 		DeterministicID: false, // the ApiId is server-assigned
+		// F-LC3 (D520): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("apigateway", "front", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -1089,6 +1202,10 @@ func TestHonestyHarnessAWSKMS(t *testing.T) {
 		Classify:        kmsAWSRole,
 		OwnerTagValue:   "datakey",
 		DeterministicID: false, // the KeyId is a server-assigned UUID
+		// F-LC3 (D521): protocol-aware gone estate.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("kms", "datakey", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -1119,14 +1236,22 @@ func TestHonestyHarnessAWSKMS(t *testing.T) {
 // a definite one.
 func ebsHonestyServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	deleted := false
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		switch actionOf(string(body)) {
 		case "CreateVolume":
 			_, _ = w.Write([]byte(ebsCreateOKXML))
 		case "DescribeVolumes":
+			if deleted {
+				// the volume has finished deleting — the delete's poll-to-absence (D978)
+				// confirms gone on the happy path.
+				_, _ = w.Write([]byte(ebsEmptyXML))
+				return
+			}
 			_, _ = w.Write([]byte(ebsAvailableXML))
 		case "DeleteVolume":
+			deleted = true
 			_, _ = w.Write([]byte(`<DeleteVolumeResponse><return>true</return></DeleteVolumeResponse>`))
 		default:
 			w.WriteHeader(http.StatusBadRequest)
@@ -1149,6 +1274,10 @@ func TestHonestyHarnessEBS(t *testing.T) {
 		Classify:        queryXMLRole,
 		OwnerTagValue:   "orders-data",
 		DeterministicID: false, // vol-xxx is server-assigned
+		// F-LC3 (D521): protocol-aware gone estate.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("ebs", "orders-data", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -1176,6 +1305,7 @@ func TestHonestyHarnessEBS(t *testing.T) {
 // preflights, the group create, the policy, the read-back and the delete.
 func asgHonestyServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	deleted := false
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		switch actionOf(string(body)) {
@@ -1184,6 +1314,12 @@ func asgHonestyServer(t *testing.T) *httptest.Server {
 		case "DescribeLaunchTemplateVersions":
 			_, _ = w.Write([]byte(asgPrivateTemplateXML))
 		case "DescribeAutoScalingGroups":
+			if deleted {
+				// the group has finished deleting — the delete's poll-to-absence (D977)
+				// confirms gone on the happy path.
+				_, _ = w.Write([]byte(`<DescribeAutoScalingGroupsResponse><DescribeAutoScalingGroupsResult><AutoScalingGroups/></DescribeAutoScalingGroupsResult></DescribeAutoScalingGroupsResponse>`))
+				return
+			}
 			_, _ = w.Write([]byte(asgGroupXML))
 		case "DescribePolicies":
 			_, _ = w.Write([]byte(asgHasPolicyXML))
@@ -1192,6 +1328,7 @@ func asgHonestyServer(t *testing.T) *httptest.Server {
 		case "PutScalingPolicy":
 			_, _ = w.Write([]byte(`<PutScalingPolicyResponse/>`))
 		case "DeleteAutoScalingGroup":
+			deleted = true
 			_, _ = w.Write([]byte(`<DeleteAutoScalingGroupResponse/>`))
 		default:
 			w.WriteHeader(http.StatusBadRequest)
@@ -1213,6 +1350,10 @@ func TestHonestyHarnessASG(t *testing.T) {
 		Classify:        queryXMLRole,
 		OwnerTagValue:   "web-fleet",
 		DeterministicID: true, // the group name is a chosen slug
+		// F-LC3 (D521): protocol-aware gone estate.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("asg", "web-fleet", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := newHonestyDriver(happyURL, rt)
 			d.AutoScalingBaseURL = happyURL

@@ -83,6 +83,26 @@ func mappedSurfaceModel(m *Mapping, schemas map[string]any) (map[string]any, err
 			return nil, err
 		}
 		surface[path] = sig
+		// D551: a resolve-ref attribute reads a field on ANOTHER kind. That field is
+		// as much of the mapped surface as a local one — leaving it out would let the
+		// referent's schema drift under a fingerprint that claims to cover the
+		// attribute, which is the exact hole D132 exists to close.
+		if a.Op == "resolve-ref" && a.Ref != nil {
+			rgvk, ok := findGVKSchema(schemas, a.Ref.Group, a.Ref.Version, a.Ref.Kind)
+			if !ok {
+				surface[path+" -> "+a.Ref.Kind+"."+a.Ref.Field] = "REFERENT-SCHEMA-ABSENT"
+				continue
+			}
+			segs, err := mapping.ParseFieldPath(a.Ref.Field)
+			if err != nil {
+				return nil, err
+			}
+			rsig := "ABSENT"
+			if s, ok := mapping.WalkSchemaPath(rgvk, schemas, segs); ok {
+				rsig = s
+			}
+			surface[path+" -> "+a.Ref.Kind+"."+a.Ref.Field] = rsig
+		}
 	}
 	// a lens's inputs are part of the mapped surface too — drift on a field a lens
 	// reads must refuse the same as drift on a copy op's field.
@@ -138,7 +158,41 @@ func (d *Driver) guardDrift(m *Mapping) ([]string, error) {
 		schemas = s
 		d.schemaCache[key] = s
 	}
-	return m.checkDrift(schemas)
+	// D551: a resolve-ref attribute's referent lives in another API group, whose
+	// definitions are in a different OpenAPI document. Merge them in, or the
+	// referent's signature fingerprints as ABSENT on every run and the pin stops
+	// meaning anything about the half of the surface that is remote.
+	merged, copied := schemas, false
+	for _, a := range m.Attributes {
+		if a.Op != "resolve-ref" || a.Ref == nil {
+			continue
+		}
+		rkey := a.Ref.Group + "/" + a.Ref.Version
+		if rkey == key {
+			continue
+		}
+		rs, ok := d.schemaCache[rkey]
+		if !ok {
+			var err error
+			rs, err = d.SchemaFetch(a.Ref.Group, a.Ref.Version)
+			if err != nil {
+				return []string{"schema fingerprint UNCHECKED for the referent " + rkey +
+					" — could not fetch it: " + err.Error()}, nil
+			}
+			d.schemaCache[rkey] = rs
+		}
+		if !copied { // never mutate the cached document for the primary group
+			m2 := make(map[string]any, len(schemas)+len(rs))
+			for k, v := range schemas {
+				m2[k] = v
+			}
+			merged, copied = m2, true
+		}
+		for k, v := range rs {
+			merged[k] = v
+		}
+	}
+	return m.checkDrift(merged)
 }
 
 func (m *Mapping) checkDrift(schemas map[string]any) ([]string, error) {

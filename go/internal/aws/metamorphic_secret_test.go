@@ -111,8 +111,8 @@ func TestMetamorphicASMRoundTrip(t *testing.T) {
 				t.Errorf("CMEK true not reflected: %+v", got)
 			}
 			if !c.cmek {
-				if _, claimed := got["encryption.customerManagedKeys"]; claimed {
-					t.Errorf("CMEK false must not be claimed: %+v", got)
+				if got["encryption.customerManagedKeys"] != false {
+					t.Errorf("CMEK false must be observed as false: %+v", got)
 				}
 			}
 		})

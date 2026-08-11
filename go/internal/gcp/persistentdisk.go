@@ -296,7 +296,10 @@ func classifyPDChange(path string) (string, string) {
 	case "availability.class":
 		return "immutable", "zonal and regional disks are different resources (disks vs regionDisks), not two settings of one — changing the class means creating a new disk and copying the data"
 	case "encryption.atRest":
-		return "immutable", "Compute Engine encrypts every persistent disk and the setting cannot be changed — there is nothing to patch"
+		// D823: the twin of the Azure disk case. "Immutable" here destroys the disk to reach
+		// a state the new disk will also have.
+		return "unsupported", "Compute Engine encrypts every persistent disk and the setting " +
+			"cannot be changed — nothing to patch (=false cannot be honored)"
 	case "encryption.customerManagedKeys":
 		return "immutable", "the key encrypting a disk is fixed when the disk is created — re-keying is a new disk"
 	case "service.managed":

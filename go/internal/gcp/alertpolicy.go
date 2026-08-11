@@ -9,6 +9,7 @@ package gcp
 import (
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 const monitoringBaseURL = "https://monitoring.googleapis.com/v3"
@@ -16,14 +17,19 @@ const monitoringBaseURL = "https://monitoring.googleapis.com/v3"
 // alertMetricOK bounds a metric type before it is placed in a condition filter.
 var alertMetricOK = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._/-]*$`)
 
+// alertResourceTypeOK bounds a monitored-resource type (D897) before it is placed in the
+// condition filter — Cloud Monitoring's resource types are lower-snake identifiers.
+var alertResourceTypeOK = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+
 // AlertPolicyPlan is the attribute-derived shape a create assembles.
 type AlertPolicyPlan struct {
-	DisplayName string
-	Metric      string
-	Threshold   float64
-	Comparison  string // COMPARISON_GT | COMPARISON_LT
-	Notify      bool
-	Channel     string // notification channel resource name (impl); required when Notify
+	DisplayName  string
+	Metric       string
+	Threshold    float64
+	Comparison   string // COMPARISON_GT | COMPARISON_LT
+	Notify       bool
+	Channel      string // notification channel resource name (impl); required when Notify
+	ResourceType string // D897: the monitored-resource type the filter must restrict
 }
 
 // BuildAlertPolicy maps capability.monitoring.alert attributes + impl to a plan.
@@ -84,6 +90,23 @@ func BuildAlertPolicy(project, environment, capability string,
 					"SILENT alert that claims to notify")
 		}
 	}
+	// D897: Cloud Monitoring requires an alerting condition filter to restrict
+	// resource.type — a metric maps to a monitored-resource type, and the API refuses a
+	// filter that names only metric.type ("must specify a restriction on resource.type").
+	// The type is not derivable from the metric string alone, so the operator supplies it
+	// (e.g. gce_instance for a Compute CPU metric); refuse rather than build a filter the
+	// platform rejects.
+	p.ResourceType, _ = impl["resource_type"].(string)
+	p.ResourceType = strings.TrimSpace(p.ResourceType)
+	if p.ResourceType == "" {
+		return AlertPolicyPlan{}, fmt.Errorf(
+			"alert requires implementation.resource_type (the monitored-resource type the condition " +
+				"restricts, e.g. gce_instance) — Cloud Monitoring rejects a filter that names only the metric")
+	}
+	if !alertResourceTypeOK.MatchString(p.ResourceType) {
+		return AlertPolicyPlan{}, fmt.Errorf(
+			"implementation.resource_type %q is not a valid monitored-resource type", p.ResourceType)
+	}
 	if !projectOK.MatchString(project) {
 		return AlertPolicyPlan{}, fmt.Errorf("project %q is invalid", project)
 	}
@@ -98,7 +121,7 @@ func (p AlertPolicyPlan) createBody(capability, environment string) map[string]a
 		"conditions": []any{map[string]any{
 			"displayName": p.DisplayName + "-cond",
 			"conditionThreshold": map[string]any{
-				"filter":         `metric.type="` + p.Metric + `"`,
+				"filter":         `metric.type="` + p.Metric + `" AND resource.type="` + p.ResourceType + `"`,
 				"comparison":     p.Comparison,
 				"thresholdValue": p.Threshold,
 				"duration":       "60s",

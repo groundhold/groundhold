@@ -214,9 +214,15 @@ func (d *Driver) observeCWLogs(capability, providerID string) ([]provider.Observ
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"log group not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"log group not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
@@ -224,10 +230,14 @@ func (d *Driver) observeCWLogs(capability, providerID string) ([]provider.Observ
 		obs = append(obs, provider.Observation{Path: "retention.days",
 			Value: fmt.Sprintf("%dh", desc.RetentionInDays*24), Derivation: "measured"})
 	}
-	if strings.TrimSpace(desc.KmsKeyId) != "" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
-			Value: true, Derivation: "measured"})
-	}
+	// D1003: emit the boolean UNCONDITIONALLY. Emitting it only when a key is present
+	// (and staying silent otherwise) made a log group with NO key read as UNMEASURED,
+	// not as unencrypted — so a declared `customerManagedKeys: true` hard constraint had
+	// no observed value to contradict and passed VACUOUSLY, and verify reported PROVEN
+	// over an audit-trail log group under the provider's default key (field: acme). No
+	// kmsKeyId is a measured FALSE (the group is not CMK-encrypted), never an absence.
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+		Value: strings.TrimSpace(desc.KmsKeyId) != "", Derivation: "measured"})
 	return obs, nil, nil
 }
 
@@ -435,7 +445,7 @@ func (d *Driver) discoverCWLogs(region string) ([]provider.Discovered, []string,
 			out = append(out, provider.Discovered{
 				ProviderID:   pid,
 				ResourceType: "capability.monitoring.logs",
-				Observations: obs,
+				Observations: provider.WithoutAbsence(obs),
 			})
 		}
 		if r.NextToken == "" {

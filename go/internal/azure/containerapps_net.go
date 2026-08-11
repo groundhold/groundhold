@@ -114,7 +114,11 @@ func (d *Driver) observeContainerApp(capability, providerID string) ([]provider.
 		return nil, nil, fmt.Errorf("containerApps.get: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"container app not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"container app not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("containerApps.get: HTTP %d", st)
@@ -123,7 +127,10 @@ func (d *Driver) observeContainerApp(capability, providerID string) ([]provider.
 	if json.Unmarshal(resp, &doc) != nil {
 		return nil, nil, &armReadError{Op: "containerApps.get", Cause: "body", Status: st}
 	}
-	var obs []provider.Observation
+	// Present: clear the marker, or a stale "gone" survives a re-create.
+	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
+	}
 	if doc.Location != "" {
 		obs = append(obs, provider.Observation{Path: "location.region", Value: strings.ToLower(doc.Location), Derivation: "measured"})
 	}
@@ -179,7 +186,18 @@ func (d *Driver) deleteContainerApp(capability, environment, providerID string) 
 	if err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
-	_ = sub
+	// D467 — the subscription boundary. 64 of 67 sub-bearing paths already refused a
+	// providerId whose subscription is not the driver's; these three parsed it and
+	// discarded it with `_ = sub`. The discard is the part that matters: armURL builds
+	// from d.Subscription, never from the bound one, so a foreign-subscription
+	// providerId did not reach the other subscription — it silently RETARGETED the
+	// delete at the same resource group and name in OURS. The binding named one
+	// resource and the driver destroyed a different one.
+	if sub != d.Subscription && d.Subscription != "" {
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("providerId subscription %q is not the driver's %q — "+
+				"refusing to retarget the delete at our own subscription", sub, d.Subscription)}
+	}
 	appURL, _ := d.armURL(rg, "Microsoft.App/containerApps/"+app, appAPIVersion)
 	st, resp, e := d.doARM("GET", appURL, nil)
 	if e != nil {
@@ -201,13 +219,25 @@ func (d *Driver) deleteContainerApp(capability, environment, providerID string) 
 			Reason: "container app tags do not match — refusing to delete a resource that is not ours"}
 	}
 	// delete the app, then the constitutive environment (reverse).
-	if r := d.deleteAndConfirm(appURL, providerID, "container app"); r != nil {
+	// D940: deleteAndConfirm never returns nil, so `r != nil` was always true and the
+	// managed-environment cleanup below was unreachable dead code — retire reported
+	// succeeded while the billable managed environment lingered. Fall through on a
+	// succeeded app delete; only a non-success short-circuits.
+	if r := d.deleteAndConfirm(appURL, providerID, "container app"); r != nil && r.Status != "succeeded" {
 		return *r
 	}
 	envURL, _ := d.armURL(rg, "Microsoft.App/managedEnvironments/"+app+"-env", appAPIVersion)
-	if r := d.deleteAndConfirm(envURL, providerID, "managed environment"); r != nil && r.Status != "succeeded" {
+	// D943: verify the environment is OURS before deleting — a brownfield-adopted app has
+	// an arbitrary name, so `<app>-env` could be a FOREIGN managed environment groundhold
+	// never created. D237/D940: an unconfirmed OWNED delete is UNRESOLVED — report its own
+	// non-success outcome, never a false "succeeded" over a billable environment.
+	r, foreign := d.deleteCompanionIfOurs(envURL, capability, environment, providerID, "managed environment")
+	if foreign {
 		return provider.CreateResult{ProviderID: providerID, Status: "succeeded",
-			Reason: "app retired; environment cleanup inconclusive — reconcile"}
+			Reason: "app retired; a managed environment at the companion name is not ours — left it untouched"}
+	}
+	if r != nil && r.Status != "succeeded" {
+		return *r
 	}
 	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
 }

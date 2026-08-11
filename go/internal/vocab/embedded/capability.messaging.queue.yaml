@@ -32,7 +32,10 @@ attributes:
       about the broker until an outcome probe measures the end-to-end behavior.
     mappings:
       aws.sqs: exactly-once => FIFO queue + dedup (content-based or explicit id)
-      gcp.pubsub: exactly-once => subscription enableExactlyOnceDelivery
+      gcp.pubsub-queue: exactly-once => subscription enableExactlyOnceDelivery
+      # D544: read from the driver — Azure expresses the guarantee through DEDUP.
+      azure.servicebusqueue: >
+        requiresDuplicateDetection — true reads as exactly-once, false as at-least-once
 
   ordering.enabled:
     kind: bool
@@ -43,7 +46,8 @@ attributes:
       allow_replace_stateful.
     mappings:
       aws.sqs: FIFO queue (MessageGroupId ordering)
-      gcp.pubsub: subscription enableMessageOrdering (ordering key)
+      gcp.pubsub-queue: subscription enableMessageOrdering (ordering key)
+      azure.servicebusqueue: requiresSession (sessions are Service Bus's ordering primitive)
 
   retention.minimum:
     kind: duration
@@ -52,7 +56,7 @@ attributes:
       value outside the provider's envelope is REFUSED loudly, never clamped.
     mappings:
       aws.sqs: MessageRetentionPeriod (60s–14d)
-      gcp.pubsub: subscription messageRetentionDuration (10m–31d)
+      gcp.pubsub-queue: subscription messageRetentionDuration (10m–31d)
 
   reliability.deadLetter:
     kind: bool
@@ -67,14 +71,19 @@ attributes:
       capability paths — mirroring encryption.customerManagedKeys + kms_key_id.
     mappings:
       aws.sqs: RedrivePolicy {deadLetterTargetArn, maxReceiveCount}
-      gcp.pubsub: subscription deadLetterPolicy {deadLetterTopic, maxDeliveryAttempts}
+      gcp.pubsub-queue: subscription deadLetterPolicy {deadLetterTopic, maxDeliveryAttempts}
+      # Azure has a BUILT-IN dead-letter sub-queue, so unlike SQS there is no target
+      # to name — the posture is the retry threshold plus expiry dead-lettering.
+      azure.servicebusqueue: >
+        maxDeliveryCount as the retry threshold, with deadLetteringOnMessageExpiration on
 
   encryption.atRest:
     kind: bool
     description: Provider-side encryption of held messages. Only true is meaningful.
     mappings:
       aws.sqs: SSE (SSE-SQS or SSE-KMS)
-      gcp.pubsub: encrypted backlog (default; CMEK via the constitutive topic)
+      gcp.pubsub-queue: encrypted backlog (default; CMEK via the constitutive topic)
+      azure.servicebusqueue: const true — Service Bus encrypts at rest unconditionally
     recommended:
       op: equals
       value: true
@@ -94,7 +103,7 @@ attributes:
       (implementation.kms_key_id / kms_key_name), never a capability path.
     mappings:
       aws.sqs: KmsMasterKeyId (a customer key)
-      gcp.pubsub: kmsKeyName on the constitutive topic (same create sequence)
+      gcp.pubsub-queue: kmsKeyName on the constitutive topic (same create sequence)
 
   location.region:
     kind: string
@@ -104,14 +113,18 @@ attributes:
       contract "satisfied" by a global topic would be a compliance lie.
     mappings:
       aws.sqs: queue region
-      gcp.pubsub: messageStoragePolicy.allowedPersistenceRegions (constitutive topic)
+      gcp.pubsub-queue: messageStoragePolicy.allowedPersistenceRegions (constitutive topic)
+      azure.servicebusqueue: the NAMESPACE's location (the entity has none of its own)
 
   network.publicExposure:
     kind: bool
     description: Whether any public/anonymous producer or consumer path exists.
     mappings:
       aws.sqs: no Principal:"*" in the queue resource policy
-      gcp.pubsub: no allUsers/allAuthenticatedUsers IAM binding
+      gcp.pubsub-queue: no allUsers/allAuthenticatedUsers IAM binding
+      azure.servicebusqueue: >
+        the namespace's publicNetworkAccess — Enabled is exposed, Disabled is not.
+        Again a namespace property: the queue/topic does not carry one
     note: >
       static verification proves configuration intent; an anonymous-access probe
       proves the actual absence of a public path.
@@ -121,6 +134,8 @@ attributes:
     description: Managed service vs self-operated
 
   cost.monthly:
+    description: >-
+      Projected monthly cost of the queue — a projection, never a quote, and never read back from the provider (evidence: projection)
     kind: money
     evidence: projection      # D311: a forecast, never resource state
     verification: static against a pricing catalog; billing after deploy

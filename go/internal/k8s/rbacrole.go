@@ -107,8 +107,14 @@ func rulesMutating(perms []string) bool {
 func permPrivileged(perm string) bool {
 	group, res := groupResOf(perm)
 	verb := verbOf(perm)
-	// full wildcard on verb, resource or group is cluster-admin-shaped
-	if verb == "*" && res == "*" && (group == "*" || group == "core") {
+	// D988 (user-directed): full control of ALL resources of ANY apiGroup (verb:*
+	// resource:*) is admin-shaped over that group — e.g. apps/*:* lets the holder
+	// schedule an arbitrary privileged pod, an escalation-to-node vector. The check
+	// used to fire only for group "*"/"core", under-implementing its own intent and
+	// reporting apps/*:* as access.privileged=false. Any group now counts; this
+	// over-reports a benign full-control-of-a-CRD-group role as privileged, which is
+	// the safe direction.
+	if verb == "*" && res == "*" {
 		return true
 	}
 	switch verb {

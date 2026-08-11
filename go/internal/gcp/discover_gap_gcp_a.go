@@ -64,7 +64,7 @@ func (d *Driver) discoverBigQuery(region string) ([]provider.Discovered, []strin
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.warehouse.analytics",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -108,7 +108,7 @@ func (d *Driver) discoverCloudArmor(region string) ([]provider.Discovered, []str
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.security.waf",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -152,7 +152,7 @@ func (d *Driver) discoverCloudDNS(region string) ([]provider.Discovered, []strin
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.dns.zone",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -216,7 +216,7 @@ func (d *Driver) discoverCloudFunctions(region string) ([]provider.Discovered, [
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.workload.container",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -237,60 +237,51 @@ func (d *Driver) certManagerDiscoverLocations() ([]string, error) {
 // observeCertManager reads certificate metadata only; the private key never
 // transits groundhold.
 func (d *Driver) discoverCertManager(region string) ([]provider.Discovered, []string, error) {
-	var locations []string
-	var diags []string
-	if region != "" {
-		locations = []string{region}
-	} else {
-		locs, err := d.certManagerDiscoverLocations()
-		if err != nil {
-			return nil, nil, err
-		}
-		locations = locs
-	}
-	var out []provider.Discovered
-	for _, loc := range locations {
-		status, body, err := d.call("GET", fmt.Sprintf(
-			"%s/projects/%s/locations/%s/certificates", d.certManagerBase(), d.Project, loc), nil)
-		if err != nil {
-			diags = append(diags, "certificates.list "+loc+": "+err.Error())
-			continue
-		}
-		if status != http.StatusOK {
-			diags = append(diags, fmt.Sprintf("certificates.list %s: HTTP %d", loc, status))
-			continue
-		}
-		var resp struct {
-			Certificates []struct {
-				Name string `json:"name"`
-			} `json:"certificates"`
-		}
-		if err := json.Unmarshal(body, &resp); err != nil {
-			diags = append(diags, loc+": "+readBody("certificates.list", status).Error())
-			continue
-		}
-		for _, c := range resp.Certificates {
-			certID := leafName(c.Name)
-			if certID == "" {
-				continue
-			}
-			pid := certManagerProviderID(d.Project, loc, certID)
-			obs, odiags, err := d.observeCertManager("", pid)
+	return d.sweepEachLocation(region, d.certManagerDiscoverLocations,
+		func(loc string) ([]provider.Discovered, []string, error) {
+			var out []provider.Discovered
+			var diags []string
+			status, body, err := d.call("GET", fmt.Sprintf(
+				"%s/projects/%s/locations/%s/certificates", d.certManagerBase(), d.Project, loc), nil)
 			if err != nil {
-				diags = append(diags, certID+": "+err.Error())
-				continue
+				// D642: the LIST failed — this location was not read.
+				return nil, nil, fmt.Errorf("%s", "certificates.list "+loc+": "+err.Error())
 			}
-			for _, dg := range odiags {
-				diags = append(diags, certID+": "+dg)
+			if status != http.StatusOK {
+				// D642: the LIST failed — this location was not read.
+				return nil, nil, fmt.Errorf("%s", fmt.Sprintf("certificates.list %s: HTTP %d", loc, status))
 			}
-			out = append(out, provider.Discovered{
-				ProviderID:   pid,
-				ResourceType: "capability.certificate.tls",
-				Observations: obs,
-			})
-		}
-	}
-	return out, diags, nil
+			var resp struct {
+				Certificates []struct {
+					Name string `json:"name"`
+				} `json:"certificates"`
+			}
+			if err := json.Unmarshal(body, &resp); err != nil {
+				// D642: the LIST failed — this location was not read.
+				return nil, nil, fmt.Errorf("%s", loc+": "+readBody("certificates.list", status).Error())
+			}
+			for _, c := range resp.Certificates {
+				certID := leafName(c.Name)
+				if certID == "" {
+					continue
+				}
+				pid := certManagerProviderID(d.Project, loc, certID)
+				obs, odiags, err := d.observeCertManager("", pid)
+				if err != nil {
+					diags = append(diags, certID+": "+err.Error())
+					continue
+				}
+				for _, dg := range odiags {
+					diags = append(diags, certID+": "+dg)
+				}
+				out = append(out, provider.Discovered{
+					ProviderID:   pid,
+					ResourceType: "capability.certificate.tls",
+					Observations: provider.WithoutAbsence(obs),
+				})
+			}
+			return out, diags, nil
+		})
 }
 
 // backupDRDiscoverLocations lists the Backup and DR locations available to the
@@ -307,60 +298,51 @@ func (d *Driver) backupDRDiscoverLocations() ([]string, error) {
 // location returned. Vaults are regional, so region filters on the swept
 // location.
 func (d *Driver) discoverBackupVault(region string) ([]provider.Discovered, []string, error) {
-	var locations []string
-	var diags []string
-	if region != "" {
-		locations = []string{region}
-	} else {
-		locs, err := d.backupDRDiscoverLocations()
-		if err != nil {
-			return nil, nil, err
-		}
-		locations = locs
-	}
-	var out []provider.Discovered
-	for _, loc := range locations {
-		status, body, err := d.call("GET", fmt.Sprintf(
-			"%s/projects/%s/locations/%s/backupVaults", d.backupDRBase(), d.Project, loc), nil)
-		if err != nil {
-			diags = append(diags, "backupVaults.list "+loc+": "+err.Error())
-			continue
-		}
-		if status != http.StatusOK {
-			diags = append(diags, fmt.Sprintf("backupVaults.list %s: HTTP %d", loc, status))
-			continue
-		}
-		var resp struct {
-			BackupVaults []struct {
-				Name string `json:"name"`
-			} `json:"backupVaults"`
-		}
-		if err := json.Unmarshal(body, &resp); err != nil {
-			diags = append(diags, loc+": "+readBody("backupVaults.list", status).Error())
-			continue
-		}
-		for _, v := range resp.BackupVaults {
-			vaultID := leafName(v.Name)
-			if vaultID == "" {
-				continue
-			}
-			pid := backupDRProviderID(d.Project, loc, vaultID)
-			obs, odiags, err := d.observeBackupDR("", pid)
+	return d.sweepEachLocation(region, d.backupDRDiscoverLocations,
+		func(loc string) ([]provider.Discovered, []string, error) {
+			var out []provider.Discovered
+			var diags []string
+			status, body, err := d.call("GET", fmt.Sprintf(
+				"%s/projects/%s/locations/%s/backupVaults", d.backupDRBase(), d.Project, loc), nil)
 			if err != nil {
-				diags = append(diags, vaultID+": "+err.Error())
-				continue
+				// D642: the LIST failed — this location was not read.
+				return nil, nil, fmt.Errorf("%s", "backupVaults.list "+loc+": "+err.Error())
 			}
-			for _, dg := range odiags {
-				diags = append(diags, vaultID+": "+dg)
+			if status != http.StatusOK {
+				// D642: the LIST failed — this location was not read.
+				return nil, nil, fmt.Errorf("%s", fmt.Sprintf("backupVaults.list %s: HTTP %d", loc, status))
 			}
-			out = append(out, provider.Discovered{
-				ProviderID:   pid,
-				ResourceType: "capability.backup.vault",
-				Observations: obs,
-			})
-		}
-	}
-	return out, diags, nil
+			var resp struct {
+				BackupVaults []struct {
+					Name string `json:"name"`
+				} `json:"backupVaults"`
+			}
+			if err := json.Unmarshal(body, &resp); err != nil {
+				// D642: the LIST failed — this location was not read.
+				return nil, nil, fmt.Errorf("%s", loc+": "+readBody("backupVaults.list", status).Error())
+			}
+			for _, v := range resp.BackupVaults {
+				vaultID := leafName(v.Name)
+				if vaultID == "" {
+					continue
+				}
+				pid := backupDRProviderID(d.Project, loc, vaultID)
+				obs, odiags, err := d.observeBackupDR("", pid)
+				if err != nil {
+					diags = append(diags, vaultID+": "+err.Error())
+					continue
+				}
+				for _, dg := range odiags {
+					diags = append(diags, vaultID+": "+dg)
+				}
+				out = append(out, provider.Discovered{
+					ProviderID:   pid,
+					ResourceType: "capability.backup.vault",
+					Observations: provider.WithoutAbsence(obs),
+				})
+			}
+			return out, diags, nil
+		})
 }
 
 // kmsDiscoverLocations lists the Cloud KMS locations available to the project.
@@ -388,9 +370,13 @@ func (d *Driver) discoverCloudKMS(region string) ([]provider.Discovered, []strin
 		locations = locs
 	}
 	var out []provider.Discovered
+	failed := 0
 	for _, loc := range locations {
 		rings, ok := d.kmsListKeyRings(loc, &diags)
 		if !ok {
+			// D642: this location was not READ. A location that answers with no key
+			// rings is a fact; a location that could not be listed is not.
+			failed++
 			continue
 		}
 		for _, ring := range rings {
@@ -419,10 +405,16 @@ func (d *Driver) discoverCloudKMS(region string) ([]provider.Discovered, []strin
 				out = append(out, provider.Discovered{
 					ProviderID:   pid,
 					ResourceType: "capability.key.encryption",
-					Observations: obs,
+					Observations: provider.WithoutAbsence(obs),
 				})
 			}
 		}
+	}
+	if len(locations) > 0 && failed == len(locations) {
+		return nil, diags, fmt.Errorf(
+			"cloudkms discovery could not reach the provider: all %d locations failed "+
+				"to list key rings, so nothing was read — this is not an empty estate",
+			failed)
 	}
 	return out, diags, nil
 }

@@ -270,9 +270,15 @@ func (d *Driver) observeEC2Instance(capability, providerID string) ([]provider.O
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"instance not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"instance not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		// An instance is placed in exactly one availability zone, always.
@@ -334,7 +340,22 @@ func (d *Driver) deleteEC2Instance(capability, environment, providerID string) p
 		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
 			Reason: fmt.Sprintf("delete outcome unknown: %v", e)}
 	case st == http.StatusOK:
-		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+		// ---- poll to absence (D968 class, D976) ----
+		// TerminateInstances is async: the machine enters shutting-down, not gone.
+		// Reporting succeeded here tombstones a still-billable VM. describeEC2Instances
+		// skips terminated instances, so poll to a confirmed absence as the create path
+		// polls to running; unknown on timeout keeps the handle.
+		deadline := d.Now().Add(d.PollTimeout)
+		for {
+			if _, found, rerr := d.describeEC2Instances(region, map[string]string{"InstanceId.1": id}); rerr == nil && !found {
+				return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // confirmed terminated
+			}
+			if d.Now().After(deadline) {
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: "instance still terminating at poll timeout — reconcile via DescribeInstances"}
+			}
+			time.Sleep(d.PollInterval)
+		}
 	case strings.Contains(ec2ErrCode(body), "NotFound"):
 		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // idempotent
 	case st >= 500:
@@ -397,7 +418,7 @@ func (d *Driver) discoverEC2Instances(region string) ([]provider.Discovered, []s
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.compute.instance",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

@@ -2,6 +2,7 @@ package aws
 
 import (
 	"fmt"
+	"groundhold/internal/provider"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -414,6 +415,25 @@ func TestProbeAuroraExposureFalse(t *testing.T) {
 	}
 }
 
+// TestProbeAuroraExposureNoInstanceIsProviderConfig pins D990: a cluster with no member
+// instance concludes not-exposed from the CONFIG (no endpoint to dial). The value is
+// honest, but the method must say provider-config — naming a tcp-connect a handshake
+// nobody attempted is the D775 lie, and this branch was left behind by that fix.
+func TestProbeAuroraExposureNoInstanceIsProviderConfig(t *testing.T) {
+	var out provider.ProbeOutcome
+	(&Driver{}).probeAuroraExposure("eu-central-1", dbCluster{}, &out)
+	if len(out.Measurements) != 1 {
+		t.Fatalf("want one measurement, got %+v", out.Measurements)
+	}
+	m := out.Measurements[0]
+	if m.Path != "network.publicExposure" || m.Value != false {
+		t.Fatalf("a no-instance cluster must measure exposure false: %+v", m)
+	}
+	if m.Method != "provider-config" {
+		t.Fatalf("method = %q, want provider-config — nothing was dialed, so a tcp-connect method is a false provenance", m.Method)
+	}
+}
+
 // aurora exposure true: the cluster endpoint answers a handshake.
 func TestProbeAuroraExposureTrue(t *testing.T) {
 	srv := auroraProbeServer(t, auroraProbeOpts{
@@ -493,4 +513,46 @@ func TestProbeUnwiredService(t *testing.T) {
 	if _, err := d.Probe("s3", "bucket", "s3:eu-central-1:x", false); err == nil {
 		t.Fatal("probing an unwired service must error")
 	}
+}
+
+// D775. `PubliclyAccessible: true` with an EMPTY endpoint address is an instance whose
+// name is not readable yet — not one without a public endpoint. The old branch folded it
+// with the genuinely-private case and reported `network.publicExposure: false` as a
+// MEASURED outcome, with `Method: tcp-connect` on a value obtained by dialling nothing.
+//
+// A proven negative invented out of missing data is the exact shape D306 and D513 exist
+// for: absent is not no.
+func TestProbeWillNotProveAbsenceFromAMissingAddress(t *testing.T) {
+	d := NewDriver("eu-central-1")
+
+	t.Run("configured public, no address yet", func(t *testing.T) {
+		var out provider.ProbeOutcome
+		d.probeExposure("", 5432, true, "postgres", &out)
+		if len(out.Measurements) != 0 {
+			t.Fatalf("measured %+v from an unknown address — the endpoint may exist and "+
+				"simply not be readable yet (D775)", out.Measurements)
+		}
+		if len(out.Failures) != 1 || !out.Failures[0].Retryable {
+			t.Fatalf("want one RETRYABLE failure, got %+v", out.Failures)
+		}
+		// The REASON is what discriminates. A mutant that skips this branch falls
+		// through and DIALS the empty address, producing a retryable failure too —
+		// which the first version of this test accepted, and the meter said so.
+		if !strings.Contains(out.Failures[0].Reason, "no endpoint address") {
+			t.Fatalf("the failure must name the missing address rather than report a dial "+
+				"that should never have been attempted: %q", out.Failures[0].Reason)
+		}
+	})
+
+	t.Run("the provider says there is no public endpoint", func(t *testing.T) {
+		var out provider.ProbeOutcome
+		d.probeExposure("", 5432, false, "postgres", &out)
+		if len(out.Measurements) != 1 || out.Measurements[0].Value != false {
+			t.Fatalf("a provider-reported private resource IS a measured false: %+v", out.Measurements)
+		}
+		if m := out.Measurements[0].Method; m == "tcp-connect" {
+			t.Errorf("method %q names a handshake nobody attempted — a probe's Method says "+
+				"what was DONE, and a config read is not a dial (D775)", m)
+		}
+	})
 }

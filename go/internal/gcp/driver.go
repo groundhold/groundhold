@@ -21,6 +21,11 @@ import (
 )
 
 type Driver struct {
+	// D803: pages the provider said existed and this driver did not follow. A POINTER,
+	// so a scoped copy of the driver shares the record rather than losing it — the
+	// truncation belongs to the sweep, not to the struct that happened to see it.
+	trunc *truncRecord
+
 	Project string
 	// secrets (D309) holds the credential values of the mutation in flight so the
 	// driver can scrub them out of a Reason before it is persisted.
@@ -102,6 +107,7 @@ func newResilientHTTPClient() *http.Client {
 func NewDriver(project string) *Driver {
 	httpClient := newResilientHTTPClient()
 	return &Driver{
+		trunc:          &truncRecord{}, // D803
 		Project:        project,
 		BaseURL:        baseURL,
 		CRMBaseURL:     crmBaseURL,
@@ -733,6 +739,13 @@ func (d *Driver) Observe(service, capability,
 	if err != nil {
 		return nil, nil, err
 	}
+	if status == http.StatusNotFound {
+		// F-LC3 (D523): a readable absence, not a failure to read. Folded into the
+		// generic error it blocked the binding on unknown instead of re-creating.
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"instance not found — bound resource is gone (will re-create)"}, nil
+	}
 	if status != http.StatusOK {
 		return nil, nil, fmt.Errorf("instances.get: HTTP %d", status)
 	}
@@ -741,7 +754,10 @@ func (d *Driver) Observe(service, capability,
 		return nil, nil, err
 	}
 	observed, diags := MapInstance(inst)
-	out := make([]provider.Observation, 0, len(observed))
+	out := make([]provider.Observation, 0, len(observed)+1)
+	// Present: clear the marker (F-LC3).
+	out = append(out, provider.Observation{
+		Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"})
 	for _, o := range observed {
 		out = append(out, provider.Observation{
 			Path: o.Path, Value: o.Value, Derivation: o.Derivation})
@@ -883,27 +899,73 @@ func gcpErrCode(body []byte) string {
 	return e.Error.Status
 }
 
+// gcpRouteSink is nil in production. It is the seam a test uses to record every route
+// the GCP drivers actually build, rather than reading the routes back out of the
+// source (D317, D717). The driver is passed so the recorder can resolve which base
+// URL the call went through — in a test that is a fixture host, and only the driver
+// knows which of its overrides it belongs to.
+var gcpRouteSink func(d *Driver, method, url string)
+
+// truncRecord holds the pages a driver was told about and did not follow (D803). The
+// bookkeeping itself is shared (D818): a truncation is evidence of an incomplete answer
+// only if the continuation it handed back was never used, and that rule belongs to how
+// paging works rather than to any one provider.
+type truncRecord = provider.ListingRecord
+
+// noteTruncation records that a response said more results exist, along with the
+// continuation values that would prove a sweep went and read them. A driver built without
+// a record (a bare literal in a test) simply keeps none.
+func (d *Driver) noteTruncation(call string, values []string) {
+	d.trunc.Note(call, values)
+}
+
+// noteFollowed clears the note belonging to any continuation an OUTGOING request carries.
+func (d *Driver) noteFollowed(rawURL string, body []byte) {
+	d.trunc.Followed(provider.RequestValues(rawURL, body))
+}
+
+// TruncatedListings implements provider.ListingCompleteness. It RESETS the record, so one
+// sweep cannot report the next one's pages.
+func (d *Driver) TruncatedListings() []provider.TruncationNote {
+	return d.trunc.Take()
+}
+
 func (d *Driver) call(method, url string,
 	body map[string]any) (int, []byte, error) {
+	if gcpRouteSink != nil {
+		gcpRouteSink(d, method, url)
+	}
 	tok, err := d.auth.token()
 	if err != nil {
 		return 0, nil, err
 	}
 	var reader io.Reader
+	var raw []byte
 	if body != nil {
-		raw, err := json.Marshal(body)
-		if err != nil {
-			return 0, nil, err
+		var merr error
+		raw, merr = json.Marshal(body)
+		if merr != nil {
+			return 0, nil, merr
 		}
 		reader = bytes.NewReader(raw)
 	}
+	// D818: a request that carries a continuation handed back earlier is the sweep
+	// saying it went and read the rest — that clears the note the response left.
+	d.noteFollowed(url, raw)
 	req, err := http.NewRequest(method, url, reader)
 	if err != nil {
 		return 0, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+	// D993: user Application-Default-Credentials (as opposed to a service-account token)
+	// have no quota/billing project of their own, so quota-metered APIs
+	// (billingbudgets, serviceusage, …) 403 without an explicit x-goog-user-project.
+	// The driver already knows the project it is acting on; naming it as the quota
+	// project makes user-ADC work and is ignored/harmless for a service-account token.
+	// Field-found 2026-08-10 (billingbudgets create 403'd on a user-ADC token; the
+	// header turned the 403 into a 200).
+	if d.Project != "" {
+		req.Header.Set("x-goog-user-project", d.Project)
 	}
 	resp, err := d.HTTP.Do(req)
 	if err != nil {
@@ -911,6 +973,11 @@ func (d *Driver) call(method, url string,
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if resp.StatusCode == http.StatusOK {
+		if more, values := provider.ListingContinuation(respBody); more {
+			d.noteTruncation(method+" "+url, values)
+		}
+	}
 	return resp.StatusCode, respBody, nil
 }
 
@@ -952,7 +1019,7 @@ func (d *Driver) discoverCloudSQL(region string) ([]provider.Discovered, []strin
 		out = append(out, provider.Discovered{
 			ProviderID:   d.providerID(instRegion, name),
 			ResourceType: "capability.database.relational",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

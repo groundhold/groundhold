@@ -19,7 +19,6 @@ package azure
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"regexp"
 	"sort"
 	"strings"
@@ -44,24 +43,37 @@ type azPermEntry struct {
 // scope (a subscription path or a full resource id). A non-nil error is inconclusive
 // (never a denial): transport, a non-200 (e.g. the caller lacks
 // Microsoft.Authorization/permissions/read), or a bad body.
+// effectivePermissions reads EVERY page of the scope's permission list (D869).
+//
+// It read one before. ARM's own specification marks `Permissions_ListForResource` and
+// `Permissions_ListForResourceGroup` pageable with a nextLink, and this list is what
+// `CheckResourcePermissions` calls AUTHORITATIVE — an action it does not find becomes a
+// denial that `internal/apply` refuses on. Truncation can only remove grants, never add
+// one, so the lie was always in the same direction: an operator told they lack a
+// permission they hold, blocked from work that would have succeeded. That is worse than
+// saying nothing, which is the test the freeze is written around.
+//
+// A chain that never ends stays an ERROR rather than a partial list, because here a
+// partial list does not come out as a smaller answer — it comes out as a refusal.
 func (d *Driver) effectivePermissions(scope string) ([]azPermEntry, error) {
 	url := d.BaseURL + scope + "/providers/Microsoft.Authorization/permissions?api-version=" + azAuthAPIVersion
-	st, body, err := d.doARM("GET", url, nil)
+	const op = "Authorization/permissions"
+	var out []azPermEntry
+	err := d.listAllARMPages(op, url, func(body []byte) error {
+		var page struct {
+			Value []azPermEntry `json:"value"`
+		}
+		if json.Unmarshal(body, &page) != nil {
+			return fmt.Errorf("%s: bad response", op)
+		}
+		out = append(out, page.Value...)
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("Authorization/permissions: %w", err)
+		return nil, fmt.Errorf("%w — at %s (the acting identity needs "+
+			"Microsoft.Authorization/permissions/read)", err, scope)
 	}
-	if st != http.StatusOK {
-		return nil, fmt.Errorf("Authorization/permissions HTTP %d at %s "+
-			"(the acting identity needs Microsoft.Authorization/permissions/read): %s",
-			st, scope, mutDetailAz(body))
-	}
-	var out struct {
-		Value []azPermEntry `json:"value"`
-	}
-	if json.Unmarshal(body, &out) != nil {
-		return nil, fmt.Errorf("Authorization/permissions: bad response")
-	}
-	return out.Value, nil
+	return out, nil
 }
 
 // azActionAllowed: RBAC grants an action when some entry's Actions match it and that
@@ -133,17 +145,17 @@ func (d *Driver) CheckPermissions(subscription string, permissions []string) (de
 // cannot be reconstructed from the providerID return ErrNoResourceSurface → the
 // caller falls back to the subscription check (unattested, safe). Any error is
 // inconclusive, never a denial.
-func (d *Driver) CheckResourcePermissions(service, providerID string, permissions []string) ([]string, error) {
+func (d *Driver) CheckResourcePermissions(service, providerID string, permissions []string) ([]string, []string, error) {
 	if len(permissions) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	resID, ok := azResourceID(service, providerID)
 	if !ok {
-		return nil, provider.ErrNoResourceSurface
+		return nil, nil, provider.ErrNoResourceSurface
 	}
 	perms, err := d.effectivePermissions(resID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var denied []string
 	for _, p := range permissions {
@@ -152,7 +164,7 @@ func (d *Driver) CheckResourcePermissions(service, providerID string, permission
 		}
 	}
 	sort.Strings(denied)
-	return denied, nil
+	return denied, nil, nil
 }
 
 // azResourceID reconstructs an ARM resource id from a providerID for services whose

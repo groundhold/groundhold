@@ -1,0 +1,67 @@
+# Audit-verb false-clean fixes (D963/D964): audit evaluates constraints against
+# RECORDED reality, and must not report clean where reality violates. D964's
+# presence prohibition is exercised end to end here (adopt observes the attribute
+# present, then a hard `absent` audits it violated). D963's SET order-independence
+# is pinned at the unit level (internal/audit set-canon test) — the fake's observe
+# does not echo a declared unordered-list attribute, so the adopt→observe flow
+# cannot stage the reordered-set condition. Go-only.
+suite: audit-honesty
+cases:
+  - name: audit-evaluates-a-presence-prohibition
+    impl: go
+    description: >
+      D964: a hard `absent` that recorded reality VIOLATES must report violated,
+      not be silently dropped into a clean verdict — before the fix every
+      exists/absent constraint was skipped and the run reported clean.
+    onboard:
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: presc, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-managed
+              subject: db
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: presc
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+              network.publicExposure: true
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T12:00:00Z"
+          map: { db: "fake:existing-db" }
+          expect: { exit: 0, status: adopted }
+        - cmd: audit
+          at: "2026-07-12T12:35:00Z"
+          record: true
+          contract:
+            apiVersion: contract/v0.1
+            kind: InfrastructureContract
+            meta: { id: presc, environment: test, version: 2 }
+            capabilities:
+              - id: db
+                type: capability.database.relational
+            constraints:
+              hard:
+                - id: c-no-public
+                  subject: db
+                  path: network.publicExposure
+                  op: absent
+                  verify: { method: static }
+          expect:
+            exit: 2
+            status: violations-found
+            violations: 1
+            events: [violation.detected]

@@ -9,6 +9,11 @@
 #   fulfilled: [tokens]  — one or more SERVICE tokens fulfil the capability (D76)
 #   gap: {class, reason} — the cloud STRUCTURALLY cannot fulfil it (a fact about
 #                          the cloud; class is from a closed set)
+#   fulfilledOutsideTheClouds: [provider/service]
+#                        — the capability IS built, by a provider that is not one of the
+#                          three clouds (today: the Kubernetes driver). The cloud cells
+#                          still read honestly; this stops unbuilt from being read as
+#                          "groundhold has not built this" when it has (D502).
 #   unbuilt: true        — DERIVED: no token, no declared gap (a fact about groundhold —
 #                          a driver could be written; the cloud is not the blocker)
 #
@@ -57,6 +62,7 @@ capabilities:
       fulfilled: [iambinding]
     azure:
       fulfilled: [roleassignment]
+    fulfilledOutsideTheClouds: [k8s/rbac-clustergrant, k8s/rbac-grant]
   capability.authorization.role:
     aws:
       fulfilled: [custompolicy]
@@ -64,6 +70,7 @@ capabilities:
       fulfilled: [customrole]
     azure:
       fulfilled: [customroledef]
+    fulfilledOutsideTheClouds: [k8s/rbac-clusterrole, k8s/rbac-role]
   capability.backup.plan:
     aws:
       fulfilled: [backupplan]
@@ -103,6 +110,7 @@ capabilities:
       gap:
         class: not-capability-shaped
         reason: "Azure has no management-plane managed-TLS-certificate service: Key Vault certificates are data-plane and App Service managed certificates are coupled to an App Service Plan, so neither honors this standalone managed-certificate capability the way AWS ACM and GCP Certificate Manager do (D117)."
+    fulfilledOutsideTheClouds: [k8s/certmanager-cert]
   capability.cluster.addon:
     aws:
       fulfilled: [eks-addon]
@@ -124,6 +132,7 @@ capabilities:
       unbuilt: true
     azure:
       unbuilt: true
+    fulfilledOutsideTheClouds: [k8s/namespace]
   capability.compute.autoscaling:
     aws:
       fulfilled: [asg]
@@ -152,6 +161,7 @@ capabilities:
       unbuilt: true
     azure:
       unbuilt: true
+    fulfilledOutsideTheClouds: [k8s/quota]
   capability.container.job:
     aws:
       gap:
@@ -230,6 +240,7 @@ capabilities:
       unbuilt: true
     azure:
       unbuilt: true
+    fulfilledOutsideTheClouds: [k8s/argocd-application, k8s/flux-kustomization]
   capability.identity.oauth-client:
     aws:
       unbuilt: true
@@ -335,6 +346,7 @@ capabilities:
       fulfilled: [vpc]
     azure:
       fulfilled: [vnet]
+    fulfilledOutsideTheClouds: [k8s/netpol]
   capability.observability.changefeed:
     aws:
       fulfilled: [changefeed]

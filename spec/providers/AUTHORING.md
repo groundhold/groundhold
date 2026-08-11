@@ -1,8 +1,10 @@
 # Authoring a provider driver
 
 A driver adapts groundhold's executor to one cloud service. This is the pattern
-every driver follows — extracted from three built to it (Cloud SQL D43, Cloud
-Run D76, GCS D77) and hardened by two adversarial security reviews. A driver is
+every HAND-WRITTEN driver follows — extracted from the first three built to it
+(Cloud SQL D43, Cloud Run D76, GCS D77) and hardened by two adversarial security
+reviews. The repository now holds roughly a hundred and forty-five of them across
+AWS, GCP and Azure, plus a second authoring mode for Kubernetes described below. A driver is
 DONE when it satisfies all five disciplines below and passes the driver
 certification (`go/internal/provider/certify.go`).
 
@@ -125,6 +127,36 @@ Every item below is a real finding from the D76 review; get them right up front.
   Include the QUIET reads (the ownership GET, the operation poll) — an omitted
   permission produces a false PASS, the dangerous direction. Make the set
   attribute-aware where an option changes it (public exposure adds IAM perms).
+
+## The OTHER authoring mode: a schema-driven mapping (Kubernetes)
+
+Everything above describes a HAND-WRITTEN driver: a pure core, a network shell, a
+`case` per attribute. That is how the cloud drivers are built and it is not the only
+mode in this repository — following this guide to add a Kubernetes-governed resource
+would have you write code where the actual path is a YAML file (D502/D504).
+
+The k8s driver is SCHEMA-DRIVEN: one generic engine reads a mapping and does the
+observe/create/update/delete for every service, so there are no hand-coded twins. A new
+service is a file in `go/internal/k8s/mappings/`, and it declares:
+
+- `service` / `capability` — the token the dispatch answers to, and the capability TYPE
+  it fulfils (this is what the parity matrix reads).
+- `resource` — group/version/kind/plural/scope, the machine-authoritative profile.
+- `schema.mappedSurface` — a sha256 over the identity facts and each mapped field's
+  terminal type signature. Drift INSIDE that surface (a mapped field changed type or
+  vanished upstream) is a refusal; drift outside it is tolerated. This is the k8s
+  analogue of the endpoint-reality gate the cloud drivers get from live smokes.
+- `attributes` — the human-authored semantics: field path, op, type, derivation. A
+  `copy` op is the flat case; anything needing judgement is a NAMED LENS, registered in
+  `generic_lens.go`, because invariant 4 forbids an expression language in a mapping
+  just as it forbids one in a contract.
+- `ownership: k8s/v1` — the engine's single strategy (labels plus server-side apply).
+
+The disciplines above still apply and are enforced by the engine rather than by each
+author: refuse an unmapped attribute, refuse a foreign object before writing to it
+(D462), conclude four-valued. A mapping whose lenses are not all write-capable is
+observe-only by construction (`writeSafe`), which is how a half-built service fails
+closed instead of half-writing.
 
 ## Layout of one service module
 

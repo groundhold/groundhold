@@ -84,8 +84,15 @@ func (d *Driver) describeRG(region, id string) (replicationGroup, bool, error) {
 	var r struct {
 		Groups []replicationGroup `xml:"DescribeReplicationGroupsResult>ReplicationGroups>ReplicationGroup"`
 	}
-	if xml.Unmarshal(resp, &r) != nil || len(r.Groups) == 0 {
+	// D523: this said `unmarshal != nil || len(Groups) == 0` and called BOTH a
+	// read failure. An EMPTY result set is how this API says the group does not
+	// exist — a fact about the world, not a failure to read it — and reporting it
+	// as unparseable blocked the binding on unknown instead of re-creating.
+	if xml.Unmarshal(resp, &r) != nil {
 		return replicationGroup{}, false, readBody(op, st)
+	}
+	if len(r.Groups) == 0 {
+		return replicationGroup{}, false, nil // authoritative: does not exist
 	}
 	return r.Groups[0], true, nil
 }
@@ -197,9 +204,15 @@ func (d *Driver) observeElastiCache(capability, providerID string) ([]provider.O
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"replication group not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"replication group not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		// a replication group is VPC-only — no public endpoint is assignable.
@@ -207,24 +220,48 @@ func (d *Driver) observeElastiCache(capability, providerID string) ([]provider.O
 		{Path: "encryption.atRest", Value: rg.AtRestEncryptionEnabled, Derivation: "measured"},
 		{Path: "encryption.inTransit", Value: rg.TransitEncryptionEnabled, Derivation: "measured"},
 	}
+	var diags []string
+	// D800: an encrypted replication group always reports a KMS key — the account-default
+	// aws/elasticache one when the customer brought none — so "a key id is present" is not
+	// "the customer brought a key". Trace it to KMS (DescribeKey -> KeyManager), the way
+	// the RDS driver in this same package already does; an unreadable trace is a
+	// diagnostic, never a false BYOK.
 	if rg.KmsKeyID != "" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: true, Derivation: "measured"})
+		if customer, kerr := d.kmsKeyIsCustomerManaged(region, rg.KmsKeyID); kerr == nil {
+			obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+				Value: customer, Derivation: "measured"})
+		} else {
+			diags = append(diags, "encryption.customerManagedKeys not observed on the replication group's "+
+				"KMS key: "+kerr.Error()+" — probe/reconcile")
+		}
 	}
-	// availability: AutomaticFailover enabled => a replica survives a zone loss.
-	switch rg.AutomaticFailover {
+	// availability.class: zone survival is MultiAZ (replicas in DIFFERENT AZs), NOT
+	// AutomaticFailover. A group with AutomaticFailover=enabled but MultiAZ=disabled keeps
+	// its replica in the primary's OWN AZ — node failover, not zone survival — and AWS
+	// accepts exactly that combination (field 2026-08-08: CreateReplicationGroup
+	// AutomaticFailoverEnabled=true + MultiAZEnabled=false → 200, MultiAZ=disabled). Reading
+	// AutomaticFailover reported that single-zone group as regional/measured, so a hard
+	// availability.class==regional DR constraint read satisfied against a cache that loses
+	// data on a zone outage — the D946 shape. Read MultiAZ, the field that carries the
+	// guarantee (D955); MultiAZ=enabled implies AutomaticFailover=enabled (an AWS invariant),
+	// so it is the authoritative single signal. The create sets BOTH for regional, matching.
+	switch rg.MultiAZ {
 	case "enabled":
 		obs = append(obs, provider.Observation{Path: "availability.class", Value: "regional", Derivation: "measured"})
 	case "disabled":
 		obs = append(obs, provider.Observation{Path: "availability.class", Value: "zonal", Derivation: "measured"})
 	}
-	diags := []string{"engine.protocol not observed from the replication group " +
-		"(the engine version lives on the member cache clusters — DescribeCacheClusters)"}
+	diags = append(diags, "engine.protocol not observed from the replication group "+
+		"(the engine version lives on the member cache clusters — DescribeCacheClusters)")
 	return obs, diags, nil
 }
 
 func (d *Driver) deleteElastiCache(capability, environment, providerID string) provider.CreateResult {
 	region, account, id, err := splitECacheProviderID(providerID)
 	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if err := d.sameAccount(account); err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	_, found, rerr := d.describeRG(region, id)
@@ -259,6 +296,23 @@ func (d *Driver) deleteElastiCache(capability, environment, providerID string) p
 			return *r
 		}
 		return provider.CreateResult{Status: "failed", Reason: fmt.Sprintf("delete: HTTP %d (%s)", st, rdsErrCode(resp))}
+	}
+	// ---- poll the replication group to absence (D968 class, D970) ----
+	// The delete is async: the group enters "deleting", not gone. Reporting
+	// succeeded here tombstones a group still live and billing, and the subnet-group
+	// cleanup below cannot succeed while the group still uses it. Poll to a confirmed
+	// ReplicationGroupNotFound as createElastiCache polls to available; unknown on
+	// timeout keeps the handle (the subnet group is left for the reconcile).
+	deadline := d.Now().Add(d.PollTimeout)
+	for {
+		if _, found, rerr := d.describeRG(region, id); rerr == nil && !found {
+			break // confirmed gone — proceed to subnet-group cleanup
+		}
+		if d.Now().After(deadline) {
+			return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+				Reason: "replication group still deleting at poll timeout — reconcile via DescribeReplicationGroups"}
+		}
+		time.Sleep(d.PollInterval)
 	}
 	// D278: cleanup of the driver-DERIVED cache subnet group — part of this
 	// capability's composite footprint, reported honestly: not-found means no

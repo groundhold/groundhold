@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -69,6 +70,34 @@ type dynamoTableDesc struct {
 		SSEType         string `json:"SSEType"`
 		KMSMasterKeyArn string `json:"KMSMasterKeyArn"`
 	} `json:"SSEDescription"`
+	// D799: a table can be a GLOBAL TABLE, replicated into other regions. The driver
+	// did not read this and called "regional" a platform invariant, so a table with
+	// copies of its data in three continents satisfied an EU-residency constraint.
+	Replicas []struct {
+		RegionName string `json:"RegionName"`
+	} `json:"Replicas"`
+}
+
+// dynamoAvailability answers from the replica list rather than from the type of the
+// service (D799). "Regional" was written as a platform-invariant — a claim that a
+// DynamoDB table CANNOT be anything else — and Global Tables are exactly that something
+// else. The observation is measured now, because the API says which one this is.
+func dynamoAvailability(desc dynamoTableDesc) string {
+	if len(dynamoReplicaRegions(desc)) > 0 {
+		return "multi-regional"
+	}
+	return "regional"
+}
+
+func dynamoReplicaRegions(desc dynamoTableDesc) []string {
+	var out []string
+	for _, r := range desc.Replicas {
+		if r.RegionName != "" {
+			out = append(out, r.RegionName)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // describeTable reads a table. found=false + readable=true is an authoritative
@@ -231,13 +260,18 @@ func (d *Driver) observeDynamoDB(capability, providerID string) ([]provider.Obse
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"table not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"table not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
-		// a single-region DynamoDB table is zonally-redundant within the region.
-		{Path: "availability.class", Value: "regional", Derivation: "config-intent"},
+		{Path: "availability.class", Value: dynamoAvailability(desc), Derivation: "measured"},
 		{Path: "deletion.protection", Value: desc.DeletionProtectionEnabled, Derivation: "measured"},
 	}
 	// SSEType=KMS means KMS encryption is on, but DescribeTable reports the key as
@@ -246,6 +280,16 @@ func (d *Driver) observeDynamoDB(capability, providerID string) ([]provider.Obse
 	// case RDS refuses. Emit a diagnostic, never a false customerManagedKeys=true
 	// (which would certify BYOK on a managed-key table at adoption).
 	var diags []string
+	// D799: residency is the reason this matters. A global table's rows live in every
+	// replica region, so naming ONE region as location.region and stopping there let an
+	// EU-only contract verify against a table that also stores its data elsewhere. The
+	// region stays (it is where THIS table endpoint is), and the replicas are said out
+	// loud rather than being invisible.
+	if regions := dynamoReplicaRegions(desc); len(regions) > 0 {
+		diags = append(diags, "location.region names this table's own region, but the table "+
+			"is a GLOBAL TABLE replicating into: "+strings.Join(regions, ", ")+
+			" — its data is resident in those regions too")
+	}
 	if desc.SSEDescription.SSEType == "KMS" && desc.SSEDescription.KMSMasterKeyArn != "" {
 		diags = append(diags, "encryption.customerManagedKeys not observed: DescribeTable "+
 			"reports a KMS key ARN but cannot distinguish the AWS-managed aws/dynamodb key "+
@@ -257,9 +301,94 @@ func (d *Driver) observeDynamoDB(capability, providerID string) ([]provider.Obse
 	return obs, diags, nil
 }
 
+// updateDynamoDB patches a LIVE table in place for the mutable paths (D1004):
+// backup.pointInTimeRecovery via UpdateContinuousBackups, deletion.protection via
+// UpdateTable. Ownership is re-checked (tags) BEFORE any mutation; unreadable -> unknown,
+// vanished -> failed. Four-valued: a transport/5xx is unknown WITH the pid; a clean 4xx
+// is failed. Only the two attributes classifyDynamoDBChange marks mutable reach here (the
+// compiler routes an immutable change to replacement), so no other path is touched.
+func (d *Driver) updateDynamoDB(capability, environment, providerID string,
+	attrs, impl map[string]any, changes []string) provider.CreateResult {
+	region, account, table, err := splitDynamoProviderID(providerID)
+	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if err := d.sameAccount(account); err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	_, found, rerr := d.describeTable(region, table)
+	if rerr != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: "pre-update read gave no answer — reconcile: " + rerr.Error()}
+	}
+	if !found {
+		return provider.CreateResult{Status: "failed", Reason: "table no longer exists — re-observe and re-plan"}
+	}
+	tags, terr := d.dynamoTags(region, account, table)
+	if terr != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: "pre-update tag read gave no answer — reconcile: " + terr.Error()}
+	}
+	if !groundholdTagsMatch(tags, capability, environment) {
+		return provider.CreateResult{Status: "failed",
+			Reason: "table tags do not match — refusing to patch a resource that is not ours"}
+	}
+	plan, berr := BuildDynamoDB(environment, capability, attrs, impl, 1)
+	if berr != nil {
+		return provider.CreateResult{Status: "failed", Reason: berr.Error()}
+	}
+	plan.Table = table
+	for _, path := range changes {
+		switch path {
+		case "backup.pointInTimeRecovery":
+			st, resp, e := d.dynamoCall(region, "UpdateContinuousBackups", jsonBody(map[string]any{
+				"TableName":                        table,
+				"PointInTimeRecoverySpecification": map[string]any{"PointInTimeRecoveryEnabled": plan.PITR},
+			}))
+			if r := dynamoPatchOutcome(st, resp, e, providerID, "UpdateContinuousBackups"); r != nil {
+				return *r
+			}
+		case "deletion.protection":
+			st, resp, e := d.dynamoCall(region, "UpdateTable", jsonBody(map[string]any{
+				"TableName":                 table,
+				"DeletionProtectionEnabled": plan.DeletionProtection,
+			}))
+			if r := dynamoPatchOutcome(st, resp, e, providerID, "UpdateTable"); r != nil {
+				return *r
+			}
+		default:
+			// classifyDynamoDBChange routes everything else to replacement; a path here
+			// would be a wiring bug, not a silent no-op.
+			return provider.CreateResult{Status: "failed",
+				Reason: fmt.Sprintf("dynamodb in-place update does not handle %q (it should have been a replacement)", path)}
+		}
+	}
+	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+}
+
+// dynamoPatchOutcome folds one patch call into the four-valued shape: nil = keep going
+// (2xx), non-nil is terminal. A transport error / 5xx is unknown WITH the pid; a throttle
+// or live-403 routes through MutationResult (unknown); a clean 4xx is failed.
+func dynamoPatchOutcome(st int, resp []byte, err error, pid, op string) *provider.CreateResult {
+	switch {
+	case err != nil:
+		return &provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: fmt.Sprintf("%s outcome unknown: %v", op, err)}
+	case st == http.StatusOK:
+		return nil
+	case st >= 500:
+		return &provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: fmt.Sprintf("%s HTTP %d (server error) — reconcile", op, st)}
+	default:
+		if r := provider.MutationResult(st, ecsErr(resp), nil, pid, op); r != nil {
+			return r
+		}
+		return &provider.CreateResult{ProviderID: pid, Status: "failed", Reason: fmt.Sprintf("%s HTTP %d: %s", op, st, ecsErr(resp))}
+	}
+}
+
 func (d *Driver) deleteDynamoDB(capability, environment, providerID string) provider.CreateResult {
 	region, account, table, err := splitDynamoProviderID(providerID)
 	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if err := d.sameAccount(account); err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	desc, found, rerr := d.describeTable(region, table)
@@ -300,5 +429,21 @@ func (d *Driver) deleteDynamoDB(capability, environment, providerID string) prov
 		}
 		return provider.CreateResult{Status: "failed", Reason: fmt.Sprintf("delete HTTP %d (%s)", st, ecsErr(resp))}
 	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// ---- poll to absence (D968 class) ----
+	// The delete is async: a 200 means the table entered DELETING, not that it is
+	// gone. Concluding "succeeded" here tombstones a table still live and billing;
+	// if the async deletion then fails, it is orphaned from a ledger that says it
+	// is gone. Poll to a confirmed ResourceNotFound as createDynamoDB polls to
+	// ACTIVE; unknown on timeout keeps the handle for a reconcile.
+	deadline := d.Now().Add(d.PollTimeout)
+	for {
+		if _, found, rerr := d.describeTable(region, table); rerr == nil && !found {
+			return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // confirmed gone
+		}
+		if d.Now().After(deadline) {
+			return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+				Reason: "table still deleting at poll timeout — reconcile via DescribeTable"}
+		}
+		time.Sleep(d.PollInterval)
+	}
 }

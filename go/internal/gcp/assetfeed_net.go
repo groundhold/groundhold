@@ -63,9 +63,30 @@ type assetFeedDoc struct {
 
 func (doc assetFeedDoc) topic() string { return doc.FeedOutputConfig.PubsubDestination.Topic }
 
+// assetFeedName builds the {name} the Cloud Asset feeds.get and feeds.delete
+// endpoints demand. Unlike feeds.create — whose {parent} accepts the project ID —
+// get and delete REJECT a project ID in the name ("Feed name must be in the format
+// of projects|folders|organizations/<number>/feeds/<feed_identifier>") and require
+// the project NUMBER. project is the providerId's project, which sameProject has
+// already pinned to d.Project, so its number is ourProjectNumber().
+//
+// Field 2026-08-10: get/delete built the name with the ID, so both 400'd forever —
+// a retire's pre-delete read never answered, the delete never fired, and the feed
+// was orphaned while resume reported "pending" indefinitely (worse than nothing).
+func (d *Driver) assetFeedName(feedID string) (string, error) {
+	num, err := d.ourProjectNumber()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s/projects/%s/feeds/%s", d.assetFeedBase(), num, feedID), nil
+}
+
 func (d *Driver) getAssetFeed(project, feedID string) (assetFeedDoc, bool, error) {
 	const op = "assetFeed.get"
-	url := fmt.Sprintf("%s/projects/%s/feeds/%s", d.assetFeedBase(), project, feedID)
+	url, err := d.assetFeedName(feedID)
+	if err != nil {
+		return assetFeedDoc{}, false, readTransport(op, err)
+	}
 	st, body, err := d.call("GET", url, nil)
 	if err != nil {
 		return assetFeedDoc{}, false, readTransport(op, err)
@@ -130,12 +151,23 @@ func (d *Driver) observeAssetFeed(capability, providerID string) ([]provider.Obs
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"change feed not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"change feed not found — bound resource is gone (will re-create)"}, nil
 	}
 	if doc.topic() == "" {
-		return nil, []string{"change feed has no Pub/Sub destination — nothing anyone can drain"}, nil
+		return []provider.Observation{
+			// D802: the feed EXISTS — it simply has no destination. Clearing the absence
+			// marker says so; the attributes stay unobserved and the diagnostic explains
+			// why. An empty return would have read as "gone".
+			{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
+		}, []string{"change feed has no Pub/Sub destination — nothing anyone can drain"}, nil
 	}
 	return []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "feed.target", Value: doc.topic(), Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}, nil, nil
@@ -153,6 +185,14 @@ func (d *Driver) deleteAssetFeed(capability, environment, providerID string) pro
 	// namespace (feeds carry no labels). Confirm existence, then delete the pinned
 	// id — removing the feed only stops future delivery (stateful:false; already
 	// delivered events stay in the target topic).
+	// OWNERSHIP (D451): the comment above already reasons that the id "lives in
+	// groundhold's deterministic namespace (feeds carry no labels)" — it never checked
+	// that the id is one we would produce.
+	if !nameLooksOursGCP(feedID, capability, environment, "", "-", nameOK, 8) {
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("asset feed %q is not named by groundhold for %s/%s — "+
+				"refusing to delete a feed this contract does not own", feedID, capability, environment)}
+	}
 	_, found, rerr := d.getAssetFeed(project, feedID)
 	if rerr != nil {
 		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: "pre-delete read gave no answer — reconcile: " + rerr.Error()}
@@ -160,7 +200,10 @@ func (d *Driver) deleteAssetFeed(capability, environment, providerID string) pro
 	if !found {
 		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // idempotent
 	}
-	url := fmt.Sprintf("%s/projects/%s/feeds/%s", d.assetFeedBase(), project, feedID)
+	url, err := d.assetFeedName(feedID)
+	if err != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: "delete could not resolve the feed name — reconcile: " + err.Error()}
+	}
 	st, body, e := d.call("DELETE", url, nil)
 	if e != nil {
 		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("delete outcome unknown: %v", e)}

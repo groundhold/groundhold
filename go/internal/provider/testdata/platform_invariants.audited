@@ -1,0 +1,51 @@
+# Every claim a driver makes with derivation platform-invariant: file|attribute|value.
+# The derivation does not say "we read this" — it says the platform CANNOT be
+# otherwise, which is a statement about the service rather than about the resource.
+# Each line here was checked against the provider's own description; the two that
+# were false are recorded in D799. A claim not on this list has not been reviewed,
+# and the gate fails rather than let it pass as if it had been.
+aws/apprunner_net.go|availability.class|"regional"
+aws/apprunner_net.go|tls.enforced|true
+aws/elasticacheserverless_net.go|availability.class|"regional"
+aws/elasticacheserverless_net.go|encryption.atRest|true
+aws/elasticacheserverless_net.go|encryption.inTransit|true
+aws/iamrole_net.go|key.exportable|false
+aws/kinesis_net.go|availability.class|"regional"
+aws/lambda_net.go|tls.enforced|true
+aws/msk_net.go|availability.class|"regional"
+aws/opensearchserverless_net.go|availability.class|"regional"
+aws/opensearchserverless_net.go|encryption.atRest|true
+aws/opensearchserverless_net.go|encryption.inTransit|true
+aws/redshiftserverless_net.go|encryption.atRest|true
+aws/s3_net.go|encryption.atRest|true
+azure/aisearch_net.go|encryption.atRest|true
+azure/aisearch_net.go|encryption.inTransit|true
+azure/azfiles_net.go|encryption.atRest|true
+azure/azkafka_net.go|encryption.inTransit|true
+azure/azuredisk_net.go|encryption.atRest|true
+azure/azureimage_net.go|encryption.atRest|true
+azure/azurevm_net.go|encryption.atRest|true
+azure/blob_net.go|encryption.atRest|true
+azure/flexserver_net.go|encryption.atRest|true
+azure/loadbalancer.go|encryption.inTransit|false
+azure/managedidentity_net.go|key.exportable|false
+azure/redis_azure_net.go|encryption.atRest|true
+azure/secret_kv_net.go|encryption.atRest|true
+azure/servicebus_net.go|encryption.atRest|true
+gcp/bigquery_net.go|encryption.atRest|true
+gcp/certmanager_net.go|auto.renew|true
+gcp/cloudfunctions_net.go|availability.class|"regional"
+gcp/cloudfunctions_net.go|tls.enforced|true
+gcp/cloudfunctionsfn_net.go|tls.enforced|true
+gcp/cloudrun_net.go|availability.class|"regional"
+gcp/computeimage_net.go|encryption.atRest|true
+gcp/computeinstance_net.go|encryption.atRest|true
+gcp/filestore_net.go|encryption.atRest|true
+gcp/gcs_net.go|encryption.atRest|true
+gcp/managedkafka_net.go|availability.class|"regional"
+gcp/managedkafka_net.go|encryption.inTransit|true
+gcp/memorystore_net.go|encryption.atRest|true
+gcp/persistentdisk_net.go|encryption.atRest|true
+gcp/pubsub_net.go|encryption.atRest|true
+gcp/pubsub_queue_net.go|encryption.atRest|true
+gcp/secretmanager_net.go|encryption.atRest|true

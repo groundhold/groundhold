@@ -1,0 +1,6691 @@
+{
+ "components": {
+  "schemas": {
+   "io.argoproj.v1alpha1.Application": {
+    "type": "object",
+    "required": [
+     "metadata",
+     "spec"
+    ],
+    "properties": {
+     "apiVersion": {
+      "type": "string"
+     },
+     "kind": {
+      "type": "string"
+     },
+     "metadata": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"
+       }
+      ]
+     },
+     "operation": {
+      "type": "object",
+      "properties": {
+       "info": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "name",
+          "value"
+         ],
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "value": {
+           "type": "string"
+          }
+         }
+        }
+       },
+       "initiatedBy": {
+        "type": "object",
+        "properties": {
+         "automated": {
+          "type": "boolean"
+         },
+         "username": {
+          "type": "string"
+         }
+        }
+       },
+       "retry": {
+        "type": "object",
+        "properties": {
+         "backoff": {
+          "type": "object",
+          "properties": {
+           "duration": {
+            "type": "string"
+           },
+           "factor": {
+            "type": "integer",
+            "format": "int64"
+           },
+           "maxDuration": {
+            "type": "string"
+           }
+          }
+         },
+         "limit": {
+          "type": "integer",
+          "format": "int64"
+         },
+         "refresh": {
+          "type": "boolean"
+         }
+        }
+       },
+       "sync": {
+        "type": "object",
+        "properties": {
+         "autoHealAttemptsCount": {
+          "type": "integer",
+          "format": "int64"
+         },
+         "dryRun": {
+          "type": "boolean"
+         },
+         "manifests": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         },
+         "prune": {
+          "type": "boolean"
+         },
+         "resources": {
+          "type": "array",
+          "items": {
+           "type": "object",
+           "required": [
+            "kind",
+            "name"
+           ],
+           "properties": {
+            "group": {
+             "type": "string"
+            },
+            "kind": {
+             "type": "string"
+            },
+            "name": {
+             "type": "string"
+            },
+            "namespace": {
+             "type": "string"
+            }
+           }
+          }
+         },
+         "revision": {
+          "type": "string"
+         },
+         "revisions": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         },
+         "source": {
+          "type": "object",
+          "required": [
+           "repoURL"
+          ],
+          "properties": {
+           "chart": {
+            "type": "string"
+           },
+           "directory": {
+            "type": "object",
+            "properties": {
+             "exclude": {
+              "type": "string"
+             },
+             "include": {
+              "type": "string"
+             },
+             "jsonnet": {
+              "type": "object",
+              "properties": {
+               "extVars": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "required": [
+                  "name",
+                  "value"
+                 ],
+                 "properties": {
+                  "code": {
+                   "type": "boolean"
+                  },
+                  "name": {
+                   "type": "string"
+                  },
+                  "value": {
+                   "type": "string"
+                  }
+                 }
+                }
+               },
+               "libs": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "tlas": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "required": [
+                  "name",
+                  "value"
+                 ],
+                 "properties": {
+                  "code": {
+                   "type": "boolean"
+                  },
+                  "name": {
+                   "type": "string"
+                  },
+                  "value": {
+                   "type": "string"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             "recurse": {
+              "type": "boolean"
+             }
+            }
+           },
+           "helm": {
+            "type": "object",
+            "properties": {
+             "apiVersions": {
+              "type": "array",
+              "items": {
+               "type": "string"
+              }
+             },
+             "fileParameters": {
+              "type": "array",
+              "items": {
+               "type": "object",
+               "properties": {
+                "name": {
+                 "type": "string"
+                },
+                "path": {
+                 "type": "string"
+                }
+               }
+              }
+             },
+             "ignoreMissingValueFiles": {
+              "type": "boolean"
+             },
+             "kubeVersion": {
+              "type": "string"
+             },
+             "namespace": {
+              "type": "string"
+             },
+             "parameters": {
+              "type": "array",
+              "items": {
+               "type": "object",
+               "properties": {
+                "forceString": {
+                 "type": "boolean"
+                },
+                "name": {
+                 "type": "string"
+                },
+                "value": {
+                 "type": "string"
+                }
+               }
+              }
+             },
+             "passCredentials": {
+              "type": "boolean"
+             },
+             "releaseName": {
+              "type": "string"
+             },
+             "skipCrds": {
+              "type": "boolean"
+             },
+             "skipSchemaValidation": {
+              "type": "boolean"
+             },
+             "skipTests": {
+              "type": "boolean"
+             },
+             "valueFiles": {
+              "type": "array",
+              "items": {
+               "type": "string"
+              }
+             },
+             "values": {
+              "type": "string"
+             },
+             "valuesObject": {
+              "type": "object",
+              "x-kubernetes-preserve-unknown-fields": true
+             },
+             "version": {
+              "type": "string"
+             }
+            }
+           },
+           "kustomize": {
+            "type": "object",
+            "properties": {
+             "apiVersions": {
+              "type": "array",
+              "items": {
+               "type": "string"
+              }
+             },
+             "commonAnnotations": {
+              "type": "object",
+              "additionalProperties": {
+               "type": "string"
+              }
+             },
+             "commonAnnotationsEnvsubst": {
+              "type": "boolean"
+             },
+             "commonLabels": {
+              "type": "object",
+              "additionalProperties": {
+               "type": "string"
+              }
+             },
+             "components": {
+              "type": "array",
+              "items": {
+               "type": "string"
+              }
+             },
+             "forceCommonAnnotations": {
+              "type": "boolean"
+             },
+             "forceCommonLabels": {
+              "type": "boolean"
+             },
+             "ignoreMissingComponents": {
+              "type": "boolean"
+             },
+             "images": {
+              "type": "array",
+              "items": {
+               "type": "string"
+              }
+             },
+             "kubeVersion": {
+              "type": "string"
+             },
+             "labelIncludeTemplates": {
+              "type": "boolean"
+             },
+             "labelWithoutSelector": {
+              "type": "boolean"
+             },
+             "namePrefix": {
+              "type": "string"
+             },
+             "nameSuffix": {
+              "type": "string"
+             },
+             "namespace": {
+              "type": "string"
+             },
+             "patches": {
+              "type": "array",
+              "items": {
+               "type": "object",
+               "properties": {
+                "options": {
+                 "type": "object",
+                 "additionalProperties": {
+                  "type": "boolean"
+                 }
+                },
+                "patch": {
+                 "type": "string"
+                },
+                "path": {
+                 "type": "string"
+                },
+                "target": {
+                 "type": "object",
+                 "properties": {
+                  "annotationSelector": {
+                   "type": "string"
+                  },
+                  "group": {
+                   "type": "string"
+                  },
+                  "kind": {
+                   "type": "string"
+                  },
+                  "labelSelector": {
+                   "type": "string"
+                  },
+                  "name": {
+                   "type": "string"
+                  },
+                  "namespace": {
+                   "type": "string"
+                  },
+                  "version": {
+                   "type": "string"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             "replicas": {
+              "type": "array",
+              "items": {
+               "type": "object",
+               "required": [
+                "count",
+                "name"
+               ],
+               "properties": {
+                "count": {
+                 "anyOf": [
+                  {
+                   "type": "integer"
+                  },
+                  {
+                   "type": "string"
+                  }
+                 ],
+                 "x-kubernetes-int-or-string": true
+                },
+                "name": {
+                 "type": "string"
+                }
+               }
+              }
+             },
+             "version": {
+              "type": "string"
+             }
+            }
+           },
+           "name": {
+            "type": "string"
+           },
+           "path": {
+            "type": "string"
+           },
+           "plugin": {
+            "type": "object",
+            "properties": {
+             "env": {
+              "type": "array",
+              "items": {
+               "type": "object",
+               "required": [
+                "name",
+                "value"
+               ],
+               "properties": {
+                "name": {
+                 "type": "string"
+                },
+                "value": {
+                 "type": "string"
+                }
+               }
+              }
+             },
+             "name": {
+              "type": "string"
+             },
+             "parameters": {
+              "type": "array",
+              "items": {
+               "type": "object",
+               "properties": {
+                "array": {
+                 "type": "array",
+                 "items": {
+                  "type": "string"
+                 }
+                },
+                "map": {
+                 "type": "object",
+                 "additionalProperties": {
+                  "type": "string"
+                 }
+                },
+                "name": {
+                 "type": "string"
+                },
+                "string": {
+                 "type": "string"
+                }
+               }
+              }
+             }
+            }
+           },
+           "ref": {
+            "type": "string"
+           },
+           "repoURL": {
+            "type": "string"
+           },
+           "targetRevision": {
+            "type": "string"
+           }
+          }
+         },
+         "sources": {
+          "type": "array",
+          "items": {
+           "type": "object",
+           "required": [
+            "repoURL"
+           ],
+           "properties": {
+            "chart": {
+             "type": "string"
+            },
+            "directory": {
+             "type": "object",
+             "properties": {
+              "exclude": {
+               "type": "string"
+              },
+              "include": {
+               "type": "string"
+              },
+              "jsonnet": {
+               "type": "object",
+               "properties": {
+                "extVars": {
+                 "type": "array",
+                 "items": {
+                  "type": "object",
+                  "required": [
+                   "name",
+                   "value"
+                  ],
+                  "properties": {
+                   "code": {
+                    "type": "boolean"
+                   },
+                   "name": {
+                    "type": "string"
+                   },
+                   "value": {
+                    "type": "string"
+                   }
+                  }
+                 }
+                },
+                "libs": {
+                 "type": "array",
+                 "items": {
+                  "type": "string"
+                 }
+                },
+                "tlas": {
+                 "type": "array",
+                 "items": {
+                  "type": "object",
+                  "required": [
+                   "name",
+                   "value"
+                  ],
+                  "properties": {
+                   "code": {
+                    "type": "boolean"
+                   },
+                   "name": {
+                    "type": "string"
+                   },
+                   "value": {
+                    "type": "string"
+                   }
+                  }
+                 }
+                }
+               }
+              },
+              "recurse": {
+               "type": "boolean"
+              }
+             }
+            },
+            "helm": {
+             "type": "object",
+             "properties": {
+              "apiVersions": {
+               "type": "array",
+               "items": {
+                "type": "string"
+               }
+              },
+              "fileParameters": {
+               "type": "array",
+               "items": {
+                "type": "object",
+                "properties": {
+                 "name": {
+                  "type": "string"
+                 },
+                 "path": {
+                  "type": "string"
+                 }
+                }
+               }
+              },
+              "ignoreMissingValueFiles": {
+               "type": "boolean"
+              },
+              "kubeVersion": {
+               "type": "string"
+              },
+              "namespace": {
+               "type": "string"
+              },
+              "parameters": {
+               "type": "array",
+               "items": {
+                "type": "object",
+                "properties": {
+                 "forceString": {
+                  "type": "boolean"
+                 },
+                 "name": {
+                  "type": "string"
+                 },
+                 "value": {
+                  "type": "string"
+                 }
+                }
+               }
+              },
+              "passCredentials": {
+               "type": "boolean"
+              },
+              "releaseName": {
+               "type": "string"
+              },
+              "skipCrds": {
+               "type": "boolean"
+              },
+              "skipSchemaValidation": {
+               "type": "boolean"
+              },
+              "skipTests": {
+               "type": "boolean"
+              },
+              "valueFiles": {
+               "type": "array",
+               "items": {
+                "type": "string"
+               }
+              },
+              "values": {
+               "type": "string"
+              },
+              "valuesObject": {
+               "type": "object",
+               "x-kubernetes-preserve-unknown-fields": true
+              },
+              "version": {
+               "type": "string"
+              }
+             }
+            },
+            "kustomize": {
+             "type": "object",
+             "properties": {
+              "apiVersions": {
+               "type": "array",
+               "items": {
+                "type": "string"
+               }
+              },
+              "commonAnnotations": {
+               "type": "object",
+               "additionalProperties": {
+                "type": "string"
+               }
+              },
+              "commonAnnotationsEnvsubst": {
+               "type": "boolean"
+              },
+              "commonLabels": {
+               "type": "object",
+               "additionalProperties": {
+                "type": "string"
+               }
+              },
+              "components": {
+               "type": "array",
+               "items": {
+                "type": "string"
+               }
+              },
+              "forceCommonAnnotations": {
+               "type": "boolean"
+              },
+              "forceCommonLabels": {
+               "type": "boolean"
+              },
+              "ignoreMissingComponents": {
+               "type": "boolean"
+              },
+              "images": {
+               "type": "array",
+               "items": {
+                "type": "string"
+               }
+              },
+              "kubeVersion": {
+               "type": "string"
+              },
+              "labelIncludeTemplates": {
+               "type": "boolean"
+              },
+              "labelWithoutSelector": {
+               "type": "boolean"
+              },
+              "namePrefix": {
+               "type": "string"
+              },
+              "nameSuffix": {
+               "type": "string"
+              },
+              "namespace": {
+               "type": "string"
+              },
+              "patches": {
+               "type": "array",
+               "items": {
+                "type": "object",
+                "properties": {
+                 "options": {
+                  "type": "object",
+                  "additionalProperties": {
+                   "type": "boolean"
+                  }
+                 },
+                 "patch": {
+                  "type": "string"
+                 },
+                 "path": {
+                  "type": "string"
+                 },
+                 "target": {
+                  "type": "object",
+                  "properties": {
+                   "annotationSelector": {
+                    "type": "string"
+                   },
+                   "group": {
+                    "type": "string"
+                   },
+                   "kind": {
+                    "type": "string"
+                   },
+                   "labelSelector": {
+                    "type": "string"
+                   },
+                   "name": {
+                    "type": "string"
+                   },
+                   "namespace": {
+                    "type": "string"
+                   },
+                   "version": {
+                    "type": "string"
+                   }
+                  }
+                 }
+                }
+               }
+              },
+              "replicas": {
+               "type": "array",
+               "items": {
+                "type": "object",
+                "required": [
+                 "count",
+                 "name"
+                ],
+                "properties": {
+                 "count": {
+                  "anyOf": [
+                   {
+                    "type": "integer"
+                   },
+                   {
+                    "type": "string"
+                   }
+                  ],
+                  "x-kubernetes-int-or-string": true
+                 },
+                 "name": {
+                  "type": "string"
+                 }
+                }
+               }
+              },
+              "version": {
+               "type": "string"
+              }
+             }
+            },
+            "name": {
+             "type": "string"
+            },
+            "path": {
+             "type": "string"
+            },
+            "plugin": {
+             "type": "object",
+             "properties": {
+              "env": {
+               "type": "array",
+               "items": {
+                "type": "object",
+                "required": [
+                 "name",
+                 "value"
+                ],
+                "properties": {
+                 "name": {
+                  "type": "string"
+                 },
+                 "value": {
+                  "type": "string"
+                 }
+                }
+               }
+              },
+              "name": {
+               "type": "string"
+              },
+              "parameters": {
+               "type": "array",
+               "items": {
+                "type": "object",
+                "properties": {
+                 "array": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "map": {
+                  "type": "object",
+                  "additionalProperties": {
+                   "type": "string"
+                  }
+                 },
+                 "name": {
+                  "type": "string"
+                 },
+                 "string": {
+                  "type": "string"
+                 }
+                }
+               }
+              }
+             }
+            },
+            "ref": {
+             "type": "string"
+            },
+            "repoURL": {
+             "type": "string"
+            },
+            "targetRevision": {
+             "type": "string"
+            }
+           }
+          }
+         },
+         "syncOptions": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         },
+         "syncStrategy": {
+          "type": "object",
+          "properties": {
+           "apply": {
+            "type": "object",
+            "properties": {
+             "force": {
+              "type": "boolean"
+             }
+            }
+           },
+           "hook": {
+            "type": "object",
+            "properties": {
+             "force": {
+              "type": "boolean"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "spec": {
+      "type": "object",
+      "required": [
+       "destination",
+       "project"
+      ],
+      "properties": {
+       "destination": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string"
+         },
+         "namespace": {
+          "type": "string"
+         },
+         "server": {
+          "type": "string"
+         }
+        }
+       },
+       "ignoreDifferences": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "kind"
+         ],
+         "properties": {
+          "group": {
+           "type": "string"
+          },
+          "jqPathExpressions": {
+           "type": "array",
+           "items": {
+            "type": "string"
+           }
+          },
+          "jsonPointers": {
+           "type": "array",
+           "items": {
+            "type": "string"
+           }
+          },
+          "kind": {
+           "type": "string"
+          },
+          "managedFieldsManagers": {
+           "type": "array",
+           "items": {
+            "type": "string"
+           }
+          },
+          "name": {
+           "type": "string"
+          },
+          "namespace": {
+           "type": "string"
+          }
+         }
+        }
+       },
+       "info": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "name",
+          "value"
+         ],
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "value": {
+           "type": "string"
+          }
+         }
+        }
+       },
+       "project": {
+        "type": "string"
+       },
+       "revisionHistoryLimit": {
+        "type": "integer",
+        "format": "int64"
+       },
+       "source": {
+        "type": "object",
+        "required": [
+         "repoURL"
+        ],
+        "properties": {
+         "chart": {
+          "type": "string"
+         },
+         "directory": {
+          "type": "object",
+          "properties": {
+           "exclude": {
+            "type": "string"
+           },
+           "include": {
+            "type": "string"
+           },
+           "jsonnet": {
+            "type": "object",
+            "properties": {
+             "extVars": {
+              "type": "array",
+              "items": {
+               "type": "object",
+               "required": [
+                "name",
+                "value"
+               ],
+               "properties": {
+                "code": {
+                 "type": "boolean"
+                },
+                "name": {
+                 "type": "string"
+                },
+                "value": {
+                 "type": "string"
+                }
+               }
+              }
+             },
+             "libs": {
+              "type": "array",
+              "items": {
+               "type": "string"
+              }
+             },
+             "tlas": {
+              "type": "array",
+              "items": {
+               "type": "object",
+               "required": [
+                "name",
+                "value"
+               ],
+               "properties": {
+                "code": {
+                 "type": "boolean"
+                },
+                "name": {
+                 "type": "string"
+                },
+                "value": {
+                 "type": "string"
+                }
+               }
+              }
+             }
+            }
+           },
+           "recurse": {
+            "type": "boolean"
+           }
+          }
+         },
+         "helm": {
+          "type": "object",
+          "properties": {
+           "apiVersions": {
+            "type": "array",
+            "items": {
+             "type": "string"
+            }
+           },
+           "fileParameters": {
+            "type": "array",
+            "items": {
+             "type": "object",
+             "properties": {
+              "name": {
+               "type": "string"
+              },
+              "path": {
+               "type": "string"
+              }
+             }
+            }
+           },
+           "ignoreMissingValueFiles": {
+            "type": "boolean"
+           },
+           "kubeVersion": {
+            "type": "string"
+           },
+           "namespace": {
+            "type": "string"
+           },
+           "parameters": {
+            "type": "array",
+            "items": {
+             "type": "object",
+             "properties": {
+              "forceString": {
+               "type": "boolean"
+              },
+              "name": {
+               "type": "string"
+              },
+              "value": {
+               "type": "string"
+              }
+             }
+            }
+           },
+           "passCredentials": {
+            "type": "boolean"
+           },
+           "releaseName": {
+            "type": "string"
+           },
+           "skipCrds": {
+            "type": "boolean"
+           },
+           "skipSchemaValidation": {
+            "type": "boolean"
+           },
+           "skipTests": {
+            "type": "boolean"
+           },
+           "valueFiles": {
+            "type": "array",
+            "items": {
+             "type": "string"
+            }
+           },
+           "values": {
+            "type": "string"
+           },
+           "valuesObject": {
+            "type": "object",
+            "x-kubernetes-preserve-unknown-fields": true
+           },
+           "version": {
+            "type": "string"
+           }
+          }
+         },
+         "kustomize": {
+          "type": "object",
+          "properties": {
+           "apiVersions": {
+            "type": "array",
+            "items": {
+             "type": "string"
+            }
+           },
+           "commonAnnotations": {
+            "type": "object",
+            "additionalProperties": {
+             "type": "string"
+            }
+           },
+           "commonAnnotationsEnvsubst": {
+            "type": "boolean"
+           },
+           "commonLabels": {
+            "type": "object",
+            "additionalProperties": {
+             "type": "string"
+            }
+           },
+           "components": {
+            "type": "array",
+            "items": {
+             "type": "string"
+            }
+           },
+           "forceCommonAnnotations": {
+            "type": "boolean"
+           },
+           "forceCommonLabels": {
+            "type": "boolean"
+           },
+           "ignoreMissingComponents": {
+            "type": "boolean"
+           },
+           "images": {
+            "type": "array",
+            "items": {
+             "type": "string"
+            }
+           },
+           "kubeVersion": {
+            "type": "string"
+           },
+           "labelIncludeTemplates": {
+            "type": "boolean"
+           },
+           "labelWithoutSelector": {
+            "type": "boolean"
+           },
+           "namePrefix": {
+            "type": "string"
+           },
+           "nameSuffix": {
+            "type": "string"
+           },
+           "namespace": {
+            "type": "string"
+           },
+           "patches": {
+            "type": "array",
+            "items": {
+             "type": "object",
+             "properties": {
+              "options": {
+               "type": "object",
+               "additionalProperties": {
+                "type": "boolean"
+               }
+              },
+              "patch": {
+               "type": "string"
+              },
+              "path": {
+               "type": "string"
+              },
+              "target": {
+               "type": "object",
+               "properties": {
+                "annotationSelector": {
+                 "type": "string"
+                },
+                "group": {
+                 "type": "string"
+                },
+                "kind": {
+                 "type": "string"
+                },
+                "labelSelector": {
+                 "type": "string"
+                },
+                "name": {
+                 "type": "string"
+                },
+                "namespace": {
+                 "type": "string"
+                },
+                "version": {
+                 "type": "string"
+                }
+               }
+              }
+             }
+            }
+           },
+           "replicas": {
+            "type": "array",
+            "items": {
+             "type": "object",
+             "required": [
+              "count",
+              "name"
+             ],
+             "properties": {
+              "count": {
+               "anyOf": [
+                {
+                 "type": "integer"
+                },
+                {
+                 "type": "string"
+                }
+               ],
+               "x-kubernetes-int-or-string": true
+              },
+              "name": {
+               "type": "string"
+              }
+             }
+            }
+           },
+           "version": {
+            "type": "string"
+           }
+          }
+         },
+         "name": {
+          "type": "string"
+         },
+         "path": {
+          "type": "string"
+         },
+         "plugin": {
+          "type": "object",
+          "properties": {
+           "env": {
+            "type": "array",
+            "items": {
+             "type": "object",
+             "required": [
+              "name",
+              "value"
+             ],
+             "properties": {
+              "name": {
+               "type": "string"
+              },
+              "value": {
+               "type": "string"
+              }
+             }
+            }
+           },
+           "name": {
+            "type": "string"
+           },
+           "parameters": {
+            "type": "array",
+            "items": {
+             "type": "object",
+             "properties": {
+              "array": {
+               "type": "array",
+               "items": {
+                "type": "string"
+               }
+              },
+              "map": {
+               "type": "object",
+               "additionalProperties": {
+                "type": "string"
+               }
+              },
+              "name": {
+               "type": "string"
+              },
+              "string": {
+               "type": "string"
+              }
+             }
+            }
+           }
+          }
+         },
+         "ref": {
+          "type": "string"
+         },
+         "repoURL": {
+          "type": "string"
+         },
+         "targetRevision": {
+          "type": "string"
+         }
+        }
+       },
+       "sourceHydrator": {
+        "type": "object",
+        "required": [
+         "drySource",
+         "syncSource"
+        ],
+        "properties": {
+         "drySource": {
+          "type": "object",
+          "required": [
+           "path",
+           "repoURL",
+           "targetRevision"
+          ],
+          "properties": {
+           "directory": {
+            "type": "object",
+            "properties": {
+             "exclude": {
+              "type": "string"
+             },
+             "include": {
+              "type": "string"
+             },
+             "jsonnet": {
+              "type": "object",
+              "properties": {
+               "extVars": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "required": [
+                  "name",
+                  "value"
+                 ],
+                 "properties": {
+                  "code": {
+                   "type": "boolean"
+                  },
+                  "name": {
+                   "type": "string"
+                  },
+                  "value": {
+                   "type": "string"
+                  }
+                 }
+                }
+               },
+               "libs": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "tlas": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "required": [
+                  "name",
+                  "value"
+                 ],
+                 "properties": {
+                  "code": {
+                   "type": "boolean"
+                  },
+                  "name": {
+                   "type": "string"
+                  },
+                  "value": {
+                   "type": "string"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             "recurse": {
+              "type": "boolean"
+             }
+            }
+           },
+           "helm": {
+            "type": "object",
+            "properties": {
+             "apiVersions": {
+              "type": "array",
+              "items": {
+               "type": "string"
+              }
+             },
+             "fileParameters": {
+              "type": "array",
+              "items": {
+               "type": "object",
+               "properties": {
+                "name": {
+                 "type": "string"
+                },
+                "path": {
+                 "type": "string"
+                }
+               }
+              }
+             },
+             "ignoreMissingValueFiles": {
+              "type": "boolean"
+             },
+             "kubeVersion": {
+              "type": "string"
+             },
+             "namespace": {
+              "type": "string"
+             },
+             "parameters": {
+              "type": "array",
+              "items": {
+               "type": "object",
+               "properties": {
+                "forceString": {
+                 "type": "boolean"
+                },
+                "name": {
+                 "type": "string"
+                },
+                "value": {
+                 "type": "string"
+                }
+               }
+              }
+             },
+             "passCredentials": {
+              "type": "boolean"
+             },
+             "releaseName": {
+              "type": "string"
+             },
+             "skipCrds": {
+              "type": "boolean"
+             },
+             "skipSchemaValidation": {
+              "type": "boolean"
+             },
+             "skipTests": {
+              "type": "boolean"
+             },
+             "valueFiles": {
+              "type": "array",
+              "items": {
+               "type": "string"
+              }
+             },
+             "values": {
+              "type": "string"
+             },
+             "valuesObject": {
+              "type": "object",
+              "x-kubernetes-preserve-unknown-fields": true
+             },
+             "version": {
+              "type": "string"
+             }
+            }
+           },
+           "kustomize": {
+            "type": "object",
+            "properties": {
+             "apiVersions": {
+              "type": "array",
+              "items": {
+               "type": "string"
+              }
+             },
+             "commonAnnotations": {
+              "type": "object",
+              "additionalProperties": {
+               "type": "string"
+              }
+             },
+             "commonAnnotationsEnvsubst": {
+              "type": "boolean"
+             },
+             "commonLabels": {
+              "type": "object",
+              "additionalProperties": {
+               "type": "string"
+              }
+             },
+             "components": {
+              "type": "array",
+              "items": {
+               "type": "string"
+              }
+             },
+             "forceCommonAnnotations": {
+              "type": "boolean"
+             },
+             "forceCommonLabels": {
+              "type": "boolean"
+             },
+             "ignoreMissingComponents": {
+              "type": "boolean"
+             },
+             "images": {
+              "type": "array",
+              "items": {
+               "type": "string"
+              }
+             },
+             "kubeVersion": {
+              "type": "string"
+             },
+             "labelIncludeTemplates": {
+              "type": "boolean"
+             },
+             "labelWithoutSelector": {
+              "type": "boolean"
+             },
+             "namePrefix": {
+              "type": "string"
+             },
+             "nameSuffix": {
+              "type": "string"
+             },
+             "namespace": {
+              "type": "string"
+             },
+             "patches": {
+              "type": "array",
+              "items": {
+               "type": "object",
+               "properties": {
+                "options": {
+                 "type": "object",
+                 "additionalProperties": {
+                  "type": "boolean"
+                 }
+                },
+                "patch": {
+                 "type": "string"
+                },
+                "path": {
+                 "type": "string"
+                },
+                "target": {
+                 "type": "object",
+                 "properties": {
+                  "annotationSelector": {
+                   "type": "string"
+                  },
+                  "group": {
+                   "type": "string"
+                  },
+                  "kind": {
+                   "type": "string"
+                  },
+                  "labelSelector": {
+                   "type": "string"
+                  },
+                  "name": {
+                   "type": "string"
+                  },
+                  "namespace": {
+                   "type": "string"
+                  },
+                  "version": {
+                   "type": "string"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             "replicas": {
+              "type": "array",
+              "items": {
+               "type": "object",
+               "required": [
+                "count",
+                "name"
+               ],
+               "properties": {
+                "count": {
+                 "anyOf": [
+                  {
+                   "type": "integer"
+                  },
+                  {
+                   "type": "string"
+                  }
+                 ],
+                 "x-kubernetes-int-or-string": true
+                },
+                "name": {
+                 "type": "string"
+                }
+               }
+              }
+             },
+             "version": {
+              "type": "string"
+             }
+            }
+           },
+           "path": {
+            "type": "string"
+           },
+           "plugin": {
+            "type": "object",
+            "properties": {
+             "env": {
+              "type": "array",
+              "items": {
+               "type": "object",
+               "required": [
+                "name",
+                "value"
+               ],
+               "properties": {
+                "name": {
+                 "type": "string"
+                },
+                "value": {
+                 "type": "string"
+                }
+               }
+              }
+             },
+             "name": {
+              "type": "string"
+             },
+             "parameters": {
+              "type": "array",
+              "items": {
+               "type": "object",
+               "properties": {
+                "array": {
+                 "type": "array",
+                 "items": {
+                  "type": "string"
+                 }
+                },
+                "map": {
+                 "type": "object",
+                 "additionalProperties": {
+                  "type": "string"
+                 }
+                },
+                "name": {
+                 "type": "string"
+                },
+                "string": {
+                 "type": "string"
+                }
+               }
+              }
+             }
+            }
+           },
+           "repoURL": {
+            "type": "string"
+           },
+           "targetRevision": {
+            "type": "string"
+           }
+          }
+         },
+         "hydrateTo": {
+          "type": "object",
+          "required": [
+           "targetBranch"
+          ],
+          "properties": {
+           "targetBranch": {
+            "type": "string"
+           }
+          }
+         },
+         "syncSource": {
+          "type": "object",
+          "required": [
+           "path",
+           "targetBranch"
+          ],
+          "properties": {
+           "path": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^.{2,}|[^./]$"
+           },
+           "targetBranch": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       },
+       "sources": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "repoURL"
+         ],
+         "properties": {
+          "chart": {
+           "type": "string"
+          },
+          "directory": {
+           "type": "object",
+           "properties": {
+            "exclude": {
+             "type": "string"
+            },
+            "include": {
+             "type": "string"
+            },
+            "jsonnet": {
+             "type": "object",
+             "properties": {
+              "extVars": {
+               "type": "array",
+               "items": {
+                "type": "object",
+                "required": [
+                 "name",
+                 "value"
+                ],
+                "properties": {
+                 "code": {
+                  "type": "boolean"
+                 },
+                 "name": {
+                  "type": "string"
+                 },
+                 "value": {
+                  "type": "string"
+                 }
+                }
+               }
+              },
+              "libs": {
+               "type": "array",
+               "items": {
+                "type": "string"
+               }
+              },
+              "tlas": {
+               "type": "array",
+               "items": {
+                "type": "object",
+                "required": [
+                 "name",
+                 "value"
+                ],
+                "properties": {
+                 "code": {
+                  "type": "boolean"
+                 },
+                 "name": {
+                  "type": "string"
+                 },
+                 "value": {
+                  "type": "string"
+                 }
+                }
+               }
+              }
+             }
+            },
+            "recurse": {
+             "type": "boolean"
+            }
+           }
+          },
+          "helm": {
+           "type": "object",
+           "properties": {
+            "apiVersions": {
+             "type": "array",
+             "items": {
+              "type": "string"
+             }
+            },
+            "fileParameters": {
+             "type": "array",
+             "items": {
+              "type": "object",
+              "properties": {
+               "name": {
+                "type": "string"
+               },
+               "path": {
+                "type": "string"
+               }
+              }
+             }
+            },
+            "ignoreMissingValueFiles": {
+             "type": "boolean"
+            },
+            "kubeVersion": {
+             "type": "string"
+            },
+            "namespace": {
+             "type": "string"
+            },
+            "parameters": {
+             "type": "array",
+             "items": {
+              "type": "object",
+              "properties": {
+               "forceString": {
+                "type": "boolean"
+               },
+               "name": {
+                "type": "string"
+               },
+               "value": {
+                "type": "string"
+               }
+              }
+             }
+            },
+            "passCredentials": {
+             "type": "boolean"
+            },
+            "releaseName": {
+             "type": "string"
+            },
+            "skipCrds": {
+             "type": "boolean"
+            },
+            "skipSchemaValidation": {
+             "type": "boolean"
+            },
+            "skipTests": {
+             "type": "boolean"
+            },
+            "valueFiles": {
+             "type": "array",
+             "items": {
+              "type": "string"
+             }
+            },
+            "values": {
+             "type": "string"
+            },
+            "valuesObject": {
+             "type": "object",
+             "x-kubernetes-preserve-unknown-fields": true
+            },
+            "version": {
+             "type": "string"
+            }
+           }
+          },
+          "kustomize": {
+           "type": "object",
+           "properties": {
+            "apiVersions": {
+             "type": "array",
+             "items": {
+              "type": "string"
+             }
+            },
+            "commonAnnotations": {
+             "type": "object",
+             "additionalProperties": {
+              "type": "string"
+             }
+            },
+            "commonAnnotationsEnvsubst": {
+             "type": "boolean"
+            },
+            "commonLabels": {
+             "type": "object",
+             "additionalProperties": {
+              "type": "string"
+             }
+            },
+            "components": {
+             "type": "array",
+             "items": {
+              "type": "string"
+             }
+            },
+            "forceCommonAnnotations": {
+             "type": "boolean"
+            },
+            "forceCommonLabels": {
+             "type": "boolean"
+            },
+            "ignoreMissingComponents": {
+             "type": "boolean"
+            },
+            "images": {
+             "type": "array",
+             "items": {
+              "type": "string"
+             }
+            },
+            "kubeVersion": {
+             "type": "string"
+            },
+            "labelIncludeTemplates": {
+             "type": "boolean"
+            },
+            "labelWithoutSelector": {
+             "type": "boolean"
+            },
+            "namePrefix": {
+             "type": "string"
+            },
+            "nameSuffix": {
+             "type": "string"
+            },
+            "namespace": {
+             "type": "string"
+            },
+            "patches": {
+             "type": "array",
+             "items": {
+              "type": "object",
+              "properties": {
+               "options": {
+                "type": "object",
+                "additionalProperties": {
+                 "type": "boolean"
+                }
+               },
+               "patch": {
+                "type": "string"
+               },
+               "path": {
+                "type": "string"
+               },
+               "target": {
+                "type": "object",
+                "properties": {
+                 "annotationSelector": {
+                  "type": "string"
+                 },
+                 "group": {
+                  "type": "string"
+                 },
+                 "kind": {
+                  "type": "string"
+                 },
+                 "labelSelector": {
+                  "type": "string"
+                 },
+                 "name": {
+                  "type": "string"
+                 },
+                 "namespace": {
+                  "type": "string"
+                 },
+                 "version": {
+                  "type": "string"
+                 }
+                }
+               }
+              }
+             }
+            },
+            "replicas": {
+             "type": "array",
+             "items": {
+              "type": "object",
+              "required": [
+               "count",
+               "name"
+              ],
+              "properties": {
+               "count": {
+                "anyOf": [
+                 {
+                  "type": "integer"
+                 },
+                 {
+                  "type": "string"
+                 }
+                ],
+                "x-kubernetes-int-or-string": true
+               },
+               "name": {
+                "type": "string"
+               }
+              }
+             }
+            },
+            "version": {
+             "type": "string"
+            }
+           }
+          },
+          "name": {
+           "type": "string"
+          },
+          "path": {
+           "type": "string"
+          },
+          "plugin": {
+           "type": "object",
+           "properties": {
+            "env": {
+             "type": "array",
+             "items": {
+              "type": "object",
+              "required": [
+               "name",
+               "value"
+              ],
+              "properties": {
+               "name": {
+                "type": "string"
+               },
+               "value": {
+                "type": "string"
+               }
+              }
+             }
+            },
+            "name": {
+             "type": "string"
+            },
+            "parameters": {
+             "type": "array",
+             "items": {
+              "type": "object",
+              "properties": {
+               "array": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "map": {
+                "type": "object",
+                "additionalProperties": {
+                 "type": "string"
+                }
+               },
+               "name": {
+                "type": "string"
+               },
+               "string": {
+                "type": "string"
+               }
+              }
+             }
+            }
+           }
+          },
+          "ref": {
+           "type": "string"
+          },
+          "repoURL": {
+           "type": "string"
+          },
+          "targetRevision": {
+           "type": "string"
+          }
+         }
+        }
+       },
+       "syncPolicy": {
+        "type": "object",
+        "properties": {
+         "automated": {
+          "type": "object",
+          "properties": {
+           "allowEmpty": {
+            "type": "boolean"
+           },
+           "enabled": {
+            "type": "boolean"
+           },
+           "prune": {
+            "type": "boolean"
+           },
+           "selfHeal": {
+            "type": "boolean"
+           }
+          }
+         },
+         "managedNamespaceMetadata": {
+          "type": "object",
+          "properties": {
+           "annotations": {
+            "type": "object",
+            "additionalProperties": {
+             "type": "string"
+            }
+           },
+           "labels": {
+            "type": "object",
+            "additionalProperties": {
+             "type": "string"
+            }
+           }
+          }
+         },
+         "retry": {
+          "type": "object",
+          "properties": {
+           "backoff": {
+            "type": "object",
+            "properties": {
+             "duration": {
+              "type": "string"
+             },
+             "factor": {
+              "type": "integer",
+              "format": "int64"
+             },
+             "maxDuration": {
+              "type": "string"
+             }
+            }
+           },
+           "limit": {
+            "type": "integer",
+            "format": "int64"
+           },
+           "refresh": {
+            "type": "boolean"
+           }
+          }
+         },
+         "syncOptions": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      }
+     },
+     "status": {
+      "type": "object",
+      "properties": {
+       "conditions": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "message",
+          "type"
+         ],
+         "properties": {
+          "lastTransitionTime": {
+           "type": "string",
+           "format": "date-time"
+          },
+          "message": {
+           "type": "string"
+          },
+          "type": {
+           "type": "string"
+          }
+         }
+        }
+       },
+       "controllerNamespace": {
+        "type": "string"
+       },
+       "health": {
+        "type": "object",
+        "properties": {
+         "lastTransitionTime": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "message": {
+          "type": "string"
+         },
+         "status": {
+          "type": "string"
+         }
+        }
+       },
+       "history": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "deployedAt",
+          "id"
+         ],
+         "properties": {
+          "deployStartedAt": {
+           "type": "string",
+           "format": "date-time"
+          },
+          "deployedAt": {
+           "type": "string",
+           "format": "date-time"
+          },
+          "id": {
+           "type": "integer",
+           "format": "int64"
+          },
+          "initiatedBy": {
+           "type": "object",
+           "properties": {
+            "automated": {
+             "type": "boolean"
+            },
+            "username": {
+             "type": "string"
+            }
+           }
+          },
+          "revision": {
+           "type": "string"
+          },
+          "revisions": {
+           "type": "array",
+           "items": {
+            "type": "string"
+           }
+          },
+          "source": {
+           "type": "object",
+           "required": [
+            "repoURL"
+           ],
+           "properties": {
+            "chart": {
+             "type": "string"
+            },
+            "directory": {
+             "type": "object",
+             "properties": {
+              "exclude": {
+               "type": "string"
+              },
+              "include": {
+               "type": "string"
+              },
+              "jsonnet": {
+               "type": "object",
+               "properties": {
+                "extVars": {
+                 "type": "array",
+                 "items": {
+                  "type": "object",
+                  "required": [
+                   "name",
+                   "value"
+                  ],
+                  "properties": {
+                   "code": {
+                    "type": "boolean"
+                   },
+                   "name": {
+                    "type": "string"
+                   },
+                   "value": {
+                    "type": "string"
+                   }
+                  }
+                 }
+                },
+                "libs": {
+                 "type": "array",
+                 "items": {
+                  "type": "string"
+                 }
+                },
+                "tlas": {
+                 "type": "array",
+                 "items": {
+                  "type": "object",
+                  "required": [
+                   "name",
+                   "value"
+                  ],
+                  "properties": {
+                   "code": {
+                    "type": "boolean"
+                   },
+                   "name": {
+                    "type": "string"
+                   },
+                   "value": {
+                    "type": "string"
+                   }
+                  }
+                 }
+                }
+               }
+              },
+              "recurse": {
+               "type": "boolean"
+              }
+             }
+            },
+            "helm": {
+             "type": "object",
+             "properties": {
+              "apiVersions": {
+               "type": "array",
+               "items": {
+                "type": "string"
+               }
+              },
+              "fileParameters": {
+               "type": "array",
+               "items": {
+                "type": "object",
+                "properties": {
+                 "name": {
+                  "type": "string"
+                 },
+                 "path": {
+                  "type": "string"
+                 }
+                }
+               }
+              },
+              "ignoreMissingValueFiles": {
+               "type": "boolean"
+              },
+              "kubeVersion": {
+               "type": "string"
+              },
+              "namespace": {
+               "type": "string"
+              },
+              "parameters": {
+               "type": "array",
+               "items": {
+                "type": "object",
+                "properties": {
+                 "forceString": {
+                  "type": "boolean"
+                 },
+                 "name": {
+                  "type": "string"
+                 },
+                 "value": {
+                  "type": "string"
+                 }
+                }
+               }
+              },
+              "passCredentials": {
+               "type": "boolean"
+              },
+              "releaseName": {
+               "type": "string"
+              },
+              "skipCrds": {
+               "type": "boolean"
+              },
+              "skipSchemaValidation": {
+               "type": "boolean"
+              },
+              "skipTests": {
+               "type": "boolean"
+              },
+              "valueFiles": {
+               "type": "array",
+               "items": {
+                "type": "string"
+               }
+              },
+              "values": {
+               "type": "string"
+              },
+              "valuesObject": {
+               "type": "object",
+               "x-kubernetes-preserve-unknown-fields": true
+              },
+              "version": {
+               "type": "string"
+              }
+             }
+            },
+            "kustomize": {
+             "type": "object",
+             "properties": {
+              "apiVersions": {
+               "type": "array",
+               "items": {
+                "type": "string"
+               }
+              },
+              "commonAnnotations": {
+               "type": "object",
+               "additionalProperties": {
+                "type": "string"
+               }
+              },
+              "commonAnnotationsEnvsubst": {
+               "type": "boolean"
+              },
+              "commonLabels": {
+               "type": "object",
+               "additionalProperties": {
+                "type": "string"
+               }
+              },
+              "components": {
+               "type": "array",
+               "items": {
+                "type": "string"
+               }
+              },
+              "forceCommonAnnotations": {
+               "type": "boolean"
+              },
+              "forceCommonLabels": {
+               "type": "boolean"
+              },
+              "ignoreMissingComponents": {
+               "type": "boolean"
+              },
+              "images": {
+               "type": "array",
+               "items": {
+                "type": "string"
+               }
+              },
+              "kubeVersion": {
+               "type": "string"
+              },
+              "labelIncludeTemplates": {
+               "type": "boolean"
+              },
+              "labelWithoutSelector": {
+               "type": "boolean"
+              },
+              "namePrefix": {
+               "type": "string"
+              },
+              "nameSuffix": {
+               "type": "string"
+              },
+              "namespace": {
+               "type": "string"
+              },
+              "patches": {
+               "type": "array",
+               "items": {
+                "type": "object",
+                "properties": {
+                 "options": {
+                  "type": "object",
+                  "additionalProperties": {
+                   "type": "boolean"
+                  }
+                 },
+                 "patch": {
+                  "type": "string"
+                 },
+                 "path": {
+                  "type": "string"
+                 },
+                 "target": {
+                  "type": "object",
+                  "properties": {
+                   "annotationSelector": {
+                    "type": "string"
+                   },
+                   "group": {
+                    "type": "string"
+                   },
+                   "kind": {
+                    "type": "string"
+                   },
+                   "labelSelector": {
+                    "type": "string"
+                   },
+                   "name": {
+                    "type": "string"
+                   },
+                   "namespace": {
+                    "type": "string"
+                   },
+                   "version": {
+                    "type": "string"
+                   }
+                  }
+                 }
+                }
+               }
+              },
+              "replicas": {
+               "type": "array",
+               "items": {
+                "type": "object",
+                "required": [
+                 "count",
+                 "name"
+                ],
+                "properties": {
+                 "count": {
+                  "anyOf": [
+                   {
+                    "type": "integer"
+                   },
+                   {
+                    "type": "string"
+                   }
+                  ],
+                  "x-kubernetes-int-or-string": true
+                 },
+                 "name": {
+                  "type": "string"
+                 }
+                }
+               }
+              },
+              "version": {
+               "type": "string"
+              }
+             }
+            },
+            "name": {
+             "type": "string"
+            },
+            "path": {
+             "type": "string"
+            },
+            "plugin": {
+             "type": "object",
+             "properties": {
+              "env": {
+               "type": "array",
+               "items": {
+                "type": "object",
+                "required": [
+                 "name",
+                 "value"
+                ],
+                "properties": {
+                 "name": {
+                  "type": "string"
+                 },
+                 "value": {
+                  "type": "string"
+                 }
+                }
+               }
+              },
+              "name": {
+               "type": "string"
+              },
+              "parameters": {
+               "type": "array",
+               "items": {
+                "type": "object",
+                "properties": {
+                 "array": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "map": {
+                  "type": "object",
+                  "additionalProperties": {
+                   "type": "string"
+                  }
+                 },
+                 "name": {
+                  "type": "string"
+                 },
+                 "string": {
+                  "type": "string"
+                 }
+                }
+               }
+              }
+             }
+            },
+            "ref": {
+             "type": "string"
+            },
+            "repoURL": {
+             "type": "string"
+            },
+            "targetRevision": {
+             "type": "string"
+            }
+           }
+          },
+          "sources": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "required": [
+             "repoURL"
+            ],
+            "properties": {
+             "chart": {
+              "type": "string"
+             },
+             "directory": {
+              "type": "object",
+              "properties": {
+               "exclude": {
+                "type": "string"
+               },
+               "include": {
+                "type": "string"
+               },
+               "jsonnet": {
+                "type": "object",
+                "properties": {
+                 "extVars": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "required": [
+                    "name",
+                    "value"
+                   ],
+                   "properties": {
+                    "code": {
+                     "type": "boolean"
+                    },
+                    "name": {
+                     "type": "string"
+                    },
+                    "value": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 },
+                 "libs": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "tlas": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "required": [
+                    "name",
+                    "value"
+                   ],
+                   "properties": {
+                    "code": {
+                     "type": "boolean"
+                    },
+                    "name": {
+                     "type": "string"
+                    },
+                    "value": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 }
+                }
+               },
+               "recurse": {
+                "type": "boolean"
+               }
+              }
+             },
+             "helm": {
+              "type": "object",
+              "properties": {
+               "apiVersions": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "fileParameters": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "properties": {
+                  "name": {
+                   "type": "string"
+                  },
+                  "path": {
+                   "type": "string"
+                  }
+                 }
+                }
+               },
+               "ignoreMissingValueFiles": {
+                "type": "boolean"
+               },
+               "kubeVersion": {
+                "type": "string"
+               },
+               "namespace": {
+                "type": "string"
+               },
+               "parameters": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "properties": {
+                  "forceString": {
+                   "type": "boolean"
+                  },
+                  "name": {
+                   "type": "string"
+                  },
+                  "value": {
+                   "type": "string"
+                  }
+                 }
+                }
+               },
+               "passCredentials": {
+                "type": "boolean"
+               },
+               "releaseName": {
+                "type": "string"
+               },
+               "skipCrds": {
+                "type": "boolean"
+               },
+               "skipSchemaValidation": {
+                "type": "boolean"
+               },
+               "skipTests": {
+                "type": "boolean"
+               },
+               "valueFiles": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "values": {
+                "type": "string"
+               },
+               "valuesObject": {
+                "type": "object",
+                "x-kubernetes-preserve-unknown-fields": true
+               },
+               "version": {
+                "type": "string"
+               }
+              }
+             },
+             "kustomize": {
+              "type": "object",
+              "properties": {
+               "apiVersions": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "commonAnnotations": {
+                "type": "object",
+                "additionalProperties": {
+                 "type": "string"
+                }
+               },
+               "commonAnnotationsEnvsubst": {
+                "type": "boolean"
+               },
+               "commonLabels": {
+                "type": "object",
+                "additionalProperties": {
+                 "type": "string"
+                }
+               },
+               "components": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "forceCommonAnnotations": {
+                "type": "boolean"
+               },
+               "forceCommonLabels": {
+                "type": "boolean"
+               },
+               "ignoreMissingComponents": {
+                "type": "boolean"
+               },
+               "images": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "kubeVersion": {
+                "type": "string"
+               },
+               "labelIncludeTemplates": {
+                "type": "boolean"
+               },
+               "labelWithoutSelector": {
+                "type": "boolean"
+               },
+               "namePrefix": {
+                "type": "string"
+               },
+               "nameSuffix": {
+                "type": "string"
+               },
+               "namespace": {
+                "type": "string"
+               },
+               "patches": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "properties": {
+                  "options": {
+                   "type": "object",
+                   "additionalProperties": {
+                    "type": "boolean"
+                   }
+                  },
+                  "patch": {
+                   "type": "string"
+                  },
+                  "path": {
+                   "type": "string"
+                  },
+                  "target": {
+                   "type": "object",
+                   "properties": {
+                    "annotationSelector": {
+                     "type": "string"
+                    },
+                    "group": {
+                     "type": "string"
+                    },
+                    "kind": {
+                     "type": "string"
+                    },
+                    "labelSelector": {
+                     "type": "string"
+                    },
+                    "name": {
+                     "type": "string"
+                    },
+                    "namespace": {
+                     "type": "string"
+                    },
+                    "version": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 }
+                }
+               },
+               "replicas": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "required": [
+                  "count",
+                  "name"
+                 ],
+                 "properties": {
+                  "count": {
+                   "anyOf": [
+                    {
+                     "type": "integer"
+                    },
+                    {
+                     "type": "string"
+                    }
+                   ],
+                   "x-kubernetes-int-or-string": true
+                  },
+                  "name": {
+                   "type": "string"
+                  }
+                 }
+                }
+               },
+               "version": {
+                "type": "string"
+               }
+              }
+             },
+             "name": {
+              "type": "string"
+             },
+             "path": {
+              "type": "string"
+             },
+             "plugin": {
+              "type": "object",
+              "properties": {
+               "env": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "required": [
+                  "name",
+                  "value"
+                 ],
+                 "properties": {
+                  "name": {
+                   "type": "string"
+                  },
+                  "value": {
+                   "type": "string"
+                  }
+                 }
+                }
+               },
+               "name": {
+                "type": "string"
+               },
+               "parameters": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "properties": {
+                  "array": {
+                   "type": "array",
+                   "items": {
+                    "type": "string"
+                   }
+                  },
+                  "map": {
+                   "type": "object",
+                   "additionalProperties": {
+                    "type": "string"
+                   }
+                  },
+                  "name": {
+                   "type": "string"
+                  },
+                  "string": {
+                   "type": "string"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             "ref": {
+              "type": "string"
+             },
+             "repoURL": {
+              "type": "string"
+             },
+             "targetRevision": {
+              "type": "string"
+             }
+            }
+           }
+          }
+         }
+        }
+       },
+       "observedAt": {
+        "type": "string",
+        "format": "date-time"
+       },
+       "operationState": {
+        "type": "object",
+        "required": [
+         "operation",
+         "phase",
+         "startedAt"
+        ],
+        "properties": {
+         "finishedAt": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "message": {
+          "type": "string"
+         },
+         "operation": {
+          "type": "object",
+          "properties": {
+           "info": {
+            "type": "array",
+            "items": {
+             "type": "object",
+             "required": [
+              "name",
+              "value"
+             ],
+             "properties": {
+              "name": {
+               "type": "string"
+              },
+              "value": {
+               "type": "string"
+              }
+             }
+            }
+           },
+           "initiatedBy": {
+            "type": "object",
+            "properties": {
+             "automated": {
+              "type": "boolean"
+             },
+             "username": {
+              "type": "string"
+             }
+            }
+           },
+           "retry": {
+            "type": "object",
+            "properties": {
+             "backoff": {
+              "type": "object",
+              "properties": {
+               "duration": {
+                "type": "string"
+               },
+               "factor": {
+                "type": "integer",
+                "format": "int64"
+               },
+               "maxDuration": {
+                "type": "string"
+               }
+              }
+             },
+             "limit": {
+              "type": "integer",
+              "format": "int64"
+             },
+             "refresh": {
+              "type": "boolean"
+             }
+            }
+           },
+           "sync": {
+            "type": "object",
+            "properties": {
+             "autoHealAttemptsCount": {
+              "type": "integer",
+              "format": "int64"
+             },
+             "dryRun": {
+              "type": "boolean"
+             },
+             "manifests": {
+              "type": "array",
+              "items": {
+               "type": "string"
+              }
+             },
+             "prune": {
+              "type": "boolean"
+             },
+             "resources": {
+              "type": "array",
+              "items": {
+               "type": "object",
+               "required": [
+                "kind",
+                "name"
+               ],
+               "properties": {
+                "group": {
+                 "type": "string"
+                },
+                "kind": {
+                 "type": "string"
+                },
+                "name": {
+                 "type": "string"
+                },
+                "namespace": {
+                 "type": "string"
+                }
+               }
+              }
+             },
+             "revision": {
+              "type": "string"
+             },
+             "revisions": {
+              "type": "array",
+              "items": {
+               "type": "string"
+              }
+             },
+             "source": {
+              "type": "object",
+              "required": [
+               "repoURL"
+              ],
+              "properties": {
+               "chart": {
+                "type": "string"
+               },
+               "directory": {
+                "type": "object",
+                "properties": {
+                 "exclude": {
+                  "type": "string"
+                 },
+                 "include": {
+                  "type": "string"
+                 },
+                 "jsonnet": {
+                  "type": "object",
+                  "properties": {
+                   "extVars": {
+                    "type": "array",
+                    "items": {
+                     "type": "object",
+                     "required": [
+                      "name",
+                      "value"
+                     ],
+                     "properties": {
+                      "code": {
+                       "type": "boolean"
+                      },
+                      "name": {
+                       "type": "string"
+                      },
+                      "value": {
+                       "type": "string"
+                      }
+                     }
+                    }
+                   },
+                   "libs": {
+                    "type": "array",
+                    "items": {
+                     "type": "string"
+                    }
+                   },
+                   "tlas": {
+                    "type": "array",
+                    "items": {
+                     "type": "object",
+                     "required": [
+                      "name",
+                      "value"
+                     ],
+                     "properties": {
+                      "code": {
+                       "type": "boolean"
+                      },
+                      "name": {
+                       "type": "string"
+                      },
+                      "value": {
+                       "type": "string"
+                      }
+                     }
+                    }
+                   }
+                  }
+                 },
+                 "recurse": {
+                  "type": "boolean"
+                 }
+                }
+               },
+               "helm": {
+                "type": "object",
+                "properties": {
+                 "apiVersions": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "fileParameters": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "properties": {
+                    "name": {
+                     "type": "string"
+                    },
+                    "path": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 },
+                 "ignoreMissingValueFiles": {
+                  "type": "boolean"
+                 },
+                 "kubeVersion": {
+                  "type": "string"
+                 },
+                 "namespace": {
+                  "type": "string"
+                 },
+                 "parameters": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "properties": {
+                    "forceString": {
+                     "type": "boolean"
+                    },
+                    "name": {
+                     "type": "string"
+                    },
+                    "value": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 },
+                 "passCredentials": {
+                  "type": "boolean"
+                 },
+                 "releaseName": {
+                  "type": "string"
+                 },
+                 "skipCrds": {
+                  "type": "boolean"
+                 },
+                 "skipSchemaValidation": {
+                  "type": "boolean"
+                 },
+                 "skipTests": {
+                  "type": "boolean"
+                 },
+                 "valueFiles": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "values": {
+                  "type": "string"
+                 },
+                 "valuesObject": {
+                  "type": "object",
+                  "x-kubernetes-preserve-unknown-fields": true
+                 },
+                 "version": {
+                  "type": "string"
+                 }
+                }
+               },
+               "kustomize": {
+                "type": "object",
+                "properties": {
+                 "apiVersions": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "commonAnnotations": {
+                  "type": "object",
+                  "additionalProperties": {
+                   "type": "string"
+                  }
+                 },
+                 "commonAnnotationsEnvsubst": {
+                  "type": "boolean"
+                 },
+                 "commonLabels": {
+                  "type": "object",
+                  "additionalProperties": {
+                   "type": "string"
+                  }
+                 },
+                 "components": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "forceCommonAnnotations": {
+                  "type": "boolean"
+                 },
+                 "forceCommonLabels": {
+                  "type": "boolean"
+                 },
+                 "ignoreMissingComponents": {
+                  "type": "boolean"
+                 },
+                 "images": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "kubeVersion": {
+                  "type": "string"
+                 },
+                 "labelIncludeTemplates": {
+                  "type": "boolean"
+                 },
+                 "labelWithoutSelector": {
+                  "type": "boolean"
+                 },
+                 "namePrefix": {
+                  "type": "string"
+                 },
+                 "nameSuffix": {
+                  "type": "string"
+                 },
+                 "namespace": {
+                  "type": "string"
+                 },
+                 "patches": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "properties": {
+                    "options": {
+                     "type": "object",
+                     "additionalProperties": {
+                      "type": "boolean"
+                     }
+                    },
+                    "patch": {
+                     "type": "string"
+                    },
+                    "path": {
+                     "type": "string"
+                    },
+                    "target": {
+                     "type": "object",
+                     "properties": {
+                      "annotationSelector": {
+                       "type": "string"
+                      },
+                      "group": {
+                       "type": "string"
+                      },
+                      "kind": {
+                       "type": "string"
+                      },
+                      "labelSelector": {
+                       "type": "string"
+                      },
+                      "name": {
+                       "type": "string"
+                      },
+                      "namespace": {
+                       "type": "string"
+                      },
+                      "version": {
+                       "type": "string"
+                      }
+                     }
+                    }
+                   }
+                  }
+                 },
+                 "replicas": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "required": [
+                    "count",
+                    "name"
+                   ],
+                   "properties": {
+                    "count": {
+                     "anyOf": [
+                      {
+                       "type": "integer"
+                      },
+                      {
+                       "type": "string"
+                      }
+                     ],
+                     "x-kubernetes-int-or-string": true
+                    },
+                    "name": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 },
+                 "version": {
+                  "type": "string"
+                 }
+                }
+               },
+               "name": {
+                "type": "string"
+               },
+               "path": {
+                "type": "string"
+               },
+               "plugin": {
+                "type": "object",
+                "properties": {
+                 "env": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "required": [
+                    "name",
+                    "value"
+                   ],
+                   "properties": {
+                    "name": {
+                     "type": "string"
+                    },
+                    "value": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 },
+                 "name": {
+                  "type": "string"
+                 },
+                 "parameters": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "properties": {
+                    "array": {
+                     "type": "array",
+                     "items": {
+                      "type": "string"
+                     }
+                    },
+                    "map": {
+                     "type": "object",
+                     "additionalProperties": {
+                      "type": "string"
+                     }
+                    },
+                    "name": {
+                     "type": "string"
+                    },
+                    "string": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 }
+                }
+               },
+               "ref": {
+                "type": "string"
+               },
+               "repoURL": {
+                "type": "string"
+               },
+               "targetRevision": {
+                "type": "string"
+               }
+              }
+             },
+             "sources": {
+              "type": "array",
+              "items": {
+               "type": "object",
+               "required": [
+                "repoURL"
+               ],
+               "properties": {
+                "chart": {
+                 "type": "string"
+                },
+                "directory": {
+                 "type": "object",
+                 "properties": {
+                  "exclude": {
+                   "type": "string"
+                  },
+                  "include": {
+                   "type": "string"
+                  },
+                  "jsonnet": {
+                   "type": "object",
+                   "properties": {
+                    "extVars": {
+                     "type": "array",
+                     "items": {
+                      "type": "object",
+                      "required": [
+                       "name",
+                       "value"
+                      ],
+                      "properties": {
+                       "code": {
+                        "type": "boolean"
+                       },
+                       "name": {
+                        "type": "string"
+                       },
+                       "value": {
+                        "type": "string"
+                       }
+                      }
+                     }
+                    },
+                    "libs": {
+                     "type": "array",
+                     "items": {
+                      "type": "string"
+                     }
+                    },
+                    "tlas": {
+                     "type": "array",
+                     "items": {
+                      "type": "object",
+                      "required": [
+                       "name",
+                       "value"
+                      ],
+                      "properties": {
+                       "code": {
+                        "type": "boolean"
+                       },
+                       "name": {
+                        "type": "string"
+                       },
+                       "value": {
+                        "type": "string"
+                       }
+                      }
+                     }
+                    }
+                   }
+                  },
+                  "recurse": {
+                   "type": "boolean"
+                  }
+                 }
+                },
+                "helm": {
+                 "type": "object",
+                 "properties": {
+                  "apiVersions": {
+                   "type": "array",
+                   "items": {
+                    "type": "string"
+                   }
+                  },
+                  "fileParameters": {
+                   "type": "array",
+                   "items": {
+                    "type": "object",
+                    "properties": {
+                     "name": {
+                      "type": "string"
+                     },
+                     "path": {
+                      "type": "string"
+                     }
+                    }
+                   }
+                  },
+                  "ignoreMissingValueFiles": {
+                   "type": "boolean"
+                  },
+                  "kubeVersion": {
+                   "type": "string"
+                  },
+                  "namespace": {
+                   "type": "string"
+                  },
+                  "parameters": {
+                   "type": "array",
+                   "items": {
+                    "type": "object",
+                    "properties": {
+                     "forceString": {
+                      "type": "boolean"
+                     },
+                     "name": {
+                      "type": "string"
+                     },
+                     "value": {
+                      "type": "string"
+                     }
+                    }
+                   }
+                  },
+                  "passCredentials": {
+                   "type": "boolean"
+                  },
+                  "releaseName": {
+                   "type": "string"
+                  },
+                  "skipCrds": {
+                   "type": "boolean"
+                  },
+                  "skipSchemaValidation": {
+                   "type": "boolean"
+                  },
+                  "skipTests": {
+                   "type": "boolean"
+                  },
+                  "valueFiles": {
+                   "type": "array",
+                   "items": {
+                    "type": "string"
+                   }
+                  },
+                  "values": {
+                   "type": "string"
+                  },
+                  "valuesObject": {
+                   "type": "object",
+                   "x-kubernetes-preserve-unknown-fields": true
+                  },
+                  "version": {
+                   "type": "string"
+                  }
+                 }
+                },
+                "kustomize": {
+                 "type": "object",
+                 "properties": {
+                  "apiVersions": {
+                   "type": "array",
+                   "items": {
+                    "type": "string"
+                   }
+                  },
+                  "commonAnnotations": {
+                   "type": "object",
+                   "additionalProperties": {
+                    "type": "string"
+                   }
+                  },
+                  "commonAnnotationsEnvsubst": {
+                   "type": "boolean"
+                  },
+                  "commonLabels": {
+                   "type": "object",
+                   "additionalProperties": {
+                    "type": "string"
+                   }
+                  },
+                  "components": {
+                   "type": "array",
+                   "items": {
+                    "type": "string"
+                   }
+                  },
+                  "forceCommonAnnotations": {
+                   "type": "boolean"
+                  },
+                  "forceCommonLabels": {
+                   "type": "boolean"
+                  },
+                  "ignoreMissingComponents": {
+                   "type": "boolean"
+                  },
+                  "images": {
+                   "type": "array",
+                   "items": {
+                    "type": "string"
+                   }
+                  },
+                  "kubeVersion": {
+                   "type": "string"
+                  },
+                  "labelIncludeTemplates": {
+                   "type": "boolean"
+                  },
+                  "labelWithoutSelector": {
+                   "type": "boolean"
+                  },
+                  "namePrefix": {
+                   "type": "string"
+                  },
+                  "nameSuffix": {
+                   "type": "string"
+                  },
+                  "namespace": {
+                   "type": "string"
+                  },
+                  "patches": {
+                   "type": "array",
+                   "items": {
+                    "type": "object",
+                    "properties": {
+                     "options": {
+                      "type": "object",
+                      "additionalProperties": {
+                       "type": "boolean"
+                      }
+                     },
+                     "patch": {
+                      "type": "string"
+                     },
+                     "path": {
+                      "type": "string"
+                     },
+                     "target": {
+                      "type": "object",
+                      "properties": {
+                       "annotationSelector": {
+                        "type": "string"
+                       },
+                       "group": {
+                        "type": "string"
+                       },
+                       "kind": {
+                        "type": "string"
+                       },
+                       "labelSelector": {
+                        "type": "string"
+                       },
+                       "name": {
+                        "type": "string"
+                       },
+                       "namespace": {
+                        "type": "string"
+                       },
+                       "version": {
+                        "type": "string"
+                       }
+                      }
+                     }
+                    }
+                   }
+                  },
+                  "replicas": {
+                   "type": "array",
+                   "items": {
+                    "type": "object",
+                    "required": [
+                     "count",
+                     "name"
+                    ],
+                    "properties": {
+                     "count": {
+                      "anyOf": [
+                       {
+                        "type": "integer"
+                       },
+                       {
+                        "type": "string"
+                       }
+                      ],
+                      "x-kubernetes-int-or-string": true
+                     },
+                     "name": {
+                      "type": "string"
+                     }
+                    }
+                   }
+                  },
+                  "version": {
+                   "type": "string"
+                  }
+                 }
+                },
+                "name": {
+                 "type": "string"
+                },
+                "path": {
+                 "type": "string"
+                },
+                "plugin": {
+                 "type": "object",
+                 "properties": {
+                  "env": {
+                   "type": "array",
+                   "items": {
+                    "type": "object",
+                    "required": [
+                     "name",
+                     "value"
+                    ],
+                    "properties": {
+                     "name": {
+                      "type": "string"
+                     },
+                     "value": {
+                      "type": "string"
+                     }
+                    }
+                   }
+                  },
+                  "name": {
+                   "type": "string"
+                  },
+                  "parameters": {
+                   "type": "array",
+                   "items": {
+                    "type": "object",
+                    "properties": {
+                     "array": {
+                      "type": "array",
+                      "items": {
+                       "type": "string"
+                      }
+                     },
+                     "map": {
+                      "type": "object",
+                      "additionalProperties": {
+                       "type": "string"
+                      }
+                     },
+                     "name": {
+                      "type": "string"
+                     },
+                     "string": {
+                      "type": "string"
+                     }
+                    }
+                   }
+                  }
+                 }
+                },
+                "ref": {
+                 "type": "string"
+                },
+                "repoURL": {
+                 "type": "string"
+                },
+                "targetRevision": {
+                 "type": "string"
+                }
+               }
+              }
+             },
+             "syncOptions": {
+              "type": "array",
+              "items": {
+               "type": "string"
+              }
+             },
+             "syncStrategy": {
+              "type": "object",
+              "properties": {
+               "apply": {
+                "type": "object",
+                "properties": {
+                 "force": {
+                  "type": "boolean"
+                 }
+                }
+               },
+               "hook": {
+                "type": "object",
+                "properties": {
+                 "force": {
+                  "type": "boolean"
+                 }
+                }
+               }
+              }
+             }
+            }
+           }
+          }
+         },
+         "phase": {
+          "type": "string"
+         },
+         "retryCount": {
+          "type": "integer",
+          "format": "int64"
+         },
+         "startedAt": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "syncResult": {
+          "type": "object",
+          "required": [
+           "revision"
+          ],
+          "properties": {
+           "managedNamespaceMetadata": {
+            "type": "object",
+            "properties": {
+             "annotations": {
+              "type": "object",
+              "additionalProperties": {
+               "type": "string"
+              }
+             },
+             "labels": {
+              "type": "object",
+              "additionalProperties": {
+               "type": "string"
+              }
+             }
+            }
+           },
+           "resources": {
+            "type": "array",
+            "items": {
+             "type": "object",
+             "required": [
+              "group",
+              "kind",
+              "name",
+              "namespace",
+              "version"
+             ],
+             "properties": {
+              "group": {
+               "type": "string"
+              },
+              "hookPhase": {
+               "type": "string"
+              },
+              "hookType": {
+               "type": "string"
+              },
+              "images": {
+               "type": "array",
+               "items": {
+                "type": "string"
+               }
+              },
+              "kind": {
+               "type": "string"
+              },
+              "message": {
+               "type": "string"
+              },
+              "name": {
+               "type": "string"
+              },
+              "namespace": {
+               "type": "string"
+              },
+              "status": {
+               "type": "string"
+              },
+              "syncPhase": {
+               "type": "string"
+              },
+              "version": {
+               "type": "string"
+              }
+             }
+            }
+           },
+           "revision": {
+            "type": "string"
+           },
+           "revisions": {
+            "type": "array",
+            "items": {
+             "type": "string"
+            }
+           },
+           "source": {
+            "type": "object",
+            "required": [
+             "repoURL"
+            ],
+            "properties": {
+             "chart": {
+              "type": "string"
+             },
+             "directory": {
+              "type": "object",
+              "properties": {
+               "exclude": {
+                "type": "string"
+               },
+               "include": {
+                "type": "string"
+               },
+               "jsonnet": {
+                "type": "object",
+                "properties": {
+                 "extVars": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "required": [
+                    "name",
+                    "value"
+                   ],
+                   "properties": {
+                    "code": {
+                     "type": "boolean"
+                    },
+                    "name": {
+                     "type": "string"
+                    },
+                    "value": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 },
+                 "libs": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "tlas": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "required": [
+                    "name",
+                    "value"
+                   ],
+                   "properties": {
+                    "code": {
+                     "type": "boolean"
+                    },
+                    "name": {
+                     "type": "string"
+                    },
+                    "value": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 }
+                }
+               },
+               "recurse": {
+                "type": "boolean"
+               }
+              }
+             },
+             "helm": {
+              "type": "object",
+              "properties": {
+               "apiVersions": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "fileParameters": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "properties": {
+                  "name": {
+                   "type": "string"
+                  },
+                  "path": {
+                   "type": "string"
+                  }
+                 }
+                }
+               },
+               "ignoreMissingValueFiles": {
+                "type": "boolean"
+               },
+               "kubeVersion": {
+                "type": "string"
+               },
+               "namespace": {
+                "type": "string"
+               },
+               "parameters": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "properties": {
+                  "forceString": {
+                   "type": "boolean"
+                  },
+                  "name": {
+                   "type": "string"
+                  },
+                  "value": {
+                   "type": "string"
+                  }
+                 }
+                }
+               },
+               "passCredentials": {
+                "type": "boolean"
+               },
+               "releaseName": {
+                "type": "string"
+               },
+               "skipCrds": {
+                "type": "boolean"
+               },
+               "skipSchemaValidation": {
+                "type": "boolean"
+               },
+               "skipTests": {
+                "type": "boolean"
+               },
+               "valueFiles": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "values": {
+                "type": "string"
+               },
+               "valuesObject": {
+                "type": "object",
+                "x-kubernetes-preserve-unknown-fields": true
+               },
+               "version": {
+                "type": "string"
+               }
+              }
+             },
+             "kustomize": {
+              "type": "object",
+              "properties": {
+               "apiVersions": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "commonAnnotations": {
+                "type": "object",
+                "additionalProperties": {
+                 "type": "string"
+                }
+               },
+               "commonAnnotationsEnvsubst": {
+                "type": "boolean"
+               },
+               "commonLabels": {
+                "type": "object",
+                "additionalProperties": {
+                 "type": "string"
+                }
+               },
+               "components": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "forceCommonAnnotations": {
+                "type": "boolean"
+               },
+               "forceCommonLabels": {
+                "type": "boolean"
+               },
+               "ignoreMissingComponents": {
+                "type": "boolean"
+               },
+               "images": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "kubeVersion": {
+                "type": "string"
+               },
+               "labelIncludeTemplates": {
+                "type": "boolean"
+               },
+               "labelWithoutSelector": {
+                "type": "boolean"
+               },
+               "namePrefix": {
+                "type": "string"
+               },
+               "nameSuffix": {
+                "type": "string"
+               },
+               "namespace": {
+                "type": "string"
+               },
+               "patches": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "properties": {
+                  "options": {
+                   "type": "object",
+                   "additionalProperties": {
+                    "type": "boolean"
+                   }
+                  },
+                  "patch": {
+                   "type": "string"
+                  },
+                  "path": {
+                   "type": "string"
+                  },
+                  "target": {
+                   "type": "object",
+                   "properties": {
+                    "annotationSelector": {
+                     "type": "string"
+                    },
+                    "group": {
+                     "type": "string"
+                    },
+                    "kind": {
+                     "type": "string"
+                    },
+                    "labelSelector": {
+                     "type": "string"
+                    },
+                    "name": {
+                     "type": "string"
+                    },
+                    "namespace": {
+                     "type": "string"
+                    },
+                    "version": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 }
+                }
+               },
+               "replicas": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "required": [
+                  "count",
+                  "name"
+                 ],
+                 "properties": {
+                  "count": {
+                   "anyOf": [
+                    {
+                     "type": "integer"
+                    },
+                    {
+                     "type": "string"
+                    }
+                   ],
+                   "x-kubernetes-int-or-string": true
+                  },
+                  "name": {
+                   "type": "string"
+                  }
+                 }
+                }
+               },
+               "version": {
+                "type": "string"
+               }
+              }
+             },
+             "name": {
+              "type": "string"
+             },
+             "path": {
+              "type": "string"
+             },
+             "plugin": {
+              "type": "object",
+              "properties": {
+               "env": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "required": [
+                  "name",
+                  "value"
+                 ],
+                 "properties": {
+                  "name": {
+                   "type": "string"
+                  },
+                  "value": {
+                   "type": "string"
+                  }
+                 }
+                }
+               },
+               "name": {
+                "type": "string"
+               },
+               "parameters": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "properties": {
+                  "array": {
+                   "type": "array",
+                   "items": {
+                    "type": "string"
+                   }
+                  },
+                  "map": {
+                   "type": "object",
+                   "additionalProperties": {
+                    "type": "string"
+                   }
+                  },
+                  "name": {
+                   "type": "string"
+                  },
+                  "string": {
+                   "type": "string"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             "ref": {
+              "type": "string"
+             },
+             "repoURL": {
+              "type": "string"
+             },
+             "targetRevision": {
+              "type": "string"
+             }
+            }
+           },
+           "sources": {
+            "type": "array",
+            "items": {
+             "type": "object",
+             "required": [
+              "repoURL"
+             ],
+             "properties": {
+              "chart": {
+               "type": "string"
+              },
+              "directory": {
+               "type": "object",
+               "properties": {
+                "exclude": {
+                 "type": "string"
+                },
+                "include": {
+                 "type": "string"
+                },
+                "jsonnet": {
+                 "type": "object",
+                 "properties": {
+                  "extVars": {
+                   "type": "array",
+                   "items": {
+                    "type": "object",
+                    "required": [
+                     "name",
+                     "value"
+                    ],
+                    "properties": {
+                     "code": {
+                      "type": "boolean"
+                     },
+                     "name": {
+                      "type": "string"
+                     },
+                     "value": {
+                      "type": "string"
+                     }
+                    }
+                   }
+                  },
+                  "libs": {
+                   "type": "array",
+                   "items": {
+                    "type": "string"
+                   }
+                  },
+                  "tlas": {
+                   "type": "array",
+                   "items": {
+                    "type": "object",
+                    "required": [
+                     "name",
+                     "value"
+                    ],
+                    "properties": {
+                     "code": {
+                      "type": "boolean"
+                     },
+                     "name": {
+                      "type": "string"
+                     },
+                     "value": {
+                      "type": "string"
+                     }
+                    }
+                   }
+                  }
+                 }
+                },
+                "recurse": {
+                 "type": "boolean"
+                }
+               }
+              },
+              "helm": {
+               "type": "object",
+               "properties": {
+                "apiVersions": {
+                 "type": "array",
+                 "items": {
+                  "type": "string"
+                 }
+                },
+                "fileParameters": {
+                 "type": "array",
+                 "items": {
+                  "type": "object",
+                  "properties": {
+                   "name": {
+                    "type": "string"
+                   },
+                   "path": {
+                    "type": "string"
+                   }
+                  }
+                 }
+                },
+                "ignoreMissingValueFiles": {
+                 "type": "boolean"
+                },
+                "kubeVersion": {
+                 "type": "string"
+                },
+                "namespace": {
+                 "type": "string"
+                },
+                "parameters": {
+                 "type": "array",
+                 "items": {
+                  "type": "object",
+                  "properties": {
+                   "forceString": {
+                    "type": "boolean"
+                   },
+                   "name": {
+                    "type": "string"
+                   },
+                   "value": {
+                    "type": "string"
+                   }
+                  }
+                 }
+                },
+                "passCredentials": {
+                 "type": "boolean"
+                },
+                "releaseName": {
+                 "type": "string"
+                },
+                "skipCrds": {
+                 "type": "boolean"
+                },
+                "skipSchemaValidation": {
+                 "type": "boolean"
+                },
+                "skipTests": {
+                 "type": "boolean"
+                },
+                "valueFiles": {
+                 "type": "array",
+                 "items": {
+                  "type": "string"
+                 }
+                },
+                "values": {
+                 "type": "string"
+                },
+                "valuesObject": {
+                 "type": "object",
+                 "x-kubernetes-preserve-unknown-fields": true
+                },
+                "version": {
+                 "type": "string"
+                }
+               }
+              },
+              "kustomize": {
+               "type": "object",
+               "properties": {
+                "apiVersions": {
+                 "type": "array",
+                 "items": {
+                  "type": "string"
+                 }
+                },
+                "commonAnnotations": {
+                 "type": "object",
+                 "additionalProperties": {
+                  "type": "string"
+                 }
+                },
+                "commonAnnotationsEnvsubst": {
+                 "type": "boolean"
+                },
+                "commonLabels": {
+                 "type": "object",
+                 "additionalProperties": {
+                  "type": "string"
+                 }
+                },
+                "components": {
+                 "type": "array",
+                 "items": {
+                  "type": "string"
+                 }
+                },
+                "forceCommonAnnotations": {
+                 "type": "boolean"
+                },
+                "forceCommonLabels": {
+                 "type": "boolean"
+                },
+                "ignoreMissingComponents": {
+                 "type": "boolean"
+                },
+                "images": {
+                 "type": "array",
+                 "items": {
+                  "type": "string"
+                 }
+                },
+                "kubeVersion": {
+                 "type": "string"
+                },
+                "labelIncludeTemplates": {
+                 "type": "boolean"
+                },
+                "labelWithoutSelector": {
+                 "type": "boolean"
+                },
+                "namePrefix": {
+                 "type": "string"
+                },
+                "nameSuffix": {
+                 "type": "string"
+                },
+                "namespace": {
+                 "type": "string"
+                },
+                "patches": {
+                 "type": "array",
+                 "items": {
+                  "type": "object",
+                  "properties": {
+                   "options": {
+                    "type": "object",
+                    "additionalProperties": {
+                     "type": "boolean"
+                    }
+                   },
+                   "patch": {
+                    "type": "string"
+                   },
+                   "path": {
+                    "type": "string"
+                   },
+                   "target": {
+                    "type": "object",
+                    "properties": {
+                     "annotationSelector": {
+                      "type": "string"
+                     },
+                     "group": {
+                      "type": "string"
+                     },
+                     "kind": {
+                      "type": "string"
+                     },
+                     "labelSelector": {
+                      "type": "string"
+                     },
+                     "name": {
+                      "type": "string"
+                     },
+                     "namespace": {
+                      "type": "string"
+                     },
+                     "version": {
+                      "type": "string"
+                     }
+                    }
+                   }
+                  }
+                 }
+                },
+                "replicas": {
+                 "type": "array",
+                 "items": {
+                  "type": "object",
+                  "required": [
+                   "count",
+                   "name"
+                  ],
+                  "properties": {
+                   "count": {
+                    "anyOf": [
+                     {
+                      "type": "integer"
+                     },
+                     {
+                      "type": "string"
+                     }
+                    ],
+                    "x-kubernetes-int-or-string": true
+                   },
+                   "name": {
+                    "type": "string"
+                   }
+                  }
+                 }
+                },
+                "version": {
+                 "type": "string"
+                }
+               }
+              },
+              "name": {
+               "type": "string"
+              },
+              "path": {
+               "type": "string"
+              },
+              "plugin": {
+               "type": "object",
+               "properties": {
+                "env": {
+                 "type": "array",
+                 "items": {
+                  "type": "object",
+                  "required": [
+                   "name",
+                   "value"
+                  ],
+                  "properties": {
+                   "name": {
+                    "type": "string"
+                   },
+                   "value": {
+                    "type": "string"
+                   }
+                  }
+                 }
+                },
+                "name": {
+                 "type": "string"
+                },
+                "parameters": {
+                 "type": "array",
+                 "items": {
+                  "type": "object",
+                  "properties": {
+                   "array": {
+                    "type": "array",
+                    "items": {
+                     "type": "string"
+                    }
+                   },
+                   "map": {
+                    "type": "object",
+                    "additionalProperties": {
+                     "type": "string"
+                    }
+                   },
+                   "name": {
+                    "type": "string"
+                   },
+                   "string": {
+                    "type": "string"
+                   }
+                  }
+                 }
+                }
+               }
+              },
+              "ref": {
+               "type": "string"
+              },
+              "repoURL": {
+               "type": "string"
+              },
+              "targetRevision": {
+               "type": "string"
+              }
+             }
+            }
+           }
+          }
+         }
+        }
+       },
+       "reconciledAt": {
+        "type": "string",
+        "format": "date-time"
+       },
+       "resourceHealthSource": {
+        "type": "string"
+       },
+       "resources": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "properties": {
+          "group": {
+           "type": "string"
+          },
+          "health": {
+           "type": "object",
+           "properties": {
+            "lastTransitionTime": {
+             "type": "string",
+             "format": "date-time"
+            },
+            "message": {
+             "type": "string"
+            },
+            "status": {
+             "type": "string"
+            }
+           }
+          },
+          "hook": {
+           "type": "boolean"
+          },
+          "kind": {
+           "type": "string"
+          },
+          "name": {
+           "type": "string"
+          },
+          "namespace": {
+           "type": "string"
+          },
+          "requiresDeletionConfirmation": {
+           "type": "boolean"
+          },
+          "requiresPruning": {
+           "type": "boolean"
+          },
+          "status": {
+           "type": "string"
+          },
+          "syncWave": {
+           "type": "integer",
+           "format": "int64"
+          },
+          "version": {
+           "type": "string"
+          }
+         }
+        }
+       },
+       "sourceHydrator": {
+        "type": "object",
+        "properties": {
+         "currentOperation": {
+          "type": "object",
+          "required": [
+           "message",
+           "phase"
+          ],
+          "properties": {
+           "drySHA": {
+            "type": "string"
+           },
+           "finishedAt": {
+            "type": "string",
+            "format": "date-time"
+           },
+           "hydratedSHA": {
+            "type": "string"
+           },
+           "message": {
+            "type": "string"
+           },
+           "phase": {
+            "type": "string",
+            "enum": [
+             "Hydrating",
+             "Failed",
+             "Hydrated"
+            ]
+           },
+           "sourceHydrator": {
+            "type": "object",
+            "required": [
+             "drySource",
+             "syncSource"
+            ],
+            "properties": {
+             "drySource": {
+              "type": "object",
+              "required": [
+               "path",
+               "repoURL",
+               "targetRevision"
+              ],
+              "properties": {
+               "directory": {
+                "type": "object",
+                "properties": {
+                 "exclude": {
+                  "type": "string"
+                 },
+                 "include": {
+                  "type": "string"
+                 },
+                 "jsonnet": {
+                  "type": "object",
+                  "properties": {
+                   "extVars": {
+                    "type": "array",
+                    "items": {
+                     "type": "object",
+                     "required": [
+                      "name",
+                      "value"
+                     ],
+                     "properties": {
+                      "code": {
+                       "type": "boolean"
+                      },
+                      "name": {
+                       "type": "string"
+                      },
+                      "value": {
+                       "type": "string"
+                      }
+                     }
+                    }
+                   },
+                   "libs": {
+                    "type": "array",
+                    "items": {
+                     "type": "string"
+                    }
+                   },
+                   "tlas": {
+                    "type": "array",
+                    "items": {
+                     "type": "object",
+                     "required": [
+                      "name",
+                      "value"
+                     ],
+                     "properties": {
+                      "code": {
+                       "type": "boolean"
+                      },
+                      "name": {
+                       "type": "string"
+                      },
+                      "value": {
+                       "type": "string"
+                      }
+                     }
+                    }
+                   }
+                  }
+                 },
+                 "recurse": {
+                  "type": "boolean"
+                 }
+                }
+               },
+               "helm": {
+                "type": "object",
+                "properties": {
+                 "apiVersions": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "fileParameters": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "properties": {
+                    "name": {
+                     "type": "string"
+                    },
+                    "path": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 },
+                 "ignoreMissingValueFiles": {
+                  "type": "boolean"
+                 },
+                 "kubeVersion": {
+                  "type": "string"
+                 },
+                 "namespace": {
+                  "type": "string"
+                 },
+                 "parameters": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "properties": {
+                    "forceString": {
+                     "type": "boolean"
+                    },
+                    "name": {
+                     "type": "string"
+                    },
+                    "value": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 },
+                 "passCredentials": {
+                  "type": "boolean"
+                 },
+                 "releaseName": {
+                  "type": "string"
+                 },
+                 "skipCrds": {
+                  "type": "boolean"
+                 },
+                 "skipSchemaValidation": {
+                  "type": "boolean"
+                 },
+                 "skipTests": {
+                  "type": "boolean"
+                 },
+                 "valueFiles": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "values": {
+                  "type": "string"
+                 },
+                 "valuesObject": {
+                  "type": "object",
+                  "x-kubernetes-preserve-unknown-fields": true
+                 },
+                 "version": {
+                  "type": "string"
+                 }
+                }
+               },
+               "kustomize": {
+                "type": "object",
+                "properties": {
+                 "apiVersions": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "commonAnnotations": {
+                  "type": "object",
+                  "additionalProperties": {
+                   "type": "string"
+                  }
+                 },
+                 "commonAnnotationsEnvsubst": {
+                  "type": "boolean"
+                 },
+                 "commonLabels": {
+                  "type": "object",
+                  "additionalProperties": {
+                   "type": "string"
+                  }
+                 },
+                 "components": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "forceCommonAnnotations": {
+                  "type": "boolean"
+                 },
+                 "forceCommonLabels": {
+                  "type": "boolean"
+                 },
+                 "ignoreMissingComponents": {
+                  "type": "boolean"
+                 },
+                 "images": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "kubeVersion": {
+                  "type": "string"
+                 },
+                 "labelIncludeTemplates": {
+                  "type": "boolean"
+                 },
+                 "labelWithoutSelector": {
+                  "type": "boolean"
+                 },
+                 "namePrefix": {
+                  "type": "string"
+                 },
+                 "nameSuffix": {
+                  "type": "string"
+                 },
+                 "namespace": {
+                  "type": "string"
+                 },
+                 "patches": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "properties": {
+                    "options": {
+                     "type": "object",
+                     "additionalProperties": {
+                      "type": "boolean"
+                     }
+                    },
+                    "patch": {
+                     "type": "string"
+                    },
+                    "path": {
+                     "type": "string"
+                    },
+                    "target": {
+                     "type": "object",
+                     "properties": {
+                      "annotationSelector": {
+                       "type": "string"
+                      },
+                      "group": {
+                       "type": "string"
+                      },
+                      "kind": {
+                       "type": "string"
+                      },
+                      "labelSelector": {
+                       "type": "string"
+                      },
+                      "name": {
+                       "type": "string"
+                      },
+                      "namespace": {
+                       "type": "string"
+                      },
+                      "version": {
+                       "type": "string"
+                      }
+                     }
+                    }
+                   }
+                  }
+                 },
+                 "replicas": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "required": [
+                    "count",
+                    "name"
+                   ],
+                   "properties": {
+                    "count": {
+                     "anyOf": [
+                      {
+                       "type": "integer"
+                      },
+                      {
+                       "type": "string"
+                      }
+                     ],
+                     "x-kubernetes-int-or-string": true
+                    },
+                    "name": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 },
+                 "version": {
+                  "type": "string"
+                 }
+                }
+               },
+               "path": {
+                "type": "string"
+               },
+               "plugin": {
+                "type": "object",
+                "properties": {
+                 "env": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "required": [
+                    "name",
+                    "value"
+                   ],
+                   "properties": {
+                    "name": {
+                     "type": "string"
+                    },
+                    "value": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 },
+                 "name": {
+                  "type": "string"
+                 },
+                 "parameters": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "properties": {
+                    "array": {
+                     "type": "array",
+                     "items": {
+                      "type": "string"
+                     }
+                    },
+                    "map": {
+                     "type": "object",
+                     "additionalProperties": {
+                      "type": "string"
+                     }
+                    },
+                    "name": {
+                     "type": "string"
+                    },
+                    "string": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 }
+                }
+               },
+               "repoURL": {
+                "type": "string"
+               },
+               "targetRevision": {
+                "type": "string"
+               }
+              }
+             },
+             "hydrateTo": {
+              "type": "object",
+              "required": [
+               "targetBranch"
+              ],
+              "properties": {
+               "targetBranch": {
+                "type": "string"
+               }
+              }
+             },
+             "syncSource": {
+              "type": "object",
+              "required": [
+               "path",
+               "targetBranch"
+              ],
+              "properties": {
+               "path": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^.{2,}|[^./]$"
+               },
+               "targetBranch": {
+                "type": "string"
+               }
+              }
+             }
+            }
+           },
+           "startedAt": {
+            "type": "string",
+            "format": "date-time"
+           }
+          }
+         },
+         "lastSuccessfulOperation": {
+          "type": "object",
+          "properties": {
+           "drySHA": {
+            "type": "string"
+           },
+           "hydratedSHA": {
+            "type": "string"
+           },
+           "sourceHydrator": {
+            "type": "object",
+            "required": [
+             "drySource",
+             "syncSource"
+            ],
+            "properties": {
+             "drySource": {
+              "type": "object",
+              "required": [
+               "path",
+               "repoURL",
+               "targetRevision"
+              ],
+              "properties": {
+               "directory": {
+                "type": "object",
+                "properties": {
+                 "exclude": {
+                  "type": "string"
+                 },
+                 "include": {
+                  "type": "string"
+                 },
+                 "jsonnet": {
+                  "type": "object",
+                  "properties": {
+                   "extVars": {
+                    "type": "array",
+                    "items": {
+                     "type": "object",
+                     "required": [
+                      "name",
+                      "value"
+                     ],
+                     "properties": {
+                      "code": {
+                       "type": "boolean"
+                      },
+                      "name": {
+                       "type": "string"
+                      },
+                      "value": {
+                       "type": "string"
+                      }
+                     }
+                    }
+                   },
+                   "libs": {
+                    "type": "array",
+                    "items": {
+                     "type": "string"
+                    }
+                   },
+                   "tlas": {
+                    "type": "array",
+                    "items": {
+                     "type": "object",
+                     "required": [
+                      "name",
+                      "value"
+                     ],
+                     "properties": {
+                      "code": {
+                       "type": "boolean"
+                      },
+                      "name": {
+                       "type": "string"
+                      },
+                      "value": {
+                       "type": "string"
+                      }
+                     }
+                    }
+                   }
+                  }
+                 },
+                 "recurse": {
+                  "type": "boolean"
+                 }
+                }
+               },
+               "helm": {
+                "type": "object",
+                "properties": {
+                 "apiVersions": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "fileParameters": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "properties": {
+                    "name": {
+                     "type": "string"
+                    },
+                    "path": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 },
+                 "ignoreMissingValueFiles": {
+                  "type": "boolean"
+                 },
+                 "kubeVersion": {
+                  "type": "string"
+                 },
+                 "namespace": {
+                  "type": "string"
+                 },
+                 "parameters": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "properties": {
+                    "forceString": {
+                     "type": "boolean"
+                    },
+                    "name": {
+                     "type": "string"
+                    },
+                    "value": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 },
+                 "passCredentials": {
+                  "type": "boolean"
+                 },
+                 "releaseName": {
+                  "type": "string"
+                 },
+                 "skipCrds": {
+                  "type": "boolean"
+                 },
+                 "skipSchemaValidation": {
+                  "type": "boolean"
+                 },
+                 "skipTests": {
+                  "type": "boolean"
+                 },
+                 "valueFiles": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "values": {
+                  "type": "string"
+                 },
+                 "valuesObject": {
+                  "type": "object",
+                  "x-kubernetes-preserve-unknown-fields": true
+                 },
+                 "version": {
+                  "type": "string"
+                 }
+                }
+               },
+               "kustomize": {
+                "type": "object",
+                "properties": {
+                 "apiVersions": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "commonAnnotations": {
+                  "type": "object",
+                  "additionalProperties": {
+                   "type": "string"
+                  }
+                 },
+                 "commonAnnotationsEnvsubst": {
+                  "type": "boolean"
+                 },
+                 "commonLabels": {
+                  "type": "object",
+                  "additionalProperties": {
+                   "type": "string"
+                  }
+                 },
+                 "components": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "forceCommonAnnotations": {
+                  "type": "boolean"
+                 },
+                 "forceCommonLabels": {
+                  "type": "boolean"
+                 },
+                 "ignoreMissingComponents": {
+                  "type": "boolean"
+                 },
+                 "images": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "kubeVersion": {
+                  "type": "string"
+                 },
+                 "labelIncludeTemplates": {
+                  "type": "boolean"
+                 },
+                 "labelWithoutSelector": {
+                  "type": "boolean"
+                 },
+                 "namePrefix": {
+                  "type": "string"
+                 },
+                 "nameSuffix": {
+                  "type": "string"
+                 },
+                 "namespace": {
+                  "type": "string"
+                 },
+                 "patches": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "properties": {
+                    "options": {
+                     "type": "object",
+                     "additionalProperties": {
+                      "type": "boolean"
+                     }
+                    },
+                    "patch": {
+                     "type": "string"
+                    },
+                    "path": {
+                     "type": "string"
+                    },
+                    "target": {
+                     "type": "object",
+                     "properties": {
+                      "annotationSelector": {
+                       "type": "string"
+                      },
+                      "group": {
+                       "type": "string"
+                      },
+                      "kind": {
+                       "type": "string"
+                      },
+                      "labelSelector": {
+                       "type": "string"
+                      },
+                      "name": {
+                       "type": "string"
+                      },
+                      "namespace": {
+                       "type": "string"
+                      },
+                      "version": {
+                       "type": "string"
+                      }
+                     }
+                    }
+                   }
+                  }
+                 },
+                 "replicas": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "required": [
+                    "count",
+                    "name"
+                   ],
+                   "properties": {
+                    "count": {
+                     "anyOf": [
+                      {
+                       "type": "integer"
+                      },
+                      {
+                       "type": "string"
+                      }
+                     ],
+                     "x-kubernetes-int-or-string": true
+                    },
+                    "name": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 },
+                 "version": {
+                  "type": "string"
+                 }
+                }
+               },
+               "path": {
+                "type": "string"
+               },
+               "plugin": {
+                "type": "object",
+                "properties": {
+                 "env": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "required": [
+                    "name",
+                    "value"
+                   ],
+                   "properties": {
+                    "name": {
+                     "type": "string"
+                    },
+                    "value": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 },
+                 "name": {
+                  "type": "string"
+                 },
+                 "parameters": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "properties": {
+                    "array": {
+                     "type": "array",
+                     "items": {
+                      "type": "string"
+                     }
+                    },
+                    "map": {
+                     "type": "object",
+                     "additionalProperties": {
+                      "type": "string"
+                     }
+                    },
+                    "name": {
+                     "type": "string"
+                    },
+                    "string": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 }
+                }
+               },
+               "repoURL": {
+                "type": "string"
+               },
+               "targetRevision": {
+                "type": "string"
+               }
+              }
+             },
+             "hydrateTo": {
+              "type": "object",
+              "required": [
+               "targetBranch"
+              ],
+              "properties": {
+               "targetBranch": {
+                "type": "string"
+               }
+              }
+             },
+             "syncSource": {
+              "type": "object",
+              "required": [
+               "path",
+               "targetBranch"
+              ],
+              "properties": {
+               "path": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^.{2,}|[^./]$"
+               },
+               "targetBranch": {
+                "type": "string"
+               }
+              }
+             }
+            }
+           }
+          }
+         }
+        }
+       },
+       "sourceType": {
+        "type": "string"
+       },
+       "sourceTypes": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       },
+       "summary": {
+        "type": "object",
+        "properties": {
+         "externalURLs": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         },
+         "images": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         }
+        }
+       },
+       "sync": {
+        "type": "object",
+        "required": [
+         "status"
+        ],
+        "properties": {
+         "comparedTo": {
+          "type": "object",
+          "required": [
+           "destination"
+          ],
+          "properties": {
+           "destination": {
+            "type": "object",
+            "properties": {
+             "name": {
+              "type": "string"
+             },
+             "namespace": {
+              "type": "string"
+             },
+             "server": {
+              "type": "string"
+             }
+            }
+           },
+           "ignoreDifferences": {
+            "type": "array",
+            "items": {
+             "type": "object",
+             "required": [
+              "kind"
+             ],
+             "properties": {
+              "group": {
+               "type": "string"
+              },
+              "jqPathExpressions": {
+               "type": "array",
+               "items": {
+                "type": "string"
+               }
+              },
+              "jsonPointers": {
+               "type": "array",
+               "items": {
+                "type": "string"
+               }
+              },
+              "kind": {
+               "type": "string"
+              },
+              "managedFieldsManagers": {
+               "type": "array",
+               "items": {
+                "type": "string"
+               }
+              },
+              "name": {
+               "type": "string"
+              },
+              "namespace": {
+               "type": "string"
+              }
+             }
+            }
+           },
+           "source": {
+            "type": "object",
+            "required": [
+             "repoURL"
+            ],
+            "properties": {
+             "chart": {
+              "type": "string"
+             },
+             "directory": {
+              "type": "object",
+              "properties": {
+               "exclude": {
+                "type": "string"
+               },
+               "include": {
+                "type": "string"
+               },
+               "jsonnet": {
+                "type": "object",
+                "properties": {
+                 "extVars": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "required": [
+                    "name",
+                    "value"
+                   ],
+                   "properties": {
+                    "code": {
+                     "type": "boolean"
+                    },
+                    "name": {
+                     "type": "string"
+                    },
+                    "value": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 },
+                 "libs": {
+                  "type": "array",
+                  "items": {
+                   "type": "string"
+                  }
+                 },
+                 "tlas": {
+                  "type": "array",
+                  "items": {
+                   "type": "object",
+                   "required": [
+                    "name",
+                    "value"
+                   ],
+                   "properties": {
+                    "code": {
+                     "type": "boolean"
+                    },
+                    "name": {
+                     "type": "string"
+                    },
+                    "value": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 }
+                }
+               },
+               "recurse": {
+                "type": "boolean"
+               }
+              }
+             },
+             "helm": {
+              "type": "object",
+              "properties": {
+               "apiVersions": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "fileParameters": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "properties": {
+                  "name": {
+                   "type": "string"
+                  },
+                  "path": {
+                   "type": "string"
+                  }
+                 }
+                }
+               },
+               "ignoreMissingValueFiles": {
+                "type": "boolean"
+               },
+               "kubeVersion": {
+                "type": "string"
+               },
+               "namespace": {
+                "type": "string"
+               },
+               "parameters": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "properties": {
+                  "forceString": {
+                   "type": "boolean"
+                  },
+                  "name": {
+                   "type": "string"
+                  },
+                  "value": {
+                   "type": "string"
+                  }
+                 }
+                }
+               },
+               "passCredentials": {
+                "type": "boolean"
+               },
+               "releaseName": {
+                "type": "string"
+               },
+               "skipCrds": {
+                "type": "boolean"
+               },
+               "skipSchemaValidation": {
+                "type": "boolean"
+               },
+               "skipTests": {
+                "type": "boolean"
+               },
+               "valueFiles": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "values": {
+                "type": "string"
+               },
+               "valuesObject": {
+                "type": "object",
+                "x-kubernetes-preserve-unknown-fields": true
+               },
+               "version": {
+                "type": "string"
+               }
+              }
+             },
+             "kustomize": {
+              "type": "object",
+              "properties": {
+               "apiVersions": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "commonAnnotations": {
+                "type": "object",
+                "additionalProperties": {
+                 "type": "string"
+                }
+               },
+               "commonAnnotationsEnvsubst": {
+                "type": "boolean"
+               },
+               "commonLabels": {
+                "type": "object",
+                "additionalProperties": {
+                 "type": "string"
+                }
+               },
+               "components": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "forceCommonAnnotations": {
+                "type": "boolean"
+               },
+               "forceCommonLabels": {
+                "type": "boolean"
+               },
+               "ignoreMissingComponents": {
+                "type": "boolean"
+               },
+               "images": {
+                "type": "array",
+                "items": {
+                 "type": "string"
+                }
+               },
+               "kubeVersion": {
+                "type": "string"
+               },
+               "labelIncludeTemplates": {
+                "type": "boolean"
+               },
+               "labelWithoutSelector": {
+                "type": "boolean"
+               },
+               "namePrefix": {
+                "type": "string"
+               },
+               "nameSuffix": {
+                "type": "string"
+               },
+               "namespace": {
+                "type": "string"
+               },
+               "patches": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "properties": {
+                  "options": {
+                   "type": "object",
+                   "additionalProperties": {
+                    "type": "boolean"
+                   }
+                  },
+                  "patch": {
+                   "type": "string"
+                  },
+                  "path": {
+                   "type": "string"
+                  },
+                  "target": {
+                   "type": "object",
+                   "properties": {
+                    "annotationSelector": {
+                     "type": "string"
+                    },
+                    "group": {
+                     "type": "string"
+                    },
+                    "kind": {
+                     "type": "string"
+                    },
+                    "labelSelector": {
+                     "type": "string"
+                    },
+                    "name": {
+                     "type": "string"
+                    },
+                    "namespace": {
+                     "type": "string"
+                    },
+                    "version": {
+                     "type": "string"
+                    }
+                   }
+                  }
+                 }
+                }
+               },
+               "replicas": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "required": [
+                  "count",
+                  "name"
+                 ],
+                 "properties": {
+                  "count": {
+                   "anyOf": [
+                    {
+                     "type": "integer"
+                    },
+                    {
+                     "type": "string"
+                    }
+                   ],
+                   "x-kubernetes-int-or-string": true
+                  },
+                  "name": {
+                   "type": "string"
+                  }
+                 }
+                }
+               },
+               "version": {
+                "type": "string"
+               }
+              }
+             },
+             "name": {
+              "type": "string"
+             },
+             "path": {
+              "type": "string"
+             },
+             "plugin": {
+              "type": "object",
+              "properties": {
+               "env": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "required": [
+                  "name",
+                  "value"
+                 ],
+                 "properties": {
+                  "name": {
+                   "type": "string"
+                  },
+                  "value": {
+                   "type": "string"
+                  }
+                 }
+                }
+               },
+               "name": {
+                "type": "string"
+               },
+               "parameters": {
+                "type": "array",
+                "items": {
+                 "type": "object",
+                 "properties": {
+                  "array": {
+                   "type": "array",
+                   "items": {
+                    "type": "string"
+                   }
+                  },
+                  "map": {
+                   "type": "object",
+                   "additionalProperties": {
+                    "type": "string"
+                   }
+                  },
+                  "name": {
+                   "type": "string"
+                  },
+                  "string": {
+                   "type": "string"
+                  }
+                 }
+                }
+               }
+              }
+             },
+             "ref": {
+              "type": "string"
+             },
+             "repoURL": {
+              "type": "string"
+             },
+             "targetRevision": {
+              "type": "string"
+             }
+            }
+           },
+           "sources": {
+            "type": "array",
+            "items": {
+             "type": "object",
+             "required": [
+              "repoURL"
+             ],
+             "properties": {
+              "chart": {
+               "type": "string"
+              },
+              "directory": {
+               "type": "object",
+               "properties": {
+                "exclude": {
+                 "type": "string"
+                },
+                "include": {
+                 "type": "string"
+                },
+                "jsonnet": {
+                 "type": "object",
+                 "properties": {
+                  "extVars": {
+                   "type": "array",
+                   "items": {
+                    "type": "object",
+                    "required": [
+                     "name",
+                     "value"
+                    ],
+                    "properties": {
+                     "code": {
+                      "type": "boolean"
+                     },
+                     "name": {
+                      "type": "string"
+                     },
+                     "value": {
+                      "type": "string"
+                     }
+                    }
+                   }
+                  },
+                  "libs": {
+                   "type": "array",
+                   "items": {
+                    "type": "string"
+                   }
+                  },
+                  "tlas": {
+                   "type": "array",
+                   "items": {
+                    "type": "object",
+                    "required": [
+                     "name",
+                     "value"
+                    ],
+                    "properties": {
+                     "code": {
+                      "type": "boolean"
+                     },
+                     "name": {
+                      "type": "string"
+                     },
+                     "value": {
+                      "type": "string"
+                     }
+                    }
+                   }
+                  }
+                 }
+                },
+                "recurse": {
+                 "type": "boolean"
+                }
+               }
+              },
+              "helm": {
+               "type": "object",
+               "properties": {
+                "apiVersions": {
+                 "type": "array",
+                 "items": {
+                  "type": "string"
+                 }
+                },
+                "fileParameters": {
+                 "type": "array",
+                 "items": {
+                  "type": "object",
+                  "properties": {
+                   "name": {
+                    "type": "string"
+                   },
+                   "path": {
+                    "type": "string"
+                   }
+                  }
+                 }
+                },
+                "ignoreMissingValueFiles": {
+                 "type": "boolean"
+                },
+                "kubeVersion": {
+                 "type": "string"
+                },
+                "namespace": {
+                 "type": "string"
+                },
+                "parameters": {
+                 "type": "array",
+                 "items": {
+                  "type": "object",
+                  "properties": {
+                   "forceString": {
+                    "type": "boolean"
+                   },
+                   "name": {
+                    "type": "string"
+                   },
+                   "value": {
+                    "type": "string"
+                   }
+                  }
+                 }
+                },
+                "passCredentials": {
+                 "type": "boolean"
+                },
+                "releaseName": {
+                 "type": "string"
+                },
+                "skipCrds": {
+                 "type": "boolean"
+                },
+                "skipSchemaValidation": {
+                 "type": "boolean"
+                },
+                "skipTests": {
+                 "type": "boolean"
+                },
+                "valueFiles": {
+                 "type": "array",
+                 "items": {
+                  "type": "string"
+                 }
+                },
+                "values": {
+                 "type": "string"
+                },
+                "valuesObject": {
+                 "type": "object",
+                 "x-kubernetes-preserve-unknown-fields": true
+                },
+                "version": {
+                 "type": "string"
+                }
+               }
+              },
+              "kustomize": {
+               "type": "object",
+               "properties": {
+                "apiVersions": {
+                 "type": "array",
+                 "items": {
+                  "type": "string"
+                 }
+                },
+                "commonAnnotations": {
+                 "type": "object",
+                 "additionalProperties": {
+                  "type": "string"
+                 }
+                },
+                "commonAnnotationsEnvsubst": {
+                 "type": "boolean"
+                },
+                "commonLabels": {
+                 "type": "object",
+                 "additionalProperties": {
+                  "type": "string"
+                 }
+                },
+                "components": {
+                 "type": "array",
+                 "items": {
+                  "type": "string"
+                 }
+                },
+                "forceCommonAnnotations": {
+                 "type": "boolean"
+                },
+                "forceCommonLabels": {
+                 "type": "boolean"
+                },
+                "ignoreMissingComponents": {
+                 "type": "boolean"
+                },
+                "images": {
+                 "type": "array",
+                 "items": {
+                  "type": "string"
+                 }
+                },
+                "kubeVersion": {
+                 "type": "string"
+                },
+                "labelIncludeTemplates": {
+                 "type": "boolean"
+                },
+                "labelWithoutSelector": {
+                 "type": "boolean"
+                },
+                "namePrefix": {
+                 "type": "string"
+                },
+                "nameSuffix": {
+                 "type": "string"
+                },
+                "namespace": {
+                 "type": "string"
+                },
+                "patches": {
+                 "type": "array",
+                 "items": {
+                  "type": "object",
+                  "properties": {
+                   "options": {
+                    "type": "object",
+                    "additionalProperties": {
+                     "type": "boolean"
+                    }
+                   },
+                   "patch": {
+                    "type": "string"
+                   },
+                   "path": {
+                    "type": "string"
+                   },
+                   "target": {
+                    "type": "object",
+                    "properties": {
+                     "annotationSelector": {
+                      "type": "string"
+                     },
+                     "group": {
+                      "type": "string"
+                     },
+                     "kind": {
+                      "type": "string"
+                     },
+                     "labelSelector": {
+                      "type": "string"
+                     },
+                     "name": {
+                      "type": "string"
+                     },
+                     "namespace": {
+                      "type": "string"
+                     },
+                     "version": {
+                      "type": "string"
+                     }
+                    }
+                   }
+                  }
+                 }
+                },
+                "replicas": {
+                 "type": "array",
+                 "items": {
+                  "type": "object",
+                  "required": [
+                   "count",
+                   "name"
+                  ],
+                  "properties": {
+                   "count": {
+                    "anyOf": [
+                     {
+                      "type": "integer"
+                     },
+                     {
+                      "type": "string"
+                     }
+                    ],
+                    "x-kubernetes-int-or-string": true
+                   },
+                   "name": {
+                    "type": "string"
+                   }
+                  }
+                 }
+                },
+                "version": {
+                 "type": "string"
+                }
+               }
+              },
+              "name": {
+               "type": "string"
+              },
+              "path": {
+               "type": "string"
+              },
+              "plugin": {
+               "type": "object",
+               "properties": {
+                "env": {
+                 "type": "array",
+                 "items": {
+                  "type": "object",
+                  "required": [
+                   "name",
+                   "value"
+                  ],
+                  "properties": {
+                   "name": {
+                    "type": "string"
+                   },
+                   "value": {
+                    "type": "string"
+                   }
+                  }
+                 }
+                },
+                "name": {
+                 "type": "string"
+                },
+                "parameters": {
+                 "type": "array",
+                 "items": {
+                  "type": "object",
+                  "properties": {
+                   "array": {
+                    "type": "array",
+                    "items": {
+                     "type": "string"
+                    }
+                   },
+                   "map": {
+                    "type": "object",
+                    "additionalProperties": {
+                     "type": "string"
+                    }
+                   },
+                   "name": {
+                    "type": "string"
+                   },
+                   "string": {
+                    "type": "string"
+                   }
+                  }
+                 }
+                }
+               }
+              },
+              "ref": {
+               "type": "string"
+              },
+              "repoURL": {
+               "type": "string"
+              },
+              "targetRevision": {
+               "type": "string"
+              }
+             }
+            }
+           }
+          }
+         },
+         "revision": {
+          "type": "string"
+         },
+         "revisions": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         },
+         "status": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "x-kubernetes-group-version-kind": [
+     {
+      "group": "argoproj.io",
+      "kind": "Application",
+      "version": "v1alpha1"
+     }
+    ]
+   },
+   "io.k8s.apimachinery.pkg.apis.meta.v1.FieldsV1": {
+    "type": "object"
+   },
+   "io.k8s.apimachinery.pkg.apis.meta.v1.ManagedFieldsEntry": {
+    "type": "object",
+    "properties": {
+     "apiVersion": {
+      "type": "string"
+     },
+     "fieldsType": {
+      "type": "string"
+     },
+     "fieldsV1": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.FieldsV1"
+       }
+      ]
+     },
+     "manager": {
+      "type": "string"
+     },
+     "operation": {
+      "type": "string"
+     },
+     "subresource": {
+      "type": "string"
+     },
+     "time": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Time"
+       }
+      ]
+     }
+    }
+   },
+   "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta": {
+    "type": "object",
+    "properties": {
+     "annotations": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "string",
+       "default": ""
+      }
+     },
+     "creationTimestamp": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Time"
+       }
+      ]
+     },
+     "deletionGracePeriodSeconds": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "deletionTimestamp": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Time"
+       }
+      ]
+     },
+     "finalizers": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "default": ""
+      },
+      "x-kubernetes-list-type": "set",
+      "x-kubernetes-patch-strategy": "merge"
+     },
+     "generateName": {
+      "type": "string"
+     },
+     "generation": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "labels": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "string",
+       "default": ""
+      }
+     },
+     "managedFields": {
+      "type": "array",
+      "items": {
+       "default": {},
+       "allOf": [
+        {
+         "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ManagedFieldsEntry"
+        }
+       ]
+      },
+      "x-kubernetes-list-type": "atomic"
+     },
+     "name": {
+      "type": "string"
+     },
+     "namespace": {
+      "type": "string"
+     },
+     "ownerReferences": {
+      "type": "array",
+      "items": {
+       "default": {},
+       "allOf": [
+        {
+         "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.OwnerReference"
+        }
+       ]
+      },
+      "x-kubernetes-list-map-keys": [
+       "uid"
+      ],
+      "x-kubernetes-list-type": "map",
+      "x-kubernetes-patch-merge-key": "uid",
+      "x-kubernetes-patch-strategy": "merge"
+     },
+     "resourceVersion": {
+      "type": "string"
+     },
+     "selfLink": {
+      "type": "string"
+     },
+     "uid": {
+      "type": "string"
+     }
+    }
+   },
+   "io.k8s.apimachinery.pkg.apis.meta.v1.OwnerReference": {
+    "type": "object",
+    "required": [
+     "apiVersion",
+     "kind",
+     "name",
+     "uid"
+    ],
+    "properties": {
+     "apiVersion": {
+      "type": "string",
+      "default": ""
+     },
+     "blockOwnerDeletion": {
+      "type": "boolean"
+     },
+     "controller": {
+      "type": "boolean"
+     },
+     "kind": {
+      "type": "string",
+      "default": ""
+     },
+     "name": {
+      "type": "string",
+      "default": ""
+     },
+     "uid": {
+      "type": "string",
+      "default": ""
+     }
+    },
+    "x-kubernetes-map-type": "atomic"
+   },
+   "io.k8s.apimachinery.pkg.apis.meta.v1.Time": {
+    "type": "string",
+    "format": "date-time"
+   }
+  }
+ }
+}

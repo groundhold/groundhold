@@ -29,17 +29,23 @@ attributes:
     mappings:
       gcp.cloudrun: service region
       gcp.cloudfunctions: function location
-      gcp.gke: cluster location
       aws.ecs: region
       aws.apprunner: region
+      azure.containerapps: the resource `location`, lower-cased
 
   availability.class:
+    description: >-
+      How much of a failure the workload survives: `zonal` runs in one availability zone, `regional` spreads across several. It is about placement, not about replica count, which is an implementation operand
     kind: string
     enum: [zonal, regional, multi-regional]
     mappings:
       gcp.cloudrun: regional by construction
       gcp.cloudfunctions: regional by construction
-      gcp.gke: cluster topology
+      aws.ecs: regional by construction (a service spans the cluster's subnets)
+      aws.apprunner: regional by construction (App Runner has no zonal placement)
+      azure.containerapps: zonal — a Container Apps environment is placed in one
+        zone unless zone redundancy is enabled on the environment, which this
+        capability does not configure
 
   network.publicExposure:
     kind: bool
@@ -47,8 +53,16 @@ attributes:
     mappings:
       gcp.cloudrun: ingress setting + IAM invoker
       gcp.cloudfunctions: ingressSettings + invoker IAM on the backing Run service
-      gcp.gke: Service/Ingress type
       aws.apprunner: NetworkConfiguration.IngressConfiguration.IsPubliclyAccessible
+      aws.ecs: awsvpcConfiguration.assignPublicIp == ENABLED — a task with a public
+        IP is reachable from the internet; this is the network placement, not an
+        authorization check
+      azure.containerapps: >
+        configuration.ingress.external — Container Apps decides internet
+        reachability with that one flag (no separate anonymous-invoke grant the
+        way Lambda and Cloud Run have). Absent ingress means not exposed. Note
+        this attribute is "reachable from the internet", NOT "unauthenticated":
+        Easy Auth in front of an external ingress does not make it false (D538)
 
   replicas.minimum:
     kind: number
@@ -58,15 +72,19 @@ attributes:
     mappings:
       gcp.cloudrun: minInstances
       gcp.cloudfunctions: serviceConfig.minInstanceCount
-      gcp.gke: HPA minReplicas
       aws.apprunner: AutoScalingConfiguration MinSize (>=1; no scale-to-zero)
+      aws.ecs: desiredCount (omitted when 0 — a service scaled to zero declares no
+        minimum rather than claiming one of zero)
+      azure.containerapps: template.scale.minReplicas (omitted when unset — Container
+        Apps then applies its own default rather than a declared floor)
 
   autoscaling.enabled:
+    description: >-
+      Whether the platform adds and removes instances on load by itself. The thresholds and bounds are implementation operands (D26); this says only whether the behaviour is on
     kind: bool
     mappings:
       gcp.cloudrun: always true (maxInstances bounds it)
       gcp.cloudfunctions: always true (maxInstanceCount bounds it)
-      gcp.gke: HPA present
       aws.apprunner: always true (AutoScalingConfiguration MaxSize bounds it)
 
   image.signedProvenance:
@@ -76,7 +94,6 @@ attributes:
       may run — supply-chain gate
     mappings:
       gcp.cloudrun: Binary Authorization policy
-      gcp.gke: Binary Authorization
     note: >
       static verification proves the POLICY exists; an outcome probe
       (attempt to deploy an unsigned image into a scratch revision)
@@ -88,14 +105,23 @@ attributes:
     mappings:
       gcp.cloudrun: HTTPS-only by construction
       gcp.cloudfunctions: HTTPS-only by construction
-      gcp.gke: Ingress TLS + redirect
       aws.apprunner: HTTPS-only by construction (managed endpoint)
+      aws.ecs: the HTTPS/TLS listener of the load balancer fronting the service —
+        traced targetGroupArn -> DescribeTargetGroups -> DescribeListeners. A service
+        behind no load balancer has no front door to measure and the attribute is not
+        emitted (a diagnostic says the trace failed rather than assuming plaintext)
+      azure.containerapps: NOT configuration.ingress.allowInsecure — the ingress
+        accepts plaintext only when that flag is set, so TLS is enforced when it is
+        false. An app with no ingress has no front door and the attribute is not
+        emitted
 
   service.managed:
     kind: bool
     description: Managed runtime vs self-operated cluster
 
   cost.monthly:
+    description: >-
+      Projected monthly cost of the workload — a projection over the declared shape, never a quote and never read back from the provider (evidence: projection)
     kind: money
     evidence: projection      # D311: a forecast, never resource state
     verification: static against a pricing catalog; billing after deploy
@@ -104,3 +130,23 @@ attributes:
 # image tags/digests (the digest is the CANDIDATE's business), pod
 # templates, orchestrator flags, sidecar shapes, service mesh wiring,
 # cpu/memory requests (capacity tuning, not capability semantics).
+
+# NOT an implementation of this capability, deliberately recorded (D552).
+# capability.workload.container previously named `gcp.gke` on seven attributes. No
+# service measures them: the driver reports gke -> capability.cluster.kubernetes, and
+# observeGKE emits only cluster attributes. The lines described what a
+# containers-on-GKE mapping WOULD look like, sitting in the block that states what a
+# driver DOES measure — indistinguishable from the backed lines beside them. The
+# design intent is kept here, out of `mappings:`, where nothing reads it as a claim:
+#
+#   gcp.gke: cluster location
+#   gcp.gke: cluster topology
+#   gcp.gke: Service/Ingress type
+#   gcp.gke: HPA minReplicas
+#   gcp.gke: HPA present
+#   gcp.gke: Binary Authorization
+#   gcp.gke: Ingress TLS + redirect
+#
+# Wiring it would mean a service that reverse-maps a Deployment + HPA + Ingress into
+# this capability. GKE's own cluster attributes are mapped, accurately and in more
+# detail, in capability.cluster.kubernetes.

@@ -87,14 +87,20 @@ func (d *Driver) observeAzureImage(capability, providerID string) ([]provider.Ob
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"managed image not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"managed image not found — bound resource is gone (will re-create)"}, nil
 	}
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: doc.Location, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		// The image's disks are managed disks, always encrypted at rest — a fact
 		// about the platform, not a reading of this resource.
-		{Path: "encryption.atRest", Value: true, Derivation: "config-intent"},
+		{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"},
 		{Path: "encryption.customerManagedKeys",
 			Value:      doc.Properties.StorageProfile.OSDisk.DiskEncryptionSet != nil,
 			Derivation: "measured"},
@@ -160,7 +166,7 @@ func (d *Driver) discoverAzureImages(region string) ([]provider.Discovered, []st
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.compute.image",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

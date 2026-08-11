@@ -14,7 +14,20 @@ import (
 	"groundhold/internal/provider"
 )
 
-const openSearchPath = "/2021-01-01/opensearch"
+// OpenSearch Service mixes two prefixes under one API version, and the driver used the
+// longer one for everything (D820). AWS's own model puts DescribeDomain, CreateDomain and
+// DeleteDomain under /2021-01-01/opensearch/domain, and ListDomainNames and ListTags
+// directly under /2021-01-01 — so the sweep and the tag read were calling paths AWS
+// answers 404 to, forever. Live AWS agrees: /2021-01-01/domain returns "Missing
+// Authentication Token" (the route exists) and /2021-01-01/opensearch/domain returns
+// <UnknownOperationException/> (it does not).
+//
+// Two constants rather than one, because the difference is real and a single one invites
+// the same mistake back.
+const (
+	openSearchPath        = "/2021-01-01/opensearch" // per-domain operations
+	openSearchAccountPath = "/2021-01-01"            // account-wide listings
+)
 
 func (d *Driver) openSearchBase(region string) string {
 	if d.OpenSearchBaseURL != "" {
@@ -116,7 +129,7 @@ func (d *Driver) describeDomain(region, domain string) (openSearchDomain, bool, 
 // openSearchTags reads the domain's ownership tags. readable=false on any failure.
 func (d *Driver) openSearchTags(region, account, domain string) (map[string]string, error) {
 	const op = "ListTags"
-	st, resp, err := d.openSearchDo("GET", region, openSearchPath+"/tags/?arn="+openSearchARN(region, account, domain), nil)
+	st, resp, err := d.openSearchDo("GET", region, openSearchAccountPath+"/tags/?arn="+openSearchARN(region, account, domain), nil)
 	if err != nil || st != http.StatusOK {
 		if err != nil {
 			return nil, readTransport(op, err)
@@ -200,9 +213,15 @@ func (d *Driver) observeOpenSearch(capability, providerID string) ([]provider.Ob
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"domain not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"domain not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		{Path: "encryption.atRest", Value: dom.EncryptionAtRestOptions.Enabled, Derivation: "measured"},
@@ -215,15 +234,30 @@ func (d *Driver) observeOpenSearch(capability, providerID string) ([]provider.Ob
 	} else {
 		obs = append(obs, provider.Observation{Path: "availability.class", Value: "zonal", Derivation: "measured"})
 	}
+	var diags []string
+	// D800: an encrypted domain always reports a KMS key — the account-default
+	// aws/es one when the customer brought none — so "a key id is present" is not
+	// "the customer brought a key". Trace it to KMS (DescribeKey -> KeyManager), the way
+	// the RDS driver in this same package already does; an unreadable trace is a
+	// diagnostic, never a false BYOK.
 	if dom.EncryptionAtRestOptions.KmsKeyId != "" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: true, Derivation: "measured"})
+		if customer, kerr := d.kmsKeyIsCustomerManaged(region, dom.EncryptionAtRestOptions.KmsKeyId); kerr == nil {
+			obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+				Value: customer, Derivation: "measured"})
+		} else {
+			diags = append(diags, "encryption.customerManagedKeys not observed on the domain's "+
+				"KMS key: "+kerr.Error()+" — probe/reconcile")
+		}
 	}
-	return obs, nil, nil
+	return obs, diags, nil
 }
 
 func (d *Driver) deleteOpenSearch(capability, environment, providerID string) provider.CreateResult {
 	region, account, domain, err := splitOpenSearchProviderID(providerID)
 	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if err := d.sameAccount(account); err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	_, found, rerr := d.describeDomain(region, domain)
@@ -257,5 +291,20 @@ func (d *Driver) deleteOpenSearch(capability, environment, providerID string) pr
 		}
 		return provider.CreateResult{Status: "failed", Reason: fmt.Sprintf("delete HTTP %d (%s)", st, osErr(resp))}
 	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// ---- poll to absence (D968 class, D973) ----
+	// The delete is async: the domain enters Deleted/Processing, not gone. Reporting
+	// succeeded here tombstones a data-bearing search domain still live. Poll to a
+	// confirmed ResourceNotFound as createOpenSearch polls to Processing=false;
+	// unknown on timeout keeps the handle.
+	deadline := d.Now().Add(d.PollTimeout)
+	for {
+		if _, found, rerr := d.describeDomain(region, domain); rerr == nil && !found {
+			return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // confirmed gone
+		}
+		if d.Now().After(deadline) {
+			return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+				Reason: "domain still deleting at poll timeout — reconcile via DescribeDomain"}
+		}
+		time.Sleep(d.PollInterval)
+	}
 }

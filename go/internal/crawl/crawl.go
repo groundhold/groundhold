@@ -27,6 +27,11 @@ const contextDomain = "groundhold/canon/v1:crawl-context"
 type Fetched struct {
 	Resources []discover.Resource
 	Pace      pace.Result
+	// D803: the listing SUCCEEDED and was cut short. A page the provider said existed
+	// and the driver did not follow is not an error — which is exactly why the scope
+	// used to be recorded complete, and the shadow count over it went out as exact.
+	Incomplete bool
+	Reason     string
 }
 
 // Fetcher runs one listing for a (connection, scope). It must be READ-ONLY. The
@@ -60,9 +65,20 @@ type Resource struct {
 // ScopeContext is one crawled scope. Status is complete | incomplete; Reason names
 // why an incomplete scope stopped short (never a silent short list).
 type ScopeContext struct {
-	Scope     string     `json:"scope"`
-	Status    string     `json:"status"`
-	Reason    string     `json:"reason,omitempty"`
+	Scope  string `json:"scope"`
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
+	// ListedAt is when THIS scope was listed, which is not the document's `at` once
+	// a splice is involved. D592: react re-lists one scope and carries the rest over
+	// from a base crawl, and the result was stamped only at the top — so a document
+	// said "as of 20:20 this scope COMPLETELY contains 14 resources" about a listing
+	// taken at 20:16, by which time there were 15. `status: complete` is what
+	// shadowLowerBound rests on, so the age of that completeness is load-bearing.
+	//
+	// Deliberately absent from the hashed model: contentModel covers content
+	// "WITHOUT any timing", because a fingerprint that moves on every crawl cannot
+	// answer whether the WORLD moved.
+	ListedAt  string     `json:"listedAt,omitempty"`
 	Resources []Resource `json:"resources"`
 }
 
@@ -158,7 +174,7 @@ func Run(reg *pair.Registry, fetch Fetcher, enum Enumerator, sched *pace.Schedul
 		if enumErr != nil {
 			// the provider's scopes are unknown — one visible incomplete marker,
 			// never a silently empty provider
-			pc.Scopes = append(pc.Scopes, ScopeContext{Scope: "*", Status: "incomplete",
+			pc.Scopes = append(pc.Scopes, ScopeContext{Scope: "*", ListedAt: at, Status: "incomplete",
 				Reason: "scope enumeration failed: " + enumErr.Error(), Resources: []Resource{}})
 			switch {
 			case errors.Is(enumErr, pace.ErrBudget):
@@ -176,7 +192,10 @@ func Run(reg *pair.Registry, fetch Fetcher, enum Enumerator, sched *pace.Schedul
 				fetched = fetch(conn, scope)
 				return fetched.Pace
 			})
-			sc := ScopeContext{Scope: scope, Resources: []Resource{}}
+			// D592: stamp WHEN this scope was listed. The document's own `at` is
+			// the run's clock, and after a splice it no longer describes every
+			// scope in the document.
+			sc := ScopeContext{Scope: scope, ListedAt: at, Resources: []Resource{}}
 			if err != nil {
 				sc.Status = "incomplete"
 				sc.Reason = err.Error()
@@ -187,6 +206,21 @@ func Run(reg *pair.Registry, fetch Fetcher, enum Enumerator, sched *pace.Schedul
 					if stoppedEarly == "" {
 						stoppedEarly = "breaker"
 					}
+				}
+			} else if fetched.Incomplete {
+				// D803: read everything the provider offered on page one, and it said
+				// there was more. The resources found are kept — they are real — but the
+				// scope is not complete, so posture reports a lower bound.
+				sc.Status = "incomplete"
+				sc.Reason = fetched.Reason
+				stamp := now().UTC().Format(time.RFC3339)
+				for _, r := range fetched.Resources {
+					sc.Resources = append(sc.Resources, Resource{
+						ProviderID:   r.ProviderID,
+						ResourceType: r.ResourceType,
+						Observations: r.Observations,
+						ObservedAt:   stamp,
+					})
 				}
 			} else {
 				sc.Status = "complete"

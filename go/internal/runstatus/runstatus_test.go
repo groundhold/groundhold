@@ -1,6 +1,13 @@
 package runstatus
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"groundhold/internal/ledger"
+)
 
 const h = "abc123"
 
@@ -188,5 +195,31 @@ func TestListRunsRegistryOnlyIsUnknownAndTagged(t *testing.T) {
 	runs2 := ListRuns(evs, 200, []string{"admitted"})
 	if len(runs2) != 1 {
 		t.Fatalf("a registry handle with ledger events must not be duplicated, got %d", len(runs2))
+	}
+}
+
+// D708: an unreadable snapshot must not shorten the history in silence.
+//
+// This is the LIVE half of that entry. `runs`, `status` and `wait` read through
+// ReadEventsFull WITHOUT replaying first, so the fail-open test here was reachable:
+// an unreadable sidecar meant the archived (pre-compaction) events were simply not
+// read, and a run recorded before the compaction answered "no such run" — an absence
+// manufactured from a file nobody could open.
+func TestUnreadableSnapshotIsNotAnEmptyArchive(t *testing.T) {
+	dir := t.TempDir()
+	lp := filepath.Join(dir, "l.jsonl")
+	if err := os.WriteFile(lp, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ledger.SnapshotPath(lp), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := ReadEventsFull(lp)
+	if err == nil {
+		t.Fatal("an unreadable snapshot returned no error — the archive was skipped, " +
+			"so every run recorded before the compaction reads as if it never happened")
+	}
+	if !strings.Contains(err.Error(), "snapshot") {
+		t.Errorf("the error must name the snapshot, got %v", err)
 	}
 }

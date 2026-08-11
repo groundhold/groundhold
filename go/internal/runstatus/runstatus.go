@@ -11,6 +11,7 @@ package runstatus
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"sort"
 
@@ -23,6 +24,11 @@ type RunEvent struct {
 	Type  string
 	Clock int // parsed occurredAt (the coordination clock)
 	Body  map[string]any
+	// Caps is event.capabilities. D676: leases are PER-CAPABILITY, and the fold
+	// treated any run's `lease.released` as ending the queried run's — because
+	// apply writes that event with a nil body, so it carries no handle to match on.
+	// The capability set is what distinguishes them.
+	Caps []string
 }
 
 // State is the closed run-state set (D229). No `queued`: the ledger cannot prove
@@ -75,35 +81,113 @@ var codeFor = map[State]perr.Code{
 	StateFailed:         perr.RunFailed,
 }
 
-// ReadEvents parses a ledger JSONL file into run events (type + clock + body).
+// ReadEvents parses a ledger JSONL file into run events (type + clock + body),
+// INCLUDING the events a compaction moved into the archives.
+//
+// D672: it read the live file alone. After a `snapshot` every run vanished — a
+// COMPLETED deploy read `unknown`, `runs` returned an empty list, and `wait`
+// blocked to its timeout and exited 3, the reconcile-required code whose published
+// remediation is `groundhold resume`. `ListRuns`'s own doc-comment claims a run
+// whose start event was compacted "reads unknown and sorts last, never dropped";
+// it was dropped. Compaction is the routine operation this design recommends.
+//
+// The note is returned rather than raised: a pruned archive (spec §10 leaves that
+// to the operator) must not make a reporting verb permanently unusable. The caller
+// surfaces it, so an incomplete answer says why.
 func ReadEvents(path string) ([]RunEvent, error) {
+	evs, _, err := ReadEventsFull(path)
+	return evs, err
+}
+
+func ReadEventsFull(path string) ([]RunEvent, string, error) {
+	var pre []RunEvent
+	note := ""
+	snap, snapState, serr := ledger.SnapshotStateOf(path)
+	if snapState == ledger.SnapshotUnreadable {
+		// D708: an unreadable sidecar meant the archive was silently not read, so a
+		// run that lives in it answered "no such run" — an absence, from a file we
+		// could not open. `runs`, `status` and `wait` all read through here.
+		return nil, "", fmt.Errorf("the snapshot sidecar beside %s could not be read "+
+			"(%v) — runs recorded before the compaction cannot be listed, and their "+
+			"absence would read as if they never happened", path, serr)
+	}
+	if snapState == ledger.SnapshotPresent && snap.BaseEvents > 0 {
+		lines, n, aerr := ledger.ArchivedLines(path, snap.BaseEvents)
+		if aerr != nil {
+			return nil, "", aerr
+		}
+		note = n
+		for i, line := range lines {
+			ev, perr := parseRunEvent(line, i+1)
+			if perr != nil {
+				return nil, "", perr
+			}
+			pre = append(pre, ev)
+		}
+	}
+	evs, err := readTail(path)
+	if err != nil {
+		return nil, "", err
+	}
+	return append(pre, evs...), note, nil
+}
+
+func readTail(path string) ([]RunEvent, error) {
 	f, err := os.Open(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// D617: a wrong path is not a damaged history.
+			return nil, fmt.Errorf("%w at %s", ledger.ErrNoLedger, path)
+		}
 		return nil, err
 	}
 	defer f.Close()
 	var out []RunEvent
+	n := 0
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 1024*1024), 8*1024*1024)
 	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
+		line := string(sc.Bytes())
+		n++
+		if line == "" {
 			continue
 		}
-		var doc struct {
-			Event struct {
-				Type       string         `json:"type"`
-				OccurredAt string         `json:"occurredAt"`
-				Body       map[string]any `json:"body"`
-			} `json:"event"`
+		ev, perr := parseRunEvent(line, n)
+		if perr != nil {
+			return nil, perr
 		}
-		if err := json.Unmarshal(line, &doc); err != nil {
-			return nil, err
-		}
-		clk, _ := ledger.ParseTs(doc.Event.OccurredAt)
-		out = append(out, RunEvent{Type: doc.Event.Type, Clock: clk, Body: doc.Event.Body})
+		out = append(out, ev)
 	}
 	return out, sc.Err()
+}
+
+// parseRunEvent applies the D611 rules to ONE line — a line that parses as JSON is
+// not therefore an event, and an unreadable occurredAt would time the run by the
+// epoch. Shared so the archived events are held to exactly what the tail is.
+func parseRunEvent(line string, n int) (RunEvent, error) {
+	var doc struct {
+		Event struct {
+			Type         string         `json:"type"`
+			OccurredAt   string         `json:"occurredAt"`
+			Body         map[string]any `json:"body"`
+			Capabilities []string       `json:"capabilities"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal([]byte(line), &doc); err != nil {
+		return RunEvent{}, fmt.Errorf("ledger line %d: %w", n, err)
+	}
+	if doc.Event.Type == "" {
+		return RunEvent{}, fmt.Errorf("ledger line %d: event.type is missing — "+
+			"this line is not a ledger event", n)
+	}
+	clk, terr := ledger.ParseTs(doc.Event.OccurredAt)
+	if terr != nil {
+		return RunEvent{}, fmt.Errorf("ledger line %d: event.occurredAt is unreadable "+
+			"(%q) — run state derived from it would be timed by the epoch", n,
+			doc.Event.OccurredAt)
+	}
+	return RunEvent{Type: doc.Event.Type, Clock: clk, Body: doc.Event.Body,
+		Caps: doc.Event.Capabilities}, nil
 }
 
 func str(m map[string]any, k string) string { s, _ := m[k].(string); return s }
@@ -135,6 +219,7 @@ func DeriveRunStatus(evs []RunEvent, handle string, nowClock int) RunStatus {
 		started, finished, failed bool
 		leaseAcqClock, leaseTTL   int
 		leaseAcquired, leaseEnded bool
+		leaseCaps                 map[string]bool
 		phase                     string
 	)
 	pending := map[string]bool{} // operationId -> unsettled
@@ -152,12 +237,19 @@ func DeriveRunStatus(evs []RunEvent, handle string, nowClock int) RunStatus {
 			rs.StartedAt = fmtClock(e.Clock)
 		case "converge.phase.entered":
 			phase = str(e.Body, "phase")
+		// D656: the LAST terminal event wins, not `finished`. A handle that named
+		// two runs (the candidate was not in it) produced finished{0} followed by
+		// failed{2}, and preferring `finished` reported the earlier SUCCESS with the
+		// later run's exit code — `wait` returned 0 for a deploy that was refused.
+		// The handle is fixed, so this state is no longer reachable that way; a fold
+		// that resolves a contradiction by choosing the good news is worth fixing
+		// anyway, because the next way to reach it will not announce itself.
 		case "apply.finished", "converge.finished":
-			finished = true
+			finished, failed = true, false
 			rs.ConcludedAt = fmtClock(e.Clock)
 			rs.ExitCode = intOf(e.Body, "exitCode")
 		case "apply.failed", "converge.failed":
-			failed = true
+			failed, finished = true, false
 			rs.ConcludedAt = fmtClock(e.Clock)
 			rs.ExitCode = intOf(e.Body, "exitCode")
 			if p := str(e.Body, "phase"); p != "" {
@@ -166,18 +258,33 @@ func DeriveRunStatus(evs []RunEvent, handle string, nowClock int) RunStatus {
 		case "lease.acquired":
 			if handleOf(e) == handle {
 				leaseAcquired, leaseAcqClock, leaseTTL = true, e.Clock, intOf(e.Body, "ttlSeconds")
+				leaseCaps = map[string]bool{}
+				for _, c := range e.Caps {
+					leaseCaps[c] = true
+				}
 			}
 		case "lease.released":
-			// leases are serialized; a release at/after our acquire ends ours.
-			if leaseAcquired && e.Clock >= leaseAcqClock {
+			// D676: this said "leases are serialized; a release at/after our acquire
+			// ends ours". They are not — a lease covers CAPABILITIES, and two runs
+			// over disjoint capabilities hold live leases at the same time. Measured:
+			// two converges on `assets` and `db` in one ledger, both exit 0, and the
+			// moment `assets` released, the still-running `db` run read `stalled`
+			// with the remediation "the writer's lease lapsed with no outcome — run
+			// `groundhold resume`".
+			//
+			// apply writes lease.released with a NIL body, so there is no handle to
+			// match on; the capability set is the discriminator that exists.
+			if leaseAcquired && e.Clock >= leaseAcqClock && sharesCap(leaseCaps, e.Caps) {
 				leaseEnded = true
 			}
 		case "operation.receipt":
 			op := str(e.Body, "operationId")
-			switch str(e.Body, "status") {
-			case "pending":
+			// D641: the rule lives in the ledger, which is what `resume` acts on.
+			// This fold used to answer `unknown` the other way, so `status` called a
+			// run with a possibly-created resource "stalled — no outcome".
+			if ledger.ReceiptLeavesIntentPending(str(e.Body, "status")) {
 				pending[op] = true
-			default: // succeeded/failed/unknown-with-id conclude the intent
+			} else {
 				delete(pending, op)
 			}
 		}
@@ -203,10 +310,13 @@ func DeriveRunStatus(evs []RunEvent, handle string, nowClock int) RunStatus {
 		rs.State = StateRunning
 	case len(pending) > 0:
 		rs.State = StateNeedsReconcile
-		rs.Remediation = "run `groundhold resume` — an in-flight receipt is unsettled"
+		rs.Remediation = "run `groundhold resume <contract.yaml> --ledger <file> " +
+			"--provider <p> " + perr.AtNow + "` — an in-flight receipt is unsettled"
 	default:
 		rs.State = StateStalled
-		rs.Remediation = "the writer's lease lapsed with no outcome — run `groundhold resume`"
+		rs.Remediation = "the writer's lease lapsed with no outcome — run " +
+			"`groundhold resume <contract.yaml> --ledger <file> --provider <p> " +
+			perr.AtNow + "`"
 	}
 	rs.Code = codeFor[rs.State]
 	return rs
@@ -288,3 +398,19 @@ func ListRuns(evs []RunEvent, nowClock int, registryHandles []string) []RunStatu
 }
 
 func fmtClock(clk int) string { return ledger.FormatTs(clk) }
+
+// sharesCap reports whether a lease event touches any capability this run's lease
+// covers. An event with no capability list is treated as OURS: the ledger requires
+// a non-empty list, so an empty one means a reader that could not see it, and
+// "cannot tell" must not silently mean "not mine" for a liveness signal (D676).
+func sharesCap(mine map[string]bool, theirs []string) bool {
+	if len(mine) == 0 || len(theirs) == 0 {
+		return true
+	}
+	for _, c := range theirs {
+		if mine[c] {
+			return true
+		}
+	}
+	return false
+}

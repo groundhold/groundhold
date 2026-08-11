@@ -28,6 +28,13 @@ attributes:
       record points a name at an IPv4 address; a CNAME aliases it to another
       name; a TXT carries verification/policy text. The kind constrains what the
       target legitimately is, so it is the first governed fact about a record.
+    # D538: derived by READING the drivers, not from memory — a mapping written
+    # from recall would authorise a wrong answer, which is exactly how D534 was
+    # settled against a driver.
+    mappings:
+      aws.route53record: the record set's Type (ListResourceRecordSets)
+      azure.dnsrecord: the record set's type segment in the ARM resource path
+      gcp.clouddnsrecord: the ResourceRecordSet's type
 
   dns.target:
     kind: string
@@ -36,6 +43,14 @@ attributes:
       the exchange host (MX), the text payload (TXT). The correctness fact an
       organization governs: does the name resolve to where it should. Cloudflare
       calls this the record `content`; Route 53 the resource record value.
+    mappings:
+      aws.route53record: >
+        ResourceRecords[0].Value — the FIRST value only; a multi-value record set
+        is not represented (the driver reads one target)
+      azure.dnsrecord: >
+        per type: ARecords[0].ipv4Address, AAAARecords[0].ipv6Address,
+        CNAMERecord.cname — again the first value only
+      gcp.clouddnsrecord: rrdatas[0] — the first value only
 
   dns.proxied:
     kind: bool
@@ -46,10 +61,19 @@ attributes:
       then directly reachable and exposed. The protection / exposure posture an org
       governs on an edge provider. Only proxiable record types (A/AAAA/CNAME) can
       carry it; a TXT/MX is always direct.
+    mappings:
+      # NOT observable on any of the three clouds, and the drivers say so rather
+      # than defaulting: each emits a diagnostic naming it a Cloudflare edge
+      # concept with no Route 53 / Azure DNS / Cloud DNS equivalent.
+      cloudflare.dnsrecord: the record's `proxied` flag (the orange-cloud posture)
 
   service.managed:
     kind: bool
     description: A managed cloud DNS record vs a self-operated zone file (bind/knot).
+    mappings:
+      aws.route53record: const true — a record set groundhold authored
+      azure.dnsrecord: const true
+      gcp.clouddnsrecord: const true
 
 # Deliberately absent in v0.1 (operational noise / identity, not governance semantics):
 #   - TTL — cache lifetime tuning, not a governed correctness fact

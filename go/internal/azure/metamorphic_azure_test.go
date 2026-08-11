@@ -103,11 +103,10 @@ func TestMetamorphicFlexRoundTrip(t *testing.T) {
 		name      string
 		public    bool
 		avail     string
-		rpo       string
 		wantClass string
 	}{
-		{"private-regional", false, "regional", "7d", "regional"},
-		{"public-zonal", true, "zonal", "3d", "zonal"},
+		{"private-regional", false, "regional", "regional"},
+		{"public-zonal", true, "zonal", "zonal"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -120,7 +119,6 @@ func TestMetamorphicFlexRoundTrip(t *testing.T) {
 				"network.publicExposure": c.public,
 				"encryption.atRest":      true,
 				"encryption.inTransit":   true,
-				"recovery.rpo":           c.rpo,
 				"availability.class":     c.avail,
 				"service.managed":        true,
 			}
@@ -138,8 +136,13 @@ func TestMetamorphicFlexRoundTrip(t *testing.T) {
 			if got["engine.protocol"] != "postgresql/16" {
 				t.Errorf("engine.protocol not reflected: %+v", got)
 			}
-			if got["recovery.rpo"] != c.rpo {
-				t.Errorf("rpo %q not reflected: %+v", c.rpo, got)
+			// D796: recovery.rpo is deliberately NOT part of this round trip. It used
+			// to be, and the round trip PASSED — writing "7d" and reading "7d" back
+			// proved the loop was closed, not that either end meant a data-loss window.
+			// A metamorphic test can only ever prove the loop; the meaning has to be
+			// checked against the world.
+			if _, ok := got["recovery.rpo"]; ok {
+				t.Errorf("recovery.rpo observed from configuration: %+v", got)
 			}
 		})
 	}
@@ -469,16 +472,12 @@ func metamorphicBlobServer(t *testing.T) *httptest.Server {
 					var doc struct {
 						Sku        struct{ Name string } `json:"sku"`
 						Properties struct {
-							AllowBlobPublicAccess bool `json:"allowBlobPublicAccess"`
+							PublicNetworkAccess string `json:"publicNetworkAccess"`
 						} `json:"properties"`
 					}
 					_ = json.Unmarshal(body, &doc)
 					sku = doc.Sku.Name
-					if doc.Properties.AllowBlobPublicAccess {
-						public = "true"
-					} else {
-						public = "false"
-					}
+					public = doc.Properties.PublicNetworkAccess // "Enabled" / "Disabled" (D989)
 				}
 				w.WriteHeader(200)
 				_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded"}}`))
@@ -488,8 +487,8 @@ func metamorphicBlobServer(t *testing.T) *httptest.Server {
 					"tags":     map[string]any{"groundhold-capability": "assets", "groundhold-environment": "prod"},
 					"sku":      map[string]any{"name": sku},
 					"properties": map[string]any{
-						"provisioningState":     "Succeeded",
-						"allowBlobPublicAccess": public == "true",
+						"provisioningState":   "Succeeded",
+						"publicNetworkAccess": public,
 					},
 				})
 				_, _ = w.Write(b)
@@ -589,7 +588,9 @@ func TestMetamorphicRedisAzureRoundTrip(t *testing.T) {
 		wantClass string
 	}{
 		{"zonal-private-tls", "zonal", false, true, "zonal"},
-		{"regional-public-notls", "regional", true, false, "regional"},
+		// D946: regional (zone-redundant) is refused for Azure Redis, so the round-trip
+		// varies public/tls under the valid zonal class instead.
+		{"zonal-public-notls", "zonal", true, false, "zonal"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

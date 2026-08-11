@@ -201,6 +201,13 @@ func BuildMIGCreate(project, environment, capability string,
 		return MIGPlan{}, fmt.Errorf(
 			"implementation.instance_template %q is not an instance-template reference", p.InstanceTemplate)
 	}
+	// D898: a BARE template name passes the regex, but GCP's instanceGroupManagers.insert
+	// rejects a bare name ("Invalid value for field 'resource.instanceTemplate' ... The URL
+	// is malformed") — the field needs a partial URL. Qualify a bare name to the
+	// project-relative form GCP accepts, rather than sending a value the platform refuses.
+	if !strings.Contains(p.InstanceTemplate, "/") {
+		p.InstanceTemplate = "global/instanceTemplates/" + p.InstanceTemplate
+	}
 
 	// An autoscaler needs tuning the vocabulary deliberately excludes (D363), so
 	// the operator supplies it. Inventing a target would attach a control loop
@@ -281,7 +288,13 @@ func classifyMIGChange(path string) (string, string) {
 	case "availability.class":
 		return "immutable", "zonal and regional groups are different resources at different scopes, not two settings of one — changing the class means a new group"
 	case "network.publicExposure":
-		return "immutable", "public addressing lives in the instance template, which groundhold does not author — change the template and replace the group, so the running fleet is not silently re-addressed"
+		// D822: same correction as the Auto Scaling twin. The sentence is true and the
+		// verdict is not: instanceGroupManagers.setInstanceTemplate swaps the template on a
+		// LIVE group, so no replacement is required.
+		return "unsupported", "in-place exposure change is not wired for managed instance " +
+			"groups in this slice — public addressing lives in the instance template, which " +
+			"groundhold does not author, and Compute Engine does accept a new template on a " +
+			"live group (instanceGroupManagers.setInstanceTemplate)"
 	case "service.managed":
 		return "unsupported", "platform/projection property — nothing to patch"
 	}

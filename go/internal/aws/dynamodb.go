@@ -96,6 +96,26 @@ func BuildDynamoDB(environment, capability string,
 	return p, nil
 }
 
+// classifyDynamoDBChange (D46, D1004): backup.pointInTimeRecovery and
+// deletion.protection change on a LIVE table (UpdateContinuousBackups / UpdateTable),
+// so a change to either is a PATCH, not a replacement. Without this, dynamodb had no
+// explicit ClassifyChange and fell to the default (replacement) — so disabling PITR on
+// a stateful table read as "replace the table (data loss), consent-required", a false
+// claim that a destructive rebuild was the only path (field: acme). A table's region
+// and its immutable schema (key, billing) stay a replacement.
+func classifyDynamoDBChange(path string) (string, string) {
+	switch path {
+	case "backup.pointInTimeRecovery":
+		return "mutable", "PITR toggled in place via UpdateContinuousBackups (no replacement)"
+	case "deletion.protection":
+		return "mutable", "deletion protection toggled in place via UpdateTable (no replacement)"
+	case "location.region":
+		return "immutable", "a DynamoDB table's region is fixed at creation — a change is a replacement"
+	default:
+		return "immutable", "a DynamoDB table's key schema/billing are fixed at creation — a change is a replacement"
+	}
+}
+
 // createBody is the CreateTable request body. A single string partition key "pk"
 // and on-demand billing are the reference defaults (schema/throughput are impl).
 func (p DynamoPlan) createBody(capability, environment string) map[string]any {

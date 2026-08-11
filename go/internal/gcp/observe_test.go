@@ -143,6 +143,19 @@ func TestMapInstanceHonesty(t *testing.T) {
 		t.Error("daily backups must bound rpo at 24h")
 	}
 
+	// D950: a MySQL instance expresses PITR as binaryLogEnabled, not
+	// pointInTimeRecoveryEnabled. Observe must read it as PITR (defer the value to a
+	// probe) rather than fabricate a plain 24h window.
+	inst = parse(t, `{"databaseVersion": "MYSQL_8_0", "region": "x",
+	  "settings": {"backupConfiguration": {"enabled": true,
+	  "binaryLogEnabled": true}}}`)
+	got, _ = MapInstance(inst)
+	for _, o := range got {
+		if o.Path == "recovery.rpo" {
+			t.Errorf("MySQL binaryLogEnabled is PITR — rpo value needs a probe, got %+v", o)
+		}
+	}
+
 	// unknown enum: skip with diagnostic, never crash
 	inst = parse(t, `{"databaseVersion": "SQLSERVER_2022_STANDARD",
 	  "region": "x", "settings": {"availabilityType":

@@ -16,19 +16,45 @@ import (
 // service that errors becomes a diagnostic, never a hard failure that
 // hides another's resources.
 func (d *Driver) List(region string) ([]provider.Discovered, []string, error) {
-	var out []provider.Discovered
-	var diags []string
-	reg := d.serviceDiscoverers()
-	for _, tok := range d.DiscoverableServices() { // sorted, deterministic
-		found, ds, err := reg[tok](region)
-		if err != nil {
-			diags = append(diags, err.Error())
-			continue
-		}
-		out = append(out, found...)
-		diags = append(diags, ds...)
+	// D621: if there are no credentials, NOTHING was swept — and a sweep that never
+	// happened must not be handed back as an empty estate. Every service lister
+	// failed the same way and appended a diagnostic, so `discover --provider gcp`
+	// exited 0 with `"resources": []` and 43 lines of "no usable GCP credentials".
+	// A script branching on the exit status read "the project is empty"; the truth
+	// was "GCP was never contacted". AWS and Azure already error out of List on their
+	// equivalents (a missing region, a missing subscription); this makes the third
+	// answer the same way, once, before it can be flattened into prose.
+	if _, err := d.auth.token(); err != nil {
+		return nil, nil, fmt.Errorf("gcp discovery cannot reach the provider: %w", err)
 	}
-	return out, diags, nil
+	reg := d.serviceDiscoverers()
+	// D642: shared sweep loop — a service that fails is a diagnostic, but ALL of
+	// them failing means the provider was never reached.
+	return provider.SweepAll(d.DiscoverableServices(), // sorted, deterministic
+		func(tok string) ([]provider.Discovered, []string, error) { return reg[tok](region) }, d.trunc)
+}
+
+// sweepEachLocation is the per-location fan-out that several sweeps had written
+// out identically: a given region is swept directly, an empty region enumerates the
+// project's locations first, and a location that fails to LIST is a diagnostic so
+// one bad location cannot hide another's resources.
+//
+// D642: those copies had no floor. On a dead network every location failed, every
+// failure became a diagnostic, and the sweep returned "no artifact registries / no
+// KMS keys / no backup plans" with a nil error — which List then counted as a
+// SUCCESSFUL sweep, so even the all-failed floor above never fired. SweepAll
+// carries the rule: all of them failing means nothing was read.
+func (d *Driver) sweepEachLocation(region string, locs func() ([]string, error),
+	one func(loc string) ([]provider.Discovered, []string, error)) ([]provider.Discovered, []string, error) {
+	locations := []string{region}
+	if region == "" {
+		got, err := locs()
+		if err != nil {
+			return nil, nil, err
+		}
+		locations = got
+	}
+	return provider.SweepAll(locations, one, d.trunc)
 }
 
 // serviceDiscoverers maps each SERVICE token (the D76 dispatch key) to its
@@ -92,22 +118,28 @@ func (d *Driver) NonListableServices() map[string]string {
 // reusing the same reverse map observe uses. Buckets are global with a
 // location; region, when given, filters on that location.
 func (d *Driver) discoverGCS(region string) ([]provider.Discovered, []string, error) {
-	status, body, err := d.call("GET", d.gcsBase()+"/b?project="+d.Project, nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("buckets.list: %v", err)
-	}
-	if status != http.StatusOK {
-		return nil, nil, fmt.Errorf("buckets.list: HTTP %d", status)
+	// D814: FOLLOW the pages. The URL already carries a query, and the shared loop
+	// appends its token with the right separator.
+	type gcsBucket struct {
+		Name     string `json:"name"`
+		Location string `json:"location"`
 	}
 	var resp struct {
-		Items []struct {
-			Name     string `json:"name"`
-			Location string `json:"location"`
-		} `json:"items"`
+		Items []gcsBucket `json:"items"`
 	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, nil, readBody("buckets.list", status)
+	var allBuckets []gcsBucket
+	if err := d.listAllPages("buckets.list", d.gcsBase()+"/b?project="+d.Project,
+		func(body []byte) error {
+			resp.Items = nil
+			if err := json.Unmarshal(body, &resp); err != nil {
+				return readBody("buckets.list", http.StatusOK)
+			}
+			allBuckets = append(allBuckets, resp.Items...)
+			return nil
+		}); err != nil {
+		return nil, nil, err
 	}
+	resp.Items = allBuckets
 	var out []provider.Discovered
 	var diags []string
 	for _, b := range resp.Items {
@@ -129,7 +161,7 @@ func (d *Driver) discoverGCS(region string) ([]provider.Discovered, []string, er
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.storage.object",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -147,21 +179,27 @@ func leafName(name string) string {
 // discoverPubSubTopics enumerates Pub/Sub topics as
 // capability.messaging.topic. Topics are global, so region does not filter.
 func (d *Driver) discoverPubSubTopics(region string) ([]provider.Discovered, []string, error) {
-	status, body, err := d.call("GET", d.pubsubBase()+"/projects/"+d.Project+"/topics", nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("topics.list: %v", err)
-	}
-	if status != http.StatusOK {
-		return nil, nil, fmt.Errorf("topics.list: HTTP %d", status)
+	// D814: FOLLOW the pages (the shared loop, D813).
+	type gcpTopic struct {
+		Name string `json:"name"`
 	}
 	var resp struct {
-		Topics []struct {
-			Name string `json:"name"`
-		} `json:"topics"`
+		Topics []gcpTopic `json:"topics"`
 	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, nil, readBody("topics.list", status)
+	var allTopics []gcpTopic
+	if err := d.listAllPages("topics.list",
+		d.pubsubBase()+"/projects/"+d.Project+"/topics",
+		func(body []byte) error {
+			resp.Topics = nil
+			if err := json.Unmarshal(body, &resp); err != nil {
+				return readBody("topics.list", http.StatusOK)
+			}
+			allTopics = append(allTopics, resp.Topics...)
+			return nil
+		}); err != nil {
+		return nil, nil, err
 	}
+	resp.Topics = allTopics
 	var out []provider.Discovered
 	var diags []string
 	for _, t := range resp.Topics {
@@ -181,7 +219,7 @@ func (d *Driver) discoverPubSubTopics(region string) ([]provider.Discovered, []s
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.messaging.topic",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -225,7 +263,7 @@ func (d *Driver) discoverPubSubQueues(region string) ([]provider.Discovered, []s
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.messaging.queue",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -272,7 +310,7 @@ func (d *Driver) discoverMemorystore(region string) ([]provider.Discovered, []st
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.cache.keyvalue",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -336,7 +374,7 @@ func (d *Driver) discoverFirestore(region string) ([]provider.Discovered, []stri
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.database.nosql",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -400,7 +438,7 @@ func (d *Driver) discoverCloudRun(region string) ([]provider.Discovered, []strin
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.workload.container",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -458,7 +496,7 @@ func (d *Driver) discoverVPC(region string) ([]provider.Discovered, []string, er
 			out = append(out, provider.Discovered{
 				ProviderID:   pid,
 				ResourceType: "capability.network.private",
-				Observations: obs,
+				Observations: provider.WithoutAbsence(obs),
 			})
 		}
 	}
@@ -472,25 +510,36 @@ func (d *Driver) discoverVPC(region string) ([]provider.Discovered, []string, er
 // imported account under a foreign domain would not reconstruct to a readable
 // providerId, so it is skipped rather than misreported.
 func (d *Driver) discoverServiceAccounts(region string) ([]provider.Discovered, []string, error) {
-	status, body, err := d.call("GET", fmt.Sprintf(
-		"%s/projects/%s/serviceAccounts", d.iamBase(), d.Project), nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("serviceAccounts.list: %v", err)
-	}
-	if status != http.StatusOK {
-		return nil, nil, fmt.Errorf("serviceAccounts.list: HTTP %d", status)
+	// D813: FOLLOW the pages. serviceAccounts.list answers 100 at a time.
+	type gcpSA struct {
+		Email string `json:"email"`
 	}
 	var resp struct {
-		Accounts []struct {
-			Email string `json:"email"`
-		} `json:"accounts"`
+		Accounts []gcpSA `json:"accounts"`
 	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, nil, readBody("serviceAccounts.list", status)
+	var accounts []gcpSA
+	if err := d.listAllPages("serviceAccounts.list",
+		fmt.Sprintf("%s/projects/%s/serviceAccounts", d.iamBase(), d.Project),
+		func(body []byte) error {
+			resp.Accounts = nil
+			if err := json.Unmarshal(body, &resp); err != nil {
+				return readBody("serviceAccounts.list", http.StatusOK)
+			}
+			accounts = append(accounts, resp.Accounts...)
+			return nil
+		}); err != nil {
+		return nil, nil, err
 	}
+	resp.Accounts = accounts
 	suffix := "@" + d.Project + ".iam.gserviceaccount.com"
 	var out []provider.Discovered
 	var diags []string
+	if len(resp.Accounts) > 0 {
+		diags = append(diags, "trust.principals not read for discovered service accounts: "+
+			"the sweep does not fetch each account's IAM policy (a second call per account). "+
+			"An absent trust.principals is not an empty one — observe an adopted account to "+
+			"learn who may assume it (D868).")
+	}
 	for _, a := range resp.Accounts {
 		if !strings.HasSuffix(a.Email, suffix) {
 			continue // foreign / default-domain account — not addressable by our providerId
@@ -500,7 +549,11 @@ func (d *Driver) discoverServiceAccounts(region string) ([]provider.Discovered, 
 			continue
 		}
 		pid := gsaProviderID(d.Project, accountID)
-		obs, odiags, err := d.observeGServiceAccount("", pid)
+		// D868: the sweep does NOT read each account's IAM policy — that is a second call
+		// per account, and a crawl that doubles its calls spends the pace budget (D141) on
+		// a question discovery does not ask. An adopted account gets its trust read by the
+		// first observe.
+		obs, odiags, err := d.observeGServiceAccountTrust("", pid, false)
 		if err != nil {
 			diags = append(diags, accountID+": "+err.Error())
 			continue
@@ -511,7 +564,7 @@ func (d *Driver) discoverServiceAccounts(region string) ([]provider.Discovered, 
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.identity.serviceaccount",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -522,22 +575,27 @@ func (d *Driver) discoverServiceAccounts(region string) ([]provider.Discovered, 
 // full role for its permission set — the list view omits it). Custom roles are
 // project-global; region does not filter.
 func (d *Driver) discoverCustomRoles(region string) ([]provider.Discovered, []string, error) {
-	status, body, err := d.call("GET", fmt.Sprintf(
-		"%s/projects/%s/roles", d.iamBase(), d.Project), nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("roles.list: %v", err)
-	}
-	if status != http.StatusOK {
-		return nil, nil, fmt.Errorf("roles.list: HTTP %d", status)
+	// D814: FOLLOW the pages (the shared loop, D813).
+	type gcpRole struct {
+		Name string `json:"name"`
 	}
 	var resp struct {
-		Roles []struct {
-			Name string `json:"name"`
-		} `json:"roles"`
+		Roles []gcpRole `json:"roles"`
 	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, nil, readBody("roles.list", status)
+	var allRoles []gcpRole
+	if err := d.listAllPages("roles.list",
+		fmt.Sprintf("%s/projects/%s/roles", d.iamBase(), d.Project),
+		func(body []byte) error {
+			resp.Roles = nil
+			if err := json.Unmarshal(body, &resp); err != nil {
+				return readBody("roles.list", http.StatusOK)
+			}
+			allRoles = append(allRoles, resp.Roles...)
+			return nil
+		}); err != nil {
+		return nil, nil, err
 	}
+	resp.Roles = allRoles
 	var out []provider.Discovered
 	var diags []string
 	for _, r := range resp.Roles {
@@ -557,7 +615,7 @@ func (d *Driver) discoverCustomRoles(region string) ([]provider.Discovered, []st
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.authorization.role",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -589,7 +647,7 @@ func (d *Driver) discoverIAMBindings(region string) ([]provider.Discovered, []st
 			out = append(out, provider.Discovered{
 				ProviderID:   pid,
 				ResourceType: "capability.authorization.grant",
-				Observations: obs,
+				Observations: provider.WithoutAbsence(obs),
 			})
 		}
 	}
@@ -603,22 +661,27 @@ func (d *Driver) discoverIAMBindings(region string) ([]provider.Discovered, []st
 // project-global; region does not filter (residency, when single-region, is
 // reported by the observe map itself).
 func (d *Driver) discoverSecrets(region string) ([]provider.Discovered, []string, error) {
-	status, body, err := d.call("GET", fmt.Sprintf(
-		"%s/projects/%s/secrets", d.secretBase(), d.Project), nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("secrets.list: %v", err)
-	}
-	if status != http.StatusOK {
-		return nil, nil, fmt.Errorf("secrets.list: HTTP %d", status)
+	// D814: FOLLOW the pages (the shared loop, D813).
+	type gcpSecret struct {
+		Name string `json:"name"`
 	}
 	var resp struct {
-		Secrets []struct {
-			Name string `json:"name"`
-		} `json:"secrets"`
+		Secrets []gcpSecret `json:"secrets"`
 	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, nil, readBody("secrets.list", status)
+	var allSecrets []gcpSecret
+	if err := d.listAllPages("secrets.list",
+		fmt.Sprintf("%s/projects/%s/secrets", d.secretBase(), d.Project),
+		func(body []byte) error {
+			resp.Secrets = nil
+			if err := json.Unmarshal(body, &resp); err != nil {
+				return readBody("secrets.list", http.StatusOK)
+			}
+			allSecrets = append(allSecrets, resp.Secrets...)
+			return nil
+		}); err != nil {
+		return nil, nil, err
 	}
+	resp.Secrets = allSecrets
 	var out []provider.Discovered
 	var diags []string
 	for _, s := range resp.Secrets {
@@ -638,7 +701,7 @@ func (d *Driver) discoverSecrets(region string) ([]provider.Discovered, []string
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.secret",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -683,7 +746,7 @@ func (d *Driver) discoverAlertPolicies(region string) ([]provider.Discovered, []
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.monitoring.alert",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -728,7 +791,7 @@ func (d *Driver) discoverUptimeChecks(region string) ([]provider.Discovered, []s
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.monitoring.uptime",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -769,58 +832,49 @@ func (d *Driver) arLocations() ([]string, error) {
 // list has no cross-location wildcard). A per-location list failure is a
 // diagnostic — it never hides the repositories another location did return.
 func (d *Driver) discoverArtifactRegistries(region string) ([]provider.Discovered, []string, error) {
-	var locations []string
-	var diags []string
-	if region != "" {
-		locations = []string{region}
-	} else {
-		locs, err := d.arLocations()
-		if err != nil {
-			return nil, nil, err
-		}
-		locations = locs
-	}
-	var out []provider.Discovered
-	for _, loc := range locations {
-		status, body, err := d.call("GET", fmt.Sprintf(
-			"%s/projects/%s/locations/%s/repositories", d.arBase(), d.Project, loc), nil)
-		if err != nil {
-			diags = append(diags, "repositories.list "+loc+": "+err.Error())
-			continue
-		}
-		if status != http.StatusOK {
-			diags = append(diags, fmt.Sprintf("repositories.list %s: HTTP %d", loc, status))
-			continue
-		}
-		var resp struct {
-			Repositories []struct {
-				Name string `json:"name"`
-			} `json:"repositories"`
-		}
-		if err := json.Unmarshal(body, &resp); err != nil {
-			diags = append(diags, loc+": "+readBody("repositories.list", status).Error())
-			continue
-		}
-		for _, r := range resp.Repositories {
-			repoID := leafName(r.Name)
-			if repoID == "" {
-				continue
-			}
-			pid := garProviderID(d.Project, loc, repoID)
-			obs, odiags, err := d.observeARRepo("", pid)
+	return d.sweepEachLocation(region, d.arLocations,
+		func(loc string) ([]provider.Discovered, []string, error) {
+			var out []provider.Discovered
+			var diags []string
+			status, body, err := d.call("GET", fmt.Sprintf(
+				"%s/projects/%s/locations/%s/repositories", d.arBase(), d.Project, loc), nil)
 			if err != nil {
-				diags = append(diags, repoID+": "+err.Error())
-				continue
+				// D642: the LIST failed — this location was not read.
+				return nil, nil, fmt.Errorf("%s", "repositories.list "+loc+": "+err.Error())
 			}
-			for _, dg := range odiags {
-				diags = append(diags, repoID+": "+dg)
+			if status != http.StatusOK {
+				// D642: the LIST failed — this location was not read.
+				return nil, nil, fmt.Errorf("%s", fmt.Sprintf("repositories.list %s: HTTP %d", loc, status))
 			}
-			out = append(out, provider.Discovered{
-				ProviderID:   pid,
-				ResourceType: "capability.registry.image",
-				Observations: obs,
-			})
-		}
-	}
-	return out, diags, nil
+			var resp struct {
+				Repositories []struct {
+					Name string `json:"name"`
+				} `json:"repositories"`
+			}
+			if err := json.Unmarshal(body, &resp); err != nil {
+				// D642: the LIST failed — this location was not read.
+				return nil, nil, fmt.Errorf("%s", loc+": "+readBody("repositories.list", status).Error())
+			}
+			for _, r := range resp.Repositories {
+				repoID := leafName(r.Name)
+				if repoID == "" {
+					continue
+				}
+				pid := garProviderID(d.Project, loc, repoID)
+				obs, odiags, err := d.observeARRepo("", pid)
+				if err != nil {
+					diags = append(diags, repoID+": "+err.Error())
+					continue
+				}
+				for _, dg := range odiags {
+					diags = append(diags, repoID+": "+dg)
+				}
+				out = append(out, provider.Discovered{
+					ProviderID:   pid,
+					ResourceType: "capability.registry.image",
+					Observations: provider.WithoutAbsence(obs),
+				})
+			}
+			return out, diags, nil
+		})
 }

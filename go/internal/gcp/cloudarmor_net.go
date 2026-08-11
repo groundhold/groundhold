@@ -81,7 +81,11 @@ func (d *Driver) observeArmor(capability, providerID string) ([]provider.Observa
 		return nil, nil, fmt.Errorf("securityPolicies.get: %v", err)
 	}
 	if status == http.StatusNotFound {
-		return nil, []string{"security policy not found — nothing to observe"}, nil
+		// F-LC3 (D521): a BOUND resource the API says is GONE. A diagnostic
+		// alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"security policy not found — bound resource is gone (will re-create)"}, nil
 	}
 	if status != http.StatusOK {
 		return nil, nil, fmt.Errorf("securityPolicies.get: HTTP %d", status)
@@ -119,6 +123,8 @@ func (d *Driver) observeArmor(capability, providerID string) ([]provider.Observa
 		mode = "detection"
 	}
 	return []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		{Path: "policy.mode", Value: mode, Derivation: "measured"},
 		{Path: "managed.ruleset", Value: managed, Derivation: "measured"},

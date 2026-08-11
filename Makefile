@@ -1,4 +1,4 @@
-.PHONY: check validate verify plan conformance conformance-cli conformance-go examples vet differential embed-vocab parity mutation race lint cover tidy
+.PHONY: check validate verify plan conformance conformance-cli conformance-go examples vet differential embed-vocab parity mutation race lint cover tidy export-check repro-check
 
 # the gate for every change: all suites, both implementations, vet
 check: vet validate conformance conformance-cli conformance-go examples
@@ -13,7 +13,45 @@ examples:
 
 vet:
 	@cd go && f=$$(gofmt -l .); if [ -n "$$f" ]; then echo "gofmt: unformatted files:"; echo "$$f"; exit 1; fi
-	cd go && go vet ./... && go test ./...
+	# D565: -count=1 is load-bearing, not caution. Four test packages read files
+	# OUTSIDE the Go module (spec/vocab, spec/outputs.schema.json, docs/MATURITY.md,
+	# CHANGELOG.md) — the doc and registry gates. Go's test cache cannot see those
+	# inputs, so it replayed a PASS for a gate whose subject had changed underneath
+	# it: master shipped an embedded vocabulary six slices out of date while
+	# `make check` said all gates passed. A gate that can report success without
+	# re-reading its subject is not a gate.
+	cd go && go vet ./... && go test ./... -count=1
+
+# export-check: prove the PUBLIC tree is still publishable (D474). The export is the
+# last step of the roadmap and the only one nothing was checking: it broke once (D340 —
+# a client token across thirty files and a count gate that hard-read a file the export
+# omits) and was found by a manual audit, not by a gate. The script already does the
+# whole job — whitelist copy, sanitize, negative-space audit, and a STANDALONE
+# `make check` proving the public tree has no hidden dependency on the private one.
+#
+# The destination is ALWAYS explicit and always a temp dir. Run with no argument the
+# script defaults to ../groundhold-public and wipes it, which is correct for a publish
+# and wrong for a check.
+export-check:
+	@d=$$(mktemp -d) && trap 'rm -rf "$$d"' EXIT && scripts/export-public.sh "$$d"
+
+# repro-check: the release claims a bit-identical rebuild (BUILDINFO.txt records the
+# toolchain and command precisely so a third party can do it). D477 recorded that the
+# claim was ENABLED and never VERIFIED. This verifies the half that can be verified
+# here: two builds of the same source, same environment, same bytes — which is what
+# -trimpath is for, and what catches an embedded timestamp, an absolute path, or a
+# non-deterministic link creeping in.
+#
+# It does NOT prove environment-independence: a different Go version or OS may produce
+# different bytes, and only a third party rebuilding from BUILDINFO can close that.
+# The threat model says so rather than letting this target imply more than it checks.
+repro-check:
+	@cd go && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.buildVersion=repro" -o /tmp/gh-repro-a ./cmd/groundhold
+	@cd go && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.buildVersion=repro" -o /tmp/gh-repro-b ./cmd/groundhold
+	@a=$$(sha256sum /tmp/gh-repro-a | cut -d" " -f1); b=$$(sha256sum /tmp/gh-repro-b | cut -d" " -f1); \
+	rm -f /tmp/gh-repro-a /tmp/gh-repro-b; \
+	if [ "$$a" != "$$b" ]; then echo "NOT REPRODUCIBLE: $$a != $$b"; exit 1; fi; \
+	echo "reproducible: two builds, identical bytes ($$a)"
 
 # race: the concurrency gate. The runtime is concurrency-heavy (lease
 # acquisition, the ledger, the scenario engine); the detector must stay green.
@@ -71,7 +109,7 @@ verify:
 # probe. Exit 2 here is the thesis working, not a failure.
 plan:
 	@cd go && go build -o ../bin/groundhold-go ./cmd/groundhold
-	@bin/groundhold-go plan spec/examples/orders-production.contract.yaml spec/examples/candidates/gcp-cloudsql.candidate.yaml --vocab spec/vocab || [ $$? -eq 2 ]
+	@bin/groundhold-go plan spec/examples/orders-production.contract.yaml spec/examples/candidates/gcp-cloudsql.candidate.yaml --vocab spec/vocab --at $(shell date -u +%Y-%m-%dT%H:%M:%SZ) || [ $$? -eq 2 ]
 
 conformance:
 	python3 conformance/run.py

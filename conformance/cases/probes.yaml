@@ -193,12 +193,73 @@ cases:
                 evidence: "0 open paths from 3 external vantage points"
             failures: []
 
-  - name: probe-crash-is-not-an-observation
+  - name: probe-that-measured-some-of-it-is-partial
     impl: go
     description: >
-      D59 (review verdict): a probe that crashes measured NOTHING — it
-      records probe.failed, never observation.recorded, and the failing
-      path stays unknown to audit.
+      D697: two bound capabilities, one whose probe crashes. Something WAS measured,
+      so this is not `unmeasured`; something was not, so it is not `probed` either.
+      `partial`, exit 2 — the measured half is recorded as an observation and the
+      failed half stays unknown, and the status says both happened rather than
+      letting the successful half speak for the run.
+    onboard:
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: pr-t, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+          - id: cache
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-managed
+              subject: db
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: pr-t
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+          cache:
+            attributes:
+              service.managed: true
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T16:00:00Z"
+          map: { db: "fake:existing-db", cache: "fake:existing-cache" }
+          expect: { exit: 0, status: adopted }
+        - cmd: probe
+          at: "2026-07-12T16:10:00Z"
+          failKeys: ["probe:cache"]
+          expect:
+            exit: 2
+            status: partial
+            failures:
+              - capability: cache
+                path: network.publicExposure
+                method: tcp-connect
+                reason: injected probe crash
+                retryable: true
+
+  # D697 SUPERSEDES `probe-crash-is-not-an-observation`, which pinned
+  # `exit: 0, status: probed` for a run in which every measurement failed. The half
+  # about observations was right and is kept below; the status was the two-state
+  # collapse — "I established nothing" wearing the shape of "I established it".
+  - name: probe-that-measured-nothing-is-not-a-probed-run
+    impl: go
+    description: >
+      D59 + D697: a probe that crashes measured NOTHING — it records probe.failed,
+      never observation.recorded, and the failing path stays unknown to audit. The
+      RUN says so too: status `unmeasured`, exit 2. A probe is expensive and
+      sometimes intrusive; it is run in order to learn something, so a run that
+      learned nothing must not be readable as a success by exit code alone.
     onboard:
       contract: *pv1
       candidate: *pcand
@@ -211,8 +272,8 @@ cases:
           at: "2026-07-12T16:10:00Z"
           failKeys: ["probe:db"]
           expect:
-            exit: 0
-            status: probed
+            exit: 2
+            status: unmeasured
             measurements: []
             failures:
               - capability: db

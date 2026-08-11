@@ -534,6 +534,14 @@ func (d *Driver) observeCloudRun(capability, providerID string) ([]provider.Obse
 	if err != nil {
 		return nil, nil, err
 	}
+	// F-LC3 (D519): a 404 here is a READABLE absence, not a failure to read.
+	// Folded into the generic error it made the binding block forever on
+	// unknown instead of re-creating; the contract reserves a marker for it.
+	if status == http.StatusNotFound {
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"bound resource is gone (will re-create)"}, nil
+	}
 	if status != http.StatusOK {
 		return nil, nil, fmt.Errorf("services.get: HTTP %d", status)
 	}
@@ -553,14 +561,17 @@ func (d *Driver) observeCloudRun(capability, providerID string) ([]provider.Obse
 		return nil, nil, fmt.Errorf("services.get: unparseable service document")
 	}
 
-	var obs []provider.Observation
+	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
+	}
 	var diags []string
 	obs = append(obs, provider.Observation{Path: "location.region",
 		Value: region, Derivation: "measured"})
 	obs = append(obs, provider.Observation{Path: "service.managed",
 		Value: true, Derivation: "measured"})
 	obs = append(obs, provider.Observation{Path: "availability.class",
-		Value: "regional", Derivation: "config-intent"})
+		Value: "regional", Derivation: "platform-invariant"})
 	if svc.Template.Scaling.MinInstanceCount > 0 {
 		obs = append(obs, provider.Observation{Path: "replicas.minimum",
 			Value: float64(svc.Template.Scaling.MinInstanceCount), Derivation: "measured"})

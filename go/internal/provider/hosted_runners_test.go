@@ -66,6 +66,19 @@ func TestNoWorkflowSpendsHostedMinutesUnasked(t *testing.T) {
 			strings.HasPrefix(s, "windows-")
 	}
 
+	// D603: a positive control. This gate reports "no offenders"; over a clean tree it
+	// says that whether the classifier works or not, so a `hosted` that returns true
+	// for everything would be invisible. The control asserts both directions on
+	// synthetic labels, touching no file.
+	if !hosted("ubuntu-24.04") {
+		t.Fatal("the classifier rejects a label GitHub actually provides — it is not " +
+			"running, and every green result over the real workflows means nothing")
+	}
+	if hosted("a-pool-label-github-does-not-provide") {
+		t.Fatal("the classifier accepts an unknown label as hosted — this gate would " +
+			"pass over a workflow pinned to the fleet")
+	}
+
 	var offenders []string
 	for _, f := range files {
 		raw, err := os.ReadFile(f)

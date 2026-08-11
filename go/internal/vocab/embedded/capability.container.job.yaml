@@ -28,7 +28,7 @@ attributes:
     description: Region the job runs in
     mappings:
       gcp.cloudrunjobs: the job location
-      azure.containerappsjobs: the job location
+      azure.containerappsjob: the job location
 
   image:
     kind: string
@@ -37,7 +37,7 @@ attributes:
       gcr.io/proj/worker:1.2 or myregistry.azurecr.io/worker:1.2).
     mappings:
       gcp.cloudrunjobs: template.template.containers[0].image
-      azure.containerappsjobs: template.containers[0].image
+      azure.containerappsjob: template.containers[0].image
 
   trigger.type:
     kind: string
@@ -50,7 +50,7 @@ attributes:
       resource's scope) — refused rather than silently dropping the schedule.
     mappings:
       gcp.cloudrunjobs: manual (native) — schedule refused (needs Cloud Scheduler)
-      azure.containerappsjobs: configuration.triggerType (Manual | Schedule)
+      azure.containerappsjob: configuration.triggerType (Manual | Schedule)
 
   timeout:
     kind: duration
@@ -58,7 +58,7 @@ attributes:
       Maximum wall-clock time a single job execution may run before it is stopped.
     mappings:
       gcp.cloudrunjobs: template.template.timeout
-      azure.containerappsjobs: configuration.replicaTimeout
+      azure.containerappsjob: configuration.replicaTimeout
 
   service.managed:
     kind: bool

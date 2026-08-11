@@ -5,6 +5,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 const testKeyID = "12345678-90ab-cdef-1234-567890abcdef"
@@ -203,4 +206,71 @@ func TestCreateAWSKMS_AdoptsExistingOwned(t *testing.T) {
 	if res.Status != "succeeded" || res.ProviderID != awsKMSProviderID("eu-central-1", testKeyID) {
 		t.Fatalf("must adopt the existing owned key (no CreateKey), got %+v", res)
 	}
+}
+
+// kmsTarget classifies the X-Amz-Target JSON protocol, where every call is a POST and
+// the method tells you nothing — reads are the list/describe family, everything else
+// changes the world.
+func kmsRole(req *http.Request, _ []byte) certifynet.Role {
+	tgt := req.Header.Get("X-Amz-Target")
+	tgt = tgt[strings.LastIndex(tgt, ".")+1:]
+	switch tgt {
+	case "ListKeys", "ListResourceTags", "DescribeKey", "GetKeyRotationStatus", "ListAliases":
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingKMS enrolls KMS in the D391 create-time-adoption gate. KMS is
+// D253's own example of the damage: a KeyId is server-assigned with no idempotency
+// token, so a create that does not adopt mints a SECOND PAID KEY and leaves it out of
+// the ledger. TestCreateAWSKMS_AdoptsExistingOwned pins the same property for this one
+// driver; this enrolls it as a CLASS, through the public Create dispatch, with the
+// mutation count as the proof.
+func TestAdoptsExistingKMS(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:           "aws/kms",
+		Classify:       kmsRole,
+		ExistingServer: func() *httptest.Server { return kmsScanServer(t, testKeyID, "datakey", "prod") },
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.KMSBaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("kms", "datakey", "prod",
+				awsKMSAttrs(), nil, "datakey", 1)
+		},
+		PID: awsKMSProviderID("eu-central-1", testKeyID),
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
+
+// TestRefusesForeignDeleteKMS enrols KMS in the D439 delete-ownership gate, through the
+// PUBLIC Delete dispatch and counting the wire. Its per-driver twin above calls
+// deleteAWSKMS directly; this asserts the same refusal as a CLASS, and adds what the
+// direct call cannot see — that no mutation went out before the refusal.
+func TestRefusesForeignDeleteKMS(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ForeignProbe{
+		Name:          "aws/kms",
+		Classify:      kmsRole,
+		ForeignServer: func() *httptest.Server { return awsKMSServer(t, "someone-else", false, 0) },
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.KMSBaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			return d
+		},
+		Delete: func(pr provider.Provider) provider.CreateResult {
+			return pr.Delete("kms", "datakey", "prod", "akms:eu-central-1:"+testKeyID, "k")
+		},
+	}
+	certifynet.CertifyDeleteRefusesForeign(t, p)
 }

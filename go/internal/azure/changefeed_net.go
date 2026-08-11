@@ -157,11 +157,17 @@ func (d *Driver) observeChangeFeed(capability, providerID string) ([]provider.Ob
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"event subscription not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"event subscription not found — bound resource is gone (will re-create)"}, nil
 	}
 	// service.managed is intrinsic to Event Grid; a change feed that exists IS a
 	// managed feed. It rides even if the destination is an unexpected endpoint type.
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
 	var diags []string
@@ -188,6 +194,13 @@ func (d *Driver) deleteChangeFeed(capability, environment, providerID string) pr
 	if sub != d.Subscription && d.Subscription != "" {
 		return provider.CreateResult{Status: "failed",
 			Reason: "providerId subscription is not the driver's — refusing to delete across subscriptions"}
+	}
+	// ownership: an EventGrid event subscription carries no tags — the deterministic
+	// name is the evidence (D458).
+	if !azNameLooksOurs(name, "pv-cf", environment, capability) {
+		return provider.CreateResult{Status: "failed",
+			Reason: "event subscription name does not carry our ownership marker — " +
+				"refusing to delete a resource that is not ours"}
 	}
 	url, err := d.changeFeedURL(sub, name)
 	if err != nil {

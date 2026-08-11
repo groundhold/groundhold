@@ -2,8 +2,8 @@
 // the single capability TYPE it fulfils. This is the AWS column of the
 // machine-verifiable parity matrix. Every value is the exact capability.<...>
 // string the service's Observe/discover stamps as ResourceType — ground truth,
-// not a guess. The three non-listable tokens (changefeed, rolepolicy,
-// cwlogfilter) have no top-level discover ResourceType; their TYPE is taken
+// not a guess. The three non-listable tokens (changefeed, cwlogfilter,
+// route53record) have no top-level discover ResourceType; their TYPE is taken
 // from the driver's Build dispatch + header docstring and noted inline.
 package aws
 

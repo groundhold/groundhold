@@ -216,8 +216,10 @@ func TestObserveCustomRoleNotFound(t *testing.T) {
 	}))
 	defer srv.Close()
 	d := customRoleDriver(t, srv)
-	obs, diags, err := d.observeCustomRole("viewer", gcRoleProviderID("acme-prod", "viewer"))
-	if err != nil || len(obs) != 0 || len(diags) == 0 {
+	obs, diags, err := d.observeCustomRole("viewer", gcRoleProviderID("acme-prod", gcRoleID("prod", "viewer", 1)))
+	// Corrected with D521: this asserted SILENCE for an absent bound resource,
+	// which is the defect F-LC3 exists to prevent.
+	if err != nil || !absentMarked(obs) || len(diags) == 0 {
 		t.Fatalf("a gone role must be nothing-to-observe, got obs=%v diags=%v err=%v", obs, diags, err)
 	}
 }
@@ -229,8 +231,10 @@ func TestObserveCustomRoleSoftDeleted(t *testing.T) {
 	}))
 	defer srv.Close()
 	d := customRoleDriver(t, srv)
-	obs, diags, err := d.observeCustomRole("viewer", gcRoleProviderID("acme-prod", "viewer"))
-	if err != nil || len(obs) != 0 || len(diags) == 0 {
+	obs, diags, err := d.observeCustomRole("viewer", gcRoleProviderID("acme-prod", gcRoleID("prod", "viewer", 1)))
+	// Corrected with D521: this asserted SILENCE for an absent bound resource,
+	// which is the defect F-LC3 exists to prevent.
+	if err != nil || !absentMarked(obs) || len(diags) == 0 {
 		t.Fatalf("a soft-deleted role must be nothing-to-observe, got obs=%v diags=%v err=%v", obs, diags, err)
 	}
 }
@@ -241,7 +245,7 @@ func TestObserveCustomRoleErrorPropagates(t *testing.T) {
 	}))
 	defer srv.Close()
 	d := customRoleDriver(t, srv)
-	if _, _, err := d.observeCustomRole("viewer", gcRoleProviderID("acme-prod", "viewer")); err == nil {
+	if _, _, err := d.observeCustomRole("viewer", gcRoleProviderID("acme-prod", gcRoleID("prod", "viewer", 1))); err == nil {
 		t.Fatal("an unreadable role must propagate an error, not nothing-to-observe")
 	}
 }
@@ -259,7 +263,7 @@ func TestDeleteCustomRoleTransportErrorIsUnknown(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	d := customRoleDriver(t, srv)
 	srv.Close()
-	res := d.deleteCustomRole("viewer", "prod", gcRoleProviderID("acme-prod", "viewer"))
+	res := d.deleteCustomRole("viewer", "prod", gcRoleProviderID("acme-prod", gcRoleID("prod", "viewer", 1)))
 	if res.Status != "unknown" {
 		t.Fatalf("a lost delete must be unknown, got %+v", res)
 	}
@@ -271,7 +275,7 @@ func TestDeleteCustomRole5xxIsUnknown(t *testing.T) {
 	}))
 	defer srv.Close()
 	d := customRoleDriver(t, srv)
-	res := d.deleteCustomRole("viewer", "prod", gcRoleProviderID("acme-prod", "viewer"))
+	res := d.deleteCustomRole("viewer", "prod", gcRoleProviderID("acme-prod", gcRoleID("prod", "viewer", 1)))
 	if res.Status != "unknown" {
 		t.Fatalf("a 503 delete must be unknown, got %+v", res)
 	}
@@ -283,7 +287,7 @@ func TestDeleteCustomRoleNotFoundIsIdempotent(t *testing.T) {
 	}))
 	defer srv.Close()
 	d := customRoleDriver(t, srv)
-	res := d.deleteCustomRole("viewer", "prod", gcRoleProviderID("acme-prod", "viewer"))
+	res := d.deleteCustomRole("viewer", "prod", gcRoleProviderID("acme-prod", gcRoleID("prod", "viewer", 1)))
 	if res.Status != "succeeded" {
 		t.Fatalf("a 404 delete must be idempotent success, got %+v", res)
 	}
@@ -296,7 +300,7 @@ func TestDeleteCustomRoleTerminalRefused(t *testing.T) {
 	}))
 	defer srv.Close()
 	d := customRoleDriver(t, srv)
-	res := d.deleteCustomRole("viewer", "prod", gcRoleProviderID("acme-prod", "viewer"))
+	res := d.deleteCustomRole("viewer", "prod", gcRoleProviderID("acme-prod", gcRoleID("prod", "viewer", 1)))
 	if res.Status != "failed" {
 		t.Fatalf("a clean 400 delete must be a terminal failed, got %+v", res)
 	}

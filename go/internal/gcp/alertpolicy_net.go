@@ -90,6 +90,9 @@ type alertPolicyDoc struct {
 		} `json:"conditionThreshold"`
 	} `json:"conditions"`
 	NotificationChannels []string `json:"notificationChannels"`
+	// D726: the arming switch, set by the create and never read back. A disabled
+	// policy never fires, however many channels it names.
+	Enabled *bool `json:"enabled"`
 }
 
 func (d *Driver) getAlertPolicy(project, policyID string) (alertPolicyDoc, bool, error) {
@@ -125,12 +128,19 @@ func (d *Driver) observeAlertPolicy(capability, providerID string) ([]provider.O
 		return nil, nil, rerr
 	}
 	if !found || len(doc.Conditions) == 0 {
-		return nil, []string{"alert policy not found (or has no condition) — nothing to observe"}, nil
+		// F-LC3 (D521): a BOUND resource the API says is GONE. A diagnostic
+		// alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"alert policy not found (or has no condition) — bound resource is gone (will re-create)"}, nil
 	}
 	cond := doc.Conditions[0].ConditionThreshold
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "alert.threshold", Value: cond.ThresholdValue, Derivation: "measured"},
-		{Path: "alert.notify", Value: len(doc.NotificationChannels) > 0, Derivation: "measured"},
+		{Path: "alert.notify", Value: len(doc.NotificationChannels) > 0 &&
+			(doc.Enabled == nil || *doc.Enabled), Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
 	if m := metricFromFilter.FindStringSubmatch(cond.Filter); m != nil {

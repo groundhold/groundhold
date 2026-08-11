@@ -14,6 +14,7 @@ import (
 	"groundhold/internal/ledger"
 	"groundhold/internal/observe"
 	"groundhold/internal/pace"
+	"groundhold/internal/perr"
 	"groundhold/internal/provider"
 )
 
@@ -40,7 +41,26 @@ type Report struct {
 	Refreshed []string   `json:"refreshed"`
 	Fresh     []string   `json:"fresh"`
 	Skipped   []CapIssue `json:"skipped,omitempty"`
-	Crawl     Stats      `json:"crawl"`
+	// Notes (D558) carry the driver's own account of what it could NOT read on a
+	// capability that refreshed successfully. Dropping them here is the worst of
+	// the three sites the same `_` appeared in: refresh runs unattended on a
+	// schedule, so nobody is watching a terminal when the sentence is lost, and
+	// its entire job is keeping the proof honest.
+	Notes []string `json:"notes,omitempty"`
+	// Unreadable (D649) names a capability whose re-observation FAILED. It used to
+	// land in Refreshed: observe.Run reports a failed read as Partial with a nil
+	// error (D242 by design), refresh only looked at the error, and so an
+	// unattended sweep over a provider that was entirely down reported every
+	// capability refreshed while appending no events at all.
+	Unreadable []CapIssue `json:"unreadable,omitempty"`
+	// Partial mirrors observe's own field: at least one capability could not be
+	// read this run. A cron reading this JSON has one boolean to alert on.
+	Partial bool `json:"partial,omitempty"`
+	// Code names the outcome the way every other JSON-emitting verb does
+	// (spec/errors.md). A refresh that could not renew a proof leaves knowledge
+	// about the bound world missing or stale, which is `observation-required`.
+	Code  string `json:"code,omitempty"`
+	Crawl Stats  `json:"crawl"`
 }
 
 // isStale reports whether a capability's proof is missing, unparseable, or decays by
@@ -57,11 +77,10 @@ func isStale(led *ledger.Ledger, cap, at string, window int) bool {
 	}
 	deadline := atSec + window // seconds
 	for _, r := range recs {
-		obsSec, err := ledger.ParseTs(r.ObservedAt)
-		if err != nil {
-			return true // an unparseable proof time is not trustworthy
-		}
-		if obsSec+r.TTLSeconds <= deadline {
+		// D666: one predicate, shared with audit/plan/apply/forecast/posture. It
+		// treats an unparseable observedAt as expired, which is what the loop's own
+		// early return did.
+		if ledger.ObservationExpired(r.ObservedAt, r.TTLSeconds, deadline) {
 			return true // this proof (the weakest link) decays by the deadline
 		}
 	}
@@ -93,15 +112,35 @@ func Run(led *ledger.Ledger, ledgerPath string, prov provider.Provider,
 			continue
 		}
 		// one paced re-observation per capability; observe records the event
+		unreadable := ""
 		_, err := sched.Do(prov.Name(), func() pace.Result {
-			_, oerr := observe.Run(map[string]string{cap: bindings[cap]}, prov, at, ttlOverride, led, ledgerPath, true)
+			ores, oerr := observe.Run(map[string]string{cap: bindings[cap]}, prov, at, ttlOverride, led, ledgerPath, true)
 			if oerr != nil {
 				return pace.Result{Outcome: pace.ServerError}
+			}
+			rep.Notes = append(rep.Notes, ores.Diagnostics...)
+			// D649: a read that FAILED is not a refresh. observe returns nil here
+			// and records nothing — the proof is untouched and still decaying — so
+			// scoring this OK told the pacer a dead provider was a healthy sweep
+			// and the breaker could never trip.
+			for _, u := range ores.Unreadable {
+				if u.Capability == cap {
+					unreadable = u.Reason
+					return pace.Result{Outcome: pace.ServerError}
+				}
 			}
 			return pace.Result{Outcome: pace.OK}
 		})
 		if err != nil {
-			rep.Skipped = append(rep.Skipped, CapIssue{cap, err.Error()})
+			// A read the pacer gave up on: say WHICH failure it was when the driver
+			// gave us one, rather than only the pacer's summary of it.
+			detail := err.Error()
+			if unreadable != "" {
+				detail = unreadable + " (" + err.Error() + ")"
+				rep.Unreadable = append(rep.Unreadable, CapIssue{cap, detail})
+				rep.Partial = true
+			}
+			rep.Skipped = append(rep.Skipped, CapIssue{cap, detail})
 			switch {
 			case errors.Is(err, pace.ErrBudget):
 				stoppedEarly = "budget"
@@ -112,9 +151,19 @@ func Run(led *ledger.Ledger, ledgerPath string, prov provider.Provider,
 			}
 			continue
 		}
+		if unreadable != "" {
+			// The pacer's retries eventually returned without an error (attempts
+			// exhausted), but nothing was read. Refreshed would be a lie.
+			rep.Unreadable = append(rep.Unreadable, CapIssue{cap, unreadable})
+			rep.Partial = true
+			continue
+		}
 		rep.Refreshed = append(rep.Refreshed, cap)
 	}
 	rep.Crawl = Stats{RequestsMade: sched.Spent(), Budget: budget,
 		Throttled: sched.Throttles, Backoffs: sched.Backoffs, StoppedEarly: stoppedEarly}
+	if len(rep.Unreadable) > 0 {
+		rep.Code = string(perr.ObservationRequired)
+	}
 	return rep, nil
 }

@@ -15,10 +15,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"slices"
 	"sort"
 	"strings"
 
@@ -88,18 +90,18 @@ Usage:
   groundhold validate <contract.yaml>
   groundhold verify   <contract.yaml> <candidate.yaml> [--json] [--vocab <dir>]
   groundhold plan     <contract.yaml> <candidate.yaml> [--vocab <dir>] [--project <p>]
-                   [--ledger <f>] [--bindings <f>] [--observations <f>] [--at <ts>]
+                   [--ledger <f>] [--bindings <f>] [--observations <f>] --at <ts>
   groundhold preflight <contract.yaml> <candidate.yaml> --provider <aws|gcp|azure|k8s>
                    [--project <p>]  (every capability's missing implementation
                     operands + unsatisfiable attributes in ONE pass; exit 2 if any)
   groundhold forecast <plan.yaml> <candidate.yaml> [--ledger <file>]
-                   [--heads <f>] [--bindings <f>] [--observations <f>] [--at <ts>]
+                   [--heads <f>] [--bindings <f>] [--observations <f>] --at <ts>
   groundhold apply    <contract.yaml> <candidate.yaml> <plan.yaml>
-                   --ledger <file> [--provider fake|gcp|aws|k8s] [--at <ts>]
+                   --ledger <file> [--provider fake|gcp|aws|azure|k8s|cloudflare|hetzner|upstash] --at <ts>
                    [--vocab <dir>] [--require-preflight] [--no-reachability]
                    [--detach] [--fail-key <k>] [--unknown-key <k>]
   groundhold observe  (--ledger <file> | --bindings <file>)
-                   [--provider fake|gcp|aws] [--at <ts>] [--ttl <s>] [--record]
+                   [--provider fake|gcp|aws|azure|k8s|cloudflare|hetzner|upstash] --at <ts> [--ttl <s>] [--record]
   groundhold example  <contract|candidate> [<contract.yaml>]
                    (print a valid starter document; "candidate <contract.yaml>"
                     scaffolds one entry per capability with its vocab attributes)
@@ -153,11 +155,14 @@ Usage:
                     --print-config prints the .mcp.json + one-liner to wire it
                     into an agent — no server is started)
   groundhold converge <contract.yaml> <candidate.yaml> --ledger <file>
-                   [--provider fake|gcp|aws] [--vocab <dir>] [--project <p>]
-                   [--at <ts>] [--yes] [--allow-data-loss] [--json] [--detach]
+                   [--provider fake|gcp|aws|azure|k8s|cloudflare|hetzner|upstash] [--vocab <dir>] [--project <p>]
+                   --at <ts> [--yes] [--allow-data-loss] [--allow-exposure]
+                   [--json] [--detach]
                    [--no-reachability]  (skip the post-apply public-edge probe)
-  groundhold discover [--provider fake|gcp|aws|azure|k8s] [--project <p>] [--region <r>]
-                   [--at <ts>]  (read-only; never writes the ledger)
+  groundhold discover [--provider fake|gcp|aws|azure|k8s|cloudflare|hetzner|upstash] [--project <p>] [--region <r>]
+                   (cloudflare, hetzner and upstash are READ-ONLY: they discover and
+                    observe, and refuse to create, update or delete — D732/D734)
+                   --at <ts>  (read-only; never writes the ledger)
                    (k8s: --region is the namespace, empty = cluster-wide)
   groundhold k8s-skeleton <group>/<version>/<Kind> --capability <cap>
                    [--kubeconfig <f>] [--context <c>]  (offline mapping
@@ -167,8 +172,10 @@ Usage:
                    (register a credential REFERENCE for the gentle crawler,
                    never a secret; gcp|aws|azure|k8s only, OAuth deferred D141)
   groundhold connections   (list pairings; references only, never secrets)
+  groundhold version       (which build this is; also --version, -v)
   groundhold unpair <provider> [--scope <s>]
-  groundhold crawl --at <ts> [--budget <n>] [--out <dir>] [--pairings <f>]
+  groundhold crawl --provider <p> --at <ts> [--budget <n>] [--out <dir>]
+                   [--pairings <f>]
                    (gentle read-only context crawl over the paired providers;
                    rate-limited + backoff, partiality is recorded not hidden)
   groundhold refresh --ledger <f> --at <ts> [--window <s>] [--provider <p>]
@@ -183,7 +190,8 @@ Usage:
                    set + its off-host anchor; refuses a set that does not hold.
                    --partial restores the sound capabilities and marks the rest
                    unknown+code; --documents re-verifies the backup's contract blobs)
-  groundhold react --event <file> --ledger <f> --at <ts> [--crawl <base.json>]
+  groundhold react --event <file> --ledger <f> --provider <p> --at <ts>
+                   [--crawl <base.json>]
                    [--contract <f>...] [--out <dir>]  (event-driven ingress:
                    map one cloud change or k8s watch event to a scope, re-list it,
                    splice, reclassify posture — the opt-in real-time path over polling)
@@ -192,12 +200,12 @@ Usage:
                    managed-ok/drifted/shadow/decayed/unknown with adopt/converge/
                    observe recipes; exit 2 on shadow or drift; writes nothing)
   groundhold adopt    <contract.yaml> <candidate.yaml> --ledger <file>
-                   --map <cap=providerId> [--map ...] [--provider fake|gcp]
-                   [--project <p>] [--vocab <dir>] [--at <ts>]
+                   --map <cap=providerId> [--map ...] [--provider fake|gcp|aws|azure|k8s|cloudflare|hetzner|upstash]
+                   [--project <p>] [--vocab <dir>] --at <ts>
                    [--discovery <file>]
                    (binds existing resources; mutates the ledger, never
                     the cloud; refuses when reality disagrees)
-  groundhold unadopt  <contract.yaml> <capability> --ledger <file> [--at <ts>]
+  groundhold unadopt  <contract.yaml> <capability> --ledger <file> --at <ts>
                    (removes the binding, never the resource)
   groundhold hints    <state-file> [--format auto|tfstate|pulumi]
                    (terraform/pulumi state -> adoption hints; pure
@@ -207,16 +215,16 @@ Usage:
                    (deterministic ledger fold to stdout; --from/--to window the
                    emitted events by occurredAt — the 4D DR primitive; transport and
                     cursor belong to the operator)
-  groundhold publish  <contract.yaml> --ledger <file> --actor <id> [--at <ts>]
+  groundhold publish  <contract.yaml> --ledger <file> --actor <id> --at <ts>
                    (records contract authorship: appends
                     contract.published with the canonical hash and a
                     HUMAN actor — the ledger answers "who approved this")
-  groundhold audit    <contract.yaml> --ledger <file> [--at <ts>] [--record]
+  groundhold audit    <contract.yaml> --ledger <file> --at <ts> [--record]
                    (constraints vs recorded REALITY; --record appends
                     violation.detected; exit 2 when hard constraints
                     are violated or unknown)
-  groundhold resume   <contract.yaml> --ledger <file> [--provider fake|gcp]
-                   [--project <p>] [--at <ts>] [--fail-key <k>]
+  groundhold resume   <contract.yaml> --ledger <file> [--provider fake|gcp|aws|azure|k8s|cloudflare|hetzner|upstash]
+                   [--project <p>] --at <ts> [--fail-key <k>]
                    [--unknown-key <k>]  (concludes pending receipts
                     read-only; exit 3 while any outcome stays unknown)
   groundhold status   <handle> --ledger <file> --at <ts>  (a background run's
@@ -228,8 +236,8 @@ Usage:
   groundhold wait     <handle> --ledger <file> [--poll <s>] [--timeout <s>]
                    [--notify-url <u>] [--notify-cmd <argv>]  (block until the
                     run is terminal, then relay its exit code)
-  groundhold probe    <contract.yaml> --ledger <file> [--provider fake|gcp]
-                   [--project <p>] [--capability <id>] [--at <ts>]
+  groundhold probe    <contract.yaml> --ledger <file> [--provider fake|gcp|aws|azure|k8s|cloudflare|hetzner|upstash]
+                   [--project <p>] [--capability <id>] --at <ts>
                    [--allow-intrusive] [--record] [--fail-key <k>]
                    (outcome probes: measured reality into the
                     observation stream; never implicit)
@@ -300,10 +308,12 @@ Global: the full attribute vocabulary is compiled into this binary and
         --color auto|never|always and --ascii control human rendering
         (spec/presentation.md); banners and glyphs are never a machine
         interface — route on exit codes and "code".
-        Time-sensitive verbs (plan/apply/audit/probe/observe/forecast/
-        adopt/converge/resume) REQUIRE an explicit --at (RFC3339): a
+        Time-sensitive verbs REQUIRE an explicit --at (RFC3339): a
         safety clock never defaults to a value that makes stale
-        observations look fresh (N1).
+        observations look fresh (N1). They are: adopt, apply, attest,
+        audit, converge, crawl, discover, forecast, observe, plan,
+        posture, probe, publish, react, refresh, resume, runs, status,
+        unadopt. (wait is exempt: it IS the live clock.)
         Provider verbs (discover/apply/adopt/observe/converge/probe/
         resume/repair/anchor/react/refresh/crawl/preflight) REQUIRE an
         explicit --provider (aws|gcp|azure|k8s|fake): the fake driver
@@ -321,7 +331,8 @@ Global: the full attribute vocabulary is compiled into this binary and
         context, set once per workspace and omitted per command. The
         clock is NOT among them: --at is a safety invariant (N1) and
         never defaults, nor do the consent flags (--allow-data-loss,
-        --allow-intrusive, --require-preflight, --yes) — those must be
+        --allow-exposure, --allow-intrusive, --require-preflight, --yes)
+        — those must be
         typed each time, on purpose.
         --sign-key <keyfile> signs every event this process appends
         (ed25519, detached, D102). --trust <hex-pub> (REPEATABLE) makes
@@ -346,6 +357,31 @@ Exit codes:
 // buildVersion is stamped at release time via
 // -ldflags "-X main.buildVersion=<tag>"; a plain `go build` reports "dev".
 var buildVersion = "dev"
+
+// intFlag parses a whole-number flag. D657: these four flags were read with
+//
+//	_, _ = fmt.Sscanf(args[i+1], "%d", &x)
+//
+// which discards BOTH return values. `--ttl 1e9` therefore recorded `ttlSeconds: 1`
+// — Sscanf stops at the `e` and keeps the 1 — into an append-only ledger, so every
+// later audit blocked on a one-second freshness window that nobody typed. `--ttl
+// abc`, `--ttl -5` and `--ttl 99999999999999999999` were silently ignored, and
+// `--window 1e9` made the unattended freshness agent report `exit 0, fresh=[…]`
+// while refreshing nothing at all — a safety control switched off by a flag parse.
+//
+// A value the operator typed and the tool could not read is refused, named, and
+// never guessed at.
+func parseIntFlag(name, raw string) (int, error) {
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, fmt.Errorf("%s %q is not a whole number — refusing rather than "+
+			"reading a prefix of it (D657)", name, raw)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("%s %q is negative", name, raw)
+	}
+	return n, nil
+}
 
 func main() {
 	exit := run(os.Args[1:])
@@ -392,6 +428,7 @@ var silentOnSuccess = map[string]bool{
 const helpDrillDown = `
 Drill down (no external files needed):
   groundhold <verb> --help                 — this block for any verb (or: groundhold help <verb>)
+  groundhold version                       — which build this is (also --version, -v)
   groundhold explain <error-code>          — remediation for a refusal's "code" field (spec/errors.md)
   groundhold explain <capability.type>     — a capability's attributes (kind, enum, per-cloud)
   groundhold explain <attribute-path>      — one attribute in full
@@ -459,6 +496,15 @@ var timeSensitiveVerbs = map[string]bool{
 	// invoke after time has passed ("what happened while I was away"), where a
 	// stale clock is most likely to flip stalled back to running.
 	"runs": true,
+	// D631: `discover` stamps `--at` into the DiscoveryDocument and the document's
+	// canonical hash, and `adopt --discovery` writes that hash into the ledger as the
+	// adoption's provenance root. Outside this set it got neither the presence gate
+	// nor D323's parse gate, so `discover` with no clock produced `at: 1970-…` and
+	// `--at not-a-time` produced `at: "not-a-time"` — both at exit 0, both permanent.
+	// `pair`, the other ungated clock consumer, handles this explicitly (D588: "a
+	// record saying 1970 is worse than a record saying nothing"), which is how we
+	// know the pattern was understood and this verb was simply missed.
+	"discover": true,
 }
 
 // providerVerbs is the CLOSED set of verbs that OBSERVE or MUTATE real
@@ -471,9 +517,15 @@ var timeSensitiveVerbs = map[string]bool{
 // membership test pins it: a provider verb DROPPED here is a fail-open regression.
 var providerVerbs = map[string]bool{
 	"discover": true, "apply": true, "adopt": true, "observe": true,
-	"converge": true, "probe": true, "resume": true, "repair": true,
-	"anchor": true, "react": true, "refresh": true, "crawl": true,
-	"preflight": true,
+	"converge": true, "probe": true, "resume": true, "react": true,
+	"refresh": true, "crawl": true, "preflight": true,
+	// D571: `anchor` and `repair` were here and belong to neither half of the
+	// definition above — runAnchor and runRepair take no provider and their bodies
+	// name no driver. They are PURE LEDGER operations, and both are recovery verbs:
+	// demanding --provider to check a chain's integrity tells the operator the check
+	// contacts a cloud, at the moment they are least able to spare the doubt.
+	// Removing them is not the fail-open regression this comment warns about —
+	// there is no provider path here to fall open onto.
 }
 
 // knownProviders is the closed set of provider names the CLI accepts (a typo must
@@ -565,7 +617,8 @@ func planRefusalCode(reason string) perr.Code {
 	case strings.Contains(reason, "not executable"):
 		return perr.NotExecutable
 	case strings.Contains(reason, "forbids delete_stateful") ||
-		strings.Contains(reason, "allow_replace_stateful"):
+		strings.Contains(reason, "allow_replace_stateful") ||
+		strings.Contains(reason, "allow_protection_lift"):
 		return perr.ConsentRequired
 	case strings.Contains(reason, "retired capability"):
 		return perr.StructuralError
@@ -646,6 +699,7 @@ func run(args []string) int {
 	record := false
 	yes := false
 	allowDataLoss := false
+	allowExposure := false
 	// D364: silences the plaintext-credential warning. A warning nobody can turn
 	// off is a warning everybody learns to ignore.
 	allowPlaintextSecret := false
@@ -698,15 +752,36 @@ func run(args []string) int {
 	asciiFlag := false
 	var surveyPaths []string
 	completeFlag := false
+	versionFlag := false
 	signKeyPath := ""
 	liveVersionsPath := "" // D236: apiver --live snapshot
 	var trustArgs []string
 	trustFromArg := ""
 	verifyPath := ""
+	endOfFlags := false
 	for i := 0; i < len(args); i++ {
+		// D590: POSIX `--` ends the flags; everything after it is positional. D567
+		// made an unrecognised "-" token an error and refused this one too, which is
+		// the same failure as --version: a rule that fails closed has to be checked
+		// against the conventions it closes ON.
+		if endOfFlags {
+			pos = append(pos, args[i])
+			continue
+		}
+		if args[i] == "--" {
+			endOfFlags = true
+			continue
+		}
 		switch args[i] {
 		case "--help", "-h":
 			helpFlag = true
+		case "--version", "-v":
+			// D589: these are FLAGS and belong in the flag switch. They used to fall
+			// through to the positional list, where `cmd == "--version"` picked them
+			// up — until D567 made an unrecognised token starting with "-" an error
+			// and closed on them. A fail-closed rule must be checked against what it
+			// closes ON, not only against what it is meant to stop.
+			versionFlag = true
 		case "--json":
 			jsonMode = true
 		case "--color":
@@ -870,7 +945,12 @@ func run(args []string) int {
 				fmt.Fprintln(os.Stderr, "--since requires an index")
 				return 1
 			}
-			_, _ = fmt.Sscanf(args[i+1], "%d", &since)
+			if v, ferr := parseIntFlag("--since", args[i+1]); ferr != nil {
+				fmt.Fprintln(os.Stderr, ferr)
+				return 1
+			} else {
+				since = v
+			}
 			i++
 		case "--type":
 			if i+1 >= len(args) {
@@ -912,7 +992,12 @@ func run(args []string) int {
 				fmt.Fprintln(os.Stderr, "--ttl requires seconds")
 				return 1
 			}
-			_, _ = fmt.Sscanf(args[i+1], "%d", &ttl)
+			if v, ferr := parseIntFlag("--ttl", args[i+1]); ferr != nil {
+				fmt.Fprintln(os.Stderr, ferr)
+				return 1
+			} else {
+				ttl = v
+			}
 			i++
 		case "--record":
 			record = true
@@ -1025,7 +1110,12 @@ func run(args []string) int {
 				fmt.Fprintln(os.Stderr, "--budget requires a request count")
 				return 1
 			}
-			_, _ = fmt.Sscanf(args[i+1], "%d", &budgetArg)
+			if v, ferr := parseIntFlag("--budget", args[i+1]); ferr != nil {
+				fmt.Fprintln(os.Stderr, ferr)
+				return 1
+			} else {
+				budgetArg = v
+			}
 			i++
 		case "--out":
 			if i+1 >= len(args) {
@@ -1039,7 +1129,12 @@ func run(args []string) int {
 				fmt.Fprintln(os.Stderr, "--window requires seconds")
 				return 1
 			}
-			_, _ = fmt.Sscanf(args[i+1], "%d", &windowArg)
+			if v, ferr := parseIntFlag("--window", args[i+1]); ferr != nil {
+				fmt.Fprintln(os.Stderr, ferr)
+				return 1
+			} else {
+				windowArg = v
+			}
 			i++
 		case "--crawl":
 			if i+1 >= len(args) {
@@ -1101,11 +1196,50 @@ func run(args []string) int {
 			yes = true
 		case "--allow-data-loss":
 			allowDataLoss = true
+		case "--allow-exposure":
+			// D630: consent for a plan that provably increases security exposure.
+			allowExposure = true
 		case "--allow-plaintext-secret":
 			allowPlaintextSecret = true
 		default:
-			pos = append(pos, args[i])
+			// D567: an unrecognised token starting with "-" is an operator error,
+			// never a positional. Absorbing it silently made the run answer a
+			// question nobody asked: `posture ... --discovery d.json` printed
+			// "shadow": 0 and a postureHash over a cluster holding 169 unmanaged
+			// objects, because posture takes no such flag and the value went the
+			// same way. Same class as the candidate's silent operand (D530), one
+			// layer out.
+			//
+			// A lone "-" stays a positional. D590 corrects what this comment used to
+			// claim: no verb reads stdin, so calling that "stdin, by convention" was
+			// a convention this tool does not implement — the exact kind of unearned
+			// claim the day was spent removing.
+			// D602: a verb may own PRIVATE flags that the global switch does not
+			// know — `apireq classify` parses four of its own out of the positional
+			// list, which is how they used to arrive. D567 closed that door on them
+			// and made the whole sub-verb unreachable. The registry below is the
+			// mechanism: a private flag passes through to its own verb and is still
+			// refused for every other one, and a gate requires the registry to hold
+			// exactly what the sub-parser reads.
+			if verbOwnsFlag(firstPositional(pos), args[i]) {
+				pos = append(pos, args[i])
+				continue
+			}
+			if len(args[i]) > 1 && strings.HasPrefix(args[i], "-") { //nolint:gosec // G602: i is bounded by the enclosing for i := 0; i < len(args); i++
+				fmt.Fprintf(os.Stderr, "unknown flag %q — refusing rather than "+
+					"ignoring it: a run that drops an input answers a question you "+
+					"did not ask. `groundhold %s --help` lists what this verb takes.\n",
+					args[i], firstPositional(pos))
+				return 1
+			}
+			pos = append(pos, args[i]) //nolint:gosec // G602: i is bounded by the enclosing for i := 0; i < len(args); i++
 		}
+	}
+	// D589: --version answers before the "no command" branch, or a bare
+	// `groundhold --version` prints the usage instead of the version.
+	if versionFlag {
+		fmt.Printf("groundhold %s\n", buildVersion)
+		return 0
 	}
 	if len(pos) < 1 {
 		// an explicit --help/-h is a successful help request (exit 0); a bare
@@ -1136,7 +1270,7 @@ func run(args []string) int {
 		Ledger: ledgerPath, Provider: provLiteral, Project: project, At: atLiteral,
 		Argv: append([]string{"groundhold"}, args...),
 	}
-	if cmd == "version" || cmd == "--version" || cmd == "-v" {
+	if cmd == "version" {
 		fmt.Printf("groundhold %s\n", buildVersion)
 		return 0
 	}
@@ -1199,7 +1333,21 @@ func run(args []string) int {
 	// for EVERY verb that reads it — the receiver's held artifact brings
 	// the policy; forgetting --trust no longer downgrades anything.
 	if ledgerPath != "" {
-		if a, err := ledger.LoadAnchorFile(ledger.AnchorPath(ledgerPath)); err == nil && a != nil {
+		a, anchorState, aerr := ledger.AnchorStateOf(ledgerPath)
+		if anchorState == ledger.AnchorUnreadable {
+			// D709: an anchor beside the ledger is how a receiver's held artifact
+			// arms verification (D135). This test was `err == nil && a != nil`, which
+			// reads a CORRUPT anchor exactly like an absent one — so the policy was
+			// silently not applied: no trusted keys, no trustFrom cutoff, and events
+			// the policy required to be signed accepted unsigned. Running under a
+			// policy we cannot read is the downgrade D135 exists to prevent.
+			fmt.Fprintf(os.Stderr, "trust error: an anchor exists beside %s and could "+
+				"not be read (%v) — it carries the trust policy this run would verify "+
+				"under, so proceeding would silently verify under NO policy. Repair or "+
+				"remove the anchor deliberately.\n", ledgerPath, aerr)
+			return 1
+		}
+		if anchorState == ledger.AnchorPresent {
 			if err := ledger.ApplyAnchorPolicy(a); err != nil {
 				fmt.Fprintf(os.Stderr, "trust error: %v\n", err)
 				return 1
@@ -1331,6 +1479,14 @@ func run(args []string) int {
 			"archive":  ledger.ArchivePath(ledgerPath, snap.BaseEvents),
 			"snapshot": ledger.SnapshotPath(ledgerPath),
 			"anchor":   anchor,
+			// D647: the anchor beside the ledger detects accidents; only a copy the
+			// attacker cannot reach detects an attacker. Say so at the moment the
+			// file is written, which is the only moment the operator is looking.
+			"anchorFile": ledger.AnchorPath(ledgerPath),
+			"next": "copy " + ledger.AnchorPath(ledgerPath) + " OFF-HOST — a " +
+				"snapshot family proves the sidecar, archive and tail agree with " +
+				"each other; authenticity needs a witness stored somewhere this " +
+				"directory's writer cannot reach (or an armed --sign-key)",
 		}, "", "  ")
 		fmt.Println(string(out))
 		return 0
@@ -1374,8 +1530,7 @@ func run(args []string) int {
 		}
 		rep, err := ledger.Attest(ledgerPath, evalTime)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "attest error: %v\n", err)
-			return 5
+			return refuseCorruptLedger(err)
 		}
 		out, _ := json.MarshalIndent(rep, "", "  ")
 		fmt.Println(string(out))
@@ -1394,7 +1549,11 @@ func run(args []string) int {
 			fmt.Fprintf(os.Stderr, "converge error: %v\n", err)
 			return 1
 		}
-		crunID, cenv, ccaps, cerr := converge.RunID(pos[1], evalTime)
+		convCand := ""
+		if len(pos) > 2 {
+			convCand = pos[2]
+		}
+		crunID, cenv, ccaps, cerr := converge.RunID(pos[1], convCand, evalTime, project)
 		if cerr != nil {
 			fmt.Fprintf(os.Stderr, "converge error: %v\n", cerr)
 			return 1
@@ -1410,9 +1569,20 @@ func run(args []string) int {
 			Currency: reportingCurrency,
 			Project:  project,
 			Provider: providerName, At: evalTime,
-			Yes: yes, AllowDataLoss: allowDataLoss, JSON: jsonMode,
+			Yes: yes, AllowDataLoss: allowDataLoss, AllowExposure: allowExposure,
+			JSON:           jsonMode,
 			NoReachability: noReachability,
-			In:             os.Stdin, Out: os.Stdout,
+			// D612: the run's security policy travels to the children, which are
+			// separate PROCESSES and inherit no in-process trust set.
+			Trust: trustArgs, TrustFrom: trustFromArg, SignKey: signKeyPath,
+			// D638: and WHICH cluster. A child process inherits neither.
+			Kubeconfig: kubeconfigPath, KubeContext: kubeContext,
+			// D638: and everything else a child needs to see the same world.
+			Region: region, Bindings: bindingsPath, Observations: observationsPath,
+			TTL: intFlag(ttl), RequirePreflight: requirePreflight,
+			FailKey: oneKey(failKeys), UnknownKey: oneKey(unknownKeys),
+			RetryableKey: oneKey(retryableKeys),
+			In:           os.Stdin, Out: os.Stdout,
 			Run:           converge.SelfRunner(self),
 			ConvergeRunID: crunID, Env: cenv, Caps: ccaps,
 		})
@@ -1424,22 +1594,12 @@ func run(args []string) int {
 	}
 	if cmd == "discover" {
 		var prov provider.Provider
-		if providerName == "gcp" {
-			prov = gcp.NewDriver(project)
-		} else if providerName == "aws" {
-			prov = aws.NewDriver(region)
-		} else if providerName == "azure" {
-			prov = azure.NewDriver(project)
-		} else if providerName == "k8s" {
-			kd, kerr := k8sDriver(kubeconfigPath, kubeContext)
-			if kerr != nil {
-				fmt.Fprintln(os.Stderr, kerr.Error())
-				return 1
-			}
-			prov = kd
-		} else {
-			prov = &provider.Fake{}
+		dp, derr := driverFor(providerName, project, region, kubeconfigPath, kubeContext)
+		if derr != nil {
+			fmt.Fprintln(os.Stderr, derr.Error())
+			return 1
 		}
+		prov = dp
 		res, err := discover.Run(prov, project, region, evalTime)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "discover error: %v\n", err)
@@ -1501,7 +1661,12 @@ func run(args []string) int {
 			fmt.Fprintln(os.Stderr, "pair:", err)
 			return 1
 		}
-		conn := pair.Connection{Provider: pos[1], Scope: scopeArg, Credential: ref, PairedAt: evalTime}
+		conn := pair.Connection{Provider: pos[1], Scope: scopeArg, Credential: ref}
+		// D588: through StampPairedAt, which records nothing when there is no clock.
+		// `pair` takes no --at, so evalTime here is the epoch default unless the
+		// operator supplied one, and a record saying 1970 is worse than a record
+		// saying nothing.
+		conn.StampPairedAt(evalTime)
 		if err := conn.Validate(); err != nil {
 			fmt.Fprintln(os.Stderr, "pair:", err)
 			return 1
@@ -1545,10 +1710,17 @@ func run(args []string) int {
 		}
 		rows := []map[string]string{}
 		for _, c := range reg.Pairings {
-			rows = append(rows, map[string]string{
+			row := map[string]string{
 				"provider": c.Provider, "scope": c.Scope,
-				"credentialRef": c.Credential.String(), "pairedAt": c.PairedAt,
-			})
+				"credentialRef": c.Credential.String(),
+			}
+			// D588/D230: a clock nobody supplied is OMITTED, not published empty.
+			// An absent key says "not recorded"; "" says the field exists and is
+			// blank, which is a third thing nobody meant.
+			if c.PairedAt != "" {
+				row["pairedAt"] = c.PairedAt
+			}
+			rows = append(rows, row)
 		}
 		out, _ := json.MarshalIndent(map[string]any{"pairings": rows}, "", "  ")
 		fmt.Println(string(out))
@@ -1622,10 +1794,9 @@ func run(args []string) int {
 			fmt.Fprintln(os.Stderr, "refresh requires --ledger")
 			return 1
 		}
-		led, lerr := ledger.ReplayFile(ledgerPath)
+		led, lerr := ledger.ReplayExisting(ledgerPath)
 		if lerr != nil {
-			fmt.Fprintf(os.Stderr, "ledger error: %v\n", lerr)
-			return 5
+			return refuseCorruptLedger(lerr)
 		}
 		prov := crawlProvider(providerName, "", kubeconfigPath, kubeContext)
 		if prov == nil {
@@ -1644,20 +1815,41 @@ func run(args []string) int {
 		}
 		out, _ := json.MarshalIndent(rep, "", "  ")
 		fmt.Println(string(out))
+		// D649: refresh runs unattended on a schedule, so the exit code is the only
+		// alert. A capability whose re-observation failed left the proof untouched
+		// and still decaying — the run did not do its job, and saying 0 is how a
+		// cron never notices a provider it has not read for a month.
+		if len(rep.Unreadable) > 0 {
+			return perr.ExitFor(perr.ObservationRequired)
+		}
 		return 0
 	}
 	if cmd == "posture" {
 		// the proactive classifier (candidate D142): fold a crawl (--context) + the
 		// ledger + audit (--contract) into managed-ok/drifted/shadow/decayed/unknown
 		// with on-a-plate remediation. Pure + deterministic; N1 --at. Writes nothing.
+		// D567: posture takes its swept resources from a CRAWL, never from a
+		// `discover` output, and the difference is load-bearing rather than
+		// cosmetic: a crawl records per-scope COMPLETENESS, which is what
+		// shadowLowerBound is a claim about. Folding a discovery document would
+		// let posture report a shadow count it has not earned. The flag was
+		// silently ignored — and posture's own remediation tells the operator to
+		// run `discover`, so the tool set this trap for itself.
+		if discoveryPath != "" {
+			fmt.Fprintln(os.Stderr, "posture does not take --discovery: it classifies "+
+				"what a CRAWL swept, because a crawl records whether each scope was "+
+				"listed COMPLETELY and `discover` does not — without that, a shadow "+
+				"count would be a number with no claim behind it. Use --crawl <doc>, "+
+				"or run posture with a paired provider so it crawls first.")
+			return 1
+		}
 		if ledgerPath == "" {
 			fmt.Fprintln(os.Stderr, "posture requires --ledger")
 			return 1
 		}
-		led, lerr := ledger.ReplayFile(ledgerPath)
+		led, lerr := ledger.ReplayExisting(ledgerPath)
 		if lerr != nil {
-			fmt.Fprintf(os.Stderr, "ledger error: %v\n", lerr)
-			return 5
+			return refuseCorruptLedger(lerr)
 		}
 		// discovered resources -> shadow. A prior crawl (--crawl <doc>) is folded
 		// offline; otherwise, when providers are paired, posture runs the gentle
@@ -1672,6 +1864,34 @@ func run(args []string) int {
 			var loaded crawl.Document
 			if json.Unmarshal(raw, &loaded) != nil {
 				fmt.Fprintln(os.Stderr, "context: not a crawl document")
+				return 1
+			}
+			// D615: every field of crawl.Document is optional to the JSON decoder, so
+			// a `discover` output decodes CLEANLY into an empty crawl — no providers,
+			// no scopes — and posture then reports "shadow": 0 with
+			// shadowLowerBound:false, an affirmative claim that the sweep was
+			// complete, at exit 0. Measured on one ledger and one resource: a real
+			// crawl gave shadow 1 and exit 2; the discovery document gave shadow 0
+			// and OK.
+			//
+			// This is the trap D567 closed on --discovery and left open next to it,
+			// which is worse than never having closed it: the refusal on one flag
+			// reads as diligence covering both. Posture's own shadow recipe tells the
+			// operator to run `discover`, so the wrong file is the one they have.
+			if kind, _ := docKind(raw); kind == "DiscoveryDocument" {
+				fmt.Fprintf(os.Stderr, "posture --crawl was given a DISCOVERY "+
+					"document. It classifies what a CRAWL swept, because a crawl "+
+					"records whether each scope was listed COMPLETELY and `discover` "+
+					"does not — folding it would report a shadow count posture has "+
+					"not earned. Run `groundhold crawl --provider <p> %s` "+
+					"(or pair the provider and let posture crawl) and pass that file.\n",
+					perr.AtNow)
+				return 1
+			}
+			if len(loaded.Providers) == 0 {
+				fmt.Fprintln(os.Stderr, "posture --crawl: the document names no "+
+					"providers, so it swept nothing. A posture over an empty sweep "+
+					"would report zero shadow resources and mean nothing by it.")
 				return 1
 			}
 			ctx = &loaded
@@ -1695,17 +1915,18 @@ func run(args []string) int {
 			return 1
 		}
 		out, _ := json.MarshalIndent(doc, "", "  ")
+		fmt.Println(string(out))
 		if crawlOut != "" {
-			if err := os.MkdirAll(crawlOut, 0o755); err == nil {
-				_ = os.WriteFile(filepath.Join(crawlOut, "posture.json"), append(out, '\n'), 0o600)
+			if err := writeReport(crawlOut, "posture.json", doc); err != nil {
+				fmt.Fprintln(os.Stderr, "posture: --out was given and the document "+
+					"could not be written:", err)
+				return 1
 			}
 		}
-		fmt.Println(string(out))
-		// exit 2 on findings that demand action; decayed alone does not fail (renew)
-		if doc.Summary.Shadow > 0 || doc.Summary.Drifted > 0 {
-			return 2
-		}
-		return 0
+		// exit 2 on findings that demand action or an estate that could not be fully
+		// judged (D958): shadow/drift/unknown/incomplete-scope. decayed alone does not
+		// fail (renew). The decision lives in posture.Summary.ExitCode so it is testable.
+		return doc.Summary.ExitCode()
 	}
 	if cmd == "react" {
 		// event-driven ingress (D143): map ONE change event to (provider, scope),
@@ -1723,9 +1944,18 @@ func run(args []string) int {
 		}
 		ev, perr2 := react.ParseEvent(raw)
 		if perr2 != nil {
-			// an unmapped event is ignored LOUDLY, never a crash loop
-			fmt.Fprintln(os.Stderr, "react: event ignored —", perr2)
-			return 0
+			// D591: a routine frame and an event we could not understand are
+			// different outcomes and must not share an exit code. A stream consumer
+			// routes on this: 0 means "handled, nothing to do", and telling it that
+			// for a dropped event hides the real-time path losing changes.
+			if errors.Is(perr2, react.ErrNothingToReactTo) {
+				fmt.Fprintln(os.Stderr, "react: nothing to react to —", perr2)
+				return 0
+			}
+			// Still never a crash loop: a malformed envelope is a structural error in
+			// the INPUT document, which is what exit 1 means here (spec/errors.md).
+			fmt.Fprintln(os.Stderr, "react: event NOT understood and dropped —", perr2)
+			return 1
 		}
 		// the pairing is the consent: an event cannot conjure credentials (D141)
 		ppath := pairingsPath
@@ -1755,7 +1985,10 @@ func run(args []string) int {
 			return 1
 		}
 		stamp := time.Now().UTC().Format(time.RFC3339)
-		fresh := crawl.ScopeContext{Scope: ev.Scope, Status: "complete", Resources: []crawl.Resource{}}
+		// D592: the re-listed scope is stamped NOW; every scope the splice carries
+		// over keeps its own listing time, so the document stops re-dating what it
+		// did not read.
+		fresh := crawl.ScopeContext{Scope: ev.Scope, Status: "complete", ListedAt: evalTime, Resources: []crawl.Resource{}}
 		for _, r := range res.Discovery.Resources {
 			fresh.Resources = append(fresh.Resources, crawl.Resource{
 				ProviderID: r.ProviderID, ResourceType: r.ResourceType,
@@ -1786,20 +2019,27 @@ func run(args []string) int {
 			fmt.Fprintln(os.Stderr, "react:", cerr)
 			return 1
 		}
-		if crawlOut != "" {
-			if err := os.MkdirAll(crawlOut, 0o755); err == nil {
-				cb, _ := json.MarshalIndent(spliced, "", "  ")
-				_ = os.WriteFile(filepath.Join(crawlOut, "context.json"), append(cb, '\n'), 0o600)
-				pb, _ := json.MarshalIndent(doc, "", "  ")
-				_ = os.WriteFile(filepath.Join(crawlOut, "posture.json"), append(pb, '\n'), 0o600)
-			}
-		}
 		out, _ := json.MarshalIndent(doc, "", "  ")
 		fmt.Println(string(out))
-		if doc.Summary.Shadow > 0 || doc.Summary.Drifted > 0 {
-			return 2
+		if crawlOut != "" {
+			for _, w := range []struct {
+				name string
+				doc  any
+			}{{"context.json", spliced}, {"posture.json", doc}} {
+				if err := writeReport(crawlOut, w.name, w.doc); err != nil {
+					fmt.Fprintln(os.Stderr, "react: --out was given and the document "+
+						"could not be written:", err)
+					return 1
+				}
+			}
 		}
-		return 0
+		// D966: the exit decision lives in posture.Summary.ExitCode (the same source
+		// the `posture` verb returns), so react cannot silently drop the Unknown and
+		// ShadowLowerBound arms. react is the unattended stream-consumer path — exit 0
+		// is its "handled, nothing to do", and reading it over an incomplete sweep or
+		// an unknown hard constraint is the incomplete-as-complete / unverifiable-as-
+		// success inversion posture and audit both refuse (invariant #1, D650, D958).
+		return doc.Summary.ExitCode()
 	}
 	if cmd == "restore" {
 		// capsule disaster-recovery (slice 1): rebuild a ledger from a verified
@@ -1819,7 +2059,9 @@ func run(args []string) int {
 		// content-addressed document blobs (D103 slice 4). A tampered blob
 		// escalates to corruption (5), even if the ledger itself restored.
 		if code == restore.ExitOK && documentsPath != "" {
-			vrep, vcode := backup.VerifyDocuments(documentsPath)
+			// D616: the RESTORED ledger is the authority on which documents this
+			// history pins — the manifest beside the blobs is not.
+			vrep, vcode := backup.VerifyDocumentsAgainst(documentsPath, crawlOut)
 			vb, _ := json.MarshalIndent(vrep, "", "  ")
 			fmt.Println(string(vb))
 			if vcode != restore.ExitOK {
@@ -1863,10 +2105,9 @@ func run(args []string) int {
 			fmt.Fprintln(os.Stderr, "deposed requires --ledger")
 			return 1
 		}
-		led, err := ledger.ReplayFile(ledgerPath)
+		led, err := ledger.ReplayExisting(ledgerPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "ledger error: %v\n", err)
-			return 5
+			return refuseCorruptLedger(err)
 		}
 		list := led.Deposed(showAll)
 		if list == nil {
@@ -2114,6 +2355,17 @@ func run(args []string) int {
 		}
 		res := probe.Run(c, led, ledgerPath, prov, evalTime, onlyCap,
 			allowIntrusive, record)
+		// D697: a run that measured nothing (or only some of it) is MISSING KNOWLEDGE,
+		// not a refusal — the probe ran. The banner vocabulary already distinguishes
+		// the two (spec/presentation.md); it needs the rollup to say so.
+		for _, f := range res.Failures {
+			bannerState.rollup.Unknown = append(bannerState.rollup.Unknown,
+				f.Capability+"."+f.Path+" not measured")
+		}
+		if res.Status == "unmeasured" && len(res.Failures) == 0 {
+			bannerState.rollup.Unknown = append(bannerState.rollup.Unknown,
+				"the driver returned no measurements and named no failure")
+		}
 		printResult(res, explainFlag)
 		return res.Exit
 
@@ -2168,7 +2420,7 @@ func run(args []string) int {
 			fmt.Fprintf(os.Stderr, "ledger error: %v\n", err)
 			return 5
 		}
-		res, err := audit.Run(c, led, ledgerPath, evalTime, record)
+		res, err := audit.Run(c, led, ledgerPath, evalTime, record, vocabs)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "audit error: %v\n", err)
 			return 1
@@ -2261,7 +2513,13 @@ func run(args []string) int {
 			}
 			prov = kd
 		} else {
-			prov = &provider.Fake{}
+			// D734: never the fake by fall-through.
+			dp, derr := driverFor(providerName, project, region, kubeconfigPath, kubeContext)
+			if derr != nil {
+				fmt.Fprintln(os.Stderr, derr.Error())
+				return 1
+			}
+			prov = dp
 		}
 		res, code := adopt.Run(c, cand, report, adoptMap, prov, led,
 			ledgerPath, evalTime, discoveryHash)
@@ -2269,9 +2527,7 @@ func run(args []string) int {
 		// assumed declaration the live reading contradicts. JSON alone would bury
 		// it, so it also goes to the human channel (stderr, never stdout: the
 		// result document stays machine-clean).
-		for _, n := range res.Notes {
-			fmt.Fprintf(os.Stderr, "note: %s\n", n)
-		}
+		sayNotes(res.Notes)
 		printResult(res, explainFlag)
 		return code
 
@@ -2291,6 +2547,7 @@ func run(args []string) int {
 		}
 		res, code := adopt.Unadopt(pos[2], led, ledgerPath,
 			c.Environment, evalTime)
+		sayNotes(res.Notes)
 		printResult(res, explainFlag)
 		return code
 
@@ -2423,11 +2680,24 @@ func run(args []string) int {
 		}
 		// D203: advisory hardening hint on stderr (never gates, never touches
 		// the hashed plan) — the same channel as the cost estimate.
-		renderSuggestHint(os.Stderr, c, vocabs, cand)
+		renderSuggestHint(os.Stderr, c, vocabs, cand, pos[1])
 		// Part B: name every converged no-op on stderr (the prose channel), so a
 		// plan that changes some capabilities and leaves others alone says WHY it
 		// left them alone. The hashed plan on stdout already carries plan.noop.
 		renderNoOp(os.Stderr, doc)
+		// D721, from the field: a capability the compiler could not plan at all was
+		// carried in plan.blocked and NEVER SPOKEN. This channel named the no-ops —
+		// capabilities deliberately left alone, the harmless case — and said nothing
+		// about the capabilities that fell out of the deployment, which is the
+		// dangerous one. A pilot read a plan of 24 actions for a 27-capability
+		// contract, applied it, and learned what was missing from converge afterwards.
+		unaccounted := renderBlocked(os.Stderr, doc, c)
+		if len(unaccounted) > 0 {
+			// converge already refuses the clean "converged" verdict while a capability
+			// is blocked; plan called the same state a success. One state, two verbs,
+			// two answers — and the verb people read first was the one that said fine.
+			return 2
+		}
 		return 0
 
 	case "preflight":
@@ -2602,7 +2872,7 @@ func applyReachability(c *contract.Contract, cand *contract.Candidate, res *appl
 	if noReachability {
 		say("reachability skipped (--no-reachability) — the public edge was NOT " +
 			"probed; an APPLIED edge that 403s will read as clean success")
-		res.Reachability = "skipped"
+		res.Reachability = string(reach.Skipped)
 		return
 	}
 	capTypes := map[string]string{}
@@ -2630,22 +2900,31 @@ func applyReachability(c *contract.Contract, cand *contract.Candidate, res *appl
 		switch {
 		case cr.Verdict == reach.Reachable:
 			say("  reachable: %s GET %s — %s", cr.Capability, cr.URL, cr.Cause)
+		case cr.Verdict == reach.Failing:
+			say("  reachability FAILING: %s GET %s — %s", cr.Capability, cr.URL, cr.Cause)
 		case reach.IsAnonymousDenied(cr):
 			say("  reachability unknown: %s GET %s — %s", cr.Capability, cr.URL, cr.Cause)
 			say("    %s", reach.AnonymousRemediation)
-			bannerState.rollup.Unknown = append(bannerState.rollup.Unknown,
-				cr.Capability+" public edge not anonymously reachable")
 		default: // unknown: transport failure or an unexpected status
 			say("  reachability unknown (from here): %s GET %s — %s",
 				cr.Capability, cr.URL, cr.Cause)
-			bannerState.rollup.Unknown = append(bannerState.rollup.Unknown,
-				cr.Capability+" public edge unreachable-from-here")
 		}
 	}
-	if reach.Overall(results) == reach.Unknown {
-		res.Reachability, res.Exit = "unknown", 2
-	} else {
-		res.Reachability = "reachable"
+	if len(results) > 0 {
+		say("  checked: %s", reach.Checked)
+	}
+	// One classification for both renderers (D696) — the prose differs per verb, what
+	// a verdict MEANS does not.
+	violated, unknown, verdict := reach.Fold(results)
+	bannerState.rollup.Violated = append(bannerState.rollup.Violated, violated...)
+	bannerState.rollup.Unknown = append(bannerState.rollup.Unknown, unknown...)
+	switch verdict {
+	case reach.Failing:
+		res.Reachability, res.Exit = string(reach.Failing), 2
+	case reach.Unknown:
+		res.Reachability, res.Exit = string(reach.Unknown), 2
+	default:
+		res.Reachability = string(reach.Reachable)
 	}
 }
 
@@ -2672,7 +2951,24 @@ func runLiveCrawl(reg *pair.Registry, budgetArg int, at, kubeconfigPath, kubeCon
 		if derr != nil {
 			return crawl.Fetched{Pace: pace.Result{Outcome: pace.ServerError}}
 		}
-		return crawl.Fetched{Resources: res.Discovery.Resources, Pace: pace.Result{Outcome: pace.OK}}
+		// D803: the sweep succeeded — and the provider may have said there was more.
+		// A driver that can answer is asked; one that cannot is not assumed complete by
+		// this code, it simply says nothing and the scope keeps whatever the sweep said.
+		f := crawl.Fetched{Resources: res.Discovery.Resources, Pace: pace.Result{Outcome: pace.OK}}
+		if lc, ok := prov.(provider.ListingCompleteness); ok {
+			if notes := lc.TruncatedListings(); len(notes) > 0 {
+				calls := make([]string, 0, len(notes))
+				for _, n := range notes {
+					calls = append(calls, n.Call)
+				}
+				sort.Strings(calls)
+				f.Incomplete = true
+				f.Reason = "the scope is incomplete — a listing did not finish (a page went " +
+					"unread, or a discovery sweep failed): " + strings.Join(calls, ", ") +
+					" — the resources found are real, the count is a lower bound (D803/D873)"
+			}
+		}
+		return f
 	}
 	enum := func(c pair.Connection) crawl.EnumResult {
 		prov := crawlProvider(c.Provider, "", kubeconfigPath, kubeContext)
@@ -2692,16 +2988,44 @@ func runLiveCrawl(reg *pair.Registry, budgetArg int, at, kubeconfigPath, kubeCon
 	return crawl.Run(reg, fetch, enum, sched, pol.Budget, at, time.Now)
 }
 
+// writeReport writes a JSON document into a --out directory and says so when it
+// cannot. D653: two call sites did
+//
+//	if err := os.MkdirAll(dir, 0o755); err == nil { _ = os.WriteFile(...) }
+//
+// so a read-only directory, a full disk, or a plain file sitting where the
+// directory should be produced NOTHING — no error, no message, and the verb's own
+// exit code unchanged. A cron reading `$OUT/posture.json` then consumes a stale
+// document indefinitely while every run reports success. The output IS the
+// deliverable when --out is given; failing to produce it is not a detail.
+func writeReport(dir, name string, doc any) error {
+	raw, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("%s: %v", name, err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, name), append(raw, '\n'), 0o600)
+}
+
 // classifyPosture folds a crawl document + the ledger + audit into the posture
 // document — shared by `groundhold posture` (full or live crawl) and `groundhold react`
 // (a spliced crawl). Pure given its inputs.
 func classifyPosture(led *ledger.Ledger, ledgerPath string, ctx *crawl.Document, contractPaths []string, at string) (*posture.Document, error) {
 	in := posture.Input{At: at, Bindings: led.BoundProviderIDs(),
-		Deposed: map[string]bool{}, Decayed: map[string]bool{}, Verdict: map[string]string{}}
+		Deposed: map[string]bool{}, Decayed: map[string]bool{},
+		Verdict: map[string]string{}, Absent: map[string]bool{}}
 	if ctx != nil {
 		for _, p := range ctx.Providers {
 			for _, s := range p.Scopes {
 				complete := s.Status == "complete"
+				// D650: the SCOPE carries its own completeness. It used to travel
+				// only on the resources, so a scope that listed nothing — an auth
+				// error, a throttle, an exhausted budget — was invisible and
+				// posture called its shadow count exact.
+				in.Scopes = append(in.Scopes, posture.Scope{Provider: p.Provider,
+					Scope: s.Scope, Complete: complete, Reason: s.Reason})
 				for _, r := range s.Resources {
 					in.Discovered = append(in.Discovered, posture.Discovered{
 						ProviderID: r.ProviderID, Scope: s.Scope, ScopeComplete: complete})
@@ -2726,9 +3050,28 @@ func classifyPosture(led *ledger.Ledger, ledgerPath string, ctx *crawl.Document,
 			in.Decayed[capID] = true
 			continue
 		}
+		// D652: the reserved absence marker, judged for freshness the same way the
+		// compiler judges it — a STALE "it was gone last year" says nothing about
+		// now, and the decayed branch below already covers that case.
+		if r, ok := recs[provider.ResourceAbsentPath]; ok {
+			gone, _ := r.Value.(bool)
+			obsSec, oerr := ledger.ParseTs(r.ObservedAt)
+			// D666: the absence marker is judged by the SAME predicate the compiler
+			// applies (D652 claimed it already was; it was off by one second, so
+			// posture went green on a resource it was simultaneously planning to
+			// re-create). A FUTURE-dated marker is still refused separately — the
+			// compiler refuses it too, and "measured after the moment we are asking
+			// about" is a different fact from "too old".
+			if gone && oerr == nil && atSec >= obsSec &&
+				!ledger.ObservationExpired(r.ObservedAt, r.TTLSeconds, atSec) {
+				in.Absent[capID] = true
+			}
+		}
 		for _, r := range recs {
-			obsSec, perr2 := ledger.ParseTs(r.ObservedAt)
-			if perr2 != nil || obsSec+r.TTLSeconds <= atSec {
+			// D666: `<=` here called a proof decayed one second before audit,
+			// plan, apply and forecast did — and posture's own remediation chains
+			// those verbs. One predicate now.
+			if ledger.ObservationExpired(r.ObservedAt, r.TTLSeconds, atSec) {
 				in.Decayed[capID] = true
 				break
 			}
@@ -2741,11 +3084,19 @@ func classifyPosture(led *ledger.Ledger, ledgerPath string, ctx *crawl.Document,
 		if cerr != nil {
 			return nil, fmt.Errorf("contract error: %v", cerr)
 		}
-		ar, aerr := audit.Run(c, led, ledgerPath, at, false)
+		// D660: audit needs the vocabulary to canonicalize SET attributes; the
+		// embedded set is the source of truth (D23) and posture is a read-only
+		// classification, so overrides do not apply here.
+		postureVocabs, _ := vocab.Embedded()
+		ar, aerr := audit.Run(c, led, ledgerPath, at, false, postureVocabs)
 		if aerr != nil {
 			return nil, fmt.Errorf("audit error: %v", aerr)
 		}
-		for _, v := range ar.Verdicts {
+		// D755: soft is ADVISORY. Folding it in made an advisory violation render as
+		// drift ("a hard constraint is violated") with a converge recipe, and an
+		// advisory pass render as managed-ok — green with nothing hard proven, past
+		// the very arm that refuses to "claim ok without a proof".
+		for _, v := range audit.HardOnly(ar.Verdicts) {
 			a := accs[v.Capability]
 			if a == nil {
 				a = &vacc{}
@@ -2770,12 +3121,56 @@ func classifyPosture(led *ledger.Ledger, ledgerPath string, ctx *crawl.Document,
 		case a.unverifiable:
 			in.Verdict[capID] = "unverifiable"
 		case a.unknown:
-			// leave unset -> falls through to decayed/unknown
+			// D965: a HARD constraint whose audit verdict is unknown (its proof is
+			// stale or unprovable) must BLOCK — invariant #1, and audit exits 2 on the
+			// identical evidence. Set it so capRow ranks it ABOVE decayed, exactly as
+			// violated/unverifiable already do. Leaving it unset let a coincident
+			// decayed proof mask a stale hard constraint as exit 0 (posture's own
+			// audit-parity claim, broken for the staleness subclass).
+			in.Verdict[capID] = "unknown"
 		case a.satisfied:
 			in.Verdict[capID] = "satisfied"
 		}
 	}
 	return posture.Classify(in), nil
+}
+
+// driverFor is the ONE place a provider NAME becomes a driver (D734). It returns nil
+// for a name this binary cannot construct, and every caller must refuse on nil rather
+// than substituting the fake.
+//
+// Four copies of this mapping existed. Three ended in `else { prov = &provider.Fake{} }`,
+// so a name that passed `knownProviders` but was missing from that particular chain —
+// cloudflare, upstash, hetzner — silently became the FAKE. `discover --provider
+// cloudflare` returned `fake:existing-db`, a fabricated relational database, as the
+// result of a DNS sweep. A pilot was one `adopt` away from writing that into their
+// ledger as a real binding, and caught it only because they read the output first.
+//
+// It broke the rule printed a few lines above the validator, in this binary's own
+// words: "fake fabricates reality, so it must be chosen deliberately (--provider fake)
+// rather than defaulted". A set with two homes has no home; this one had four.
+func driverFor(name, project, region, kubeconfigPath, kubeContext string) (provider.Provider, error) {
+	switch name {
+	case "fake":
+		return &provider.Fake{}, nil
+	case "gcp":
+		return gcp.NewDriver(project), nil
+	case "aws":
+		return aws.NewDriver(region), nil
+	case "azure":
+		return azure.NewDriver(project), nil
+	case "k8s":
+		return k8sDriver(kubeconfigPath, kubeContext)
+	case "upstash":
+		return upstash.NewDriver(), nil
+	case "hetzner":
+		return hetzner.NewDriver(project), nil
+	case "cloudflare":
+		return cloudflare.NewDriver(project), nil
+	}
+	return nil, fmt.Errorf("provider %q has no driver in this binary — refusing rather "+
+		"than substituting the fake, which fabricates reality and must be chosen "+
+		"deliberately with --provider fake", name)
 }
 
 // crawlProvider builds the read-only discoverer for a paired provider+scope. nil =
@@ -2818,6 +3213,50 @@ func k8sDriver(kubeconfigPath, kubeContext string) (provider.Provider, error) {
 
 // classifyProvider picks the provider whose PURE ClassifyChange the
 // compiler consults — by the candidate's declared provider name.
+// k8sCapabilityMappings is the k8s driver's service -> capability map, in the shape
+// parity.OutsideTheClouds takes (D622).
+func k8sCapabilityMappings() map[string]string {
+	out := map[string]string{}
+	for svc, m := range k8s.NewDriver("http://unused", "").Mappings {
+		if m != nil && m.Capability != "" {
+			out[svc] = m.Capability
+		}
+	}
+	return out
+}
+
+// providerHintFor writes the candidate's provider line for a capability type, naming
+// the clouds that actually fulfil it (D622). With no type, or a type nobody fulfils, it
+// says so rather than picking one — a scaffold is advice, and advice is a claim (D585).
+func providerHintFor(capType string) string {
+	if capType == "" {
+		return "    provider: \"\"              # aws | gcp | azure | k8s | fake\n"
+	}
+	caps := parityCaps()
+	var able []string
+	for _, cloud := range parity.Clouds() {
+		if parity.CanFulfil(caps, cloud, capType).State == "fulfilled" {
+			able = append(able, cloud)
+		}
+	}
+	if outside := parity.OutsideTheClouds(k8sCapabilityMappings())[capType]; len(outside) > 0 {
+		// Fulfilled outside the clouds (k8s). Naming it here is the difference between
+		// "groundhold cannot do this" and "not with a cloud driver" (D622).
+		able = append(able, "k8s")
+	}
+	switch len(able) {
+	case 0:
+		return "    provider: \"\"              # no driver fulfils this type yet — " +
+			"see `groundhold parity " + capType + "`\n"
+	case 1:
+		return fmt.Sprintf("    provider: %-15s # the only driver that fulfils this type\n",
+			able[0])
+	default:
+		return fmt.Sprintf("    provider: %-15s # or %s — `groundhold parity %s`\n",
+			able[0], strings.Join(able[1:], ", "), capType)
+	}
+}
+
 // parityCaps returns each cloud's proven token->capability map (the drivers'
 // ServiceCapabilities). ServiceCapabilities is a static declaration, so the
 // constructor arg is irrelevant.
@@ -2861,7 +3300,35 @@ func runParity(args []string, asJSON bool) int {
 			target = a
 		}
 	}
+	// D622: the list is the union of what the CLOUD drivers know and what is
+	// fulfilled outside them. Derived from the cloud maps alone it published 51 of
+	// the 57 types the generated matrix carries, and the six it dropped are exactly
+	// the ones only k8s fulfils — so the verb was silent about them rather than
+	// wrong, which is harder to notice.
 	types := parity.CapabilityTypes(caps)
+	// The VOCABULARY is the full set of types this project publishes. Derived from
+	// the drivers alone the verb listed 51 of 57, and the six it dropped were the
+	// ones no cloud driver implements — precisely the answers a reader runs `parity`
+	// to get. A type nobody builds is three `unbuilt` rows, which is the truth.
+	if voc, verr := vocab.Embedded(); verr == nil {
+		for typ := range voc {
+			types = append(types, typ)
+		}
+	}
+	for typ := range parity.OutsideTheClouds(k8sCapabilityMappings()) {
+		known := false
+		for _, t := range types {
+			if t == typ {
+				known = true
+				break
+			}
+		}
+		if !known {
+			types = append(types, typ)
+		}
+	}
+	sort.Strings(types)
+	types = slices.Compact(types)
 	if target != "" {
 		if !strings.HasPrefix(target, "capability.") {
 			target = "capability." + target
@@ -2883,6 +3350,7 @@ func runParity(args []string, asJSON bool) int {
 		return 0
 	}
 
+	outside := parity.OutsideTheClouds(k8sCapabilityMappings())
 	for _, typ := range types {
 		fmt.Println(typ)
 		for _, cloud := range parity.Clouds() {
@@ -2895,6 +3363,15 @@ func runParity(args []string, asJSON bool) int {
 			default:
 				fmt.Printf("  %-6s unbuilt\n", cloud)
 			}
+		}
+		// D622: the generated matrix has carried `fulfilledOutsideTheClouds` since
+		// D502, and this verb — the one the help text sends a reader to — did not,
+		// so eight capabilities the k8s driver ships read as three `unbuilt` rows.
+		// spec/parity.yaml's own header names that misreading as the reason the
+		// marker exists.
+		if o := outside[typ]; len(o) > 0 {
+			fmt.Printf("  %-6s fulfilled outside the clouds: %s\n", "k8s",
+				strings.Join(o, ", "))
 		}
 	}
 	return 0
@@ -3116,6 +3593,18 @@ func runObserve(ledgerPath, bindingsPath, providerName, at string,
 		// subscription rides in each providerId (sub:rg:name); with an empty
 		// driver subscription the ownership guard defers to the providerId
 		prov = azure.NewDriver("")
+	case "k8s":
+		// D505: observe was the ONE verb the k8s driver could not be reached
+		// through. apply, converge, adopt, resume and probe all resolve it; this
+		// switch did not, so a capability could be created and retired on a
+		// cluster and never read back — the exact gap TestObserveCompleteness
+		// forbids INSIDE a driver, present at the CLI seam between them.
+		kd, kerr := k8sDriver(kubeconfigPath, kubeContext)
+		if kerr != nil {
+			fmt.Fprintln(os.Stderr, kerr.Error())
+			return 1
+		}
+		prov = kd
 	default:
 		fmt.Fprintf(os.Stderr, "unknown provider %q\n", providerName)
 		return 1
@@ -3258,10 +3747,9 @@ func runAnchor(ledgerPath, checkPath string) int {
 			return 1
 		}
 	}
-	led, err := ledger.ReplayFile(ledgerPath)
+	led, err := ledger.ReplayExisting(ledgerPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ledger error: %v\n", err)
-		return 5
+		return refuseCorruptLedger(err)
 	}
 	if checkPath == "" {
 		out, _ := json.MarshalIndent(ledger.BuildAnchor(led), "", "  ")
@@ -3277,6 +3765,14 @@ func runAnchor(ledgerPath, checkPath string) int {
 	if err := yaml.Unmarshal(raw, &a); err != nil || a.Kind != "LedgerAnchor" {
 		fmt.Fprintln(os.Stderr, "anchor error: not a LedgerAnchor document")
 		return 1
+	}
+	// D613: `anchor --check` uses the anchor AS PROOF, which is exactly where D312
+	// put this rule — and it was wired into restore and capsule --verify and not
+	// here. An anchor that names no ledgerId cannot say which ledger it manifests,
+	// so the identity checks that key on it pass vacuously.
+	if err := a.RequireIdentity(); err != nil {
+		fmt.Fprintf(os.Stderr, "anchor error: %v\n", err)
+		return 5
 	}
 	res := ledger.CheckAnchor(led, &a)
 	out, _ := json.MarshalIndent(res, "", "  ")
@@ -3343,10 +3839,49 @@ func detachRun(handle, kind, ledgerPath, at string, args []string, jsonMode bool
 			handle, ledgerPath, handle, ledgerPath)
 	}
 	if !admitted {
-		fmt.Fprintf(os.Stderr, "warning: run did not start within 5s — check the log: %s\n", e.LogPath)
-		return 1
+		// D679: "did not start" is a claim about a PROCESS, and nothing looked at
+		// the process. Measured: with the ledger lock held by another writer, the
+		// child was alive and blocked; this printed "run did not start within 5s",
+		// exited 1 — and the run later woke up and created the infrastructure. The
+		// tool said it had not started; the run then acted.
+		//
+		// The registry stores a pid and nothing ever read it. Signal 0 is the
+		// question "does this process exist", which is exactly what is being
+		// asserted, so it is asked before asserting.
+		code, msg := detachVerdict(handle, ledgerPath, e, processAlive(e.PID))
+		fmt.Fprintln(os.Stderr, msg)
+		return code
 	}
 	return 0
+}
+
+// processAlive answers the question the launcher's verdict ASSERTS: does this
+// process exist? Signal 0 is exactly that question. Injectable so the verdict can
+// be driven both ways without forking anything.
+var processAlive = func(pid int) bool {
+	return pid > 0 && syscall.Kill(pid, 0) == nil
+}
+
+// detachVerdict decides what to say about a detached run that has not reached
+// admission within the wait. D679: this used to be one sentence and exit 1 for both
+// cases — measured, a child alive and blocked on the ledger lock was declared not
+// started, and it woke up 27 seconds later and created the infrastructure.
+//
+// It is a pure function so the two answers can be tested; the launcher supplies the
+// aliveness. A slow start is not a failure and must not exit non-zero, or a caller
+// routing on the code tears down a run that is about to do its work.
+func detachVerdict(handle, ledgerPath string, e detach.Entry, alive bool) (int, string) {
+	if alive {
+		return 0, fmt.Sprintf(
+			"warning: run %s has not reached admission after 5s and is STILL "+
+				"RUNNING (pid %d) — it is most likely waiting for the ledger lock; "+
+				"it will proceed on its own. Watch it: groundhold status %s "+
+				"--ledger %s --at <t>. Log: %s",
+			handle, e.PID, handle, ledgerPath, e.LogPath)
+	}
+	return 1, fmt.Sprintf(
+		"warning: run %s did not start within 5s and its process is gone (pid %d) "+
+			"— check the log: %s", handle, e.PID, e.LogPath)
 }
 
 // runRuns lists every run in the ledger with its derived state (D231). The
@@ -3354,11 +3889,38 @@ func detachRun(handle, kind, ledgerPath, at string, args []string, jsonMode bool
 // that would be a covert ranking). Attention states are glyph-marked and a
 // per-state count line lets "what needs me" read at a glance WITHOUT a composite
 // health rollup (the four-valued discipline on run state).
-func runRuns(ledgerPath, at string, jsonMode bool) int {
-	evs, err := runstatus.ReadEvents(ledgerPath)
-	if err != nil {
+// refuseCorruptLedger is the one exit for `runs`, `status` and `wait` when the ledger
+// does not read as a ledger. D611: they used to print the error and return 1, while
+// every other verb refused the same file with ledger-corrupted (5) — and before that
+// they did not notice at all, because the reader accepted any JSON object as an event.
+// The spec's rule is "nothing proceeds over corruption"; these verbs' own rule is
+// "reporting is not judging", and both hold: a file that is not a ledger is not a run
+// that failed.
+func refuseCorruptLedger(err error) int {
+	// D617: a path that is WRONG and bytes that do not REPLAY are different operator
+	// problems. Between them they had four exit codes across sixteen verbs; a caller
+	// branching on the status could not tell "fix your path" from "your history is
+	// damaged" — and the published remediation for 5 is `groundhold repair`, which
+	// used to answer "healthy" for a file that is not there.
+	if errors.Is(err, ledger.ErrNoLedger) {
 		fmt.Fprintf(os.Stderr, "ledger error: %v\n", err)
 		return 1
+	}
+	bannerState.code = string(perr.LedgerCorrupted)
+	fmt.Fprintf(os.Stderr, "ledger error: %v\n", err)
+	return 5
+}
+
+func runRuns(ledgerPath, at string, jsonMode bool) int {
+	evs, incomplete, err := runstatus.ReadEventsFull(ledgerPath)
+	if err != nil {
+		return refuseCorruptLedger(err)
+	}
+	// D672: an incomplete history is stated, never implied. A pruned archive is the
+	// operator's own decision (spec §10), so this is a note rather than a refusal —
+	// but a list that cannot see part of the history must not read as a full one.
+	if incomplete != "" {
+		fmt.Fprintln(os.Stderr, "note:", incomplete)
 	}
 	nowClock, _ := ledger.ParseTs(at)
 	// D231: union in detach-registry handles so a run that was launched but never
@@ -3369,6 +3931,10 @@ func runRuns(ledgerPath, at string, jsonMode bool) int {
 	if ents, rerr := detach.ListRegistry(ledgerPath); rerr == nil {
 		for _, e := range ents {
 			regHandles = append(regHandles, e.Handle)
+			if e.Unreadable != "" { // D678
+				fmt.Fprintf(os.Stderr, "note: registry pointer %s: %s\n",
+					e.Handle, e.Unreadable)
+			}
 		}
 	}
 	runs := runstatus.ListRuns(evs, nowClock, regHandles)
@@ -3462,13 +4028,36 @@ func stateCountLine(counts map[string]int) string {
 // Status itself always exits 0 when derivation succeeded — reporting a failed
 // run is a successful status; relaying run exit codes is wait's job.
 func runStatus(handle, ledgerPath, at string, jsonMode bool) int {
-	evs, err := runstatus.ReadEvents(ledgerPath)
+	evs, incomplete, err := runstatus.ReadEventsFull(ledgerPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ledger error: %v\n", err)
-		return 1
+		return refuseCorruptLedger(err)
+	}
+	if incomplete != "" { // D672
+		fmt.Fprintln(os.Stderr, "note:", incomplete)
 	}
 	nowClock, _ := ledger.ParseTs(at)
 	st := runstatus.DeriveRunStatus(evs, handle, nowClock)
+	// D678: `runs` consults the detach registry and `status` did not, so one handle
+	// got two answers from two verbs at one instant — `runs` saying
+	// `registry-only` with "launched but no ledger events; check its log", and
+	// `status` a bare `unknown` with no source and no remediation. The per-run verb
+	// was the blind one.
+	if st.State == runstatus.StateUnknown {
+		if ents, rerr := detach.ListRegistry(ledgerPath); rerr == nil {
+			for _, e := range ents {
+				if e.Handle != handle {
+					continue
+				}
+				st.Source = "registry-only"
+				st.Remediation = "launched but no ledger events — it may have died " +
+					"before admission; check its log"
+				if e.Unreadable != "" {
+					st.Remediation = "the registry pointer for this handle is " +
+						"unusable (" + e.Unreadable + ") — check its log directly"
+				}
+			}
+		}
+	}
 	printRunStatus(st, jsonMode)
 	return 0
 }
@@ -3482,11 +4071,11 @@ func runWait(handle, ledgerPath string, pollS, timeoutS int, jsonMode bool, noti
 	}
 	start := time.Now()
 	for {
-		evs, err := runstatus.ReadEvents(ledgerPath)
+		evs, incomplete, err := runstatus.ReadEventsFull(ledgerPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "ledger error: %v\n", err)
-			return 1
+			return refuseCorruptLedger(err)
 		}
+		_ = incomplete // D672: wait polls; the note would repeat every tick
 		st := runstatus.DeriveRunStatus(evs, handle, int(time.Now().Unix()))
 		if isTerminalRun(st.State) {
 			exit := exitForRun(st)
@@ -3861,7 +4450,13 @@ func scaffoldCandidate(contractPath string) int {
 			continue // a retired capability is not implemented (D47)
 		}
 		fmt.Fprintf(&b, "  %s:                     # type: %s\n", capID, capType)
-		b.WriteString("    provider: aws           # aws | gcp | azure | k8s | fake\n")
+		// D622: the scaffold used to write `provider: aws` for every capability,
+		// whatever its type — including types this tool's OWN parity verb calls a
+		// structural gap on aws. The scaffold's next-step line then sends the reader
+		// to `verify`, which is a pure document check and says PROVEN, while `plan`
+		// refuses the same pair as impossible. A default that reads as a
+		// recommendation must not name a cloud that cannot do the job.
+		b.WriteString(providerHintFor(capType))
 		b.WriteString("    service: \"\"             # the provider's service token\n")
 		voc, ok := vocabs[capType]
 		if !ok || len(voc.Attributes) == 0 {
@@ -4233,8 +4828,20 @@ func renderSuggestText(w io.Writer, contractID string, res suggest.Result, asMod
 	}
 	fmt.Fprintf(w, "# %d hardening suggestion(s) for contract %s%s\n",
 		len(res.Suggestions), contractID, envSuffix)
-	fmt.Fprintf(w, "# %d already enforced. Advisory only — never gates; paste what you want to adopt.\n\n",
+	fmt.Fprintf(w, "# %d already enforced. Advisory only — never gates; paste what you want to adopt.\n",
 		res.AlreadyEnforced)
+	// D594: "never gates" is true of the SUGGESTION and misleading about the PASTE.
+	// A hard constraint over an attribute the candidate does not declare verifies
+	// UNKNOWN, and unknown blocks — measured: a PROVEN contract went to BLOCKED the
+	// moment these three were pasted. Say the cost where the paste happens, not one
+	// verb later where it reads as a failure. Only in hard mode: the caveat cannot
+	// apply in soft, and a caveat where it cannot apply is noise (D537).
+	if asMode == "hard" {
+		fmt.Fprintln(w, "# NOTE: a hard constraint whose attribute the candidate does not declare")
+		fmt.Fprintln(w, "# verifies UNKNOWN, and unknown blocks. Declare it in the candidate too, or")
+		fmt.Fprintln(w, "# take these with `--as soft` to adopt the intent without blocking.")
+	}
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, "constraints:")
 	fmt.Fprintf(w, "  %s:\n", asMode)
 	lastCap := ""
@@ -4283,12 +4890,20 @@ func warnPlaintextSecrets(w io.Writer, cand *contract.Candidate, allowed bool) {
 	fmt.Fprintf(w, "  Deliberate? re-run with --allow-plaintext-secret to silence this.\n")
 }
 
-func renderSuggestHint(w io.Writer, c *contract.Contract, vocabs map[string]vocab.Vocabulary, cand *contract.Candidate) {
+// contractPath: the document the reader just passed. D693 — the hint used to name
+// a bare `groundhold suggest`, which exits 1 with a usage line: the verb takes the
+// contract positionally. Advice printed at the moment a reader is most likely to
+// follow it must be the command they can paste, and this caller already knows it.
+func renderSuggestHint(w io.Writer, c *contract.Contract, vocabs map[string]vocab.Vocabulary, cand *contract.Candidate, contractPath string) {
 	res := suggest.Compute(c, vocabs, cand)
 	if len(res.Suggestions) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "%d hardening suggestion(s) — run `groundhold suggest`\n", len(res.Suggestions))
+	if contractPath == "" {
+		contractPath = "<contract.yaml>"
+	}
+	fmt.Fprintf(w, "%d hardening suggestion(s) — run `groundhold suggest %s`\n",
+		len(res.Suggestions), contractPath)
 }
 
 // renderNoOp surfaces the compiled plan's converged no-op capabilities on stderr
@@ -4299,9 +4914,81 @@ func renderNoOp(w io.Writer, doc *compiler.Document) {
 	if doc == nil {
 		return
 	}
+	// D531, from the field: this printed the no-ops and nothing else, so a plan
+	// that CREATED a resource summarised as twenty-one lines of "nothing to do".
+	// A bound, converged capability is harmless by definition; an unbound one is a
+	// new resource, a new cost and a new surface — and only the second was
+	// missing. Attention was distributed inversely to risk.
+	//
+	// The actions lead, and the no-ops follow as the answer to "why was nothing
+	// done to the rest". A plan with no actions prints exactly what it printed
+	// before: inventing a line for the steady state would be noise on the path
+	// every deployment runs.
+	if len(doc.Plan.Actions) > 0 {
+		byOp := map[string][]string{}
+		var ops []string
+		for _, a := range doc.Plan.Actions {
+			if _, seen := byOp[a.Operation]; !seen {
+				ops = append(ops, a.Operation)
+			}
+			byOp[a.Operation] = append(byOp[a.Operation], a.Capability)
+		}
+		sort.Strings(ops)
+		for _, op := range ops {
+			caps := byOp[op]
+			sort.Strings(caps)
+			fmt.Fprintf(w, "%s: %d capability(ies) — %s\n",
+				strings.ToUpper(op), len(caps), strings.Join(caps, ", "))
+		}
+	}
 	for _, n := range doc.Plan.NoOp {
 		fmt.Fprintf(w, "%s: no-op (%s)\n", n.Capability, n.Reason)
 	}
+}
+
+// anyMappingCanAuthor reports whether any `<provider>.<service>` key in an
+// attribute's mappings names a driver service that can AUTHOR its capability
+// (D687). A mapping to a discovery-only driver — or to a provider with no driver at
+// all — documents where the concept comes from, not that a candidate can carry it.
+func anyMappingCanAuthor(maps map[string]any) bool {
+	// `provider.CanAuthor` answers a narrower question — is this service WITNESS-only
+	// within a driver that has one — and defaults to true for a provider it has never
+	// heard of. `cloudflare` is such a provider: its driver is read-only discovery and
+	// has no create path at all, so CanAuthor said yes and this said "authorable".
+	// The provider must be one whose driver AUTHORS, and the service must not be a
+	// witness within it.
+	authoring := map[string]bool{"aws": true, "gcp": true, "azure": true, "k8s": true}
+	for k := range maps {
+		prov, svc, ok := strings.Cut(k, ".")
+		if !ok {
+			continue
+		}
+		if authoring[prov] && provider.CanAuthor(prov, svc) {
+			return true
+		}
+	}
+	return false
+}
+
+// servingServices returns the "<provider>.<service>" tokens whose driver claims to
+// realise this capability type, asked of the drivers themselves (D691). Empty means
+// nothing ships that can build it.
+func servingServices(capType string) []string {
+	var out []string
+	for prov, m := range map[string]map[string]string{
+		"aws":   aws.NewDriver("eu-central-1").ServiceCapabilities(),
+		"gcp":   gcp.NewDriver("p").ServiceCapabilities(),
+		"azure": azure.NewDriver("00000000-0000-0000-0000-000000000001").ServiceCapabilities(),
+		"k8s":   k8s.NewDriver("https://example.invalid", "t").ServiceCapabilities(),
+	} {
+		for svc, ct := range m {
+			if ct == capType && provider.CanAuthor(prov, svc) {
+				out = append(out, prov+"."+svc)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func runExplain(term, vocabDir string, jsonMode bool) int {
@@ -4320,6 +5007,19 @@ func runExplain(term, vocabDir string, jsonMode bool) int {
 			"codes":      perr.Registry(),
 		}, "", "  ")
 		fmt.Println(string(out))
+		return 0
+	}
+	// D623: markers (per-capability verdicts, compiler advisories) are nouns the
+	// runtime emits too, and `explain` is published as the single place to ask.
+	if ex, ok := perr.Markers[perr.Code(term)]; ok {
+		if jsonMode {
+			out, _ := json.MarshalIndent(perr.RegistryEntry{
+				Code: term, Summary: ex.Summary, Remediation: ex.Remediation}, "", "  ")
+			fmt.Println(string(out))
+			return 0
+		}
+		fmt.Printf("%s — a marker the runtime emits (not a process exit code)\n", term)
+		fmt.Printf("  %s\n  next: %s\n", ex.Summary, ex.Remediation)
 		return 0
 	}
 	if ex, ok := perr.Explain[perr.Code(term)]; ok {
@@ -4345,6 +5045,19 @@ func runExplain(term, vocabDir string, jsonMode bool) int {
 	if voc, ok := vocabs[term]; ok {
 		fmt.Printf("%s — capability type (%d attributes)\n", term,
 			len(voc.Attributes))
+		// D691: three capability types are declared and served by no driver at all —
+		// capability.ai.speech, capability.identity.sso and
+		// capability.identity.oauth-client (which carries no `mappings:` anywhere).
+		// A contract can declare one and nothing can ever implement it: `verify`
+		// reports it unimplemented and `plan` blocks, so the author learns at the
+		// bottom of the ladder what the top could have said. `parity` knows — it
+		// prints `unbuilt` for exactly these — and `explain`, the rung an author
+		// reads BEFORE writing, did not.
+		if svcs := servingServices(term); len(svcs) == 0 {
+			fmt.Printf("  UNBUILT: no shipped driver realises this capability — a "+
+				"contract declaring it cannot be implemented by any candidate "+
+				"(groundhold parity %s reports the same, per cloud)\n", term)
+		}
 		for _, path := range sortedKeys(voc.Attributes) {
 			attr := voc.Attributes[path]
 			kind, _ := attr["kind"].(string)
@@ -4383,10 +5096,29 @@ func runExplain(term, vocabDir string, jsonMode bool) int {
 		if n, _ := attrs["verification"].(string); n != "" {
 			fmt.Printf("  verification: %s\n", strings.TrimSpace(n))
 		}
+		// D701: `note:` carried the sharpest prose in the vocabulary — what STATIC
+		// verification proves versus what an outcome probe proves — on twelve
+		// attributes, and no reader ever saw a word of it. The key loaded and nothing
+		// consumed it, which is indistinguishable, to its author, from working.
+		if n, _ := attrs["note"].(string); strings.TrimSpace(n) != "" {
+			fmt.Printf("  note: %s\n", strings.TrimSpace(n))
+		}
 		if maps, ok := attrs["mappings"].(map[string]any); ok {
 			for _, k := range sortedKeys(maps) {
 				fmt.Printf("  %s: %s\n", k,
 					strings.TrimSpace(fmt.Sprintf("%v", maps[k])))
+			}
+			// D687: a mapping names a provider, and a reader takes that as support.
+			// `dns.proxied` lists exactly one — `cloudflare.dnsrecord` — and the
+			// cloudflare driver is read-only discovery, so no candidate can ever
+			// carry the attribute and a contract requiring it cannot be satisfied.
+			// The vocabulary says as much in a COMMENT; `explain` printed the
+			// mapping and not the comment.
+			if !anyMappingCanAuthor(maps) {
+				fmt.Printf("  NOT AUTHORABLE: no driver that can CREATE this " +
+					"capability implements this attribute — a contract requiring " +
+					"it cannot be satisfied by any candidate, and the drivers " +
+					"refuse it rather than defaulting\n")
 			}
 		}
 	}
@@ -4524,17 +5256,47 @@ func runAPIReq(pos []string, providerName string, providerProvided bool, jsonMod
 // (default aws, so the AWS canary is unaffected); the exit code IS the class.
 func runAPIReqClassify(args []string, providerName string, jsonMode bool) int {
 	var o edgecanary.Outcome
-	parseBool := func(v string) bool { return v == "true" || v == "1" || v == "yes" }
+	// D620: a usage error must not become a VERDICT. `--applied yeees` and a missing
+	// `--applied` both silently produced false, and false is a fact about the world:
+	// with no flags at all the verb announced "converge did not stand up the
+	// known-good edge — a groundhold-regression", exit 20, from inputs nobody
+	// supplied. Two daily canaries consume that code, so a broken invocation reported
+	// a regression that had not happened. The unknown-flag refusal (D567) states the
+	// rule this broke, in its own message: a run that drops an input answers a
+	// question you did not ask.
+	seen := map[string]bool{}
+	parseBool := func(flag, v string) (bool, bool) {
+		switch v {
+		case "true", "1", "yes":
+			return true, true
+		case "false", "0", "no":
+			return false, true
+		}
+		fmt.Fprintf(os.Stderr, "apireq classify: %s must be true or false, got %q — "+
+			"refusing rather than reading it as false, which is a claim about the "+
+			"edge and not about your command line\n", flag, v)
+		return false, false
+	}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--applied":
 			if i+1 < len(args) {
-				o.Applied = parseBool(args[i+1])
+				v, ok := parseBool("--applied", args[i+1])
+				if !ok {
+					return 30 // fail SAFE as a flake, never a false verdict
+				}
+				o.Applied = v
+				seen["--applied"] = true
 				i++
 			}
 		case "--deployed":
 			if i+1 < len(args) {
-				o.Deployed = parseBool(args[i+1])
+				v, ok := parseBool("--deployed", args[i+1])
+				if !ok {
+					return 30
+				}
+				o.Deployed = v
+				seen["--deployed"] = true
 				i++
 			}
 		case "--transport":
@@ -4548,6 +5310,21 @@ func runAPIReqClassify(args []string, providerName string, jsonMode bool) int {
 				}
 				o.HTTPStatus = n
 				i++
+			}
+		}
+	}
+	// D620: the two facts the truth table turns on must have been SUPPLIED. Absent,
+	// they defaulted to false — which reads as "converge did not stand up the edge"
+	// and is a verdict about infrastructure, not about a missing argument. A
+	// transport failure is its own input and needs no pair.
+	if !o.Transport {
+		for _, need := range []string{"--applied", "--deployed"} {
+			if !seen[need] {
+				fmt.Fprintf(os.Stderr, "apireq classify: %s was not given. Its absence "+
+					"used to read as false, which is a claim about the edge; the "+
+					"canaries branch on the exit code, so a missing input became a "+
+					"reported regression.\n", need)
+				return 30 // a flake: nothing was measured
 			}
 		}
 	}
@@ -4695,4 +5472,69 @@ func bannerCulprit(word string, r render.Rollup,
 		out += fmt.Sprintf(" (+%d more)", len(ids)-1)
 	}
 	return out
+}
+
+// firstPositional names the verb for an error message, or "help" before one is seen.
+// verbPrivateFlags lists, per verb, the flags parsed by that verb's OWN sub-parser
+// rather than by the global switch. Anything here is passed through as a positional
+// for that verb only; every other verb still refuses it (D567). Keep it exact: a flag
+// listed but not read would be silently swallowed, which is the failure D567 fixed.
+var verbPrivateFlags = map[string][]string{
+	"apireq": {"--applied", "--deployed", "--transport", "--http-status"},
+}
+
+func verbOwnsFlag(verb, flag string) bool {
+	for _, f := range verbPrivateFlags[verb] {
+		if f == flag {
+			return true
+		}
+	}
+	return false
+}
+
+// docKind reads apiVersion/kind out of a document without committing to its schema —
+// enough to refuse the wrong KIND of file with a message about that file (D615).
+func docKind(raw []byte) (string, string) {
+	var head struct {
+		APIVersion string `json:"apiVersion"`
+		Kind       string `json:"kind"`
+	}
+	_ = json.Unmarshal(raw, &head)
+	return head.Kind, head.APIVersion
+}
+
+// intFlag renders a numeric flag back onto a child's argv, empty when unset (D638).
+func intFlag(v int) string {
+	if v == 0 {
+		return ""
+	}
+	return strconv.Itoa(v)
+}
+
+// oneKey renders an injection-key set back onto a child's argv (D638). The sets are
+// built from repeatable flags; converge forwards each key it was given.
+func oneKey(m map[string]bool) string {
+	for k := range m {
+		return k
+	}
+	return ""
+}
+
+func firstPositional(pos []string) string {
+	if len(pos) > 0 {
+		return pos[0]
+	}
+	return "help"
+}
+
+// sayNotes renders a result's notes to the HUMAN channel (stderr, never stdout:
+// the result document stays machine-clean). D573: this was inline in the adopt
+// branch, so `unadopt` computed a note about the ownership marker it leaves behind
+// and printed it nowhere — while D322's own comment says notes go here because
+// "JSON alone would bury it". One renderer, so a verb that starts producing notes
+// cannot bury them by omission.
+func sayNotes(notes []string) {
+	for _, n := range notes {
+		fmt.Fprintf(os.Stderr, "note: %s\n", n)
+	}
 }

@@ -32,9 +32,9 @@ attributes:
       The endpoint the check probes — a hostname or IP (the path is separate). The
       semantic "what is being watched".
     mappings:
-      gcp.monitoring: the uptime check's monitoredResource host
-      aws.route53: the health check's FullyQualifiedDomainName (or IPAddress)
-      azure.appinsights: the availability test's request host
+      gcp.uptime: the uptime check's monitoredResource host
+      aws.route53health: the health check's FullyQualifiedDomainName (or IPAddress)
+      azure.webtest: the availability test's request host
 
   check.protocol:
     kind: string
@@ -44,9 +44,9 @@ attributes:
       issue a request. REFUSED on Azure for tcp — an Application Insights availability
       test is HTTP(S)-only, an honest one-cloud gap.
     mappings:
-      gcp.monitoring: httpCheck.useSsl (http/https) or tcpCheck (tcp)
-      aws.route53: HealthCheckConfig.Type HTTP | HTTPS | TCP
-      azure.appinsights: HTTP(S) only (tcp refused)
+      gcp.uptime: httpCheck.useSsl (http/https) or tcpCheck (tcp)
+      aws.route53health: HealthCheckConfig.Type HTTP | HTTPS | TCP
+      azure.webtest: HTTP(S) only (tcp refused)
 
   check.path:
     kind: string
@@ -54,9 +54,9 @@ attributes:
       The HTTP path probed (http/https only). REFUSED for a tcp check — a bare port
       connect has no path.
     mappings:
-      gcp.monitoring: httpCheck.path
-      aws.route53: HealthCheckConfig.ResourcePath
-      azure.appinsights: the request URL path
+      gcp.uptime: httpCheck.path
+      aws.route53health: HealthCheckConfig.ResourcePath
+      azure.webtest: the request URL path
 
   check.period:
     kind: duration
@@ -66,9 +66,9 @@ attributes:
       period the target cloud cannot honor is REFUSED there, not silently rounded:
       Route 53 = 10s | 30s; GCP = 60s | 300s | 600s | 900s; Azure = 300s | 600s | 900s.
     mappings:
-      gcp.monitoring: period (60s/300s/600s/900s)
-      aws.route53: RequestInterval (10s or 30s)
-      azure.appinsights: Frequency (300/600/900 seconds)
+      gcp.uptime: period (60s/300s/600s/900s)
+      aws.route53health: RequestInterval (10s or 30s)
+      azure.webtest: Frequency (300/600/900 seconds)
 
   service.managed:
     kind: bool

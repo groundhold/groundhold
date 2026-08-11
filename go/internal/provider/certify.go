@@ -108,6 +108,19 @@ var nonListableReasons = map[string]bool{
 func CertifyDiscoverability(t TestingT, prov Provider, services []string) {
 	t.Helper()
 
+	// D856: a subject of ZERO certifies nothing. Measured, not suspected — with
+	// `MappedServiceTokens()` returning nil the k8s driver passed this gate while
+	// being able to discover nothing at all, which is the exact condition the gate
+	// exists to make impossible (a shadow-blind driver, D513). The cloud drivers
+	// pass hand-written lists that cannot silently empty; k8s derives its list from
+	// an embedded registry, and a derived subject is one filter away from nothing.
+	if len(services) == 0 {
+		t.Errorf("%s certified discoverability over ZERO services — the subject is empty, "+
+			"so this gate proved nothing. A driver that maps no services is either "+
+			"mis-wired or its registry did not load (D328).", prov.Name())
+		return
+	}
+
 	sl, ok := prov.(ServiceLister)
 	if !ok {
 		t.Errorf("%s does not implement ServiceLister — its discoverability cannot "+

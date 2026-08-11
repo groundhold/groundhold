@@ -93,8 +93,14 @@ func BuildBackupVault(environment, capability string,
 		return BackupVaultPlan{}, fmt.Errorf(
 			"retention.lockMode requires retention.minimum — a lock enforces a minimum retention, so there must be one to enforce")
 	}
-	if p.LockMode == "governance" {
-		p.ChangeableForDays = 3 // a governance grace window (admin-changeable until it elapses)
+	// D724: ChangeableForDays sets the LOCK DATE, after which the lock is immutable and
+	// cannot be removed by anyone, including the account root. AWS, verbatim: "On and
+	// after the lock date, the Vault Lock becomes immutable and cannot be changed or
+	// deleted" / "If this parameter is not specified, you can delete Vault Lock from the
+	// vault ... at any time." So it is COMPLIANCE that carries it. This read the other
+	// way round, so a contract asking for the reversible mode got the irreversible one.
+	if p.LockMode == "compliance" {
+		p.ChangeableForDays = 3 // the 72-hour cooling-off AWS requires before immutability
 	}
 	if cmk {
 		key, _ := impl["kms_key_arn"].(string)
@@ -147,8 +153,9 @@ func (p BackupVaultPlan) lockBody() map[string]any {
 		return nil
 	}
 	body := map[string]any{"MinRetentionDays": p.MinRetentionDays}
-	if p.LockMode == "governance" {
-		body["ChangeableForDays"] = p.ChangeableForDays // omitted => compliance (immutable)
+	if p.LockMode == "compliance" {
+		// omitted => governance, i.e. deletable at any time (D724)
+		body["ChangeableForDays"] = p.ChangeableForDays
 	}
 	return body
 }

@@ -124,7 +124,11 @@ func (d *Driver) observeECR(capability, providerID string) ([]provider.Observati
 		return nil, nil, fmt.Errorf("DescribeRepositories: %v", e)
 	}
 	if strings.Contains(ecsErr(resp), "RepositoryNotFound") {
-		return nil, []string{"registry not found — nothing to observe"}, nil
+		// F-LC3 (D521): a BOUND resource the API says is GONE. A diagnostic
+		// alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"registry not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("DescribeRepositories: HTTP %d", st)
@@ -134,6 +138,7 @@ func (d *Driver) observeECR(capability, providerID string) ([]provider.Observati
 			ImageTagMutability      string `json:"imageTagMutability"`
 			EncryptionConfiguration struct {
 				EncryptionType string `json:"encryptionType"`
+				KmsKey         string `json:"kmsKey"`
 			} `json:"encryptionConfiguration"`
 			ImageScanningConfiguration struct {
 				ScanOnPush bool `json:"scanOnPush"`
@@ -144,15 +149,39 @@ func (d *Driver) observeECR(capability, providerID string) ([]provider.Observati
 		return nil, nil, fmt.Errorf("DescribeRepositories: unparseable or empty")
 	}
 	repo := r.Repositories[0]
-	return []provider.Observation{
+	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "immutable.tags", Value: repo.ImageTagMutability == "IMMUTABLE", Derivation: "measured"},
 		{Path: "security.scanOnPush", Value: repo.ImageScanningConfiguration.ScanOnPush, Derivation: "measured"},
-		{Path: "encryption.customerManagedKeys", Value: repo.EncryptionConfiguration.EncryptionType == "KMS", Derivation: "measured"},
 		// an ECR private registry is never public.
 		{Path: "network.publicExposure", Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
-	}, nil, nil
+	}
+	var diags []string
+	// encryption.customerManagedKeys: encryptionType=="KMS" is NOT customer-managed by
+	// itself (D954). When no customer key is given ECR resolves the config to the
+	// AWS-managed aws/ecr key and STILL reports encryptionType=KMS (field 2026-08-08:
+	// kmsKey is a KeyManager=AWS key, "Default key that protects my ECR data when no
+	// other key is defined"). So the type is a proxy that reads true for a repo with no
+	// customer key — the D800 lesson (a key id present is not a customer key). Trace the
+	// actual key to KMS (KeyManager) like RDS/elasticache; AES256 is the AWS-owned key.
+	ec := repo.EncryptionConfiguration
+	if ec.EncryptionType == "KMS" && ec.KmsKey != "" {
+		if customer, kerr := d.kmsKeyIsCustomerManaged(region, ec.KmsKey); kerr == nil {
+			obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+				Value: customer, Derivation: "measured"})
+		} else {
+			diags = append(diags, "encryption.customerManagedKeys not observed: KMS key trace failed: "+
+				kerr.Error()+" — probe/reconcile")
+		}
+	} else {
+		// AES256 (AWS-owned key), or KMS with no resolvable key id: not a customer key.
+		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+			Value: false, Derivation: "measured"})
+	}
+	return obs, diags, nil
 }
 
 // classifyECRChange (D46): PURE — can this capability.registry.image transition be
@@ -191,6 +220,9 @@ func (d *Driver) updateECR(capability, environment, providerID string,
 	attrs, impl map[string]any, changes []string) provider.CreateResult {
 	region, account, name, err := splitECRProviderID(providerID)
 	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if err := d.sameAccount(account); err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	arn := ecrArn(region, account, name)
@@ -251,6 +283,9 @@ func (d *Driver) updateECR(capability, environment, providerID string,
 func (d *Driver) deleteECR(capability, environment, providerID string) provider.CreateResult {
 	region, account, name, err := splitECRProviderID(providerID)
 	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if err := d.sameAccount(account); err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	arn := ecrArn(region, account, name)

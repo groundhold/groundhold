@@ -167,19 +167,26 @@ func (d *Driver) observeManagedKafka(capability, providerID string) ([]provider.
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"cluster not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"cluster not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: location, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		// a Managed Kafka cluster is always regional; the endpoint is TLS/mTLS.
-		{Path: "availability.class", Value: "regional", Derivation: "config-intent"},
-		{Path: "encryption.inTransit", Value: true, Derivation: "config-intent"},
+		{Path: "availability.class", Value: "regional", Derivation: "platform-invariant"},
+		{Path: "encryption.inTransit", Value: true, Derivation: "platform-invariant"},
 		{Path: "engine.protocol", Value: "kafka/3", Derivation: "config-intent"},
 	}
-	if doc.GcpConfig.KmsKey != "" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: true, Derivation: "measured"})
-	}
+	// D1003: no customer key is a MEASURED FALSE (Google-managed default), never
+	// an absence — emit the boolean unconditionally so a hard customerManagedKeys
+	// constraint has a value to contradict instead of passing vacuously.
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: doc.GcpConfig.KmsKey != "", Derivation: "measured"})
 	return obs, nil, nil
 }
 

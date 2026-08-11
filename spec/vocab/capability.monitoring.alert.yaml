@@ -34,7 +34,7 @@ attributes:
     mappings:
       gcp.monitoring: the condition filter's metric.type
       aws.cloudwatch: Namespace + MetricName
-      azure.monitor: the criteria's metricName (+ metricNamespace)
+      azure.metricalert: the criteria's metricName (+ metricNamespace)
 
   alert.threshold:
     kind: number
@@ -45,7 +45,7 @@ attributes:
     mappings:
       gcp.monitoring: conditionThreshold.thresholdValue
       aws.cloudwatch: Threshold
-      azure.monitor: the criteria threshold
+      azure.metricalert: the criteria threshold
 
   alert.comparison:
     kind: string
@@ -57,7 +57,7 @@ attributes:
     mappings:
       gcp.monitoring: COMPARISON_GT / COMPARISON_LT
       aws.cloudwatch: GreaterThanThreshold / LessThanThreshold
-      azure.monitor: GreaterThan / LessThan
+      azure.metricalert: GreaterThan / LessThan
 
   alert.notify:
     kind: bool
@@ -71,7 +71,7 @@ attributes:
     mappings:
       gcp.monitoring: notificationChannels is non-empty
       aws.cloudwatch: AlarmActions is non-empty
-      azure.monitor: the actions array is non-empty
+      azure.metricalert: the actions array is non-empty
 
   service.managed:
     kind: bool

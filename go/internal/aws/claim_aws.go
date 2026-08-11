@@ -170,6 +170,22 @@ func (d *Driver) claimTagResources(service, capability, environment, providerID 
 // ARN). A malformed providerID is a clean `failed`; the region-only providerIDs
 // complete their ARN with the cached STS account — an STS failure there is a read
 // failure, so ambiguous -> `unknown` WITH the pid (never a fabricated success).
+// D487 — the account boundary on the claim path. D468 established it for
+// delete/update/observe: no legitimate flow produces a providerId naming another
+// account, so a mismatch is a forged or stale binding. Claim needed it MORE than any
+// of them and had it in exactly one place — claimLambda, whose comment states the
+// concern precisely ("never tag a foreign function the acting account happens to hold
+// under the same name") — while thirteen other paths built an ARN straight from the
+// providerId's account.
+//
+// Why it matters more here: claim STAMPS OUR OWNERSHIP MARKER. A delete that reaches
+// the wrong resource destroys it and the damage is visible; a claim that reaches the
+// wrong resource makes every subsequent ownership check in this runtime agree the
+// resource is ours (D461). It is the one write that manufactures its own permission.
+//
+// This applies the existing boundary. It does NOT answer the open question of whether
+// claim should verify that the resource is the one the binding NAMES — that is the
+// ratcheted gap D461 records, and it is a design decision, not a missing line.
 func (d *Driver) claimARN(service, providerID string) (region, arn string, early *provider.CreateResult) {
 	fail := func(msg string) (string, string, *provider.CreateResult) {
 		return "", "", &provider.CreateResult{Status: "failed", Reason: msg}
@@ -445,6 +461,22 @@ func (d *Driver) rgtBase(region string) string {
 // NotFound/InvalidParameter per-resource entry is a clean `failed`, an empty
 // FailedResourcesMap is `succeeded` WITH the providerId.
 func (d *Driver) claimByARN(region, arn, capability, environment, providerID string) provider.CreateResult {
+	// D487 — the account boundary, checked ONCE, where the ARN is consumed.
+	//
+	// The first version put the check in each case of claimARN that binds an account
+	// from the providerId: twelve copies, which is precisely the shape that let those
+	// twelve drift apart from claimLambda's guard in the first place. The Azure twin
+	// does it right and has done all along — every claim case calls claimURLFor and the
+	// subscription check lives THERE, once.
+	//
+	// The ARN itself carries the account (field 5), so one check covers every case,
+	// including the ones that build it from d.resolveAccount() (where it is a no-op by
+	// construction) and any case added later. An account-less ARN — s3, whose ARN is
+	// arn:aws:s3:::bucket — yields "" and is skipped: there is nothing to compare, and
+	// the bucket name is global.
+	if err := d.sameAccount(arnAccount(arn)); err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
 	// stamp the SAME ownership tags the create builders apply (groundhold-capability /
 	// groundhold-environment). ResourceARNList carries exactly the one ARN.
 	body := fmt.Sprintf(`{"ResourceARNList":[%q],"Tags":{"groundhold-capability":%q,"groundhold-environment":%q}}`,

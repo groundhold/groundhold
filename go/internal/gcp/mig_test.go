@@ -39,8 +39,10 @@ func TestBuildMIGCreateGoldenRegional(t *testing.T) {
 	if body["targetSize"] != 2 {
 		t.Errorf("targetSize = %v, want the declared floor 2", body["targetSize"])
 	}
-	if body["instanceTemplate"] != "web-template" {
-		t.Errorf("instanceTemplate = %v", body["instanceTemplate"])
+	// D898: a bare name is qualified to the project-relative partial URL GCP accepts;
+	// the raw name is rejected by instanceGroupManagers.insert as a malformed URL.
+	if body["instanceTemplate"] != "global/instanceTemplates/web-template" {
+		t.Errorf("instanceTemplate = %v, want the qualified partial URL", body["instanceTemplate"])
 	}
 	// A MIG has no labels, so ownership rides in the description marker — the
 	// established pattern in this package for exactly this situation.
@@ -56,6 +58,29 @@ func TestBuildMIGCreateGoldenRegional(t *testing.T) {
 	cpu, _ := pol["cpuUtilization"].(map[string]any)
 	if cpu["utilizationTarget"] != 0.6 {
 		t.Errorf("utilizationTarget = %v, want the operator's 0.6", cpu["utilizationTarget"])
+	}
+}
+
+// TestBuildMIGQualifiesBareTemplateName (D898): a bare instance-template name must be
+// qualified to the partial URL GCP's insert accepts; an already-qualified reference (a full
+// URL or a projects/.../ path) must pass through untouched.
+func TestBuildMIGQualifiesBareTemplateName(t *testing.T) {
+	cases := map[string]string{
+		"web-template": "global/instanceTemplates/web-template",
+		"projects/acme-prod/global/instanceTemplates/web-template":                                       "projects/acme-prod/global/instanceTemplates/web-template",
+		"global/instanceTemplates/web-template":                                                          "global/instanceTemplates/web-template",
+		"https://www.googleapis.com/compute/v1/projects/acme-prod/global/instanceTemplates/web-template": "https://www.googleapis.com/compute/v1/projects/acme-prod/global/instanceTemplates/web-template",
+	}
+	for in, want := range cases {
+		impl := migImpl()
+		impl["instance_template"] = in
+		p, err := BuildMIGCreate("acme-prod", "production", "web-fleet", migAttrs(), impl, 0)
+		if err != nil {
+			t.Fatalf("%q: build: %v", in, err)
+		}
+		if got := p.createBody("web-fleet", "production")["instanceTemplate"]; got != want {
+			t.Errorf("instance_template %q -> %v, want %q", in, got, want)
+		}
 	}
 }
 
@@ -189,7 +214,14 @@ func TestClassifyMIGChange(t *testing.T) {
 			t.Errorf("%s classified %q/%q, want mutable with a reason", path, class, why)
 		}
 	}
-	for _, path := range []string{"location.region", "availability.class", "network.publicExposure"} {
+	// D822: network.publicExposure was pinned "immutable" here. The reason it carried was
+	// true (groundhold does not author instance templates) but the VERDICT was not:
+	// instanceGroupManagers.setInstanceTemplate swaps the template on a live group, so no
+	// replacement is required and the old expectation pinned a destroyed fleet.
+	if class, why := classifyMIGChange("network.publicExposure"); class != "unsupported" || why == "" {
+		t.Errorf("network.publicExposure classified %q/%q, want unsupported with a reason", class, why)
+	}
+	for _, path := range []string{"location.region", "availability.class"} {
 		if class, why := classifyMIGChange(path); class != "immutable" || why == "" {
 			t.Errorf("%s classified %q/%q, want immutable with a reason", path, class, why)
 		}

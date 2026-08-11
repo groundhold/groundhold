@@ -23,6 +23,51 @@ cases:
     expect:
       hash: sha256:cae2c417a485be28d4c2028313bf6f921b02507312b508b9b418728825ef04b2
 
+  - name: non-string-event-body-key-is-load-error
+    description: >
+      D685. The reference's canonicalizer rendered every mapping key with
+      `_quote(str(k))`, so `{8: v}`, `{"8": v}` and `{010: v}` — three distinct
+      documents — produced ONE hash, while the runtime refused the first and third.
+      A document one implementation REFUSES took the identity of a different, valid
+      one under the other. That is the injectivity argument `_num_str`'s own two
+      refusals are built on, one level up and unguarded.
+    document:
+      apiVersion: state/v0
+      kind: LedgerEvent
+      event:
+        type: lease.acquired
+        environment: production
+        capabilities: [orders-db]
+        occurredAt: "2026-07-11T09:00:00Z"
+        actor: { id: runtime-eu1, type: runtime }
+        body:
+          ttlSeconds: 120
+          8: eight
+    expect:
+      error: document
+
+  - name: unquoted-yaml-timestamp-is-load-error
+    description: >
+      D685. `spec/canonicalization.md`: YAML timestamps are not canonicalizable in
+      v1. go-yaml v3 resolves a bare `2026-07-11T12:00:00Z` to time.Time and the
+      runtime refuses it; the reference had no timestamp resolver, kept the scalar
+      as a STRING, and hashed it IDENTICALLY to the correctly quoted document — so a
+      document one implementation refuses took the identity of another under the
+      other. Its own "must be a quoted RFC3339 string" guard was unreachable code.
+    document:
+      apiVersion: state/v0
+      kind: LedgerEvent
+      event:
+        type: lease.acquired
+        environment: production
+        capabilities: [orders-db]
+        occurredAt: 2026-07-11T09:00:00Z
+        actor: { id: runtime-eu1, type: runtime }
+        body:
+          ttlSeconds: 120
+    expect:
+      error: document
+
   - name: converge-lifecycle-event-loads-in-both-implementations
     description: >
       D338: the converge lifecycle types are in the closed set, and the set is the
@@ -92,3 +137,92 @@ cases:
         fencingToken: 0
     expect:
       error: document
+
+  - name: empty-scalar-is-null-in-both-implementations
+    description: >
+      D608: an empty YAML scalar (`note:` with no value) is null in YAML 1.2 core,
+      which is what go-yaml resolves. The reference's compat loader registered its
+      null resolver with a NUL character where PyYAML dispatches the EMPTY string,
+      so the resolver never fired and an empty scalar fell through to "". The same
+      bytes then had TWO document identities, and every signature, anchor and ledger
+      head is taken over that hash.
+
+      Written as documentRaw because the ordinary shape cannot express it: the
+      harness re-emits a parsed document with safe_dump, so `note:` would reach both
+      implementations as `note: null` and the resolution under test would never
+      happen.
+    documentRaw: |
+      apiVersion: state/v0
+      kind: LedgerEvent
+      event:
+        type: observation.recorded
+        environment: test
+        capabilities: [db]
+        occurredAt: "2026-07-11T09:00:00Z"
+        actor: { id: runtime-eu1, type: runtime }
+        body:
+          note:
+    expect:
+      hash: sha256:f09303eef633db7bc6b436a0a3cadf472a9c108e6c424fb00ff63e40c29936fc
+
+  - name: ambiguous-scalar-in-a-discovery-document-resolves-the-same-way
+    description: >
+      D608: `hash` and `scenario` in the reference CLI used PyYAML's 1.1 loader
+      instead of the project's own go-yaml-matched one, so a DiscoveryDocument —
+      hashed straight from that dict — read `yes` as a bool on one side and a string
+      on the other. Eleven of twenty-two ambiguous tokens diverged this way.
+    documentRaw: |
+      apiVersion: discovery/v0
+      kind: DiscoveryDocument
+      at: "2026-07-11T09:00:00Z"
+      provider: aws
+      resources: []
+      note: yes
+    expect:
+      hash: sha256:26917b6ef589681eb139ac8de7f4fb0980aba4fb0b8ba0d1244d08104f8ed9d6
+
+  - name: a-duplicate-mapping-key-is-refused-by-both
+    description: >
+      D609: the runtime refuses a mapping that defines the same key twice ("mapping
+      key \"dup\" already defined"); the reference silently kept the last one. A
+      document one implementation reads and the other rejects breaks the dual
+      guarantee as surely as a hash divergence, and the half that answers is the
+      half that guessed. Which value the author meant is not knowable, so neither
+      side guesses.
+    documentRaw: |
+      apiVersion: state/v0
+      kind: LedgerEvent
+      event:
+        type: observation.recorded
+        environment: test
+        capabilities: [db]
+        occurredAt: "2026-07-11T09:00:00Z"
+        actor: { id: r, type: runtime }
+        body:
+          dup: 1
+          dup: 2
+    expect:
+      error: document
+
+  - name: a-merge-key-expands-the-same-way-in-both
+    description: >
+      D609: go-yaml expands `<<` into the mapping. The reference's compat loader
+      cleared PyYAML's resolver table to get 1.2 scalar resolution and lost the
+      merge tag with it, so `<<` survived as a literal KEY — the same bytes with two
+      identities, on a form config documents actually use.
+    documentRaw: |
+      apiVersion: state/v0
+      kind: LedgerEvent
+      event:
+        type: observation.recorded
+        environment: test
+        capabilities: [db]
+        occurredAt: "2026-07-11T09:00:00Z"
+        actor: { id: r, type: runtime }
+        body:
+          base: &b {a: 1}
+          merged:
+            <<: *b
+            c: 2
+    expect:
+      hash: sha256:6fb4c817b9cb81e8ab92701be6a93f4d2e45db2d2d5d79c8d915d5e6d7d31e49

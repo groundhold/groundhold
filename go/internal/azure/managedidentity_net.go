@@ -123,12 +123,18 @@ func (d *Driver) observeManagedIdentity(capability, providerID string) ([]provid
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"managed identity not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"managed identity not found — bound resource is gone (will re-create)"}, nil
 	}
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		// a managed identity is keyless — Azure holds the credential.
-		{Path: "key.exportable", Value: false, Derivation: "config-intent"},
+		{Path: "key.exportable", Value: false, Derivation: "platform-invariant"},
 	}
 	if dn := doc.Tags["groundhold-display"]; dn != "" {
 		obs = append(obs, provider.Observation{Path: "display.name", Value: dn, Derivation: "measured"})

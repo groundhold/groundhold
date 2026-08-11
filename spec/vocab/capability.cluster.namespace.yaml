@@ -9,10 +9,17 @@
 
 capability: capability.cluster.namespace
 version: 0.1
-stateful: false   # the namespace object holds no data of its own (workloads
-                  # inside it are separate capabilities); deleting an EMPTY
-                  # governed namespace loses none. (A namespace with live
-                  # workloads is a cascade the delete gate still guards.)
+# D664: `false` here, with a comment claiming "a namespace with live workloads is a
+# cascade the delete gate still guards". Measured: it does not. `policy.StatefulOf`
+# reads this flag and nothing else, so `autonomy.forbidden: [delete_stateful]` did
+# not stop a namespace delete — the plan SEALED with `dataLoss: none` while the k8s
+# driver issues `DELETE /api/v1/namespaces/<name>`, which the API server cascades to
+# every namespaced object in it, PVCs included.
+#
+# The object itself holds no data. What deleting it destroys belongs to OTHER
+# capabilities, and a static flag cannot know whether the namespace is empty — so it
+# takes the conservative direction, which is the one that asks a human.
+stateful: true
 
 attributes:
 

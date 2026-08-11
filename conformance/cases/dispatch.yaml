@@ -515,7 +515,12 @@ cases:
       A private network with flow logs (capability.network.private on aws/vpc) —
       GCP/AWS parity on network.private (D86): the SAME vocab the GCP VPC driver
       fulfils, fulfilled by AWS EC2. Multi-resource; flow logs add
-      ec2:CreateFlowLogs + iam:PassRole (attribute-aware).
+      ec2:CreateFlowLogs + iam:PassRole + iam:GetRole (attribute-aware).
+      D727: iam:GetRole joined the set when the create began READING the delivery
+      role's trust policy before handing it work — a flow log built on a role
+      vpc-flow-logs.amazonaws.com cannot assume reports ACTIVE and writes nothing,
+      which a field report measured. The expectation moved because what the driver
+      requires moved, and the case names why.
     plan:
       at: "2026-07-13T10:00:00Z"
       contract:
@@ -564,6 +569,7 @@ cases:
             - ec2:CreateTags
             - ec2:CreateVpc
             - ec2:DescribeVpcs
+            - iam:GetRole
             - iam:PassRole
 
   - name: plan-emits-aws-sns-permissions-public-cmek
@@ -1422,13 +1428,21 @@ cases:
             - redis.instances.get
             - redis.operations.get
 
-  - name: plan-emits-aws-elasticache-permissions
+  # RETIRED by D853, replaced below by plan-emits-aws-elasticache-permissions-with-subnet-group.
+  # Its expectation was complete for the calls anyone had LOOKED at and short for the calls
+  # the driver makes: createElastiCache also builds the derived cache subnet group and reads
+  # it back, and neither action was declared. The case did not encode a rule that changed —
+  # it encoded a set nobody had confronted with the driver's own traffic.
+  - name: plan-emits-aws-elasticache-permissions-with-subnet-group
     impl: go
     description: >
       A managed Redis cache (capability.cache.keyvalue on aws/elasticache, D100) —
       GCP/AWS parity on the cache domain (the SAME vocab Memorystore fulfils),
       here a replication group. DescribeReplicationGroups is the async poll +
       delete pre-read; ListTagsForResource is the ownership read off the ARN.
+      D853 adds the two the create had always called and never declared:
+      CreateCacheSubnetGroup builds the derived subnet group, DescribeCacheSubnetGroups
+      reads it back first.
     plan:
       at: "2026-07-15T10:00:00Z"
       contract:
@@ -1468,7 +1482,9 @@ cases:
           operation: create
           requiredPermissions:
             - elasticache:AddTagsToResource
+            - elasticache:CreateCacheSubnetGroup
             - elasticache:CreateReplicationGroup
+            - elasticache:DescribeCacheSubnetGroups
             - elasticache:DescribeReplicationGroups
             - elasticache:ListTagsForResource
 
@@ -2709,13 +2725,18 @@ cases:
             - cloudkms.keyRings.create
             - cloudkms.keyRings.get
 
-  - name: plan-emits-aws-kms-permissions
+  # RETIRED by D853, replaced below by plan-emits-aws-kms-permissions-with-key-search.
+  # Same shape as the elasticache retirement: the set was right about every call anyone had
+  # listed and silent about the one the create makes FIRST — the search for a key we already
+  # own, which is what keeps a re-converge from minting a second key.
+  - name: plan-emits-aws-kms-permissions-with-key-search
     impl: go
     description: >
       A managed encryption key (capability.key.encryption on aws/kms, D102) —
       GCP/AWS parity on the key domain. A single key (no ring); tags ride inline
       on CreateKey; rotation adds EnableKeyRotation. A KMS key cannot be hard-
-      deleted, so delete is ScheduleKeyDeletion.
+      deleted, so delete is ScheduleKeyDeletion. D853 adds kms:ListKeys: the create
+      looks for an existing key carrying our tags before making another one.
     plan:
       at: "2026-07-15T10:00:00Z"
       contract:
@@ -2755,6 +2776,7 @@ cases:
             - kms:DescribeKey
             - kms:EnableKeyRotation
             - kms:GetKeyRotationStatus
+            - kms:ListKeys
             - kms:TagResource
 
   - name: plan-emits-azure-keyvaultkey-permissions

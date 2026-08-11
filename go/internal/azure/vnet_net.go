@@ -302,9 +302,19 @@ func (d *Driver) observeVNet(capability, providerID string) ([]provider.Observat
 		return nil, nil, err
 	}
 	if !found {
-		return nil, []string{"vnet not found — nothing to observe"}, nil
+		// F-LC3 (D517): a BOUND resource the API authoritatively 404s is GONE, and
+		// the reserved marker is the only way to say it. A diagnostic string leaves
+		// the binding a no-op forever — converge re-observes, learns nothing, and
+		// reports the world as matching while the resource does not exist (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"vnet not found — bound resource is gone (will re-create)"}, nil
 	}
-	var obs []provider.Observation
+	// Present: clear the marker, so a stale "gone" from an earlier observe cannot
+	// linger after a re-create and plan a second one.
+	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
+	}
 	if doc.Location != "" {
 		obs = append(obs, provider.Observation{Path: "location.region", Value: strings.ToLower(doc.Location), Derivation: "measured"})
 	}
@@ -313,17 +323,33 @@ func (d *Driver) observeVNet(capability, providerID string) ([]provider.Observat
 		// a fresh VNet has no internet gateway — private ingress by construction.
 		provider.Observation{Path: "ingress.public", Value: false, Derivation: "config-intent"},
 	)
-	// egress.restricted: measured from the presence of an NSG on the subnet (the
-	// deny-outbound composite). A subnet with no NSG is not egress-restricted.
-	restricted := false
+	// egress.restricted — D744. This read "a subnet references a network security
+	// group" and called it MEASURED destination discipline. An NSG whose only outbound
+	// rule is Allow-Any-to-Internet satisfies that, so a container's presence stood for
+	// the rules inside it. The two directions are not symmetric and the derivation now
+	// says so: NO group at all genuinely measures that nothing restricts egress, while
+	// a group present tells us only that one exists. The AWS twin (D743) could measure
+	// both because its rules ride in a response the observer already reads; Azure's
+	// rules are a separate GET per group, so this states the limit instead of guessing
+	// past it — and after D722 a hard constraint asking for provider-api evidence now
+	// blocks rather than resting on the container.
+	nsgPresent := false
 	for _, s := range doc.Properties.Subnets {
 		if s.Properties.NetworkSecurityGroup != nil && s.Properties.NetworkSecurityGroup.ID != "" {
-			restricted = true
+			nsgPresent = true
 		}
 	}
-	obs = append(obs, provider.Observation{Path: "egress.restricted", Value: restricted, Derivation: "measured"})
-
 	diags := []string{"flowLogs.enabled not observed: Azure flow logs live on a subscription-level Network Watcher, out of the capability's scope"}
+	if nsgPresent {
+		obs = append(obs, provider.Observation{Path: "egress.restricted",
+			Value: true, Derivation: "config-intent"})
+		diags = append(diags, "egress.restricted is config-intent: a network security group "+
+			"is attached, but its outbound rules were not read — a group whose only rule "+
+			"allows any destination restricts nothing")
+	} else {
+		obs = append(obs, provider.Observation{Path: "egress.restricted",
+			Value: false, Derivation: "measured"})
+	}
 
 	// egress.internet: the road is read from the subnet's NAT Gateway reference. A
 	// subnet carrying a natGateway => "nat"; otherwise "none". "direct" (per-instance
@@ -367,7 +393,18 @@ func (d *Driver) deleteVNet(capability, environment, providerID string) provider
 	if err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
-	_ = sub
+	// D467 — the subscription boundary. 64 of 67 sub-bearing paths already refused a
+	// providerId whose subscription is not the driver's; these three parsed it and
+	// discarded it with `_ = sub`. The discard is the part that matters: armURL builds
+	// from d.Subscription, never from the bound one, so a foreign-subscription
+	// providerId did not reach the other subscription — it silently RETARGETED the
+	// delete at the same resource group and name in OURS. The binding named one
+	// resource and the driver destroyed a different one.
+	if sub != d.Subscription && d.Subscription != "" {
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("providerId subscription %q is not the driver's %q — "+
+				"refusing to retarget the delete at our own subscription", sub, d.Subscription)}
+	}
 	doc, found, rerr := d.getVNet(rg, name)
 	if rerr != nil {
 		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
@@ -389,7 +426,13 @@ func (d *Driver) deleteVNet(capability, environment, providerID string) provider
 	// (a vnet with no NSG / no NAT road) DELETE to 404 => idempotent success, so no
 	// false "inconclusive".
 	vnetURL, _ := d.armURL(rg, "Microsoft.Network/virtualNetworks/"+name, networkAPIVersion)
-	if r := d.deleteAndConfirm(vnetURL, providerID, "vnet"); r != nil {
+	// D940: deleteAndConfirm NEVER returns nil (it returns {Status:"succeeded"} on a
+	// clean delete), so `r != nil` was ALWAYS true — the vnet delete returned here
+	// unconditionally and the child cleanup below (NSG, NAT gateway, public IP) was
+	// unreachable dead code. Retire reported succeeded while a billable NAT gateway
+	// and public IP stayed standing. Only a NON-success (unknown/failed) leaf result
+	// short-circuits; a succeeded leaf falls through to reclaim its companions.
+	if r := d.deleteAndConfirm(vnetURL, providerID, "vnet"); r != nil && r.Status != "succeeded" {
 		return *r
 	}
 	children := []struct{ path, what string }{
@@ -397,22 +440,35 @@ func (d *Driver) deleteVNet(capability, environment, providerID string) provider
 		{"Microsoft.Network/natGateways/" + name + "-nat", "NAT Gateway"},
 		{"Microsoft.Network/publicIPAddresses/" + name + "-natip", "public IP"},
 	}
-	inconclusive := ""
+	foreignLeft := ""
 	for _, c := range children {
 		url, _ := d.armURL(rg, c.path, networkAPIVersion)
-		if r := d.deleteAndConfirm(url, providerID, c.what); r != nil && r.Status != "succeeded" {
-			inconclusive = c.what
+		// D943: verify the companion is OURS before deleting it — a brownfield-adopted
+		// vnet has an arbitrary name, so `<vnet>-nsg`/`-nat`/`-natip` could be a FOREIGN
+		// resource groundhold never created. deleteCompanionIfOurs reads the tags and
+		// leaves anything not ours untouched.
+		// D237/D940: a companion whose OWN delete did not confirm succeeded is UNRESOLVED
+		// (transient => may not have landed; clean failure => still there) — report its
+		// non-success outcome, never a false "succeeded" over a still-billing companion.
+		r, foreign := d.deleteCompanionIfOurs(url, capability, environment, providerID, c.what)
+		if foreign {
+			foreignLeft = c.what
+			continue
+		}
+		if r != nil && r.Status != "succeeded" {
+			return *r
 		}
 	}
-	if inconclusive != "" {
+	if foreignLeft != "" {
 		return provider.CreateResult{ProviderID: providerID, Status: "succeeded",
-			Reason: "vnet retired; " + inconclusive + " cleanup inconclusive — reconcile"}
+			Reason: "vnet retired; a resource at the " + foreignLeft +
+				" companion name is not ours (tags do not match) — left it untouched"}
 	}
 	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
 }
 
 func (d *Driver) deleteAndConfirm(url, pid, what string) *provider.CreateResult {
-	st, _, err := d.doARM("DELETE", url, nil)
+	st, body, err := d.doARM("DELETE", url, nil)
 	if err != nil {
 		return &provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: fmt.Sprintf("%s delete outcome unknown: %v", what, err)}
 	}
@@ -425,10 +481,34 @@ func (d *Driver) deleteAndConfirm(url, pid, what string) *provider.CreateResult 
 	if st < 200 || st >= 300 {
 		// D237: throttle (429) / live 403 -> unknown (keep the handle), never a
 		// terminal failed (5xx handled above).
-		if r := provider.MutationResult(st, "", nil, pid, what+" delete"); r != nil {
+		if r := provider.MutationResult(st, azErrCode(body), nil, pid, what+" delete"); r != nil {
 			return r
 		}
-		return &provider.CreateResult{ProviderID: pid, Status: "failed", Reason: fmt.Sprintf("%s delete HTTP %d", what, st)}
+		// D741: the provider's own message survives. This reported the status code and
+		// nothing else, so every caller that wanted to explain a refusal had to invent
+		// the reason — which is exactly what the backup vault did, telling operators to
+		// wait for recovery points to age out whatever had actually gone wrong.
+		return &provider.CreateResult{ProviderID: pid, Status: "failed",
+			Reason: fmt.Sprintf("%s delete HTTP %d: %s", what, st, azReadWhy(st, body, nil))}
 	}
-	return &provider.CreateResult{ProviderID: pid, Status: "succeeded"}
+	// D971: a 202 Accepted is a LONG-RUNNING delete — the resource has entered
+	// deleting, not gone. Reporting succeeded here tombstones a resource still live;
+	// if the async deletion then fails it is orphaned from a ledger that says it is
+	// gone. Poll the resource to a confirmed 404 (gone) — as the create paths poll
+	// provisioningState to Succeeded; unknown on timeout keeps the handle. A 200/204
+	// is a synchronous delete — already gone.
+	if st == http.StatusAccepted {
+		deadline := d.Now().Add(d.PollTimeout)
+		for {
+			if gst, _, gerr := d.doARM("GET", url, nil); gerr == nil && gst == http.StatusNotFound {
+				return &provider.CreateResult{ProviderID: pid, Status: "succeeded"} // confirmed gone
+			}
+			if d.Now().After(deadline) {
+				return &provider.CreateResult{ProviderID: pid, Status: "unknown",
+					Reason: fmt.Sprintf("%s still deleting at poll timeout — reconcile", what)}
+			}
+			time.Sleep(d.PollInterval)
+		}
+	}
+	return &provider.CreateResult{ProviderID: pid, Status: "succeeded"} // 200/204: synchronous, gone
 }

@@ -19,18 +19,37 @@ import (
 const pgAPIVersion = "2023-06-01-preview"
 
 type FlexServerPlan struct {
-	Name                string
-	Region              string
-	Environment         string
-	Capability          string
-	Version             string // e.g. "16"
-	AdminUser           string
-	AdminPassword       string
-	PublicAccess        bool
-	BackupRetentionDays int64 // recovery.rpo; 0 = provider default
-	ZoneRedundant       bool  // availability.class regional
-	KmsKeyURI           string
-	KmsIdentity         string
+	Name          string
+	Region        string
+	Environment   string
+	Capability    string
+	Version       string // e.g. "16"
+	AdminUser     string
+	AdminPassword string
+	PublicAccess  bool
+	ZoneRedundant bool // availability.class regional
+	KmsKeyURI     string
+	KmsIdentity   string
+	Sku           string // impl operand; default Standard_B1ms
+	Tier          string // DERIVED from the sku family — never a constant (D942)
+}
+
+// flexServerTier maps a PostgreSQL Flexible Server sku to its compute tier. The tier
+// MUST match the sku family or the create 400s ("SKU is not compatible with tier"),
+// so it is derived, never hardcoded (D942).
+func flexServerTier(sku string) (string, error) {
+	switch {
+	case strings.HasPrefix(sku, "Standard_B"):
+		return "Burstable", nil
+	case strings.HasPrefix(sku, "Standard_D"):
+		return "GeneralPurpose", nil
+	case strings.HasPrefix(sku, "Standard_E"):
+		return "MemoryOptimized", nil
+	default:
+		return "", fmt.Errorf("implementation.sku %q is not a recognized PostgreSQL Flexible Server "+
+			"size (expected Standard_B* Burstable, Standard_D* GeneralPurpose, or Standard_E* "+
+			"MemoryOptimized)", sku)
+	}
 }
 
 func flexServerName(environment, capability string, generation int) string {
@@ -106,15 +125,26 @@ func BuildFlexServer(environment, capability string,
 			if err != nil || sc.Kind != scalars.Duration {
 				return FlexServerPlan{}, fmt.Errorf("recovery.rpo is not a duration")
 			}
-			days := int64(sc.Value.(float64)) / 86400000
-			if days < 1 {
-				days = 1
-			}
-			if days > 35 {
-				return FlexServerPlan{}, fmt.Errorf(
-					"recovery.rpo backup retention above 35 days is not supported by Flexible Server")
-			}
-			p.BackupRetentionDays = days
+			// D796. This used to divide the requested RPO into DAYS and write it to
+			// backupRetentionDays, so asking for a 15-minute data-loss window set backup
+			// retention to its floor of one day: a tighter recovery requirement made the
+			// estate's recoverability WORSE, silently. Retention is how far back a
+			// restore reaches; the RPO is how much a failure loses, and on a server that
+			// restores to any point in its window the second is a measurement.
+			//
+			// The other two clouds already refuse to pretend otherwise — neither writes
+			// the requested VALUE anywhere; both read it as "automated backups must be
+			// on". Flexible Server has them on always, so there is nothing to switch and
+			// nothing honest to write. Refuse, and say where the two properties live.
+			return FlexServerPlan{}, fmt.Errorf(
+				"recovery.rpo has no Flexible Server mapping: backups and point-in-time " +
+					"recovery are always on, and backupRetentionDays is how far BACK a " +
+					"restore reaches, not the data-loss window a failure costs — writing " +
+					"the RPO there would shorten retention to meet a tighter RPO, which " +
+					"is backwards. The data-loss window of a PITR server is measured, not " +
+					"configured: drop recovery.rpo from the capability and prove it with " +
+					"a restore probe (recovery.rto carries evidence: probe for the same " +
+					"reason)")
 		case "availability.class":
 			switch raw {
 			case "zonal":
@@ -144,5 +174,19 @@ func BuildFlexServer(environment, capability string,
 	if p.Version == "" {
 		return FlexServerPlan{}, fmt.Errorf("azure flexible server requires engine.protocol (e.g. postgresql/16)")
 	}
+	// D942: the tier is DERIVED from the sku family, never the constant "Burstable" the
+	// body used to send. Field-proven: Standard_D2s_v3 (GeneralPurpose) with the correct
+	// tier reaches Ready, but the identical body with tier:Burstable rolls back — so any
+	// GeneralPurpose/MemoryOptimized sku was uncreatable (Azure accepts the mismatched PUT
+	// with a 202, then fails provisioning, which is why the golden fake never caught it).
+	p.Sku, _ = impl["sku"].(string)
+	if p.Sku == "" {
+		p.Sku = "Standard_B1ms"
+	}
+	tier, terr := flexServerTier(p.Sku)
+	if terr != nil {
+		return FlexServerPlan{}, terr
+	}
+	p.Tier = tier
 	return p, nil
 }

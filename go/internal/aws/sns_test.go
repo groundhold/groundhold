@@ -7,6 +7,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func snsAttrs() map[string]any {
@@ -352,10 +355,62 @@ func TestMetamorphicSNSRoundTrip(t *testing.T) {
 			if got["encryption.atRest"] != wantEncrypted {
 				t.Errorf("atRest round-trip broke: want %v observed %v", wantEncrypted, got["encryption.atRest"])
 			}
-			_, hasCMEK := got["encryption.customerManagedKeys"]
-			if hasCMEK != c.wantCMEK {
-				t.Errorf("cmek presence round-trip broke: want %v observed %v", c.wantCMEK, hasCMEK)
+			if got["encryption.customerManagedKeys"] != c.cmek {
+				t.Errorf("cmek round-trip broke: want %v observed %v", c.cmek, got["encryption.customerManagedKeys"])
 			}
 		})
 	}
+}
+
+func snsRole(_ *http.Request, body []byte) certifynet.Role {
+	switch queryAction(body) {
+	case "ListTagsForResource", "GetTopicAttributes", "ListTopics":
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingSNS enrols SNS in the D391 gate. CreateTopic is idempotent by NAME —
+// it returns the existing topic's ARN rather than minting a second one — so the
+// load-bearing proof here is the pid: the create must bind the topic that already
+// exists, carrying our tags. The untagged and foreign cases already have tests; the
+// OURS case did not.
+func TestAdoptsExistingSNS(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/sns",
+		Classify: snsRole,
+		ExistingServer: func() *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					body, _ := io.ReadAll(r.Body)
+					switch queryAction(body) {
+					case "CreateTopic":
+						_, _ = w.Write([]byte(`<CreateTopicResponse></CreateTopicResponse>`))
+					case "ListTagsForResource":
+						_, _ = w.Write([]byte(`<ListTagsForResourceResponse><ListTagsForResourceResult><Tags>` +
+							`<member><Key>groundhold-capability</Key><Value>events</Value></member>` +
+							`<member><Key>groundhold-environment</Key><Value>prod</Value></member>` +
+							`</Tags></ListTagsForResourceResult></ListTagsForResourceResponse>`))
+					default:
+						_, _ = w.Write([]byte(`<Response></Response>`))
+					}
+				}))
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.SNSBaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("sns", "events", "prod", snsAttrs(), nil, "events", 1)
+		},
+		// The pid is the deterministic name the plan builds; the gate asserts a pid is
+		// bound at all, and the tags-match path is what makes binding legitimate.
+		AllowedMutations: 4, // name-idempotent CreateTopic + attribute convergence
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

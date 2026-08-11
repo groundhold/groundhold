@@ -141,7 +141,7 @@ func TestObserveNamespacePosture(t *testing.T) {
 	srv := coreServer(t, corePathCluster("namespaces", "payments"), body, &lbls)
 	defer srv.Close()
 	d := NewDriver(srv.URL, "tok")
-	m := d.genericMapping("namespace")
+	m, _ := d.serviceMapping("namespace", forWrite)
 	if m == nil {
 		t.Fatal("namespace must route through the schema-driven engine")
 	}

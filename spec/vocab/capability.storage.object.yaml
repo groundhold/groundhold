@@ -15,6 +15,8 @@ attributes:
     mappings:
       gcp.gcs: bucket location
       aws.s3: region
+      # D545: read from the driver.
+      azure.blob: the storage account location
 
   durability.class:
     kind: string
@@ -23,6 +25,9 @@ attributes:
     mappings:
       gcp.gcs: location type (region/dual-region/multi-region)
       aws.s3: storage class redundancy
+      azure.blob: >
+        from the account SKU replication suffix: LRS is single-zone, ZRS/GRS regional,
+        RA-GZRS and the geo pairs multi-regional
 
   versioning.enabled:
     kind: bool
@@ -136,10 +141,13 @@ attributes:
       aws.s3: GetBucketLocation on the replication destination bucket
 
   encryption.atRest:
+    description: >-
+      Whether objects are encrypted on disk. Every managed object store here encrypts by default, so `false` is refused rather than pretended; customer-managed keys are a separate attribute
     kind: bool
     mappings:
       gcp.gcs: always true (CMEK optional)
       aws.s3: default encryption
+      azure.blob: const true — Azure Storage encrypts at rest unconditionally
 
   encryption.customerManagedKeys:
     kind: bool
@@ -168,6 +176,8 @@ attributes:
     description: Managed service vs self-operated
 
   cost.monthly:
+    description: >-
+      Projected monthly cost of the bucket — a projection over declared size and class, never a quote and never read back from the provider (evidence: projection)
     kind: money
     evidence: projection      # D311: a forecast, never resource state
     verification: static against a pricing catalog; billing after deploy

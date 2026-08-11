@@ -114,6 +114,9 @@ func TestCreateEBSClientToken(t *testing.T) {
 }
 
 // ebsServer is a happy EventBridge Scheduler REST double. GET reflects the marker+state.
+// D899: a DELETE with no clientToken query parameter is rejected the way real AWS rejects
+// it ("ClientToken cannot be empty"), so a driver that forgets the token fails the delete
+// test rather than passing against a double that shrugs it off.
 func ebsServer(t *testing.T, capLabel, state string) *httptest.Server {
 	t.Helper()
 	marker := awsOwnerMarker(capLabel, "prod")
@@ -127,6 +130,11 @@ func ebsServer(t *testing.T, capLabel, state string) *httptest.Server {
 			case "GET":
 				_, _ = w.Write([]byte(doc))
 			case "DELETE":
+				if r.URL.Query().Get("clientToken") == "" {
+					w.WriteHeader(400)
+					_, _ = w.Write([]byte(`{"Message":"ClientToken cannot be empty."}`))
+					return
+				}
 				_, _ = w.Write([]byte(`{}`))
 			default:
 				w.WriteHeader(400)
@@ -144,6 +152,78 @@ func ebsDriver(t *testing.T, srv *httptest.Server) *Driver {
 	d.PollInterval = time.Millisecond
 	d.PollTimeout = 2 * time.Second
 	return d
+}
+
+// TestEBSScheduleDriftAndUpdate (D1004): the cron/rate expression is observed as an operand
+// and is a DESIRED target, so a change is a detected DRIFT (mutable → UpdateSchedule), not
+// silence — the field case where declaring rate(1 minute) over a live rate(1 hour) produced
+// zero actions and the contract could stand a schedule up but never keep it.
+func TestEBSScheduleDriftAndUpdate(t *testing.T) {
+	// classify: the expression + enabled patch in place; region is a replacement.
+	if k, _ := classifyEBSChange(ebsScheduleOperand); k != "mutable" {
+		t.Fatalf("schedule expression must be mutable, got %q", k)
+	}
+	if k, _ := classifyEBSChange("location.region"); k != "immutable" {
+		t.Fatalf("region must be immutable, got %q", k)
+	}
+
+	// observe emits the live expression on the reserved operand path.
+	marker := awsOwnerMarker("nightly", "prod")
+	var putBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case "GET":
+			_, _ = w.Write([]byte(`{"Name":"nightly-prod-x","State":"ENABLED",` +
+				`"Description":"` + marker + `","ScheduleExpression":"rate(1 hour)"}`))
+		case "PUT":
+			b, _ := io.ReadAll(r.Body)
+			putBody = string(b)
+			_, _ = w.Write([]byte(`{"ScheduleArn":"arn"}`))
+		default:
+			w.WriteHeader(400)
+		}
+	}))
+	defer srv.Close()
+	d := ebsDriver(t, srv)
+	pid := ebsProviderID("eu-central-1", EBSName("prod", "nightly", 1))
+
+	obs, _, err := d.observeEventBridgeScheduler("nightly", pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]any{}
+	for _, o := range obs {
+		got[o.Path] = o.Value
+	}
+	if got[ebsScheduleOperand] != "rate(1 hour)" {
+		t.Fatalf("observe must emit the live schedule expression, got %+v", got[ebsScheduleOperand])
+	}
+
+	// OperandTargets renders the DESIRED expression, so the reconcile can compare.
+	targets, err := d.OperandTargets("eventbridgescheduler", ebsAttrs(), ebsImpl())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var desired any
+	for _, tg := range targets {
+		if tg.Path == ebsScheduleOperand {
+			desired = tg.Desired
+		}
+	}
+	if desired != "cron(0 2 * * ? *)" {
+		t.Fatalf("OperandTargets must render the desired schedule, got %v", desired)
+	}
+
+	// update PUTs the new expression via UpdateSchedule (no replacement).
+	impl := ebsImpl()
+	impl["schedule"] = "rate(1 minute)"
+	res := d.updateEventBridgeScheduler("nightly", "prod", pid, ebsAttrs(), impl, []string{ebsScheduleOperand})
+	if res.Status != "succeeded" {
+		t.Fatalf("schedule update: %+v", res)
+	}
+	if !strings.Contains(putBody, `"ScheduleExpression":"rate(1 minute)"`) {
+		t.Fatalf("UpdateSchedule must PUT the new expression, got %s", putBody)
+	}
 }
 
 func TestCreateObserveDeleteEventBridgeScheduler(t *testing.T) {
@@ -186,14 +266,15 @@ func TestHonestyHarnessEventBridgeScheduler(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 	pid := ebsProviderID("eu-central-1", EBSName("prod", "nightly", 1))
 	p := &certifynet.Probe{
-		// AssertTransient left false — D237 TODO: this driver's create/delete ladder
-		// still maps 429/503/403 to terminal failed (and drops the providerId); it must
-		// route through provider.MutationResult before the transient invariant can lock.
 		Name:            "aws/eventbridgescheduler",
 		AssertTransient: true,        // D237: create/delete route through provider.MutationResult
 		Classify:        restXMLRole, // REST: GET read, POST/DELETE opaque (name deterministic)
 		OwnerTagValue:   "nightly",
 		DeterministicID: true, // the schedule name is chosen
+		// F-LC3 (D520): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("eventbridgescheduler", "nightly", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -215,4 +296,23 @@ func TestHonestyHarnessEventBridgeScheduler(t *testing.T) {
 		},
 	}
 	certifynet.CertifyDriverNet(t, p)
+}
+
+// TestRefusesForeignUpdateEBS (D1004): updateEventBridgeScheduler refuses a schedule whose
+// Description marker is a stranger's — a patch must not touch a resource we do not own.
+func TestRefusesForeignUpdateEBS(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			_, _ = w.Write([]byte(`{"Name":"nightly-prod-x","State":"ENABLED","Description":"someone-elses-marker","ScheduleExpression":"rate(1 hour)"}`))
+			return
+		}
+		w.WriteHeader(400)
+	}))
+	defer srv.Close()
+	d := ebsDriver(t, srv)
+	pid := ebsProviderID("eu-central-1", EBSName("prod", "nightly", 1))
+	res := d.updateEventBridgeScheduler("nightly", "prod", pid, ebsAttrs(), ebsImpl(), []string{ebsScheduleOperand})
+	if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
+		t.Fatalf("foreign schedule update must refuse, got %+v", res)
+	}
 }

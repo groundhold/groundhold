@@ -33,27 +33,56 @@ attributes:
     description: The region the client invokes inference from (the profile's home)
     mappings:
       aws.bedrock: the inference profile's home region
+      azure.azureopenai: the Cognitive Services account's location
+      gcp.vertexai: >
+        the location parsed out of the endpoint NAME, falling back to the queried
+        location when the name carries none
 
   inference.destinationRegions:
     kind: list
+    # D532: a SET, as the description says — the order the cloud returns it in
+    # carries no meaning. Canonicalized at load so a candidate listing the same
+    # regions in a different order is not refused as a lie.
+    unordered: true
     description: The full set of regions the inference profile may ROUTE a call to — the residency surface. Assert subset-of the EU allowlist to catch the eu-south-2 trap deterministically.
     mappings:
       aws.bedrock: get-inference-profile models[].modelArn regions (the authoritative routing set)
+      # D541: read from each driver, not recalled. Both reduce to the same
+      # residency SURFACE the subset-of contract asserts against, by different routes.
+      azure.azureopenai: >
+        derived from the deployments' SKU names: a `global*` sku reduces to the
+        ["global"] sentinel (unbounded routing — subset-of an EU allowlist then
+        yields violated, deliberately), a `datazone*` sku to that account's data
+        zone, anything else to the account's own region. An account with NO
+        deployments is regional: its surface is the account's region
+      gcp.vertexai: >
+        the endpoint's SERVED location — a regional endpoint routes to that region
+        only. The `global` endpoint is NOT a bounded EU set and reduces to the
+        ["global"] sentinel, the direct twin of Bedrock's eu-south-2 trap
 
   model.provider:
     kind: string
     description: The model provider/family the profile serves (e.g. anthropic)
     mappings:
       aws.bedrock: the profile's model provider
+      azure.azureopenai: the deployments' model publisher/format
+      gcp.vertexai: the endpoint's served model publisher
 
   model.access:
     kind: bool
     description: Whether model access is granted on this account (a manual-gate — Bedrock model access is sometimes granted by a use-case form, never an API create; the driver OBSERVES it, never fabricates)
     mappings:
       aws.bedrock: model access status (manual-gate, observed)
+      # A MANUAL-GATE on every cloud (D55): access is granted outside the API, so a
+      # driver OBSERVES it and never fabricates it. GCP's Vertex driver refuses
+      # rather than faking model.access=true.
+      azure.azureopenai: observed, never provisioned
+      gcp.vertexai: observed, never provisioned — an unprovable true is refused
 
   service.managed:
     kind: bool
     description: Whether groundhold manages this inference configuration
     mappings:
       aws.bedrock: const true when observed through the driver
+      azure.azureopenai: const true
+      gcp.vertexai: const true

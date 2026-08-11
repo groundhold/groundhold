@@ -250,3 +250,27 @@ func TestAllowsReplaceStateful(t *testing.T) {
 		})
 	}
 }
+
+// D698: the protection marker is read from the vocabulary, and a capability whose
+// vocabulary does not declare it is not one. Fail OPEN here is deliberate — see
+// ProtectionOf's own comment for why this predicate differs from StatefulOf.
+func TestProtectionOf(t *testing.T) {
+	c := &contract.Contract{Capabilities: map[string]map[string]any{
+		"threats": {"type": "capability.security.threatdetection"},
+		"db":      {"type": "capability.database.relational"},
+	}}
+	vocabs := map[string]vocab.Vocabulary{
+		"capability.security.threatdetection": {Protection: true},
+		"capability.database.relational":      {Stateful: true},
+	}
+	if !ProtectionOf(c, "threats", vocabs) {
+		t.Error("threat detection is marked protection: true — its delete removes a control")
+	}
+	if ProtectionOf(c, "db", vocabs) {
+		t.Error("a database is not a protection: deleting it loses DATA, which is a " +
+			"different gate, and conflating them would make every retirement need this consent")
+	}
+	if ProtectionOf(c, "missing", vocabs) {
+		t.Error("an unknown capability has no declared marker to read")
+	}
+}

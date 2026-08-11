@@ -31,7 +31,7 @@ attributes:
       ("global" for global load balancers, or a region).
     mappings:
       aws.acm: the ACM endpoint region
-      gcp.certificatemanager: the certificate's location
+      gcp.certmanager: the certificate's location
 
   domain:
     kind: string
@@ -41,7 +41,10 @@ attributes:
       `implementation:`, not a capability path.
     mappings:
       aws.acm: RequestCertificate DomainName
-      gcp.certificatemanager: managed.domains[0]
+      gcp.certmanager: managed.domains[0]
+      k8s.certmanager: spec.dnsNames[0] — the PRIMARY domain. Further entries are
+        SANs and are implementation detail, reported as a diagnostic rather than
+        folded into this single-valued attribute
 
   validation.method:
     kind: string
@@ -53,7 +56,7 @@ attributes:
       via DNS authorization or the attached load balancer, never email).
     mappings:
       aws.acm: RequestCertificate ValidationMethod (DNS | EMAIL)
-      gcp.certificatemanager: managed.dnsAuthorizations (DNS) — email refused
+      gcp.certmanager: managed.dnsAuthorizations (DNS) — email refused
 
   auto.renew:
     kind: bool
@@ -65,7 +68,9 @@ attributes:
       auto-renew).
     mappings:
       aws.acm: RenewalEligibility = ELIGIBLE (DNS-validated public certs)
-      gcp.certificatemanager: managed certificates auto-renew
+      gcp.certmanager: managed certificates auto-renew
+      k8s.certmanager: const true — a cert-manager Certificate renews by design (the
+        controller reconciles it), so this is config-intent, not a measured field
 
   service.managed:
     kind: bool

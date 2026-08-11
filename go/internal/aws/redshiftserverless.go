@@ -49,10 +49,12 @@ func RSSName(environment, capability string, generation int) string {
 
 // RSSPlan is the attribute-derived shape a create assembles.
 type RSSPlan struct {
-	Name     string
-	Region   string
-	Public   bool
-	KmsKeyID string // "" = AWS-managed default; else a customer key (CMK)
+	Name             string
+	Region           string
+	Public           bool
+	KmsKeyID         string   // "" = AWS-managed default; else a customer key (CMK)
+	SubnetIDs        []string // VPC placement (opaque impl, like ElastiCache Serverless)
+	SecurityGroupIDs []string
 }
 
 // BuildRedshiftServerless maps capability.warehouse.analytics attributes + impl to a
@@ -100,6 +102,12 @@ func BuildRedshiftServerless(environment, capability string,
 		}
 		p.KmsKeyID = key
 	}
+	// VPC placement (D887): a workgroup created without subnetIds lands in the account's
+	// DEFAULT VPC and 400s "A default VPC wasn't detected" on an account that has none —
+	// the same subnet/security-group operands ElastiCache Serverless already reads. Opaque
+	// impl (invariant #4: topology is implementation, never a capability attribute).
+	p.SubnetIDs = implStrings(impl, "subnetIds")
+	p.SecurityGroupIDs = implStrings(impl, "securityGroupIds")
 	if !rssNameOK.MatchString(p.Name) {
 		return RSSPlan{}, fmt.Errorf("derived name %q is invalid", p.Name)
 	}
@@ -120,12 +128,21 @@ func (p RSSPlan) namespaceBody(capability, environment string) map[string]any {
 }
 
 func (p RSSPlan) workgroupBody(capability, environment string) map[string]any {
-	return map[string]any{
+	body := map[string]any{
 		"workgroupName":      p.Name,
 		"namespaceName":      p.Name,
 		"publiclyAccessible": p.Public,
 		"tags":               rssTags(capability, environment),
 	}
+	// D887: CreateWorkgroup takes subnetIds/securityGroupIds directly (JSON lists). Emit
+	// them only when given, so an account WITH a default VPC still works with none supplied.
+	if len(p.SubnetIDs) > 0 {
+		body["subnetIds"] = p.SubnetIDs
+	}
+	if len(p.SecurityGroupIDs) > 0 {
+		body["securityGroupIds"] = p.SecurityGroupIDs
+	}
+	return body
 }
 
 func rssTags(capability, environment string) []map[string]string {

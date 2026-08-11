@@ -108,6 +108,8 @@ type azureAlertDoc struct {
 		Actions []struct {
 			ActionGroupID string `json:"actionGroupId"`
 		} `json:"actions"`
+		// D726: the arming switch, set by the create and never read back.
+		Enabled *bool `json:"enabled"`
 	} `json:"properties"`
 }
 
@@ -125,7 +127,11 @@ func (d *Driver) observeAzureAlert(capability, providerID string) ([]provider.Ob
 		return nil, nil, fmt.Errorf("metricAlerts.get: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"metric alert not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"metric alert not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("metricAlerts.get: HTTP %d", st)
@@ -135,10 +141,13 @@ func (d *Driver) observeAzureAlert(capability, providerID string) ([]provider.Ob
 		return nil, nil, fmt.Errorf("metricAlerts.get: empty criteria — %w", armBody("metricAlerts.get", st))
 	}
 	c := doc.Properties.Criteria.AllOf[0]
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "alert.metric", Value: c.MetricName, Derivation: "measured"},
 		{Path: "alert.threshold", Value: c.Threshold, Derivation: "measured"},
-		{Path: "alert.notify", Value: len(doc.Properties.Actions) > 0, Derivation: "measured"},
+		{Path: "alert.notify", Value: len(doc.Properties.Actions) > 0 &&
+			(doc.Properties.Enabled == nil || *doc.Properties.Enabled), Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
 	switch c.Operator {
@@ -155,7 +164,18 @@ func (d *Driver) deleteAzureAlert(capability, environment, providerID string) pr
 	if err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
-	_ = sub
+	// D467 — the subscription boundary. 64 of 67 sub-bearing paths already refused a
+	// providerId whose subscription is not the driver's; these three parsed it and
+	// discarded it with `_ = sub`. The discard is the part that matters: armURL builds
+	// from d.Subscription, never from the bound one, so a foreign-subscription
+	// providerId did not reach the other subscription — it silently RETARGETED the
+	// delete at the same resource group and name in OURS. The binding named one
+	// resource and the driver destroyed a different one.
+	if sub != d.Subscription && d.Subscription != "" {
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("providerId subscription %q is not the driver's %q — "+
+				"refusing to retarget the delete at our own subscription", sub, d.Subscription)}
+	}
 	iURL, _ := d.armURL(rg, "Microsoft.Insights/metricAlerts/"+name, metricAlertAPIVersion)
 	st, resp, e := d.doARM("GET", iURL, nil)
 	if e != nil {

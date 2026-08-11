@@ -1005,6 +1005,10 @@ func (d *Driver) ClassifyChange(service, path string, current, desired any,
 		return classifyACMChange(path)
 	case "lambda":
 		return classifyLambdaChange(path)
+	case "dynamodb":
+		return classifyDynamoDBChange(path)
+	case "eventbridgescheduler":
+		return classifyEBSChange(path)
 	default:
 		// D215: a create service with no explicit ClassifyChange has no in-place
 		// update path, so reconciling a drift is honestly a REPLACEMENT
@@ -1059,6 +1063,13 @@ func (d *Driver) update(service, capability, environment, providerID string,
 		return d.updateRDS(capability, environment, providerID, attrs, impl, changes)
 	case "secretsmanager":
 		return d.updateASM(capability, environment, providerID, attrs, impl, changes)
+	case "dynamodb":
+		// D1004: in-place PITR (UpdateContinuousBackups) + deletion.protection (UpdateTable),
+		// both single-call on a live table — never a stateful replacement.
+		return d.updateDynamoDB(capability, environment, providerID, attrs, impl, changes)
+	case "eventbridgescheduler":
+		// D1004: in-place schedule-expression / enabled patch via UpdateSchedule (PUT).
+		return d.updateEventBridgeScheduler(capability, environment, providerID, attrs, impl, changes)
 	case "loadbalancer":
 		// read-only slice — refuse-closed honestly (never a silent no-op).
 		return d.updateLoadBalancer()

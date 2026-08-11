@@ -22,11 +22,16 @@ const redisAPIVersion = "2023-08-01"
 type RedisPlan struct {
 	Name         string
 	Region       string
-	SkuName      string // Basic | Standard
+	SkuName      string // Basic | Standard | Premium
 	Capacity     int    // sizing (impl), default 1
-	RedisVersion string // "6" | "4"
+	RedisVersion string
 	Public       bool
 	InTransit    bool
+	// D948: zone redundancy. regional maps to Premium + a top-level `zones` array (the
+	// region's logical AZs, filled by the net shell from the subscription locations API);
+	// only then does observe read the cache back as `regional` (D946).
+	ZoneRedundant bool
+	Zones         []string
 }
 
 func redisAzureVersion(protocol string) (string, error) {
@@ -115,9 +120,15 @@ func BuildRedisAzure(environment, capability string,
 		case "availability.class":
 			switch raw {
 			case "zonal":
-				p.SkuName = "Basic" // single node
+				p.SkuName = "Basic" // single node, single zone
 			case "regional":
-				p.SkuName = "Standard" // two-node replica
+				// D948: regional means zone-redundant (survives an AZ loss). That is the
+				// Premium tier with a top-level `zones` array spanning the region's AZs —
+				// the net shell fills Zones from the subscription locations API and refuses
+				// if the region has fewer than two. (D946 made observe read the real zones,
+				// so this now round-trips: create Premium+zones → observe regional.)
+				p.SkuName = "Premium"
+				p.ZoneRedundant = true
 			case "multi-regional":
 				return RedisPlan{}, fmt.Errorf(
 					"availability.class=multi-regional has no single managed primitive on Azure Cache " +
@@ -165,8 +176,12 @@ func (p RedisPlan) createBody(tags map[string]any) map[string]any {
 	if p.Public {
 		access = "Enabled"
 	}
+	family := "C" // Basic/Standard
+	if p.SkuName == "Premium" {
+		family = "P" // D948: the Premium family is P, not C — a wrong family is a 400
+	}
 	props := map[string]any{
-		"sku":                 map[string]any{"name": p.SkuName, "family": "C", "capacity": p.Capacity},
+		"sku":                 map[string]any{"name": p.SkuName, "family": family, "capacity": p.Capacity},
 		"redisVersion":        p.RedisVersion,
 		"publicNetworkAccess": access,
 		"enableNonSslPort":    !p.InTransit,
@@ -174,9 +189,13 @@ func (p RedisPlan) createBody(tags map[string]any) map[string]any {
 	if p.InTransit {
 		props["minimumTlsVersion"] = "1.2"
 	}
-	return map[string]any{
+	body := map[string]any{
 		"location":   p.Region,
 		"tags":       tags,
 		"properties": props,
 	}
+	if p.ZoneRedundant && len(p.Zones) > 0 {
+		body["zones"] = p.Zones // D948: top-level, spanning the region's AZs
+	}
+	return body
 }

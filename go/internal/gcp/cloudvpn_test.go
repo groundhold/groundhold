@@ -156,6 +156,10 @@ func TestHonestyHarnessCloudVPN(t *testing.T) {
 		Classify:        gcpOpRole, // LRO create/delete parse the operation name
 		OwnerTagValue:   "site",
 		DeterministicID: true, // the gateway name is a chosen slug+hash
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("vpngateway", "site", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},

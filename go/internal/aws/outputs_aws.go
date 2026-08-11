@@ -40,6 +40,26 @@ var awsOutputs = map[string][]provider.OutputSpec{
 		{Name: "bucketName", Kind: "string", Sample: "groundhold-preflight"},
 	},
 	"sns": {{Name: "topicArn", Kind: "string", Sample: "arn:aws:sns:eu-central-1:000000000000:groundhold-preflight"}},
+	// D778, from the field: a `$ref` to a queue or a log group was refused because
+	// neither declared ANY output, so a legal wiring — a scheduler targeting a queue, a
+	// trail naming its group — had to be written as a literal ARN. The reporter named
+	// the cost themselves: a candidate bound to one deployment, which a re-create
+	// silently invalidates.
+	//
+	// Both are fully derivable FROM THE PROVIDER ID and need no read, exactly as
+	// sns.topicArn and lambda.functionArn are. Declaring what costs nothing to know is
+	// not a feature; withholding it was the accident.
+	"sqs": {
+		{Name: "queueArn", Kind: "string",
+			Sample: "arn:aws:sqs:eu-central-1:000000000000:pv-jobs-prod-1a2b3c4d"},
+		{Name: "queueUrl", Kind: "string",
+			Sample: "https://sqs.eu-central-1.amazonaws.com/000000000000/pv-jobs-prod-1a2b3c4d"},
+	},
+	"cwlogs": {
+		{Name: "logGroupName", Kind: "string", Sample: "/pv/prod/api"},
+		{Name: "logGroupArn", Kind: "string",
+			Sample: "arn:aws:logs:eu-central-1:000000000000:log-group:/pv/prod/api:*"},
+	},
 	// elasticache-serverless: the client endpoint host:port a consumer app wires
 	// as {$ref: {capability: <cache>, output: endpoint}}. The address is
 	// server-assigned (not in the pid), so it comes from one read of the standing
@@ -72,8 +92,13 @@ var awsOutputs = map[string][]provider.OutputSpec{
 	"lambda": {
 		{Name: "functionArn", Kind: "string", Sample: "arn:aws:lambda:eu-central-1:000000000000:function:pv-api-prod-1a2b3c4d"},
 		{Name: "functionName", Kind: "string", Sample: "pv-api-prod-1a2b3c4d"},
-		{Name: "functionUrl", Kind: "string", Sample: "https://abc123.lambda-url.eu-central-1.on.aws/"},
-		{Name: "functionUrlDomain", Kind: "string", Sample: "abc123.lambda-url.eu-central-1.on.aws"},
+		// D774: CONDITIONAL, and the comment above already said so — present only when
+		// the function has a URL. A function declaring network.publicExposure: false is
+		// SUPPOSED to have none, so their absence is the contract being honoured.
+		{Name: "functionUrl", Kind: "string", Conditional: true,
+			Sample: "https://abc123.lambda-url.eu-central-1.on.aws/"},
+		{Name: "functionUrlDomain", Kind: "string", Conditional: true,
+			Sample: "abc123.lambda-url.eu-central-1.on.aws"},
 		// D381. AWS creates /aws/lambda/<fn> itself, on first invocation, with NO
 		// retention — it keeps every line forever. groundhold never made that group,
 		// so nothing in a contract could reach it: the log-group capability could
@@ -159,6 +184,30 @@ func (d *Driver) deriveOutputs(service, pid string) (map[string]any, error) {
 		return map[string]any{
 			"bucketName": bucket,
 			"bucketArn":  "arn:aws:s3:::" + bucket,
+		}, nil
+	case "sqs":
+		region, account, name, err := splitSQSProviderID(pid)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"queueArn": sqsARN(region, account, name),
+			"queueUrl": sqsQueueURL(d.sqsBase(region), account, name),
+		}, nil
+	case "cwlogs":
+		region, group, err := splitCWLogsProviderID(pid)
+		if err != nil {
+			return nil, err
+		}
+		account, aerr := d.resolveAccount()
+		if aerr != nil {
+			return nil, aerr
+		}
+		return map[string]any{
+			"logGroupName": group,
+			// The trailing :* is how every AWS policy and subscription names a group's
+			// streams; a bare group ARN is not what a consumer needs to reference.
+			"logGroupArn": "arn:aws:logs:" + region + ":" + account + ":log-group:" + group + ":*",
 		}, nil
 	case "sns":
 		region, account, name, err := splitSNSProviderID(pid)

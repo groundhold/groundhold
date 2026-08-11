@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"bytes"
 	"groundhold/internal/certifynet"
 	"groundhold/internal/provider"
 )
@@ -178,14 +179,18 @@ func (f *ecslFake) handler(t *testing.T) *httptest.Server {
 			if f.stuck != "" {
 				status = f.stuck
 			}
+			// D936: real AWS wraps each list member in <member>, not <ServerlessCache>.
 			_, _ = w.Write([]byte(`<DescribeServerlessCachesResponse><DescribeServerlessCachesResult>` +
-				`<ServerlessCaches><ServerlessCache><ServerlessCacheName>x</ServerlessCacheName>` +
+				`<ServerlessCaches><member><ServerlessCacheName>x</ServerlessCacheName>` +
 				`<Status>` + status + `</Status><ARN>` + arn + `</ARN>` +
 				`<Engine>redis</Engine><MajorEngineVersion>7</MajorEngineVersion>` +
 				`<Endpoint><Address>x.serverless.euc1.cache.amazonaws.com</Address><Port>6379</Port></Endpoint>` +
-				`</ServerlessCache></ServerlessCaches>` +
+				`</member></ServerlessCaches>` +
 				`</DescribeServerlessCachesResult></DescribeServerlessCachesResponse>`))
 		case "ListTagsForResource":
+			// AWS ElastiCache ListTagsForResource uses <TagList><Tag> (verified against
+			// the real API 2026-08-08) — unlike DescribeServerlessCaches, which wraps
+			// list members in <member> (D936). AWS is not internally consistent here.
 			_, _ = w.Write([]byte(`<ListTagsForResourceResponse><ListTagsForResourceResult><TagList>` +
 				`<Tag><Key>groundhold-capability</Key><Value>` + f.tagCap + `</Value></Tag>` +
 				`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag>` +
@@ -313,4 +318,69 @@ func TestBoundedPollElastiCacheServerless(t *testing.T) {
 			ecacheID("000000000000", "prod", "capability.cache.keyvalue", 1)),
 	}
 	certifynet.CertifyBoundedPoll(t, p)
+}
+
+// TestAdoptsExistingElastiCacheServerless enrols elasticache-serverless in the D391
+// gate: the cache name is deterministic, a second create is answered
+// ServerlessCacheAlreadyExistsFault, and the tags off the ARN decide.
+func TestAdoptsExistingElastiCacheServerless(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/elasticache-serverless",
+		Classify: rdsQueryRole,
+		ExistingServer: func() *httptest.Server {
+			f := &ecslFake{}
+			inner := f.handler(t)
+			return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				form, _ := url.ParseQuery(string(body))
+				if form.Get("Action") == "CreateServerlessCache" {
+					w.WriteHeader(400)
+					_, _ = w.Write([]byte(`<ErrorResponse><Error>` +
+						`<Code>ServerlessCacheAlreadyExistsFault</Code></Error></ErrorResponse>`))
+					return
+				}
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				r.ContentLength = int64(len(body))
+				inner.Config.Handler.ServeHTTP(w, r)
+			}))
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.ElastiCacheServerlessBaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.PollInterval = time.Millisecond
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("elasticache-serverless", "sessions", "prod", ecslAttrs(), ecslImpl(), "sessions", 1)
+		},
+		AllowedMutations: 1, // the refused create
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
+
+// D937: discoverElastiCacheServerless had the SAME wrong list element as the
+// lifecycle read (D936) — a second copy the D936 fix missed. With <ServerlessCache>
+// instead of <member>, brownfield discovery parses ZERO caches and reports a live
+// serverless cache as ABSENT — the dangerous false-absence: onboarding misses it,
+// and a later create makes a duplicate.
+func TestDiscoverElastiCacheServerlessSeesTheCache(t *testing.T) {
+	f := &ecslFake{}
+	srv := f.handler(t)
+	defer srv.Close()
+	d := ecslDriver(t, srv)
+	d.Account = "000000000000" // skip CallerIdentity
+
+	found, diags, err := d.discoverElastiCacheServerless("eu-central-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("discovery found %d serverless caches, want 1 — a wrong list element reads a "+
+			"live cache as absent (D937 false-absence in onboarding); diags %v", len(found), diags)
+	}
 }

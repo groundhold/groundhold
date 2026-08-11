@@ -69,7 +69,11 @@ func TestClassifyGCSChange(t *testing.T) {
 	if cls, _ := d.ClassifyChange("gcs", "versioning.enabled", false, true, nil); cls != "mutable" {
 		t.Fatalf("versioning must be mutable, got %q", cls)
 	}
-	if cls, _ := d.ClassifyChange("gcs", "location.region", "us", "eu", nil); cls != "immutable" {
-		t.Fatalf("region must be immutable, got %q", cls)
+	// D826: this pinned "immutable" for a bucket's location. Cloud Storage publishes
+	// buckets.relocate, so a bucket moves under its own name with its objects — the old
+	// expectation pinned asking for consent to destroy every object to change a location
+	// Google relocates.
+	if cls, why := d.ClassifyChange("gcs", "location.region", "us", "eu", nil); cls != "unsupported" || why == "" {
+		t.Fatalf("region must be unsupported with a reason, got %q/%q", cls, why)
 	}
 }

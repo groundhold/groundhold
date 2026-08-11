@@ -185,13 +185,39 @@ func (d *Driver) observeBackupPlan(capability, providerID string) ([]provider.Ob
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"backup plan not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"backup plan not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
 	var diags []string
+	// D733: a plan's cadence and retention describe a lifecycle applied to the resources
+	// its SELECTIONS name. This driver's own header says it — "A plan without a selection
+	// backs up nothing" — and the create is a composite for exactly that reason. Observe
+	// never asked, so an adopted or drifted plan attached to zero resources reported
+	// schedule.frequency and retention.duration as measured, while the vocabulary says
+	// the first of those "determines the Recovery Point Objective". A hard RPO constraint
+	// then read satisfied on a plan backing up nothing at all.
+	//
+	// The helper was already in this file, called from the delete path and nowhere else.
+	// An unreadable selection list withholds too: for a recovery control, "we could not
+	// establish that this protects anything" is not a reason to assert that it does.
+	if selIDs, serr := d.listBackupSelectionIDs(region, planID); serr != nil {
+		return obs, []string{"schedule.frequency, retention.duration and copy.* not " +
+			"observed: the plan's selections could not be read (" + serr.Error() + "), so " +
+			"whether this plan backs up anything is unknown"}, nil
+	} else if len(selIDs) == 0 {
+		return obs, []string{"schedule.frequency, retention.duration and copy.* not " +
+			"observed: this plan has no selections, so it backs up nothing — its cadence " +
+			"and retention describe a lifecycle applied to no resource"}, nil
+	}
 	if len(doc.BackupPlan.Rules) == 0 {
 		return obs, []string{"backup plan has no rules — cadence/retention unobservable"}, nil
 	}
@@ -411,7 +437,7 @@ func (d *Driver) discoverBackupPlans(region string) ([]provider.Discovered, []st
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.backup.plan",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

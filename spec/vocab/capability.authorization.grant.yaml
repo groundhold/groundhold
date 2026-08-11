@@ -45,9 +45,9 @@ attributes:
       already defines, never an inline policy document. This is the grant's semantic
       identity.
     mappings:
-      gcp.iam: an IAM role id, e.g. roles/storage.objectViewer (predefined or custom)
-      aws.iam: a managed policy ARN, e.g. arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
-      azure.authorization: a role definition, e.g. the "Reader" built-in role
+      gcp.iambinding: an IAM role id, e.g. roles/storage.objectViewer (predefined or custom)
+      aws.rolepolicy: a managed policy ARN, e.g. arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+      azure.roleassignment: a role definition, e.g. the "Reader" built-in role
 
   grant.principal:
     kind: string
@@ -56,9 +56,9 @@ attributes:
       form is provider-specific but it is a declared, verifiable value: observe
       confirms the live binding names exactly this principal.
     mappings:
-      gcp.iam: an IAM member, e.g. serviceAccount:name@project.iam.gserviceaccount.com
-      aws.iam: the role NAME the managed policy is attached to
-      azure.authorization: the principal object id (the managed identity's principalId)
+      gcp.iambinding: an IAM member, e.g. serviceAccount:name@project.iam.gserviceaccount.com
+      aws.rolepolicy: the role NAME the managed policy is attached to
+      azure.roleassignment: the principal object id (the managed identity's principalId)
 
   access.scope:
     kind: string
@@ -73,9 +73,13 @@ attributes:
       (resource-scoping there needs an inline policy — the expression language v0
       excludes), an honest one-cloud gap.
     mappings:
-      gcp.iam: resource=setIamPolicy on implementation.scope; account=on the project
-      aws.iam: account=AttachRolePolicy (principal-attached); resource REFUSED
-      azure.authorization: resource=assignment at implementation.scope; account=at the subscription
+      gcp.iambinding: resource=setIamPolicy on implementation.scope; account=on the project
+      aws.rolepolicy: account=AttachRolePolicy (principal-attached); resource REFUSED
+      azure.roleassignment: resource=assignment at implementation.scope; account=at the subscription
+      k8s.rbac-grant / k8s.rbac-clustergrant: the KIND decides it — a namespaced
+        RoleBinding is `resource` (it grants inside one namespace), a
+        ClusterRoleBinding is `account` (cluster-wide). Not read from any field —
+        in Kubernetes the scope IS the object kind
 
   access.privileged:
     kind: bool
@@ -87,9 +91,9 @@ attributes:
       left UNVERIFIABLE at observe (groundhold will not guess a custom role's privilege
       — the four-valued verdict is the honest answer, not a fabricated boolean).
     mappings:
-      gcp.iam: roles/owner, roles/editor, *admin* => privileged
-      aws.iam: AdministratorAccess, PowerUserAccess, *FullAccess* => privileged
-      azure.authorization: Owner, Contributor, User Access Administrator => privileged
+      gcp.iambinding: roles/owner, roles/editor, *admin* => privileged
+      aws.rolepolicy: AdministratorAccess, PowerUserAccess, *FullAccess* => privileged
+      azure.roleassignment: Owner, Contributor, User Access Administrator => privileged
 
   service.managed:
     kind: bool

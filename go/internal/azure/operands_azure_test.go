@@ -16,7 +16,7 @@ func TestConsumedOperandsSpotChecks(t *testing.T) {
 	cases := map[string][]string{
 		// no operands at all: the create path reads nothing beyond attrs.
 		"changefeed":     {},
-		"roleassignment": {},
+		"roleassignment": {"principal_type"},
 		"customroledef":  {},
 		// the naming trap called out in the source comment: dnsrecord reads
 		// camelCase "resourceGroup" while every other service reads snake_case.

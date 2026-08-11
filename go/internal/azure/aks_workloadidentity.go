@@ -247,7 +247,19 @@ func BuildAKSWorkloadIdentity(subscription, environment, capability string,
 func classifyAKSWorkloadIdentityChange(path string) (string, string) {
 	switch path {
 	case "workload.namespace", "workload.serviceAccount":
-		return "immutable", "the namespace/serviceAccount is the federated credential subject — a different binding is a different resource, not an in-place patch"
+		// D831: "a different binding is a different resource" is true on the twins, whose
+		// providerId ENCODES the namespace and the service account — change one and the id
+		// addresses something else. This driver is the exception, and says so twelve lines
+		// above: the credential name is derived from capability+environment and "the subject
+		// (namespace/serviceAccount) is recovered by reading the credential back, never
+		// re-encoded into the pid". So the resource is the same resource, and its subject is
+		// a property Azure updates with a PUT (federatedIdentityCredentials has PUT at the
+		// pinned api-version; its properties are issuer, subject, audiences).
+		return "unsupported", "in-place subject change is not wired for AKS Workload " +
+			"Identity in this slice — Azure does support it (the federated credential's " +
+			"subject is set by a PUT on the SAME credential, whose name this driver derives " +
+			"from capability+environment rather than from the subject), so this is a gap in " +
+			"groundhold rather than a different resource"
 	case "service.managed", "location.region":
 		return "unsupported", "platform/projection property — nothing to patch"
 	default:

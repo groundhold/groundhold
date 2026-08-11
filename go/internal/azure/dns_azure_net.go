@@ -97,7 +97,11 @@ func (d *Driver) observeAzureDNS(capability, providerID string) ([]provider.Obse
 		return nil, nil, fmt.Errorf("dnsZones.get: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"dns zone not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"dns zone not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("dnsZones.get: HTTP %d", st)
@@ -108,6 +112,8 @@ func (d *Driver) observeAzureDNS(capability, providerID string) ([]provider.Obse
 	}
 	// the resource TYPE that answered IS the public/private fact (measured).
 	return []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "zone.domain", Value: domain, Derivation: "measured"},
 		{Path: "network.publicExposure", Value: kind == "pub", Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},

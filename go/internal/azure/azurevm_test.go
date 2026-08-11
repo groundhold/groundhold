@@ -57,6 +57,11 @@ func TestBuildAzureVMGolden(t *testing.T) {
 	if _, present := osDisk["managedDisk"].(map[string]any)["diskEncryptionSet"]; present {
 		t.Error("a disk-encryption set appeared although customerManagedKeys is false")
 	}
+	// D941: the create implicitly provisions this OS disk; without deleteOption:Delete
+	// Azure's Detach default leaves it billing after the VM is gone (D920 residue).
+	if osDisk["deleteOption"] != "Delete" {
+		t.Errorf("osDisk.deleteOption = %v, want Delete — the OS disk must cascade with the VM", osDisk["deleteOption"])
+	}
 	// Password authentication must be structurally off, not merely undeclared.
 	lin := props["osProfile"].(map[string]any)["linuxConfiguration"].(map[string]any)
 	if lin["disablePasswordAuthentication"] != true {
@@ -151,9 +156,11 @@ func TestBuildAzureVMRefusals(t *testing.T) {
 
 func TestClassifyAzureVMChange(t *testing.T) {
 	for path, want := range map[string]string{
-		"location.region":                "immutable",
-		"availability.class":             "immutable",
-		"encryption.customerManagedKeys": "immutable",
+		"location.region":    "immutable",
+		"availability.class": "immutable",
+		// D825: Azure attaches a disk encryption set to an EXISTING disk with the VM
+		// stopped, so this never needed a new machine.
+		"encryption.customerManagedKeys": "unsupported",
 		"encryption.atRest":              "unsupported",
 		"service.managed":                "unsupported",
 		// Azure differs from both twins here: the address belongs to the interface,

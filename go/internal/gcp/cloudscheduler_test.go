@@ -72,6 +72,13 @@ func schedServer(t *testing.T, capLabel, state string) *httptest.Server {
 			case r.Method == "POST" && strings.HasSuffix(r.URL.Path, ":pause"):
 				_, _ = w.Write([]byte(`{"name":"x","state":"PAUSED"}`))
 			case r.Method == "POST" && strings.Contains(r.URL.Path, "/jobs"):
+				// D881: jobs.create carries the id in the body's name, never a ?jobId=
+				// query param — the real API 400s one. Reject it here so the fake is a
+				// double for the cloud, not a mirror of the driver's mistake.
+				if r.URL.Query().Get("jobId") != "" {
+					t.Errorf("D881: jobs.create sent ?jobId=%q — Cloud Scheduler has no such "+
+						"query parameter (the id is in the body name)", r.URL.Query().Get("jobId"))
+				}
 				_, _ = w.Write([]byte(doc))
 			case r.Method == "GET":
 				_, _ = w.Write([]byte(doc))
@@ -153,14 +160,15 @@ func TestHonestyHarnessCloudScheduler(t *testing.T) {
 	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
 	pid := schedProviderID("acme-prod", "europe-west1", SchedulerJobID("prod", "nightly", 1))
 	p := &certifynet.Probe{
-		// AssertTransient left false — D237 TODO: this driver's create/delete ladder
-		// still maps 429/503/403 to terminal failed (and drops the providerId); it must
-		// route through provider.MutationResult before the transient invariant can lock.
 		Name:            "gcp/cloudscheduler",
 		AssertTransient: true,       // D237 sweep
 		Classify:        secretRole, // sync REST: GET read, POST/DELETE opaque (id deterministic)
 		OwnerTagValue:   "nightly",
 		DeterministicID: true, // the job id is a chosen slug+hash
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("cloudscheduler", "nightly", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},

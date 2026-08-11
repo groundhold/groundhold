@@ -298,11 +298,24 @@ func BuildAzureOpenAI(environment, capability string,
 func classifyAzureOpenAIChange(path string) (string, string) {
 	switch path {
 	case "inference.destinationRegions":
-		return "immutable", "an Azure OpenAI account's destination regions are fixed by its region and deployment skus — a change is a new account/deployment, not an in-place patch"
+		// D828: the driver's own build comment says these are "DETERMINED by the deployment
+		// skus", and a deployment is replaced with a PUT. "a new account/deployment" put
+		// both on one side of a slash; only one of them is required, and it is not the
+		// account.
+		return "unsupported", "in-place routing change is not wired for Azure OpenAI in " +
+			"this slice — the destination regions follow the deployment skus, and a " +
+			"deployment is replaced by its own PUT without touching the account"
 	case "location.region":
 		return "immutable", "an Azure OpenAI account is region-bound — a region change is a new account, not a patch"
 	case "model.provider":
-		return "immutable", "the model provider/family is fixed by the model deployed on the account — a change is a new deployment, not an in-place patch"
+		// D828: the sentence already says "a new DEPLOYMENT" — and a deployment is a child
+		// resource with its own PUT and DELETE
+		// (Microsoft.CognitiveServices/accounts/{name}/deployments/{deploymentName}, present
+		// at the api-version this driver pins). The verdict destroyed the ACCOUNT for it.
+		return "unsupported", "in-place model swap is not wired for Azure OpenAI in this " +
+			"slice — Azure does support it (the deployment is a child resource with its own " +
+			"PUT and DELETE, and the account is untouched), so this is a gap in groundhold " +
+			"rather than a reason to replace the account"
 	case "model.access":
 		return "unsupported", "model access is a manual-gate — Azure OpenAI model access is granted by an application/approval, never an API patch; groundhold observes it, does not provision it"
 	case "service.managed":

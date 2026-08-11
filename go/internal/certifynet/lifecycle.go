@@ -63,14 +63,28 @@ type countRT struct {
 	inner     http.RoundTripper
 	classify  Classifier
 	mutations int
+	requests  int
+	// readFound records whether any READ actually found something (a 2xx). A
+	// foreign-refusal probe whose estate answers 404 to every read proves nothing
+	// about the ownership check: the driver refuses because the resource is not
+	// there, which is a different code path and a different guarantee (D524).
+	readFound bool
 }
 
 func (c *countRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	c.requests++
 	body := peekBody(req)
-	if c.classify(req, body).isMutation() {
+	role := c.classify(req, body)
+	restoreBody(req, body) // a classifier that read the request must not cost the driver its body
+	if role.isMutation() {
 		c.mutations++
 	}
-	return c.inner.RoundTrip(req)
+	resp, err := c.inner.RoundTrip(req)
+	if err == nil && resp != nil && !role.isMutation() &&
+		resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		c.readFound = true
+	}
+	return resp, err
 }
 
 // DuplicateProbe wires a driver's adopt-by-name path into the no-duplicate gate.
@@ -105,5 +119,16 @@ func CertifyNoDuplicate(t TestingT, p *DuplicateProbe) {
 	if rt.mutations > 0 {
 		t.Errorf("%s: adopt-by-name for an ABSENT named cluster sent %d mutation(s) — it created a DUPLICATE "+
 			"instead of refusing (the exact Acme failure).", p.Name, rt.mutations)
+	}
+	// D527: the refusal must come from LOOKING. A driver that refuses at validation
+	// — a malformed operand, a missing field — satisfies both assertions above
+	// without ever asking whether the named cluster is there, and the property this
+	// gate exists for goes unexercised. Same hole D455 closed in the foreign-refusal
+	// harness, in a harness D455 did not touch.
+	if rt.requests == 0 {
+		t.Errorf("%s: [reason=%q] the refusal came WITHOUT reading the estate — the driver "+
+			"never asked whether the named cluster exists, so this proves nothing about "+
+			"adopt-by-name. Either the fixture's operands are malformed (the driver refused "+
+			"at validation) or the check is missing.", p.Name, res.Reason)
 	}
 }

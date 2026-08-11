@@ -19,10 +19,12 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"time"
@@ -95,6 +97,11 @@ func trimDash(s string) string {
 // Driver is the Azure provider. Subscription is driver-level (like GCP's Project);
 // resource group + the substrate account/server ride in the candidate impl block.
 type Driver struct {
+	// D803: pages the provider said existed and this driver did not follow. A POINTER,
+	// so a scoped copy of the driver shares the record rather than losing it — the
+	// truncation belongs to the sweep, not to the struct that happened to see it.
+	trunc *truncRecord
+
 	Subscription string
 	// secrets (D309) holds the credential values of the mutation in flight so the
 	// driver can scrub them out of a Reason before it is persisted.
@@ -151,6 +158,7 @@ func newResilientHTTPClient() *http.Client {
 
 func NewDriver(subscription string) *Driver {
 	return &Driver{
+		trunc:         &truncRecord{}, // D803
 		Subscription:  subscription,
 		HTTP:          newResilientHTTPClient(),
 		Now:           time.Now,
@@ -197,6 +205,91 @@ var (
 )
 
 // doARM signs an ARM request with the bearer token and executes it.
+
+// truncRecord holds the pages a driver was told about and did not follow (D803). The
+// bookkeeping itself is shared (D818): a truncation is evidence of an incomplete answer
+// only if the continuation it handed back was never used, and that rule belongs to how
+// paging works rather than to any one provider.
+type truncRecord = provider.ListingRecord
+
+// noteTruncation records that a response said more results exist, along with the
+// continuation values that would prove a sweep went and read them. A driver built without
+// a record (a bare literal in a test) simply keeps none.
+func (d *Driver) noteTruncation(call string, values []string) {
+	d.trunc.Note(call, values)
+}
+
+// noteFollowed clears the note belonging to any continuation an OUTGOING request carries.
+func (d *Driver) noteFollowed(rawURL string, body []byte) {
+	d.trunc.Followed(provider.RequestValues(rawURL, body))
+}
+
+// TruncatedListings implements provider.ListingCompleteness. It RESETS the record, so one
+// sweep cannot report the next one's pages.
+func (d *Driver) TruncatedListings() []provider.TruncationNote {
+	return d.trunc.Take()
+}
+
+// listAllARMPages GETs listURL and follows nextLink, handing each page's raw body to
+// collect (D815, the Azure twin of D813's shared loop).
+//
+// One difference from Google's paging matters enough to be a guard rather than a comment.
+// A Google page token is an opaque string this driver splices into a URL it built itself.
+// ARM's nextLink is a COMPLETE URL chosen by the response — so following it blindly means
+// sending an Azure bearer token wherever a response says to. That is a redirect nobody
+// opted into, and the response is exactly the thing an attacker who can influence it would
+// use. The loop therefore follows a nextLink only when its host matches the host of the
+// listing it started from.
+func (d *Driver) listAllARMPages(op, listURL string, collect func(body []byte) error) error {
+	const maxPages = 50
+	start, err := url.Parse(listURL)
+	if err != nil {
+		return fmt.Errorf("%s: unparseable list URL", op)
+	}
+	next := listURL
+	for page := 0; next != ""; page++ {
+		if page >= maxPages {
+			return fmt.Errorf("%s: still paging after %d requests — refusing to keep going, "+
+				"and refusing to report the pages read so far as the whole list", op, maxPages)
+		}
+		st, body, derr := d.doARM("GET", next, nil)
+		if derr != nil {
+			return fmt.Errorf("%s: %v", op, derr)
+		}
+		if st != http.StatusOK {
+			return armBody(op, st)
+		}
+		if err := collect(body); err != nil {
+			return err
+		}
+		var envelope struct {
+			NextLink string `json:"nextLink"`
+		}
+		if json.Unmarshal(body, &envelope) != nil {
+			return armBody(op, st)
+		}
+		if envelope.NextLink == "" {
+			return nil
+		}
+		nl, perr := url.Parse(envelope.NextLink)
+		if perr != nil || nl.Host != start.Host {
+			return fmt.Errorf("%s: the nextLink points at %q, not at the host this listing "+
+				"started from (%q) — refusing to send an Azure token somewhere a response "+
+				"chose", op, envelope.NextLink, start.Host)
+		}
+		next = envelope.NextLink
+	}
+	return nil
+}
+
+// maxARMResponseBytes bounds a single ARM response body. The floor is set by the largest
+// UNPAGINATED list ARM returns: roleDefinitions.list carries every built-in role in one
+// body (1.14 MB / 922 roles today, and Azure only adds more). 16 MB holds an order of
+// magnitude more and still bounds memory; a response past it is refused, not truncated
+// (D872). GCP's cap is 4 MB (paginated lists there stay small); ARM's need is larger
+// precisely because this one list does not paginate.
+const maxARMResponseBytes = 16 << 20
+
 func (d *Driver) doARM(method, url string, body []byte) (int, []byte, error) {
 	return d.doARMHeader(method, url, body, nil)
 }
@@ -210,6 +303,9 @@ func (d *Driver) doARMHeader(method, url string, body []byte, extra map[string]s
 	if body != nil {
 		rdr = bytes.NewReader(body)
 	}
+	// D818: a request that carries a continuation handed back earlier is the sweep
+	// saying it went and read the rest — that clears the note the response left.
+	d.noteFollowed(url, body)
 	req, err := http.NewRequest(method, url, rdr)
 	if err != nil {
 		return 0, nil, err
@@ -226,11 +322,33 @@ func (d *Driver) doARMHeader(method, url string, body []byte, extra map[string]s
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	respBody, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// D872: read ONE byte past the cap so a body AT the cap is distinguishable from one
+	// OVER it. The old cap was 1<<20, and a real subscription's roleDefinitions.list is
+	// 1.14 MB (~922 built-in roles) in a SINGLE body with no nextLink — so it was
+	// truncated mid-JSON on every real estate, and capability.authorization.role could
+	// never be read. The D803 truncation disclosure never fired because there was no
+	// continuation to note: the loss was entirely client-side.
+	respBody, rerr := io.ReadAll(io.LimitReader(resp.Body, maxARMResponseBytes+1))
 	if rerr != nil {
 		// a mid-body drop must not surface as a well-formed short body a
 		// decision-gating parse would misread — it is an error (D87).
 		return resp.StatusCode, nil, fmt.Errorf("response body read failed: %v", rerr)
+	}
+	if len(respBody) > maxARMResponseBytes {
+		// The read hit the cap, so the body is at least one byte longer than we will
+		// hold — it may be truncated, and a truncated list handed to a decision-gating
+		// parse is the D87 hazard (a short body read as the whole answer). Refuse it as
+		// an error rather than let a raised cap re-introduce the silent truncation this
+		// entry removed. This is a read cap, never a statement about the estate.
+		return resp.StatusCode, nil, fmt.Errorf(
+			"ARM response for %s %s exceeds the %d-byte read cap — refusing to parse a "+
+				"possibly-truncated body (raise maxARMResponseBytes if this is legitimate)",
+			method, url, maxARMResponseBytes)
+	}
+	if resp.StatusCode == http.StatusOK {
+		if more, values := provider.ListingContinuation(respBody); more {
+			d.noteTruncation(method+" "+url, values)
+		}
 	}
 	return resp.StatusCode, respBody, nil
 }

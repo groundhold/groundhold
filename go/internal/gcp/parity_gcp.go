@@ -2,8 +2,8 @@
 // the single capability TYPE it fulfils. This is the GCP column of the
 // machine-verifiable parity matrix. Every value is the exact capability.<...>
 // string the service's Observe/discover stamps as ResourceType — ground truth,
-// not a guess. The one non-listable token (assetfeed) has no top-level discover
-// ResourceType; its TYPE is taken from the driver's Build dispatch + header
+// not a guess. The two non-listable tokens (assetfeed, clouddnsrecord) have no
+// top-level discover ResourceType; their TYPE is taken from the Build dispatch + header
 // docstring and noted inline.
 package gcp
 

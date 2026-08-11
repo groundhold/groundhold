@@ -357,13 +357,19 @@ func (d *Driver) observeASG(capability, providerID string) ([]provider.Observati
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"auto scaling group not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"auto scaling group not found — bound resource is gone (will re-create)"}, nil
 	}
 	class := "zonal"
 	if len(g.AvailabilityZones) > 1 {
 		class = "regional"
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		{Path: "availability.class", Value: class, Derivation: "measured"},
@@ -426,7 +432,23 @@ func (d *Driver) deleteASG(capability, environment, providerID string) provider.
 		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
 			Reason: fmt.Sprintf("delete outcome unknown: %v", e)}
 	case st == http.StatusOK:
-		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+		// ---- poll to absence (D968 class, D977) ----
+		// DeleteAutoScalingGroup with ForceDelete is async: the group enters a
+		// delete-in-progress state and terminates its member instances in the
+		// background. Reporting succeeded here tombstones a fleet still being torn
+		// down. Poll describeASG to a confirmed absence; unknown on timeout keeps
+		// the handle.
+		deadline := d.Now().Add(d.PollTimeout)
+		for {
+			if _, found, rerr := d.describeASG(region, name); rerr == nil && !found {
+				return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // confirmed gone
+			}
+			if d.Now().After(deadline) {
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: "group still deleting at poll timeout — reconcile via DescribeAutoScalingGroups"}
+			}
+			time.Sleep(d.PollInterval)
+		}
 	case strings.Contains(awsErrCodeOf(body), "NotFound"):
 		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // idempotent
 	case st >= 500:
@@ -449,26 +471,44 @@ func (d *Driver) discoverASGs(region string) ([]provider.Discovered, []string, e
 	if err != nil {
 		return nil, nil, fmt.Errorf("asg: %v", err)
 	}
-	st, body, cerr := d.asgPost(region, encodeForm(map[string]string{
-		"Action": "DescribeAutoScalingGroups", "Version": asgVersion,
-	}))
-	if cerr != nil {
-		return nil, nil, readTransport("DescribeAutoScalingGroups", cerr)
+	// D817: FOLLOW the pages. DescribeAutoScalingGroups answers 50 groups at a time by
+	// default and hands back a NextToken (botocore autoscaling/2011-01-01).
+	type asgItem struct {
+		Name string `xml:"AutoScalingGroupName"`
 	}
-	if st != http.StatusOK {
-		return nil, nil, readHTTP("DescribeAutoScalingGroups", st, awsErrCodeOf(body))
-	}
-	var resp struct {
-		Items []struct {
-			Name string `xml:"AutoScalingGroupName"`
-		} `xml:"DescribeAutoScalingGroupsResult>AutoScalingGroups>member"`
-	}
-	if xml.Unmarshal(body, &resp) != nil {
-		return nil, nil, readBody("DescribeAutoScalingGroups", st)
+	var items []asgItem
+	token := ""
+	for page := 0; ; page++ {
+		if page >= maxAWSListPages {
+			return nil, nil, fmt.Errorf("DescribeAutoScalingGroups: more than %d pages", maxAWSListPages)
+		}
+		form := map[string]string{"Action": "DescribeAutoScalingGroups", "Version": asgVersion}
+		if token != "" {
+			form["NextToken"] = token
+		}
+		st, body, cerr := d.asgPost(region, encodeForm(form))
+		if cerr != nil {
+			return nil, nil, readTransport("DescribeAutoScalingGroups", cerr)
+		}
+		if st != http.StatusOK {
+			return nil, nil, readHTTP("DescribeAutoScalingGroups", st, awsErrCodeOf(body))
+		}
+		var resp struct {
+			Items     []asgItem `xml:"DescribeAutoScalingGroupsResult>AutoScalingGroups>member"`
+			NextToken string    `xml:"DescribeAutoScalingGroupsResult>NextToken"`
+		}
+		if xml.Unmarshal(body, &resp) != nil {
+			return nil, nil, readBody("DescribeAutoScalingGroups", st)
+		}
+		items = append(items, resp.Items...)
+		if resp.NextToken == "" {
+			break
+		}
+		token = resp.NextToken
 	}
 	var out []provider.Discovered
 	var diags []string
-	for _, it := range resp.Items {
+	for _, it := range items {
 		if it.Name == "" {
 			continue
 		}
@@ -484,7 +524,7 @@ func (d *Driver) discoverASGs(region string) ([]provider.Discovered, []string, e
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.compute.autoscaling",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

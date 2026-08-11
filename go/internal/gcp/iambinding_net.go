@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strings"
 
+	"errors"
 	"groundhold/internal/provider"
 )
 
@@ -60,6 +61,10 @@ func (d *Driver) crmGetProjectPolicy(project string) (iamPolicy, error) {
 	st, body, err := d.call("POST", url, map[string]any{})
 	if err != nil {
 		return iamPolicy{}, readTransport(op, err)
+	}
+	if st == http.StatusNotFound {
+		// F-LC3 (D522): a readable absence, not a failure to read.
+		return iamPolicy{}, errGCPAbsent
 	}
 	if st != http.StatusOK {
 		return iamPolicy{}, readHTTP(op, st, gcpErrCode(body))
@@ -157,13 +162,26 @@ func (d *Driver) observeIAMBinding(capability, providerID string) ([]provider.Ob
 		return nil, nil, err
 	}
 	pol, perr := d.crmGetProjectPolicy(project)
+	if errors.Is(perr, errGCPAbsent) {
+		// The project policy itself is gone, so the binding inside it is too
+		// (F-LC3, D522) — a 404 here is a readable absence, not a read failure.
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"project policy not found — bound resource is gone (will re-create)"}, nil
+	}
 	if perr != nil {
 		return nil, nil, perr
 	}
 	if !memberInRole(pol, role, member) {
-		return nil, []string{"grant not present in the project policy — nothing to observe"}, nil
+		// F-LC3 (D522): the binding IS the resource — a member no longer in the
+		// role is a bound grant that no longer exists, not an empty reading.
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"grant not present in the project policy — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3).
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "grant.role", Value: role, Derivation: "measured"},
 		{Path: "grant.principal", Value: member, Derivation: "measured"},
 		{Path: "access.scope", Value: "account", Derivation: "measured"},

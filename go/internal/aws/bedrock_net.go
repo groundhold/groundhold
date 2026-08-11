@@ -102,7 +102,13 @@ func (p bedrockProfile) tagMap() map[string]string {
 // error or any other non-200 is readable=false (unknown — never a fabricated absence).
 func (d *Driver) getInferenceProfile(region, profileID string) (bedrockProfile, bool, error) {
 	const op = "GetInferenceProfile"
-	st, resp, err := d.bedrockDo("GET", region, bedrockProfilesPath+"/"+profileID, nil)
+	// D1000: single-encode the id on the wire (rfc3986: the ':' in a profile id like
+	// eu.anthropic...v1:0 becomes %3A), exactly as MSK/backup do for an ARN-in-path.
+	// The signer double-encodes the canonical (%3A→%253A, D880) to match what AWS
+	// computes from the received %3A; a RAW ':' on the wire makes AWS canonicalize to
+	// %3A while we signed %253A — a guaranteed 403. Every Bedrock profile id carries
+	// a ':' version suffix, so this path was dead on any double-encoding build.
+	st, resp, err := d.bedrockDo("GET", region, bedrockProfilesPath+"/"+rfc3986(profileID), nil)
 	if err != nil {
 		return bedrockProfile{}, false, readTransport(op, err)
 	}
@@ -182,12 +188,18 @@ func (d *Driver) observeBedrock(capability, providerID string) ([]provider.Obser
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"profile not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"profile not found — bound resource is gone (will re-create)"}, nil
 	}
 
 	arns := p.modelArns()
 	destRegions := destinationRegionsFromModels(arns)
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "inference.destinationRegions", Value: destRegions, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
@@ -243,7 +255,7 @@ func (d *Driver) discoverBedrock(region string) ([]provider.Discovered, []string
 		}
 		diags = append(diags, od...)
 		found = append(found, provider.Discovered{
-			ProviderID: pid, ResourceType: "capability.ai.inference", Observations: obs})
+			ProviderID: pid, ResourceType: "capability.ai.inference", Observations: provider.WithoutAbsence(obs)})
 	}
 	return found, diags, nil
 }
@@ -362,7 +374,7 @@ func (d *Driver) deleteBedrock(capability, environment, providerID string) provi
 		return provider.CreateResult{Status: "failed",
 			Reason: "profile tags do not match — refusing to delete a resource that is not ours"}
 	}
-	st, body, err := d.bedrockDo("DELETE", region, bedrockProfilesPath+"/"+profileID, nil)
+	st, body, err := d.bedrockDo("DELETE", region, bedrockProfilesPath+"/"+rfc3986(profileID), nil)
 	switch {
 	case err != nil:
 		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("DeleteInferenceProfile outcome unknown: %v", err)}

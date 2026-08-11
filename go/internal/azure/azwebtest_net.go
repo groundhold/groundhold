@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"groundhold/internal/provider"
@@ -73,11 +74,17 @@ type azureWebtestDoc struct {
 	Tags       map[string]string `json:"tags"`
 	Properties struct {
 		Frequency int `json:"Frequency"`
-		Request   struct {
-			RequestURL string `json:"RequestUrl"`
-		} `json:"Request"`
+		// D902b: Azure returns Request as null on GET and carries the request URL only
+		// inside the WebTest XML — the reverse map reads it from there, not from a
+		// structured Request field the platform never populates.
+		Configuration struct {
+			WebTest string `json:"WebTest"`
+		} `json:"Configuration"`
 	} `json:"properties"`
 }
+
+// webtestURLFromXML pulls the request URL out of the WebTest XML blob (D902b).
+var webtestURLFromXML = regexp.MustCompile(`\bUrl="([^"]+)"`)
 
 func (d *Driver) observeAzureWebtest(capability, providerID string) ([]provider.Observation, []string, error) {
 	sub, rg, name, err := splitAzureWebtestProviderID(providerID)
@@ -93,7 +100,11 @@ func (d *Driver) observeAzureWebtest(capability, providerID string) ([]provider.
 		return nil, nil, fmt.Errorf("webtests.get: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"availability test not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"availability test not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("webtests.get: HTTP %d", st)
@@ -102,11 +113,17 @@ func (d *Driver) observeAzureWebtest(capability, providerID string) ([]provider.
 	if json.Unmarshal(resp, &doc) != nil {
 		return nil, nil, &armReadError{Op: "webtests.get", Cause: "body", Status: st}
 	}
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "check.period", Value: fmt.Sprintf("%ds", doc.Properties.Frequency), Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
-	if u, perr := url.Parse(doc.Properties.Request.RequestURL); perr == nil && u.Host != "" {
+	rawURL := ""
+	if m := webtestURLFromXML.FindStringSubmatch(doc.Properties.Configuration.WebTest); len(m) == 2 {
+		rawURL = xmlUnescaper.Replace(m[1])
+	}
+	if u, perr := url.Parse(rawURL); perr == nil && u.Host != "" {
 		obs = append(obs,
 			provider.Observation{Path: "check.target", Value: u.Host, Derivation: "measured"},
 			provider.Observation{Path: "check.protocol", Value: u.Scheme, Derivation: "measured"})

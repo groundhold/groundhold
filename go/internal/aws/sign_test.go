@@ -35,6 +35,28 @@ func TestSignGetVanilla(t *testing.T) {
 	}
 }
 
+// D880: an ARN-in-path read (backup ListTags) exercises the SigV4 double-encoding of the
+// canonical path — the rule that broke every backup vault/plan delete. The expected
+// signature is computed by botocore for the SAME request (single-encoded %3A on the wire,
+// double-encoded %253A in the canonical, the model's trailing slash), so this pins our
+// signer against the reference SDK, not against ourselves. A signer that single-encodes
+// the canonical (the bug) produces 0afd0307…; only the double-encode yields this value.
+func TestSignArnInPathDoubleEncodes(t *testing.T) {
+	u, _ := url.Parse("https://backup.us-east-1.amazonaws.com/tags/" +
+		"arn%3Aaws%3Abackup%3Aus-east-1%3A000000000000%3Abackup-vault%3Av/")
+	creds := Credentials{
+		AccessKeyID:     "AKIDEXAMPLE",
+		SecretAccessKey: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+	}
+	got := Sign("GET", u, nil, emptyPayloadHash, "us-east-1", "backup",
+		"20150830T123600Z", creds)
+	const official = "a6e0e541da052b24aeb34053a3e70fafca060ed253848d3b5f6e058733bf5db4"
+	if !strings.Contains(got["Authorization"], "Signature="+official) {
+		t.Fatalf("ARN-in-path signature mismatch (canonical must double-encode the path)\n"+
+			" got: %q\nwant Signature=%s", got["Authorization"], official)
+	}
+}
+
 func TestRfc3986Encoding(t *testing.T) {
 	cases := map[string]string{
 		"a b":   "a%20b",

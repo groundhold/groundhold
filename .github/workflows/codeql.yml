@@ -7,6 +7,9 @@ name: codeql
 on:
   push:
     branches: [main, master]
+    # D626: a tag is the one event that ships something to a user, and it used to
+    # trigger release.yml alone — so this check never ran on the code being released.
+    tags: ['v*']
   pull_request:
   schedule:
     - cron: "0 7 * * 1" # weekly, alongside the govulncheck advisory sweep

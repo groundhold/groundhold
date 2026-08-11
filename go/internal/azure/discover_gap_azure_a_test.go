@@ -257,9 +257,13 @@ func TestDiscoverAzureCDNGolden(t *testing.T) {
 			_, _ = w.Write([]byte(`{"value":[
 				{"id":"/subscriptions/` + testSub + `/resourceGroups/rg1/providers/Microsoft.Cdn/profiles/hereprofile","name":"hereprofile","location":"Global"}
 			]}`))
-		case strings.HasSuffix(p, "/profiles/hereprofile/endpoints/hereendpoint"):
-			_, _ = w.Write([]byte(`{"properties":{"isHttpAllowed":false,"isHttpsAllowed":true,"origins":[{"properties":{"hostName":"origin.example.com"}}]}}`))
-		case strings.HasSuffix(p, "/profiles/hereprofile/endpoints"):
+		case strings.Contains(p, "/afdEndpoints/hereendpoint/routes/"):
+			_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded","supportedProtocols":["Https"],"httpsRedirect":"Disabled"}}`))
+		case strings.Contains(p, "/originGroups/") && strings.Contains(p, "/origins/"):
+			_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded","hostName":"origin.example.com"}}`))
+		case strings.HasSuffix(p, "/profiles/hereprofile/afdEndpoints/hereendpoint"):
+			_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded"}}`))
+		case strings.HasSuffix(p, "/profiles/hereprofile/afdEndpoints"):
 			_, _ = w.Write([]byte(`{"value":[{"name":"hereendpoint"}]}`))
 		default:
 			w.WriteHeader(http.StatusOK)

@@ -67,12 +67,16 @@ func apigwErr(body []byte) string {
 	return "" // D309: never the raw body — this string reaches a persisted receipt
 }
 
+// apigatewayv2 is restJson1: response members carry camelCase locationNames
+// (apiId, name, protocolType, apiEndpoint, tags). PascalCase tags parsed every
+// field to its zero value on a real response — an empty ApiId read as "no api
+// id" and never bound (D878).
 type apigwAPI struct {
-	ApiId        string            `json:"ApiId"`
-	Name         string            `json:"Name"`
-	ProtocolType string            `json:"ProtocolType"`
-	ApiEndpoint  string            `json:"ApiEndpoint"`
-	Tags         map[string]string `json:"Tags"`
+	ApiId        string            `json:"apiId"`
+	Name         string            `json:"name"`
+	ProtocolType string            `json:"protocolType"`
+	ApiEndpoint  string            `json:"apiEndpoint"`
+	Tags         map[string]string `json:"tags"`
 }
 
 func (d *Driver) getAPI(region, apiID string) (apigwAPI, bool, error) {
@@ -100,6 +104,25 @@ func (d *Driver) createApiGWv2(region, account, environment, capability string,
 	if err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
+	// create-adoption (D253, extended by D410): an ApiId is SERVER-assigned and CreateApi
+	// takes no idempotency token — the comment below already says so, and names GetApis
+	// as the recovery. Doing that lookup only AFTER the fact left both outcomes wrong: if
+	// the API tolerates a duplicate name a lost-ledger converge mints a SECOND api (a
+	// second endpoint, live, unmanaged), and if it refuses one the create falls to a hard
+	// failure on an estate that is already correct. Look first: exactly one API of ours
+	// at our deterministic name -> BIND it; a foreign one at that name is refused rather
+	// than adopted; an unreadable scan falls through so a genuine first deploy is never
+	// blocked.
+	if api, found, serr := d.apigwByName(region, plan.Name); serr == nil && found {
+		if !groundholdTagsMatch(api.Tags, capability, environment) {
+			return provider.CreateResult{Status: "failed",
+				Reason: "an api with this name exists and is not ours (tags do not match) — " +
+					"refusing to adopt it"}
+		}
+		return provider.CreateResult{ProviderID: apigwProviderID(region, account, api.ApiId),
+			Status: "succeeded"}
+	}
+
 	body, _ := json.Marshal(plan.createBody(capability, environment))
 	st, resp, err := d.apigwDo("POST", region, apigwPath, body)
 	switch {
@@ -136,9 +159,15 @@ func (d *Driver) observeApiGWv2(capability, providerID string) ([]provider.Obser
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"api not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"api not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
@@ -184,4 +213,31 @@ func (d *Driver) deleteApiGWv2(capability, environment, providerID string) provi
 		return provider.CreateResult{Status: "failed", Reason: fmt.Sprintf("delete HTTP %d (%s)", st, apigwErr(resp))}
 	}
 	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+}
+
+// apigwByName lists the account's APIs and returns the one whose Name matches exactly.
+// The name is deterministic (environment|capability|generation), so an exact match is
+// the identity check; the caller still verifies the ownership TAGS before adopting.
+// Any transport/HTTP/parse failure returns an error, and the caller falls through to a
+// normal create rather than blocking a genuine first deploy.
+func (d *Driver) apigwByName(region, name string) (apigwAPI, bool, error) {
+	st, resp, err := d.apigwDo("GET", region, apigwPath, nil)
+	if err != nil {
+		return apigwAPI{}, false, readTransport("GetApis", err)
+	}
+	if st != http.StatusOK {
+		return apigwAPI{}, false, readHTTP("GetApis", st, apigwErr(resp))
+	}
+	var out struct {
+		Items []apigwAPI `json:"items"`
+	}
+	if json.Unmarshal(resp, &out) != nil {
+		return apigwAPI{}, false, readBody("GetApis", st)
+	}
+	for _, a := range out.Items {
+		if a.Name == name && apigwIDOK.MatchString(a.ApiId) {
+			return a, true, nil
+		}
+	}
+	return apigwAPI{}, false, nil
 }

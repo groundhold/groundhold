@@ -89,6 +89,22 @@ never observations:
   untrusted throwaway input. Auditability comes from source
   serial/lineage; drafts cite the DISCOVERY hash, not hints.
 
+**Scope, stated rather than left to be inferred (D572).** `hints` translates ONE
+capability today — `capability.database.relational` — from six resource types:
+
+- terraform: `google_sql_database_instance`, and `google_sql_database` /
+  `google_sql_user`, which ride along with their instance as diagnostics;
+- pulumi: `gcp:sql/databaseInstance:DatabaseInstance`, and
+  `gcp:sql/database:Database` / `gcp:sql/user:User`, likewise.
+
+Everything else — every AWS, Azure and Kubernetes type, and every other GCP service —
+comes back as a named `skipped` diagnostic. That is the promised behaviour for an
+unmapped type, not a failure, but it means a state file from another cloud yields an
+empty `hints` array. Widening the table is per-service work of the same kind as a
+vocabulary mapping: derived from the driver, never guessed, because a wrong hint is
+worse than an absent one. A test holds this list to the code, so a type added without
+a line here fails the build.
+
 Migration is the same onboarding path with a head start: hints →
 discover live → compare expected vs observed (disagreements surface as
 state drift found during migration) → draft → adopt → converged no-op

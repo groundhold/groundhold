@@ -61,6 +61,24 @@ func TestBuildGCEInstanceCreateGolden(t *testing.T) {
 	}
 }
 
+// TestBuildGCEInstanceAcceptsFamilyImageReference (D891): the canonical GCP family
+// reference projects/<project>/global/images/family/<family> — how nearly every operator
+// names a debian/ubuntu image — must be accepted. The old regex put /family/ AFTER the
+// image name, so this standard form was refused and the instance was uncreatable.
+func TestBuildGCEInstanceAcceptsFamilyImageReference(t *testing.T) {
+	for _, ref := range []string{
+		"projects/debian-cloud/global/images/family/debian-12",
+		"projects/debian-cloud/global/images/debian-12-bookworm-v20260804",
+		"global/images/family/ubuntu-2204-lts",
+	} {
+		i := gceImpl()
+		i["source_image"] = ref
+		if _, err := BuildGCEInstanceCreate("acme-prod", "prod", "web", gceAttrs(), i, 0); err != nil {
+			t.Errorf("valid image reference %q was refused: %v", ref, err)
+		}
+	}
+}
+
 // The deterministic NAME is GCP's idempotency mechanism: instances.insert takes no
 // idempotency key, so a lost create must be recoverable by name rather than
 // duplicated.
@@ -217,10 +235,17 @@ func TestGCEInstanceOptionalOperands(t *testing.T) {
 // same, and differ only where the platform genuinely differs.
 func TestClassifyGCEInstanceChange(t *testing.T) {
 	for path, want := range map[string]string{
-		"location.region":                "immutable",
-		"availability.class":             "immutable",
-		"network.publicExposure":         "immutable",
-		"encryption.customerManagedKeys": "immutable",
+		"location.region":    "immutable",
+		"availability.class": "immutable",
+		// D821: this said "immutable" until Google's own discovery document was read.
+		// instances.addAccessConfig / deleteAccessConfig / updateAccessConfig all act on
+		// a live instance's network interface, so the old expectation pinned a claim about
+		// Compute Engine that Compute Engine contradicts — and the plan it produced
+		// destroyed a machine to add an external address.
+		"network.publicExposure": "unsupported",
+		// D829: re-keying is a new DISK, not a new machine — instances.detachDisk and
+		// attachDisk swap it under an instance that keeps its id.
+		"encryption.customerManagedKeys": "unsupported",
 		// GCP cannot disable encryption at all, so there is nothing to patch —
 		// "unsupported" rather than "immutable" is the honest distinction.
 		"encryption.atRest": "unsupported",

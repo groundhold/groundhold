@@ -54,6 +54,8 @@ attributes:
         GDPR: ["Art.32"]
 
   encryption.atRest:
+    description: >-
+      Whether the stored data is encrypted on disk. Every managed engine here encrypts by default, so `false` is refused rather than pretended; the customer-managed-key question is a separate attribute
     kind: bool
     mappings:
       gcp.cloudsql: always true (CMEK optional via disk_encryption)
@@ -115,8 +117,15 @@ attributes:
     mappings:
       gcp.cloudsql: point_in_time_recovery_enabled + transaction_log_retention
       aws.rds: backup_retention_period + PITR granularity
-      azure.flexpostgres: backup.backupRetentionDays (1-35 days; above
-        35 days refused)
+      # D796: NO mapping, and the reason is the attribute's meaning. This line used
+      # to name backup.backupRetentionDays, which says how far BACK a restore can
+      # reach — not how much a failure loses. Flexible Server restores to any point
+      # inside that window, so its data-loss window is a MEASUREMENT (see
+      # recovery.rto's evidence: probe, which is the same argument). The driver
+      # refuses the attribute rather than writing an RPO into a retention field,
+      # where a TIGHTER requirement would have SHORTENED retention.
+      azure.flexpostgres: none — the data-loss window of a PITR server is measured,
+        not configured; the driver refuses recovery.rpo and says where retention lives
     recommended:
       op: lte
       value: 24h
@@ -145,6 +154,8 @@ attributes:
     description: Managed service vs self-operated
 
   availability.class:
+    description: >-
+      How much of a failure the database survives: `zonal` is one availability zone, `regional` survives losing one. It says nothing about RPO/RTO, which are their own attributes
     kind: string
     enum: [zonal, regional, multi-regional]
     mappings:

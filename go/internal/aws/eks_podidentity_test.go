@@ -8,6 +8,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 // fakePodID is a stateful fake EKS pod-identity-association endpoint. The
@@ -351,4 +356,43 @@ func TestEKSPodIdentity_Discover(t *testing.T) {
 	if found[0].ResourceType != "capability.identity.podidentity" {
 		t.Fatalf("resourceType = %q", found[0].ResourceType)
 	}
+}
+
+// TestAdoptsExistingEKSPodIdentity enrols eks-podidentity in the D391 gate. An
+// association is identified by (cluster, namespace, serviceAccount), and a second
+// CreatePodIdentityAssociation for the same triple stands up a SECOND association —
+// so zero mutations is the load-bearing proof here.
+func TestAdoptsExistingEKSPodIdentity(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	attrs, impl := podIDCandidate()
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/eks-podidentity",
+		Classify: eksRole,
+		ExistingServer: func() *httptest.Server {
+			f := newFakePodID()
+			f.exists = true
+			f.tags = map[string]string{
+				"groundhold-capability":  sanitizeTag(eksPodIDCap),
+				"groundhold-environment": sanitizeTag("prod"),
+			}
+			return f.handler(t, nil)
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.EKSBaseURL = happyURL
+			d.EC2BaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.PollInterval = 0
+			d.PollTimeout = 2 * time.Second
+			d.EKSLROTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("eks-podidentity", eksPodIDCap, "prod", attrs, impl, "k", 1)
+		},
+		PID: podIDPID(),
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

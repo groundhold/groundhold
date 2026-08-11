@@ -29,6 +29,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"groundhold/internal/perr"
 )
 
 const protocolVersion = "2024-11-05"
@@ -60,7 +62,7 @@ func applyTarget(a map[string]any) string {
 		"candidate=" + str(a, "candidate", ""),
 		"ledger=" + str(a, "ledger", ""),
 		"vocab=" + str(a, "vocab", ""),
-		"provider=" + str(a, "provider", "gcp"),
+		"provider=" + str(a, "provider", ""),
 		"at=" + str(a, "at", ""),
 	}, "\n")
 }
@@ -164,6 +166,13 @@ func pathArg(name, desc string) map[string]any {
 	return map[string]any{"type": "string", "description": desc + " (file path)"}
 }
 
+// providerChoices is the ONE spelling of the driver set the tool schemas publish
+// (D704). `groundhold_observe` named all five; `groundhold_apply`, in the same file,
+// said "fake|gcp" — so an agent reading the schema for the verb that MUTATES believed
+// it could not apply to AWS, Azure or Kubernetes. Two copies of a closed set, one of
+// them three drivers out of date.
+const providerChoices = "fake|aws|gcp|azure|k8s"
+
 func (s *Server) toolDefs() []map[string]any {
 	str := func(d string) map[string]any {
 		return map[string]any{"type": "string", "description": d}
@@ -189,7 +198,7 @@ func (s *Server) toolDefs() []map[string]any {
 			"Compile a VERIFIED candidate into a Sealed Plan. Refusals "+
 				"(not executable, stale observations, immutable drift, "+
 				"missing consents, nothing-to-change) come back verbatim.",
-			[]string{"contract", "candidate"},
+			[]string{"contract", "candidate", "at"},
 			map[string]any{"contract": pathArg("contract", "contract"),
 				"candidate": pathArg("candidate", "candidate"),
 				"project":   str("provider project to pin (D28)"),
@@ -200,7 +209,7 @@ func (s *Server) toolDefs() []map[string]any {
 		tool("groundhold_forecast",
 			"Deterministic forecast of a sealed plan: effects per action, "+
 				"four-valued attribute predictions, freshness degradation.",
-			[]string{"plan", "candidate"},
+			[]string{"plan", "candidate", "at"},
 			map[string]any{"plan": pathArg("plan", "SealedPlan"),
 				"candidate": pathArg("candidate", "candidate"),
 				"ledger":    pathArg("ledger", "JSONL ledger"),
@@ -208,10 +217,11 @@ func (s *Server) toolDefs() []map[string]any {
 		tool("groundhold_observe",
 			"Read bound resources through the provider's reverse mapping; "+
 				"derivation-tagged facts, optionally recorded to the ledger.",
-			[]string{"ledger"},
+			[]string{"ledger", "provider", "at"},
 			map[string]any{"ledger": pathArg("ledger", "JSONL ledger"),
-				"provider": str("fake|gcp (default gcp)"),
-				"at":       str("observation time RFC3339"),
+				"provider": str(providerChoices + " — no default: the fake driver " +
+					"fabricates reality, so it is chosen deliberately (F4)"),
+				"at": str("observation time RFC3339"),
 				"record": map[string]any{"type": "boolean",
 					"description": "append observation.recorded events"}}),
 		tool("groundhold_hash",
@@ -233,12 +243,12 @@ func (s *Server) toolDefs() []map[string]any {
 				"confirm_token to execute EXACTLY that plan. The token "+
 				"pins the plan hash (single-use, 5-min); it does NOT "+
 				"authenticate a human and never supplies missing consent.",
-			[]string{"contract", "candidate", "plan", "ledger"},
+			[]string{"contract", "candidate", "plan", "ledger", "provider", "at"},
 			map[string]any{"contract": pathArg("contract", "contract"),
 				"candidate":     pathArg("candidate", "candidate"),
 				"plan":          pathArg("plan", "SealedPlan"),
 				"ledger":        pathArg("ledger", "JSONL ledger"),
-				"provider":      str("fake|gcp"),
+				"provider":      str(providerChoices + " — no default (F4)"),
 				"vocab":         str("vocabulary directory"),
 				"at":            str("evaluation time RFC3339"),
 				"confirm_token": str("token from the confirmation step")}))
@@ -264,25 +274,61 @@ func vocabArgs(a map[string]any) []string {
 	return nil
 }
 
+// requiredArgs mirrors the inputSchema's `required` for the tools whose CLI verb
+// refuses without them (D614). Declaring a field required and then not enforcing it
+// leaves the schema as documentation; enforcing it here means a caller that reads the
+// schema and a caller that does not get the same answer.
+var requiredArgs = map[string][]string{
+	"groundhold_plan":     {"contract", "candidate", "at"},
+	"groundhold_forecast": {"plan", "candidate", "at"},
+	"groundhold_observe":  {"ledger", "provider", "at"},
+	"groundhold_apply":    {"contract", "candidate", "plan", "ledger", "provider", "at"},
+}
+
+// missingRequired returns the first declared-required argument this call omits.
+// Deliberately NOT run before a tool's safety gate: a disabled apply must answer
+// "disabled", not "argument missing" — the operator's question is whether the tool is
+// allowed at all, and answering the smaller question first hides the bigger one.
+func missingRequired(name string, a map[string]any) map[string]any {
+	for _, k := range requiredArgs[name] {
+		if str(a, k, "") == "" {
+			return content(map[string]any{"status": "refused",
+				"code": string(perr.StructuralError),
+				"reasons": []string{name + ": " + k + " is required — the CLI verb " +
+					"behind this tool refuses without it, so the call would spend a " +
+					"round trip (and, for apply, the single-use confirmation) to fail " +
+					"structurally"}})
+		}
+	}
+	return nil
+}
+
 func (s *Server) callTool(name string, a map[string]any) map[string]any {
+	if name != "groundhold_apply" {
+		if bad := missingRequired(name, a); bad != nil {
+			return bad
+		}
+	}
 	switch name {
 	case "groundhold_verify":
 		if err := rejectFlagLike(str(a, "contract", ""),
 			str(a, "candidate", ""), str(a, "vocab", "")); err != nil {
-			return content(map[string]any{"status": "error", "error": err.Error()})
+			return content(map[string]any{"status": "refused",
+				"code": string(perr.StructuralError), "reasons": []string{err.Error()}})
 		}
 		return content(s.exec(append([]string{"verify", str(a, "contract", ""),
 			str(a, "candidate", ""), "--json"}, vocabArgs(a)...)...))
 	case "groundhold_plan":
 		out, err := confineToWorkspace(str(a, "out", ".groundhold/plan.yaml"))
 		if err != nil {
-			return content(map[string]any{"status": "error",
-				"error": "out: " + err.Error()})
+			return content(map[string]any{"status": "refused",
+				"code":    string(perr.StructuralError),
+				"reasons": []string{"out: " + err.Error()}})
 		}
 		if err := rejectFlagLike(str(a, "contract", ""),
 			str(a, "candidate", ""), str(a, "vocab", "")); err != nil {
-			return content(map[string]any{"status": "error",
-				"error": err.Error()})
+			return content(map[string]any{"status": "refused",
+				"code": string(perr.StructuralError), "reasons": []string{err.Error()}})
 		}
 		args := append([]string{"plan", str(a, "contract", ""),
 			str(a, "candidate", "")}, vocabArgs(a)...)
@@ -315,7 +361,8 @@ func (s *Server) callTool(name string, a map[string]any) map[string]any {
 		return content(res)
 	case "groundhold_forecast":
 		if err := rejectFlagLike(str(a, "plan", ""), str(a, "candidate", "")); err != nil {
-			return content(map[string]any{"status": "error", "error": err.Error()})
+			return content(map[string]any{"status": "refused",
+				"code": string(perr.StructuralError), "reasons": []string{err.Error()}})
 		}
 		args := []string{"forecast", str(a, "plan", ""), str(a, "candidate", "")}
 		if l := str(a, "ledger", ""); l != "" {
@@ -327,7 +374,7 @@ func (s *Server) callTool(name string, a map[string]any) map[string]any {
 		return content(s.exec(args...))
 	case "groundhold_observe":
 		args := []string{"observe", "--ledger", str(a, "ledger", ""),
-			"--provider", str(a, "provider", "gcp")}
+			"--provider", str(a, "provider", "")}
 		if t := str(a, "at", ""); t != "" {
 			args = append(args, "--at", t)
 		}
@@ -337,7 +384,8 @@ func (s *Server) callTool(name string, a map[string]any) map[string]any {
 		return content(s.exec(args...))
 	case "groundhold_hash":
 		if err := rejectFlagLike(str(a, "document", "")); err != nil {
-			return content(map[string]any{"status": "error", "error": err.Error()})
+			return content(map[string]any{"status": "refused",
+				"code": string(perr.StructuralError), "reasons": []string{err.Error()}})
 		}
 		return content(s.exec("hash", str(a, "document", "")))
 	case "groundhold_draft":
@@ -345,12 +393,17 @@ func (s *Server) callTool(name string, a map[string]any) map[string]any {
 	case "groundhold_apply":
 		if !s.allowApply {
 			return content(map[string]any{"status": "refused",
+				"code": string(perr.UnsupportedOperation),
 				"reasons": []string{"apply is disabled: set " +
 					"GROUNDHOLD_MCP_ALLOW_APPLY=1 to enable"}})
 		}
+		if bad := missingRequired(name, a); bad != nil {
+			return bad
+		}
 		return content(s.apply(a))
 	}
-	return content(map[string]any{"status": "error",
+	return content(map[string]any{"status": "refused",
+		"code":    string(perr.UnsupportedOperation),
 		"reasons": []string{"unknown tool " + name}})
 }
 
@@ -359,35 +412,88 @@ func (s *Server) callTool(name string, a map[string]any) map[string]any {
 func (s *Server) exec(args ...string) map[string]any {
 	code, stdout, stderr := s.run(args...)
 	payload := map[string]any{"exitCode": code}
-	payload["status"] = map[int]string{0: "ok", 1: "structural-error",
-		2: "refused", 3: "stale-or-conflict", 4: "failed-mid-flight",
-		5: "corrupted-ledger"}[code]
 	var parsed any
 	if json.Unmarshal([]byte(stdout), &parsed) == nil {
 		payload["result"] = parsed
 	} else if strings.TrimSpace(stdout) != "" {
 		payload["stdout"] = stdout
 	}
+	payload["status"] = execStatus(code, parsed)
 	if strings.TrimSpace(stderr) != "" {
 		payload["reasons"] = strings.Split(strings.TrimSpace(stderr), "\n")
 	}
 	return payload
 }
 
+// execStatus says what happened, preferring the VERB'S OWN answer over a guess made
+// from its exit code (D704).
+//
+// It used to be a bare map lookup on the exit code, and that was a second opinion
+// about a question the result had already answered. Two consequences, both measured:
+//
+//   - `verify` exits 2 when a hard constraint is violated or unknown. That is a
+//     VERDICT — the tool ran and reported — and the agent was told `status: "refused"`,
+//     which says the tool declined. The tool's own description tells the agent
+//     "unknown/unverifiable on hard constraints blocks — that is the system working",
+//     and then the status field contradicted it.
+//   - an exit code outside 0..5 produced the empty string, because that is what a Go
+//     map returns for a missing key. A machine field that is silently "" is the
+//     discarded-ok shape wearing a different hat.
+//
+// The verbs emit a machine `status` of their own (applied | converged | refused |
+// probed | partial | unmeasured | adopted | …) and a `code` when they refuse. Those
+// are the contract; this reads them.
+func execStatus(code int, parsed any) string {
+	if m, ok := parsed.(map[string]any); ok {
+		if s, _ := m["status"].(string); s != "" {
+			return s
+		}
+		// `verify` has no status field: it reports verdicts and one boolean saying
+		// whether they let execution proceed. Not-proven is not a refusal.
+		if ex, present := m["executable"].(bool); present {
+			if ex {
+				return "proven"
+			}
+			return "not-proven"
+		}
+		if c, _ := m["code"].(string); c != "" {
+			return "refused"
+		}
+	}
+	switch code {
+	case 0:
+		return "ok"
+	case 1:
+		return "structural-error"
+	case 2:
+		return "refused"
+	case 3:
+		return "stale-or-conflict"
+	case 4:
+		return "failed-mid-flight"
+	case 5:
+		return "corrupted-ledger"
+	}
+	// Never "". An exit code this server does not recognise is reported AS one, so a
+	// reader sees an unknown outcome instead of an empty field.
+	return fmt.Sprintf("unrecognized-exit-%d", code)
+}
+
 func (s *Server) draft(body string) map[string]any {
 	if strings.TrimSpace(body) == "" {
-		return map[string]any{"status": "error",
+		return map[string]any{"status": "refused",
+			"code":    string(perr.StructuralError),
 			"reasons": []string{"empty draft"}}
 	}
 	sum := sha256.Sum256([]byte(body))
 	name := "draft-" + hex.EncodeToString(sum[:])[:8] + ".yaml"
 	dir := filepath.Join(".groundhold", "drafts")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return map[string]any{"status": "error", "reasons": []string{err.Error()}}
+		return map[string]any{"status": "failed", "reasons": []string{err.Error()}}
 	}
 	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		return map[string]any{"status": "error", "reasons": []string{err.Error()}}
+		return map[string]any{"status": "failed", "reasons": []string{err.Error()}}
 	}
 	return map[string]any{"status": "ok", "path": path,
 		"hash": "sha256:" + hex.EncodeToString(sum[:]), "draft": true}
@@ -399,7 +505,8 @@ func (s *Server) apply(a map[string]any) map[string]any {
 	if err := rejectFlagLike(planPath, str(a, "contract", ""),
 		str(a, "candidate", ""), str(a, "ledger", ""),
 		str(a, "vocab", "")); err != nil {
-		return map[string]any{"status": "error", "reasons": []string{err.Error()}}
+		return map[string]any{"status": "refused",
+			"code": string(perr.StructuralError), "reasons": []string{err.Error()}}
 	}
 	// Consume the token UP FRONT — single-use, success or not (D50): a token
 	// presented against a plan that then fails to hash (below) is still spent, so
@@ -423,20 +530,24 @@ func (s *Server) apply(a map[string]any) map[string]any {
 	switch {
 	case !ok:
 		return map[string]any{"status": "refused",
+			"code": string(perr.ConfirmationRequired),
 			"reasons": []string{"unknown confirm_token — request a fresh " +
 				"confirmation"}}
 	case s.now().After(info.expires):
 		return map[string]any{"status": "refused",
+			"code": string(perr.ConfirmationRequired),
 			"reasons": []string{"confirm_token expired — the human must see " +
 				"the decision again"}}
 	case info.planHash != planHash:
 		return map[string]any{"status": "refused",
+			"code": string(perr.ConfirmationRequired),
 			"reasons": []string{"plan changed since confirmation (" +
 				info.planHash + " != " + planHash + ") — re-confirm"}}
 	case info.target != applyTarget(a):
 		// D319: same plan, different destination. The confirmation showed one
 		// decision; this call is a different one.
 		return map[string]any{"status": "refused",
+			"code": string(perr.ConfirmationRequired),
 			"reasons": []string{"the apply target changed since confirmation " +
 				"(contract/candidate/ledger/vocab/provider/at) — a token confirms " +
 				"ONE decision, not one plan document; re-confirm for this target"}}
@@ -445,7 +556,7 @@ func (s *Server) apply(a map[string]any) map[string]any {
 	args := append([]string{"apply", str(a, "contract", ""),
 		str(a, "candidate", ""), planPath, "--ledger", str(a, "ledger", "")},
 		vocabArgs(a)...)
-	args = append(args, "--provider", str(a, "provider", "gcp"))
+	args = append(args, "--provider", str(a, "provider", ""))
 	if t := str(a, "at", ""); t != "" {
 		args = append(args, "--at", t)
 	}
@@ -465,8 +576,8 @@ func (s *Server) confirmationRequired(planPath, planHash string, a map[string]an
 	if _, err := rand.Read(buf); err != nil {
 		// FAIL CLOSED: a token we cannot make unpredictable must not be
 		// issued — an all-zero token would be a guessable apply gate.
-		return map[string]any{"status": "error",
-			"error": "cannot generate a confirmation token: " + err.Error()}
+		return map[string]any{"status": "failed",
+			"reasons": []string{"cannot generate a confirmation token: " + err.Error()}}
 	}
 	tok := hex.EncodeToString(buf)
 	s.tokens[tok] = token{planHash: planHash, target: applyTarget(a),
@@ -486,7 +597,7 @@ func (s *Server) confirmationRequired(planPath, planHash string, a map[string]an
 		"target": map[string]any{
 			"contract": str(a, "contract", ""), "candidate": str(a, "candidate", ""),
 			"ledger": str(a, "ledger", ""), "vocab": str(a, "vocab", ""),
-			"provider": str(a, "provider", "gcp"), "at": str(a, "at", ""),
+			"provider": str(a, "provider", ""), "at": str(a, "at", ""),
 		},
 		"confirm_token":    tok,
 		"expiresInSeconds": 300,

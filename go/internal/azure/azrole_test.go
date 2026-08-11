@@ -1,6 +1,7 @@
 package azure
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,6 +43,28 @@ func TestBuildAzureRoleHonors(t *testing.T) {
 	a2["access.privileged"] = true
 	if _, err := BuildAzureRole("prod", "admin", a2, nil, 1); err != nil {
 		t.Errorf("Owner declared privileged should build: %v", err)
+	}
+}
+
+// TestBuildAzureRolePrincipalType (D896): the principal type is an operand, not a hardcoded
+// "ServicePrincipal". It defaults to ServicePrincipal (the workload-grant common case), honors
+// an explicit User/Group, and refuses an unknown value rather than sending it to a 400.
+func TestBuildAzureRolePrincipalType(t *testing.T) {
+	// default
+	p, err := BuildAzureRole("prod", "reader", azRoleAttrs(), nil, 1)
+	if err != nil || p.PrincipalType != "ServicePrincipal" {
+		t.Fatalf("default principalType = %q err=%v", p.PrincipalType, err)
+	}
+	// explicit User / Group honored
+	for _, pt := range []string{"User", "Group", "ServicePrincipal"} {
+		p, err := BuildAzureRole("prod", "reader", azRoleAttrs(), map[string]any{"principal_type": pt}, 1)
+		if err != nil || p.PrincipalType != pt {
+			t.Errorf("principal_type %q = %q err=%v", pt, p.PrincipalType, err)
+		}
+	}
+	// an unknown type refuses
+	if _, err := BuildAzureRole("prod", "reader", azRoleAttrs(), map[string]any{"principal_type": "Robot"}, 1); err == nil {
+		t.Fatal("an unknown principal_type was accepted")
 	}
 }
 
@@ -130,6 +153,33 @@ func TestCreateObserveDeleteAzureRole(t *testing.T) {
 
 // A custom (unclassifiable) role leaves access.privileged unverifiable, never
 // guessed — the four-valued honesty the domain exists to show.
+// TestCreateAzureRoleBodyCarriesPrincipalType (D896): the PUT body's principalType must be
+// the operand's value, not a hardcoded "ServicePrincipal" — else a User/Group grant is sent
+// as a ServicePrincipal and Azure 400s it.
+func TestCreateAzureRoleBodyCarriesPrincipalType(t *testing.T) {
+	var putBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case "PUT":
+			b, _ := io.ReadAll(r.Body)
+			putBody = string(b)
+			w.WriteHeader(201)
+			_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded"}}`))
+		default:
+			w.WriteHeader(200)
+		}
+	}))
+	defer srv.Close()
+	d := azRoleDriver(t, srv)
+	res := d.createAzureRole("prod", "reader", azRoleAttrs(), map[string]any{"principal_type": "User"}, 1)
+	if res.Status != "succeeded" {
+		t.Fatalf("create: %+v", res)
+	}
+	if !strings.Contains(putBody, `"principalType":"User"`) {
+		t.Fatalf("PUT body must carry the operand principalType User, got %s", putBody)
+	}
+}
+
 func TestObserveAzureRoleUnknownPrivilegeIsUnverifiable(t *testing.T) {
 	customGUID := "00000000-0000-0000-0000-0000000000ab"
 	srv := azRoleServer(t, customGUID)

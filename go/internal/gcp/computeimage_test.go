@@ -165,7 +165,10 @@ func TestObserveGCPImageMissingIsNotAnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an absent image produced an error: %v", err)
 	}
-	if len(obs) != 0 || len(unread) == 0 {
+	// Corrected with D519: this asserted SILENCE for an absent bound resource,
+	// which is the defect F-LC3 exists to prevent — the compile sees an empty set,
+	// plans nothing, and converge reports a world that no longer contains it.
+	if !absentMarked(obs) || len(unread) == 0 {
 		t.Errorf("obs = %v, unread = %v", obs, unread)
 	}
 }

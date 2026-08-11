@@ -443,7 +443,16 @@ func classifyVMSSChange(path string) (string, string) {
 	case "location.region":
 		return "immutable", "a scale set is created in one region and cannot move — a region change is a new fleet"
 	case "availability.class":
-		return "immutable", "the zone list is fixed when the scale set is created — a change is a new fleet"
+		// D822: this said the zone list is "fixed when the scale set is created". Microsoft
+		// documents the opposite for the direction that matters: "You can modify a scale
+		// set to expand the set of zones over which to spread VM instances", with the
+		// limitation "You can't remove or replace zones, only add zones". So RAISING
+		// availability is an in-place update and only lowering it is a replacement — and
+		// the old sentence told an operator to destroy a fleet to make it safer.
+		return "unsupported", "in-place zone change is not wired for scale sets in this " +
+			"slice — Azure supports ADDING zones on a live scale set (the zones property is " +
+			"updatable; removing or replacing zones is not), so widening availability is a " +
+			"gap in groundhold rather than a reason to replace the fleet"
 	case "service.managed":
 		return "unsupported", "platform/projection property — nothing to patch"
 	}

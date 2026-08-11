@@ -940,6 +940,10 @@ func TestReadStormEKS(t *testing.T) {
 		AssertTransient: true, // D237 sweep
 		Name:            "aws/eks",
 		Classify:        eksRole,
+		// F-LC3 (D523): hand-wired.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("eks", eksCap, eksProviderID("eu-central-1", eksTestName))
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver("eu-central-1")
 			d.HTTP = &http.Client{Transport: rt}
@@ -1148,4 +1152,52 @@ func TestCreateEKSPersistentRole400FailsBounded(t *testing.T) {
 	if f.clusterExists {
 		t.Fatal("no cluster may exist after a persistent role refusal")
 	}
+}
+
+// TestAdoptsExistingEKS enrols EKS in the D391 gate — the driver at the centre of the
+// whole Acme saga (D258/D259/D261). An existing ACTIVE cluster carrying our tags, with
+// a node group under a name that is NOT the deterministic one, must be bound whole:
+// zero mutations, and the cluster's own pid. That is the shape D253 called adoption and
+// D261 called the root cause when it was missing.
+func TestAdoptsExistingEKS(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	capTag := sanitizeTag(eksCap)
+	attrs, impl := eksCandidate()
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/eks",
+		Classify: eksRole,
+		ExistingServer: func() *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				pth, m := r.URL.Path, r.Method
+				switch {
+				case m == "GET" && pth == "/clusters/"+eksTestName:
+					fmt.Fprintf(w, `{"cluster":{"status":"ACTIVE","version":"1.29",`+
+						`"tags":{"groundhold-capability":%q,"groundhold-environment":"prod"}}}`, capTag)
+				case m == "GET" && pth == "/clusters/"+eksTestName+"/node-groups":
+					fmt.Fprint(w, `{"nodegroups":["acme-ng"]}`)
+				case m == "GET" && pth == "/clusters/"+eksTestName+"/node-groups/acme-ng":
+					fmt.Fprint(w, `{"nodegroup":{"status":"ACTIVE","version":"1.29"}}`)
+				default:
+					w.WriteHeader(400)
+				}
+			}))
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.EKSBaseURL = happyURL
+			d.EC2BaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.PollInterval = 0
+			d.PollTimeout = 2 * time.Second
+			d.EKSLROTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("eks", eksCap, "prod", attrs, impl, "k", 1)
+		},
+		PID: eksProviderID("eu-central-1", eksTestName),
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

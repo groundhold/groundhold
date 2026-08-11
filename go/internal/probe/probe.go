@@ -37,8 +37,36 @@ type Failure struct {
 	Retryable  bool   `json:"retryable"`
 }
 
+// ReportedStatuses is the CLOSED SET a machine reader can see in `probeResult.status`,
+// sorted. Published in spec/outputs.schema.json and gated against this list (D697).
+var ReportedStatuses = []string{"partial", "probed", "refused", "unmeasured"}
+
+// classify folds a finished run into its status and exit (D697).
+//
+// It used to be a constant: `probed`, exit 0, set BEFORE the loop and never revisited.
+// A run in which every probe crashed therefore reported success with an empty
+// measurement set — "I established nothing" wearing the shape of "I established it".
+// That is the same collapse the field reported one verb over (D696), and the same
+// answer: three disjoint states, so a script can tell them apart without parsing prose.
+//
+// A probe is expensive and sometimes intrusive; the reason to run one is to LEARN
+// something, so a run that learned nothing is not a success, and a run that learned
+// some of it is not a complete one.
+func classify(measurements, failures int) (status string, exit int) {
+	switch {
+	case measurements == 0:
+		// Includes the quiet case where a driver returned neither measurements nor
+		// failures: nothing was measured, whatever the driver did or did not say.
+		return "unmeasured", 2
+	case failures > 0:
+		return "partial", 2
+	default:
+		return "probed", 0
+	}
+}
+
 type Result struct {
-	Status       string        `json:"status"` // probed | refused
+	Status       string        `json:"status"` // probed | partial | unmeasured | refused
 	Code         perr.Code     `json:"code,omitempty"`
 	RunID        string        `json:"runId,omitempty"`
 	Measurements []Measurement `json:"measurements"`
@@ -99,7 +127,7 @@ func Run(c *contract.Contract, led *ledger.Ledger, ledgerPath string,
 		fmt.Sprintf("%v", caps)))
 	runID := hex.EncodeToString(seed[:])[:12]
 	res := res0
-	res.Status, res.RunID, res.Exit = "probed", runID, 0
+	res.RunID = runID
 	w := &ledger.Writer{Path: ledgerPath, Led: led, Env: c.Environment,
 		Clock: clock, Actor: "groundhold-probe", Events: &res.Events}
 
@@ -165,6 +193,17 @@ func Run(c *contract.Contract, led *ledger.Ledger, ledgerPath string,
 				}
 			}
 		}
+	}
+	res.Status, res.Exit = classify(len(res.Measurements), len(res.Failures))
+	switch res.Status {
+	case "unmeasured":
+		res.Reasons = append(res.Reasons, "the probe run measured NOTHING — every "+
+			"attempted measurement failed or the driver returned none; an unmeasured "+
+			"outcome is not a measured one, and nothing was recorded for verify to read")
+	case "partial":
+		res.Reasons = append(res.Reasons, fmt.Sprintf("%d measurement(s) recorded, "+
+			"%d failed — the run is INCOMPLETE; the failed paths stay unknown and no "+
+			"observation was written for them", len(res.Measurements), len(res.Failures)))
 	}
 	return res
 }

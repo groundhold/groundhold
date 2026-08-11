@@ -166,12 +166,24 @@ func (d *Driver) observePD(capability, providerID string) ([]provider.Observatio
 	if err != nil {
 		return nil, nil, err
 	}
+	// D466 — the project boundary. 39 of 44 GCP deletes already guard it; these
+	// families did not, and the label check is not a substitute: our capability +
+	// environment labels are IDENTICAL in every project we manage, so a providerId
+	// naming another project passes it. sameProject is a no-op when nothing is
+	// pinned (observe/discover), a refusal when apply/converge pinned one.
+	if err := d.sameProject(project); err != nil {
+		return nil, nil, err
+	}
 	doc, found, rerr := d.getPD(project, scope, name)
 	if rerr != nil {
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"disk not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"disk not found — bound resource is gone (will re-create)"}, nil
 	}
 	region := scope
 	class := "regional"
@@ -184,9 +196,11 @@ func (d *Driver) observePD(capability, providerID string) ([]provider.Observatio
 	}
 	cmk := doc.DiskEncryptionKey != nil && doc.DiskEncryptionKey.KmsKeyName != ""
 	return []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "availability.class", Value: class, Derivation: "measured"},
-		{Path: "encryption.atRest", Value: true, Derivation: "config-intent"},
+		{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"},
 		{Path: "encryption.customerManagedKeys", Value: cmk, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}, nil, nil
@@ -202,6 +216,14 @@ func (d *Driver) observePD(capability, providerID string) ([]provider.Observatio
 func (d *Driver) deletePD(capability, environment, providerID string) provider.CreateResult {
 	project, scope, name, err := splitPDProviderID(providerID)
 	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	// D466 — the project boundary. 39 of 44 GCP deletes already guard it; these
+	// families did not, and the label check is not a substitute: our capability +
+	// environment labels are IDENTICAL in every project we manage, so a providerId
+	// naming another project passes it. sameProject is a no-op when nothing is
+	// pinned (observe/discover), a refusal when apply/converge pinned one.
+	if err := d.sameProject(project); err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	doc, found, rerr := d.getPD(project, scope, name)
@@ -306,7 +328,7 @@ func (d *Driver) discoverPD(region string) ([]provider.Discovered, []string, err
 			out = append(out, provider.Discovered{
 				ProviderID:   pid,
 				ResourceType: "capability.storage.block",
-				Observations: obs,
+				Observations: provider.WithoutAbsence(obs),
 			})
 		}
 	}

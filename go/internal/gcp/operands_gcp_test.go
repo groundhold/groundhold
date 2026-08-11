@@ -98,7 +98,7 @@ func TestConsumedOperandsExactSets(t *testing.T) {
 		"clouddnsrecord":       {"record_name", "zone"},
 		"iambinding":           {},
 		"customrole":           {},
-		"monitoring":           {"notification_channel"},
+		"monitoring":           {"notification_channel", "resource_type"},
 		"dashboard":            {},
 		"uptime":               {"port"},
 		"logmetric":            {"value_field"},
@@ -123,7 +123,7 @@ func TestConsumedOperandsExactSets(t *testing.T) {
 		"auditlogs":            {"destination", "kms_key_name", "sinkName"},
 		"scc":                  {"organizationId", "projectId", "tier"},
 		"vertexai":             {"displayName", "publisherModel"},
-		"gke":                  {"nodePool"},
+		"gke":                  {"clusterName", "kmsKeyName", "masterAuthorizedCidrs", "network", "nodePool", "subnetwork", "zone"},
 		"gke-addon":            {"clusterName", "location"},
 		"gke-workloadidentity": {"clusterProject", "gsaEmail"},
 		// naming trap: the GCE key operand is kms_key_name, unlike artifactregistry's kms_key

@@ -1,0 +1,21 @@
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta:
+  id: azure-canary
+  environment: canary
+  version: 2
+
+# The FIRST live Azure slice (D290). Deliberately the cheapest honest loop:
+# a virtual network costs nothing in Azure, so this proves auth, the ARM PUT,
+# the async poll, ownership tags, the observe reverse-map, the convergence
+# check and retirement — without a bill. What it does NOT prove is stated in
+# docs/MATURITY.md rather than implied here.
+capabilities:
+  - id: net
+    type: capability.network.private
+    # D692: retirement is how a contract says "this must NOT exist" (D47). The
+    # constraints that governed it are GONE, not merely ignored: a constraint
+    # targeting a retired capability is a load error, which is the first of the
+    # three refusals this example's README documents and the reason the teardown
+    # needs its own pair rather than a sed on the live one.
+    state: retired

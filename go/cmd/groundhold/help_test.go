@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -59,5 +62,87 @@ func TestHelpBypassesGuards(t *testing.T) {
 	}
 	if got := run([]string{"--help"}); got != 0 {
 		t.Fatalf("--help = %d, want 0 (explicit help is success)", got)
+	}
+}
+
+// D505: every provider the CLI can RESOLVE must be advertised, and every provider the
+// usage text names must be resolvable.
+//
+// Six verbs under-advertised. `adopt`, `resume` and `probe` said `fake|gcp` while
+// accepting five providers, so an operator reading the help concluded that adopting an
+// AWS resource was unsupported — on the one verb the external pilot demonstrably ran
+// against AWS. And `observe` was the single verb whose switch had no `k8s` case at all:
+// a capability could be created and retired on a cluster and never read back, which is
+// the gap TestObserveCompleteness forbids INSIDE a driver, sitting at the CLI seam
+// between them.
+//
+// What this gate does NOT do, stated because the honest limit matters: it does not
+// check that each VERB advertises exactly its own resolver's set. Mapping a switch back
+// to the verb that owns it is guesswork in a 4000-line dispatch, and a gate built on a
+// guess is the tautology D501 deleted. It checks the union in both directions, which
+// catches a provider added and never advertised, and a provider advertised and never
+// wired.
+func TestAdvertisedProvidersMatchTheResolvers(t *testing.T) {
+	raw, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	src := string(raw)
+
+	usage := regexp.MustCompile("(?s)usage = `(.*?)`").FindStringSubmatch(src)
+	if usage == nil {
+		t.Fatal("usage text not found — the gate would be vacuous (D328)")
+	}
+	advertised := map[string]bool{}
+	for _, m := range regexp.MustCompile(`--provider <?([a-z0-9|]+)>?`).
+		FindAllStringSubmatch(usage[1], -1) {
+		for _, p := range strings.Split(m[1], "|") {
+			if len(p) > 1 { // "p" is the placeholder in `--provider <p>`
+				advertised[p] = true
+			}
+		}
+	}
+	if len(advertised) < 3 {
+		t.Fatalf("only %d providers parsed from the usage text — the parser broke (D328)",
+			len(advertised))
+	}
+
+	// Resolvable: a case label inside any `switch providerName`/`switch name` that
+	// builds a provider. Read from the source rather than a list, so a new one counts
+	// the moment it is wired.
+	resolvable := map[string]bool{}
+	for _, m := range regexp.MustCompile(`(?s)switch (?:providerName|name) \{(.*?)\n\t*\}`).
+		FindAllStringSubmatch(src, -1) {
+		for _, c := range regexp.MustCompile(`case "([a-z0-9]+)":`).
+			FindAllStringSubmatch(m[1], -1) {
+			resolvable[c[1]] = true
+		}
+	}
+	if len(resolvable) < 3 {
+		t.Fatalf("only %d resolvable providers found — the parser broke (D328)",
+			len(resolvable))
+	}
+
+	var unadvertised, unwired []string
+	for p := range resolvable {
+		if !advertised[p] {
+			unadvertised = append(unadvertised, p)
+		}
+	}
+	for p := range advertised {
+		if !resolvable[p] {
+			unwired = append(unwired, p)
+		}
+	}
+	sort.Strings(unadvertised)
+	sort.Strings(unwired)
+
+	if len(unadvertised) > 0 {
+		t.Errorf("providers the CLI resolves but never advertises: %v — an operator "+
+			"reads the help and concludes the provider is unsupported (D505)", unadvertised)
+	}
+	if len(unwired) > 0 {
+		t.Errorf("providers the usage text names that no switch resolves: %v — the help "+
+			"promises something the binary refuses", unwired)
 	}
 }

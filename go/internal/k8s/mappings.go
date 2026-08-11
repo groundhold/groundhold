@@ -74,13 +74,3 @@ func (d *Driver) mappingFor(service string) *Mapping {
 	}
 	return d.Mappings[service]
 }
-
-// genericMapping returns the mapping the engine should FULLY handle (observe +
-// write) for a service — present AND writeSafe — or nil to fall to the hand-coded
-// driver.
-func (d *Driver) genericMapping(service string) *Mapping {
-	if m := d.mappingFor(service); m != nil && m.writeSafe() {
-		return m
-	}
-	return nil
-}

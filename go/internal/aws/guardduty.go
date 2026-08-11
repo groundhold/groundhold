@@ -129,8 +129,9 @@ func BuildGuardDuty(environment, capability string,
 // explicitly (never omitted) so an update turns a surface OFF as decisively as on.
 func (p GuardDutyPlan) desiredFeatures() []map[string]any {
 	return []map[string]any{
-		{"Name": gdFeatureEKSAuditLogs, "Status": featureStatus(p.Kubernetes)},
-		{"Name": gdFeatureEBSMalware, "Status": featureStatus(p.Malware)},
+		// D735: camelCase, per the DetectorFeatureConfiguration shape.
+		{"name": gdFeatureEKSAuditLogs, "status": featureStatus(p.Kubernetes)},
+		{"name": gdFeatureEBSMalware, "status": featureStatus(p.Malware)},
 	}
 }
 

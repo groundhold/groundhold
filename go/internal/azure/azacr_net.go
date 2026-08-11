@@ -86,7 +86,11 @@ func (d *Driver) observeACR(capability, providerID string) ([]provider.Observati
 		return nil, nil, fmt.Errorf("registries.get: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"registry not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"registry not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("registries.get: HTTP %d", st)
@@ -99,7 +103,9 @@ func (d *Driver) observeACR(capability, providerID string) ([]provider.Observati
 	if region == "" {
 		region = "unknown"
 	}
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "encryption.customerManagedKeys", Value: doc.Properties.Encryption.Status == "enabled", Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
@@ -165,21 +171,8 @@ func (d *Driver) deleteACR(capability, environment, providerID string) provider.
 		doc.Tags["groundhold-environment"] != sanitizeAzTag(environment) {
 		return provider.CreateResult{Status: "failed", Reason: "registry tags do not match — refusing to delete a resource that is not ours"}
 	}
-	dst, dresp, de := d.doARM("DELETE", rURL, nil)
-	if de != nil {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("delete outcome unknown: %v", de)}
-	}
-	if dst == http.StatusNotFound {
-		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
-	}
-	if dst >= 500 {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("delete HTTP %d (server error) — reconcile", dst)}
-	}
-	if dst < 200 || dst >= 300 {
-		if r := provider.MutationResult(dst, azErrCode(dresp), nil, providerID, "delete"); r != nil {
-			return *r
-		}
-		return provider.CreateResult{ProviderID: providerID, Status: "failed", Reason: fmt.Sprintf("delete HTTP %d: %s", dst, mutDetailAz(dresp))}
-	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// D984: route the delete through deleteAndConfirm (D971) — registry DELETE returns
+	// 202 Accepted (async); concluding succeeded here tombstoned a registry (and its
+	// images) still live. The helper polls to a confirmed 404, unknown on timeout.
+	return *d.deleteAndConfirm(rURL, providerID, "container registry")
 }

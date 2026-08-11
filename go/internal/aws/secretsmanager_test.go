@@ -75,6 +75,11 @@ func TestBuildASMRefusals(t *testing.T) {
 	}
 }
 
+// asmDeletedDate is the DeletedDate DescribeSecret reports, as a JSON fragment. The
+// fixture never carried one, so the field was decoded and never read for as long as it
+// existed (D756).
+var asmDeletedDate = ""
+
 // asmServer is a fake Secrets Manager endpoint dispatching on X-Amz-Target.
 func asmServer(t *testing.T, tagCap string, policy string) *httptest.Server {
 	t.Helper()
@@ -87,7 +92,8 @@ func asmServer(t *testing.T, tagCap string, policy string) *httptest.Server {
 				_, _ = w.Write([]byte(`{"ARN":"arn:aws:secretsmanager:eu-central-1:000000000000:secret:x-AbCdEf","Name":"x","VersionId":"v1"}`))
 			case "DescribeSecret":
 				_, _ = w.Write([]byte(`{"ARN":"arn:aws:secretsmanager:eu-central-1:000000000000:secret:x-AbCdEf",` +
-					`"Name":"x","KmsKeyId":"arn:aws:kms:eu-central-1:000000000000:key/abc",` +
+					`"Name":"x","KmsKeyId":"arn:aws:kms:eu-central-1:000000000000:key/abc"` +
+					asmDeletedDate + `,` +
 					`"Tags":[{"Key":"groundhold-capability","Value":"` + tagCap + `"},` +
 					`{"Key":"groundhold-environment","Value":"prod"}]}`))
 			case "GetResourcePolicy":
@@ -202,5 +208,56 @@ func TestCreateASMClientRequestToken(t *testing.T) {
 	// determinism: recomputing the token yields the same value.
 	if asmRequestToken(ASMSecretName("prod", "dbcreds", 1)) != want {
 		t.Fatal("asmRequestToken must be deterministic")
+	}
+}
+
+// D756. A secret scheduled for deletion still answers DescribeSecret, so every
+// observation this driver emits stays TRUE — and nothing said that GetSecretValue already
+// refuses it. converge reported converged, posture green, and whatever reads the secret
+// was already broken. The field that says so was decoded and never read; the
+// fixture-coverage gate is what found it.
+func TestASMSaysWhenASecretIsScheduledForDeletion(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		deleted string
+		wantSay bool
+	}{
+		{"a live secret says nothing about deletion", "", false},
+		{"scheduled for deletion", `,"DeletedDate":1.7e9`, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			old := asmDeletedDate
+			asmDeletedDate = c.deleted
+			defer func() { asmDeletedDate = old }()
+
+			srv := asmServer(t, "app-secret", "")
+			defer srv.Close()
+			d := asmDriver(t, srv)
+
+			obs, diags, err := d.observeASM("app-secret",
+				"asm:eu-central-1:app-secret-prod-x")
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The resource is NOT absent: it exists, and a re-create under the same name
+			// is refused by AWS while the recovery window runs.
+			for _, o := range obs {
+				if o.Path == "resource.absent" && o.Value == true {
+					t.Fatal("a secret scheduled for deletion is not GONE — marking it absent " +
+						"makes the compiler plan a create AWS refuses for the whole window")
+				}
+			}
+			said := false
+			for _, dg := range diags {
+				if strings.Contains(dg, "SCHEDULED FOR DELETION") {
+					said = true
+				}
+			}
+			if said != c.wantSay {
+				t.Fatalf("diagnostics = %v, want a deletion warning: %v — every attribute "+
+					"stays true while the secret is unreadable, so the warning is the only "+
+					"thing that carries it (D756)", diags, c.wantSay)
+			}
+		})
 	}
 }

@@ -48,9 +48,17 @@ it says observed reality matched the sealed intent.
 
 ```bash
 # retire through the contract, so the ledger records a tombstone rather than
-# a resource that merely stopped being mentioned
-sed -i 's/^  - id: net/  - id: net\n    state: retired/' examples/canary-azure/canary.contract.yaml
-bin/groundhold-go converge ... --allow-data-loss --yes
+# a resource that merely stopped being mentioned. The retirement pair SHIPS —
+# D692: this used to be a `sed -i` on the tracked contract above, which mutated
+# a repo file and produced a document the loader refuses ("constraint targets
+# retired capability"), i.e. a teardown that could not run for a canary that
+# spends real money.
+bin/groundhold-go publish examples/canary-azure/canary-retired.contract.yaml \
+  --ledger state/canary.jsonl --actor you@org --at "$(date -u +%FT%TZ)"
+bin/groundhold-go converge examples/canary-azure/canary-retired.contract.yaml \
+  examples/canary-azure/canary-retired.candidate.yaml \
+  --ledger state/canary.jsonl --provider azure --at "$(date -u +%FT%TZ)" \
+  --allow-data-loss --yes
 az group delete -n groundhold-canary --yes            # the container you made
 ```
 
@@ -85,5 +93,5 @@ Tearing the canary down through the contract teaches the D47 rules in order:
    the CONTRACT marks it `state: retired`. The delete acts on the pinned
    providerId from the binding, so the candidate has nothing left to say.
 
-The retirement pair used here lives in the session notes rather than the repo:
+The retirement pair used here SHIPS beside this README (D692):
 retirement is contract-shaped, not a fixture.

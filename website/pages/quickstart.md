@@ -4,7 +4,7 @@
 
 ```sh
 git clone git@github.com:groundhold/groundhold.git && cd groundhold
-make check        # vet + tests + the full conformance suite (514 cases), both implementations
+make check        # vet + tests + the full conformance suite (550 cases), both implementations
 cd go && go build -o ../bin/groundhold-go ./cmd/groundhold && cd ..   # the CLI binary
 ```
 
@@ -155,10 +155,14 @@ covers the real attribute surface and `CONVERGED` is earned.
 ## Real cloud
 
 The same rich pair from [Your first contract](#your-first-contract),
-with a real driver (GCP shown; credentials come from Application
-Default Credentials — `gcloud auth application-default login`):
+with a real driver (GCP shown). Credentials are read in this order:
+`GROUNDHOLD_GCP_ACCESS_TOKEN`, then `GROUNDHOLD_GCP_KEY_FILE` (a
+`service_account` key JSON), then the GCE metadata server — **not**
+Application Default Credentials. `gcloud auth application-default
+login` alone leaves the driver with nothing to use:
 
 ```sh
+export GROUNDHOLD_GCP_ACCESS_TOKEN="$(gcloud auth print-access-token)"
 bin/groundhold-go converge db.contract.yaml db.candidate.yaml \
   --ledger state/prod.jsonl --provider gcp --project my-project \
   --at "$(date -u +%FT%TZ)"

@@ -174,7 +174,11 @@ func BuildCloudFunctionCreateRequest(project, environment, capability string,
 	}
 
 	body := map[string]any{
-		"name":          name, // set for golden determinism; the URL rebuilds it
+		// D925: Cloud Functions v2 validates the body's name against the FULL resource
+		// pattern projects/{p}/locations/{l}/functions/{f}; the bare deterministic name
+		// is rejected ("Invalid resource name ... for pattern projects/.../functions/{function}").
+		// The functionId in the URL still names it; the body name must be the full path.
+		"name":          fmt.Sprintf("projects/%s/locations/%s/functions/%s", project, region, name),
 		"environment":   "GEN_2",
 		"labels":        map[string]any{"groundhold-capability": sanitizeLabel(capability), "groundhold-environment": sanitizeLabel(environment)},
 		"buildConfig":   buildConfig,

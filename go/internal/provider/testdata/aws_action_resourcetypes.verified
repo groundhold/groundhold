@@ -1,0 +1,371 @@
+# Resource-type tokens each declared AWS action can be ARN-scoped to (AWS Service
+# Reference Actions[].Resources[].Name, fetched without credentials). One line per
+# action: service, action, then the resource-type names separated by spaces. The
+# resource preflight (internal/aws/preflight.go) judges an action authoritatively
+# against a resource ARN ONLY when the ARN's type is in this set (D886).
+# Refresh: scripts/refresh-aws-action-resourcetypes.sh
+dynamodb	AssociateTableReplica	table
+dynamodb	BatchGetItem	table
+dynamodb	BatchWriteItem	table
+dynamodb	ConditionCheckItem	table
+dynamodb	CreateBackup	table
+dynamodb	CreateGlobalTable	global-table table
+dynamodb	CreateGlobalTableWitness	table
+dynamodb	CreateTable	table
+dynamodb	CreateTableReplica	table
+dynamodb	DeleteBackup	backup
+dynamodb	DeleteGlobalTableWitness	table
+dynamodb	DeleteItem	table
+dynamodb	DeleteResourcePolicy	stream table
+dynamodb	DeleteTable	table
+dynamodb	DeleteTableReplica	table
+dynamodb	DescribeBackup	backup
+dynamodb	DescribeContinuousBackups	table
+dynamodb	DescribeContributorInsights	index table
+dynamodb	DescribeEndpoints	
+dynamodb	DescribeExport	export
+dynamodb	DescribeGlobalTable	global-table
+dynamodb	DescribeGlobalTableSettings	global-table
+dynamodb	DescribeImport	import
+dynamodb	DescribeKinesisStreamingDestination	table
+dynamodb	DescribeLimits	
+dynamodb	DescribeReservedCapacity	
+dynamodb	DescribeReservedCapacityOfferings	
+dynamodb	DescribeStream	stream
+dynamodb	DescribeTable	table
+dynamodb	DescribeTableReplicaAutoScaling	table
+dynamodb	DescribeTimeToLive	table
+dynamodb	DisableKinesisStreamingDestination	table
+dynamodb	EnableKinesisStreamingDestination	table
+dynamodb	ExportTableToPointInTime	table
+dynamodb	GetAbacStatus	
+dynamodb	GetItem	table
+dynamodb	GetRecords	stream
+dynamodb	GetResourcePolicy	stream table
+dynamodb	GetShardIterator	stream
+dynamodb	ImportTable	table
+dynamodb	InjectError	
+dynamodb	ListBackups	
+dynamodb	ListContributorInsights	
+dynamodb	ListExports	table
+dynamodb	ListGlobalTables	
+dynamodb	ListImports	table
+dynamodb	ListStreams	
+dynamodb	ListTables	
+dynamodb	ListTagsOfResource	stream table
+dynamodb	PartiQLDelete	table
+dynamodb	PartiQLInsert	table
+dynamodb	PartiQLSelect	index table
+dynamodb	PartiQLUpdate	table
+dynamodb	PurchaseReservedCapacityOfferings	
+dynamodb	PutItem	table
+dynamodb	PutResourcePolicy	stream table
+dynamodb	Query	index table
+dynamodb	ReadDataForReplication	table
+dynamodb	ReplicateSettings	table
+dynamodb	RestoreTableFromAwsBackup	table
+dynamodb	RestoreTableFromBackup	backup table
+dynamodb	RestoreTableToPointInTime	table
+dynamodb	Scan	index table
+dynamodb	SearchVectors	index table
+dynamodb	StartAwsBackupJob	table
+dynamodb	TagResource	stream table
+dynamodb	UntagResource	stream table
+dynamodb	UpdateAbacStatus	
+dynamodb	UpdateContinuousBackups	table
+dynamodb	UpdateContributorInsights	index table
+dynamodb	UpdateGlobalTable	global-table table
+dynamodb	UpdateGlobalTableSettings	global-table table
+dynamodb	UpdateGlobalTableVersion	global-table table
+dynamodb	UpdateItem	table
+dynamodb	UpdateKinesisStreamingDestination	table
+dynamodb	UpdateTable	table
+dynamodb	UpdateTableReplicaAutoScaling	table
+dynamodb	UpdateTimeToLive	table
+dynamodb	WriteDataForReplication	table
+kms	CancelKeyDeletion	key
+kms	ConnectCustomKeyStore	
+kms	CreateAlias	alias key
+kms	CreateCustomKeyStore	
+kms	CreateGrant	key
+kms	CreateKey	
+kms	Decrypt	key
+kms	DeleteAlias	alias key
+kms	DeleteCustomKeyStore	
+kms	DeleteImportedKeyMaterial	key
+kms	DeriveSharedSecret	key
+kms	DescribeCustomKeyStores	
+kms	DescribeKey	key
+kms	DisableKey	key
+kms	DisableKeyRotation	key
+kms	DisconnectCustomKeyStore	
+kms	EnableKey	key
+kms	EnableKeyRotation	key
+kms	Encrypt	key
+kms	GenerateDataKey	key
+kms	GenerateDataKeyPair	key
+kms	GenerateDataKeyPairWithoutPlaintext	key
+kms	GenerateDataKeyWithoutPlaintext	key
+kms	GenerateMac	key
+kms	GenerateRandom	
+kms	GetKeyLastUsage	key
+kms	GetKeyPolicy	key
+kms	GetKeyRotationStatus	key
+kms	GetParametersForImport	key
+kms	GetPublicKey	key
+kms	ImportKeyMaterial	key
+kms	ListAliases	
+kms	ListGrants	key
+kms	ListKeyPolicies	key
+kms	ListKeyRotations	key
+kms	ListKeys	
+kms	ListResourceTags	key
+kms	ListRetirableGrants	
+kms	PutKeyPolicy	key
+kms	ReEncryptFrom	key
+kms	ReEncryptTo	key
+kms	ReplicateKey	key
+kms	RetireGrant	key
+kms	RevokeGrant	key
+kms	RotateKeyOnDemand	key
+kms	ScheduleKeyDeletion	key
+kms	Sign	key
+kms	SynchronizeMultiRegionKey	key
+kms	TagResource	key
+kms	UntagResource	key
+kms	UpdateAlias	alias key
+kms	UpdateCustomKeyStore	
+kms	UpdateKeyDescription	key
+kms	UpdatePrimaryRegion	key
+kms	Verify	key
+kms	VerifyMac	key
+rds	AddRoleToDBCluster	cluster
+rds	AddRoleToDBInstance	db
+rds	AddSourceIdentifierToSubscription	es
+rds	AddTagsToResource	auto-backup cev cluster cluster-auto-backup cluster-endpoint cluster-pg cluster-snapshot db deployment es global-cluster integration og pg proxy proxy-endpoint ri secgrp shardgrp snapshot snapshot-tenant-database subgrp target-group tenant-database
+rds	ApplyPendingMaintenanceAction	cluster db
+rds	AuthorizeDBSecurityGroupIngress	secgrp
+rds	BacktrackDBCluster	cluster
+rds	CancelExportTask	
+rds	CopyCustomDBEngineVersion	cev
+rds	CopyDBClusterParameterGroup	cluster-pg
+rds	CopyDBClusterSnapshot	cluster-snapshot
+rds	CopyDBParameterGroup	pg
+rds	CopyDBSnapshot	snapshot
+rds	CopyOptionGroup	og
+rds	CreateBlueGreenDeployment	cluster cluster-pg db deployment pg
+rds	CreateCustomDBEngineVersion	cev
+rds	CreateDBCluster	cluster cluster-pg db global-cluster og subgrp
+rds	CreateDBClusterEndpoint	cluster cluster-endpoint
+rds	CreateDBClusterParameterGroup	cluster-pg
+rds	CreateDBClusterSnapshot	cluster cluster-snapshot
+rds	CreateDBInstance	cluster db og pg secgrp subgrp
+rds	CreateDBInstanceReadReplica	cluster db og pg subgrp
+rds	CreateDBParameterGroup	pg
+rds	CreateDBProxy	
+rds	CreateDBProxyEndpoint	proxy proxy-endpoint
+rds	CreateDBSecurityGroup	secgrp
+rds	CreateDBShardGroup	cluster shardgrp
+rds	CreateDBSnapshot	db snapshot
+rds	CreateDBSubnetGroup	subgrp
+rds	CreateEventSubscription	es
+rds	CreateGlobalCluster	cluster global-cluster
+rds	CreateIntegration	cluster db integration
+rds	CreateOptionGroup	og
+rds	CreateTenantDatabase	db tenant-database
+rds	CrossRegionCommunication	cluster-snapshot db snapshot
+rds	DeleteBlueGreenDeployment	deployment
+rds	DeleteCustomDBEngineVersion	cev
+rds	DeleteDBCluster	cluster cluster-snapshot
+rds	DeleteDBClusterAutomatedBackup	cluster-auto-backup
+rds	DeleteDBClusterEndpoint	cluster-endpoint
+rds	DeleteDBClusterParameterGroup	cluster-pg
+rds	DeleteDBClusterSnapshot	cluster-snapshot
+rds	DeleteDBInstance	db
+rds	DeleteDBInstanceAutomatedBackup	auto-backup
+rds	DeleteDBParameterGroup	pg
+rds	DeleteDBProxy	proxy
+rds	DeleteDBProxyEndpoint	proxy-endpoint
+rds	DeleteDBSecurityGroup	secgrp
+rds	DeleteDBShardGroup	shardgrp
+rds	DeleteDBSnapshot	snapshot
+rds	DeleteDBSubnetGroup	subgrp
+rds	DeleteEventSubscription	es
+rds	DeleteGlobalCluster	global-cluster
+rds	DeleteIntegration	integration
+rds	DeleteOptionGroup	og
+rds	DeleteTenantDatabase	db tenant-database
+rds	DeregisterDBProxyTargets	cluster db proxy target-group
+rds	DescribeAccountAttributes	
+rds	DescribeBlueGreenDeployments	deployment
+rds	DescribeCertificates	
+rds	DescribeDBClusterAutomatedBackups	cluster cluster-auto-backup
+rds	DescribeDBClusterBacktracks	cluster
+rds	DescribeDBClusterEndpoints	cluster cluster-endpoint
+rds	DescribeDBClusterParameterGroups	cluster-pg
+rds	DescribeDBClusterParameters	cluster-pg
+rds	DescribeDBClusterSnapshotAttributes	cluster-snapshot
+rds	DescribeDBClusterSnapshots	cluster cluster-snapshot
+rds	DescribeDBClusters	cluster
+rds	DescribeDBEngineVersions	
+rds	DescribeDBInstanceAutomatedBackups	auto-backup db
+rds	DescribeDBInstances	db
+rds	DescribeDBLogFiles	db
+rds	DescribeDBMajorEngineVersions	
+rds	DescribeDBParameterGroups	pg
+rds	DescribeDBParameters	pg
+rds	DescribeDBProxies	proxy
+rds	DescribeDBProxyEndpoints	proxy proxy-endpoint
+rds	DescribeDBProxyTargetGroups	proxy
+rds	DescribeDBProxyTargets	proxy target-group
+rds	DescribeDBRecommendations	
+rds	DescribeDBSecurityGroups	secgrp
+rds	DescribeDBShardGroups	shardgrp
+rds	DescribeDBSnapshotAttributes	snapshot
+rds	DescribeDBSnapshotTenantDatabases	db snapshot snapshot-tenant-database
+rds	DescribeDBSnapshots	db snapshot
+rds	DescribeDBSubnetGroups	subgrp
+rds	DescribeEngineDefaultClusterParameters	
+rds	DescribeEngineDefaultParameters	
+rds	DescribeEventCategories	
+rds	DescribeEventSubscriptions	es
+rds	DescribeEvents	
+rds	DescribeExportTasks	cluster cluster-snapshot snapshot
+rds	DescribeGlobalClusters	global-cluster
+rds	DescribeIntegrations	integration
+rds	DescribeOptionGroupOptions	
+rds	DescribeOptionGroups	og
+rds	DescribeOrderableDBInstanceOptions	
+rds	DescribePendingMaintenanceActions	cluster db
+rds	DescribeRecommendationGroups	
+rds	DescribeRecommendations	
+rds	DescribeReservedDBInstances	ri
+rds	DescribeReservedDBInstancesOfferings	
+rds	DescribeSourceRegions	
+rds	DescribeTenantDatabases	db tenant-database
+rds	DescribeValidDBInstanceModifications	db
+rds	DisableHttpEndpoint	cluster
+rds	DownloadCompleteDBLogFile	db
+rds	DownloadDBLogFilePortion	db
+rds	EnableHttpEndpoint	cluster
+rds	FailoverDBCluster	cluster db
+rds	FailoverGlobalCluster	cluster global-cluster
+rds	ListTagsForResource	auto-backup cev cluster cluster-auto-backup cluster-endpoint cluster-pg cluster-snapshot db es global-cluster integration og pg proxy proxy-endpoint ri secgrp shardgrp snapshot snapshot-tenant-database subgrp target-group tenant-database
+rds	ModifyActivityStream	db
+rds	ModifyCertificates	
+rds	ModifyCurrentDBClusterCapacity	cluster
+rds	ModifyCustomDBEngineVersion	cev
+rds	ModifyDBCluster	cluster cluster-pg og pg
+rds	ModifyDBClusterEndpoint	cluster-endpoint
+rds	ModifyDBClusterParameterGroup	cluster-pg
+rds	ModifyDBClusterSnapshotAttribute	cluster-snapshot
+rds	ModifyDBInstance	db og pg secgrp subgrp
+rds	ModifyDBParameterGroup	pg
+rds	ModifyDBProxy	proxy
+rds	ModifyDBProxyEndpoint	proxy-endpoint
+rds	ModifyDBProxyTargetGroup	target-group
+rds	ModifyDBRecommendation	
+rds	ModifyDBShardGroup	shardgrp
+rds	ModifyDBSnapshot	og snapshot
+rds	ModifyDBSnapshotAttribute	snapshot
+rds	ModifyDBSubnetGroup	subgrp
+rds	ModifyEventSubscription	es
+rds	ModifyGlobalCluster	global-cluster
+rds	ModifyIntegration	integration
+rds	ModifyOptionGroup	og
+rds	ModifyRecommendation	
+rds	ModifyTenantDatabase	db tenant-database
+rds	PromoteReadReplica	db
+rds	PromoteReadReplicaDBCluster	cluster
+rds	PurchaseReservedDBInstancesOffering	ri
+rds	RebootDBCluster	cluster
+rds	RebootDBInstance	db
+rds	RebootDBShardGroup	shardgrp
+rds	RegisterDBProxyTargets	db target-group
+rds	RemoveFromGlobalCluster	cluster global-cluster
+rds	RemoveRoleFromDBCluster	cluster
+rds	RemoveRoleFromDBInstance	db
+rds	RemoveSourceIdentifierFromSubscription	es
+rds	RemoveTagsFromResource	auto-backup cev cluster cluster-auto-backup cluster-endpoint cluster-pg cluster-snapshot db deployment es global-cluster integration og pg proxy proxy-endpoint ri secgrp shardgrp snapshot snapshot-tenant-database subgrp target-group tenant-database
+rds	ResetDBClusterParameterGroup	cluster-pg
+rds	ResetDBParameterGroup	pg
+rds	RestoreDBClusterFromS3	cluster cluster-pg og subgrp
+rds	RestoreDBClusterFromSnapshot	cluster cluster-pg cluster-snapshot og snapshot subgrp
+rds	RestoreDBClusterToPointInTime	cluster cluster-auto-backup cluster-pg og subgrp
+rds	RestoreDBInstanceFromDBSnapshot	cluster-snapshot db og pg snapshot subgrp
+rds	RestoreDBInstanceFromS3	db og pg secgrp subgrp
+rds	RestoreDBInstanceToPointInTime	auto-backup db og pg subgrp
+rds	RevokeDBSecurityGroupIngress	secgrp
+rds	StartActivityStream	cluster db
+rds	StartDBCluster	cluster
+rds	StartDBInstance	db
+rds	StartDBInstanceAutomatedBackupsReplication	auto-backup db
+rds	StartExportTask	cluster cluster-snapshot snapshot
+rds	StopActivityStream	cluster db
+rds	StopDBCluster	cluster
+rds	StopDBInstance	db snapshot
+rds	StopDBInstanceAutomatedBackupsReplication	db
+rds	SwitchoverBlueGreenDeployment	deployment
+rds	SwitchoverGlobalCluster	cluster global-cluster
+rds	SwitchoverReadReplica	db
+sns	AddPermission	topic
+sns	CheckIfPhoneNumberIsOptedOut	
+sns	ConfirmSubscription	topic
+sns	CreatePlatformApplication	
+sns	CreatePlatformEndpoint	
+sns	CreateSMSSandboxPhoneNumber	
+sns	CreateTopic	topic
+sns	DeleteEndpoint	
+sns	DeletePlatformApplication	
+sns	DeleteSMSSandboxPhoneNumber	
+sns	DeleteTopic	topic
+sns	GetDataProtectionPolicy	topic
+sns	GetEndpointAttributes	
+sns	GetPlatformApplicationAttributes	
+sns	GetSMSAttributes	
+sns	GetSMSSandboxAccountStatus	
+sns	GetSubscriptionAttributes	topic
+sns	GetTopicAttributes	topic
+sns	ListEndpointsByPlatformApplication	
+sns	ListOriginationNumbers	
+sns	ListPhoneNumbersOptedOut	
+sns	ListPlatformApplications	
+sns	ListSMSSandboxPhoneNumbers	
+sns	ListSubscriptions	
+sns	ListSubscriptionsByTopic	topic
+sns	ListTagsForResource	topic
+sns	ListTopics	
+sns	OptInPhoneNumber	
+sns	Publish	topic
+sns	PutDataProtectionPolicy	topic
+sns	RemovePermission	topic
+sns	SetEndpointAttributes	
+sns	SetPlatformApplicationAttributes	
+sns	SetSMSAttributes	
+sns	SetSubscriptionAttributes	topic
+sns	SetTopicAttributes	topic
+sns	Subscribe	topic
+sns	TagResource	topic
+sns	Unsubscribe	topic
+sns	UntagResource	topic
+sns	VerifySMSSandboxPhoneNumber	
+sqs	AddPermission	queue
+sqs	CancelMessageMoveTask	queue
+sqs	ChangeMessageVisibility	queue
+sqs	CreateQueue	queue
+sqs	DeleteMessage	queue
+sqs	DeleteQueue	queue
+sqs	GetQueueAttributes	queue
+sqs	GetQueueUrl	queue
+sqs	ListDeadLetterSourceQueues	queue
+sqs	ListMessageMoveTasks	queue
+sqs	ListQueueTags	queue
+sqs	ListQueues	
+sqs	PurgeQueue	queue
+sqs	ReceiveMessage	queue
+sqs	RemovePermission	queue
+sqs	SendMessage	queue
+sqs	SetQueueAttributes	queue
+sqs	StartMessageMoveTask	queue
+sqs	TagQueue	queue
+sqs	UntagQueue	queue

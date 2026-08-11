@@ -53,7 +53,12 @@ type dbCluster struct {
 	BackupRetentionPeriod   int      `xml:"BackupRetentionPeriod"`
 	DeletionProtection      bool     `xml:"DeletionProtection"`
 	AvailabilityZones       []string `xml:"AvailabilityZones>AvailabilityZone"`
-	Members                 []struct {
+	// PendingModifiedValues: an accepted-but-unapplied ModifyDBCluster leaves its
+	// pending changes here until they land (D953) — the field-agnostic applied signal.
+	PendingModifiedValues struct {
+		Inner string `xml:",innerxml"`
+	} `xml:"PendingModifiedValues"`
+	Members []struct {
 		InstanceID      string `xml:"DBInstanceIdentifier"`
 		IsClusterWriter bool   `xml:"IsClusterWriter"`
 	} `xml:"DBClusterMembers>DBClusterMember"`
@@ -65,6 +70,11 @@ type dbCluster struct {
 		Key   string `xml:"Key"`
 		Value string `xml:"Value"`
 	} `xml:"TagList>Tag"`
+}
+
+// modifyPending reports whether an accepted ModifyDBCluster is still applying (D953).
+func (c dbCluster) modifyPending() bool {
+	return strings.TrimSpace(c.PendingModifiedValues.Inner) != ""
 }
 
 func (c dbCluster) tags() map[string]string {
@@ -333,9 +343,15 @@ func (d *Driver) observeAurora(capability, providerID string) ([]provider.Observ
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"cluster not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"cluster not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		{Path: "encryption.atRest", Value: cl.StorageEncrypted, Derivation: "measured"},
@@ -492,8 +508,41 @@ func (d *Driver) updateAurora(capability, environment, providerID string,
 			}
 		}
 	}
-	// modifications are async (the cluster/instances enter "modifying"); a later
-	// observe/converge confirms the landed state.
+	// D953: ModifyDBCluster / ModifyDBInstance are ASYNC — the 2xx only ACCEPTS the
+	// change (the cluster/members enter "modifying"); it is not applied yet and can fail
+	// async. Poll to the APPLIED state (available with no PendingModifiedValues) rather
+	// than report succeeded on accept — the sibling async updaters all do, and a
+	// premature succeeded on a member's PubliclyAccessible=false mis-stated a
+	// security-closing change as done. Still applying at the timeout is unknown.
+	deadline := d.Now().Add(d.PollTimeout)
+	if clusterChanged {
+		for {
+			cur, found, rerr := d.describeCluster(region, id)
+			if rerr == nil && found && cur.Status == "available" && !cur.modifyPending() {
+				break
+			}
+			if d.Now().After(deadline) {
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: "cluster modification still applying at poll timeout — reconcile via DescribeDBClusters"}
+			}
+			time.Sleep(d.PollInterval)
+		}
+	}
+	if memberPublic != "" {
+		for _, m := range cl.Members {
+			for {
+				cur, found, rerr := d.describeDB(region, m.InstanceID)
+				if rerr == nil && found && cur.Status == "available" && !cur.modifyPending() {
+					break
+				}
+				if d.Now().After(deadline) {
+					return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+						Reason: "member " + m.InstanceID + " modification still applying at poll timeout — reconcile"}
+				}
+				time.Sleep(d.PollInterval)
+			}
+		}
+	}
 	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
 }
 
@@ -580,7 +629,23 @@ func (d *Driver) deleteAurora(capability, environment, providerID string) provid
 		return provider.CreateResult{Status: "failed",
 			Reason: fmt.Sprintf("delete cluster: HTTP %d (%s)", st, rdsErrCode(body))}
 	}
-	// deletion is async; the accepted delete is success (cluster enters "deleting").
+	// ---- poll the cluster to absence (D968 class, D972) ----
+	// The delete is async: the cluster enters "deleting", not gone. Reporting
+	// succeeded on the accepted delete tombstones a data-bearing cluster still live,
+	// and the derived subnet/param group cleanup below cannot succeed while the
+	// cluster still uses them. Poll to a confirmed DBClusterNotFound as createAurora
+	// polls to available; unknown on timeout keeps the handle.
+	deadline := d.Now().Add(d.PollTimeout)
+	for {
+		if _, found, rerr := d.describeCluster(region, id); rerr == nil && !found {
+			break // confirmed gone — proceed to derived-resource cleanup
+		}
+		if d.Now().After(deadline) {
+			return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+				Reason: "cluster still deleting at poll timeout — reconcile via DescribeDBClusters"}
+		}
+		time.Sleep(d.PollInterval)
+	}
 	// D278: cleanup of the driver-DERIVED subnet group — part of this
 	// capability's composite footprint, so its outcome is reported honestly.
 	// Only the deterministic derived name is ever touched (an operator-provided
@@ -892,7 +957,7 @@ func (d *Driver) discoverAurora(region string) ([]provider.Discovered, []string,
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.database.relational",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

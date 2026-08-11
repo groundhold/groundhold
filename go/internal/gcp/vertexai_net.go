@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"time"
 
 	"groundhold/internal/provider"
@@ -123,6 +122,19 @@ func (d *Driver) createVertexAI(capability, environment string,
 		return provider.CreateResult{Status: "failed",
 			Reason: "model access is a manual gate — grant it by accepting terms in the Vertex Model Garden console; " +
 				"groundhold observes model.access, it does not provision it (refusing to fake model.access=true)"}
+	}
+
+	// create-adoption (D253, extended by D424): an endpoint id is SERVER-assigned and
+	// endpoints.create takes no idempotency token, so a blind create on a lost ledger
+	// mints a SECOND model-serving endpoint — billed, live, and absent from the ledger.
+	// Every recovery path below already names this lookup ("reconcile by displayName via
+	// endpoints.list"); doing it FIRST is what makes those messages unnecessary. Exactly
+	// one endpoint of ours at our displayName -> BIND it; a foreign one at that name is
+	// left alone and a fresh create proceeds; an unreadable list falls through so a
+	// genuine first deploy is never blocked.
+	if id, loc, found, lerr := d.findVertexEndpointByDisplayName(plan.Region, plan.DisplayName,
+		capability, environment); lerr == nil && found {
+		return provider.CreateResult{ProviderID: vertexProviderID(d.Project, loc, id), Status: "succeeded"}
 	}
 
 	body := map[string]any{
@@ -233,7 +245,11 @@ func (d *Driver) observeVertexAI(capability, providerID string) ([]provider.Obse
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"endpoint not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"endpoint not found — bound resource is gone (will re-create)"}, nil
 	}
 
 	// the destination region is MEASURED from the server-returned resource name,
@@ -246,6 +262,8 @@ func (d *Driver) observeVertexAI(capability, providerID string) ([]provider.Obse
 	destRegions := destinationRegionsFromLocation(measuredLoc)
 
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: measuredLoc, Derivation: "measured"},
 		{Path: "inference.destinationRegions", Value: destRegions, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
@@ -297,12 +315,12 @@ func (d *Driver) deleteVertexAI(capability, environment, providerID string) prov
 		return provider.CreateResult{Status: "failed",
 			Reason: "endpoint labels do not match — refusing to delete a resource that is not ours"}
 	}
-	// ifMatch via the pre-read etag: a concurrent relabel/replace lands as a
-	// 409/412, never a blind delete of a resource that just changed hands.
+	// D995: Vertex endpoints.delete has NO etag parameter — it 400s any `?etag=`
+	// ("Unknown name 'etag': Cannot bind query parameter"), so the old ifMatch made
+	// EVERY delete of a present endpoint fail (an endpoint always carries an etag).
+	// The ownership pre-read above (labels via ownedBy) is the guard the API gives us;
+	// there is no server-side If-Match for this resource, so we delete without one.
 	delURL := d.vertexEndpointURL(project, location, id)
-	if e.Etag != "" {
-		delURL += "?etag=" + url.QueryEscape(e.Etag)
-	}
 	st, body, err := d.call("DELETE", delURL, nil)
 	switch {
 	case err != nil:
@@ -382,7 +400,7 @@ func (d *Driver) discoverVertexAI(region string) ([]provider.Discovered, []strin
 			diags = append(diags, epID+": "+dg)
 		}
 		found = append(found, provider.Discovered{
-			ProviderID: pid, ResourceType: "capability.ai.inference", Observations: obs})
+			ProviderID: pid, ResourceType: "capability.ai.inference", Observations: provider.WithoutAbsence(obs)})
 	}
 	return found, diags, nil
 }
@@ -395,4 +413,55 @@ func regionForHost(region string) string {
 		return "global"
 	}
 	return region
+}
+
+// findVertexEndpointByDisplayName lists the region's endpoints and returns the one whose
+// displayName matches ours AND whose labels prove it is ours. It VERIFIES the labels on
+// what comes back rather than trusting the name alone — a foreign endpoint may carry any
+// displayName. Any transport/HTTP/parse failure returns an error and the caller falls
+// through to a normal create. Mirrors findVpcByTags (D253) and apigwByName (D410).
+func (d *Driver) findVertexEndpointByDisplayName(region, displayName, capability, environment string) (id, loc string, found bool, err error) {
+	// D870: EVERY page. This is the read-before-write guard (D700/D804), and the comment
+	// at its caller says what a miss costs: "a blind create on a lost ledger mints a
+	// SECOND model-serving endpoint — billed, live, and absent from the ledger". Vertex
+	// pages this listing, so past the first page the guard was not weak, it was absent —
+	// and unlike a false claim, this one MUTATES.
+	type vertexEndpoint struct {
+		Name        string            `json:"name"`
+		DisplayName string            `json:"displayName"`
+		Labels      map[string]string `json:"labels"`
+	}
+	var endpoints []vertexEndpoint
+	if perr := d.listAllPages("endpoints.list", d.vertexEndpointsURL(d.Project, region),
+		func(body []byte) error {
+			var page struct {
+				Endpoints []vertexEndpoint `json:"endpoints"`
+			}
+			if json.Unmarshal(body, &page) != nil {
+				return readBody("endpoints.list", http.StatusOK)
+			}
+			endpoints = append(endpoints, page.Endpoints...)
+			return nil
+		}); perr != nil {
+		return "", "", false, perr
+	}
+	for _, ep := range endpoints {
+		if ep.DisplayName != displayName {
+			continue
+		}
+		if ep.Labels["groundhold-capability"] != sanitizeLabel(capability) ||
+			ep.Labels["groundhold-environment"] != sanitizeLabel(environment) {
+			continue // at our name but not ours — never adopt it
+		}
+		epID := endpointIDFromName(ep.Name)
+		if epID == "" || !vertexEndpointIDOK.MatchString(epID) {
+			continue
+		}
+		l := locationFromEndpointName(ep.Name)
+		if l == "" {
+			l = region
+		}
+		return epID, l, true, nil
+	}
+	return "", "", false, nil
 }

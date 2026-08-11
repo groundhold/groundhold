@@ -179,12 +179,18 @@ func (d *Driver) observeMemorystore(capability, providerID string) ([]provider.O
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"cache instance not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"cache instance not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
-		{Path: "encryption.atRest", Value: true, Derivation: "config-intent"},
+		{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"},
 		// Memorystore for Redis is always VPC-private — no public IP is assignable.
 		{Path: "network.publicExposure", Value: false, Derivation: "measured"},
 	}

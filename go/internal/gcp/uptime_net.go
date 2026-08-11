@@ -128,9 +128,15 @@ func (d *Driver) observeUptimeCheck(capability, providerID string) ([]provider.O
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"uptime check not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"uptime check not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "check.target", Value: doc.MonitoredResource.Labels["host"], Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}

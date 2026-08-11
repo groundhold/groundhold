@@ -408,7 +408,14 @@ func classifyAKSChange(path string) (string, string) {
 	case "encryption.secrets":
 		return "unsupported", "in-place toggle of KMS etcd (secrets) encryption is not wired for AKS in this slice — groundhold will not replace a stateful cluster"
 	case "availability.class":
-		return "immutable", "an AKS node pool's zone spread is fixed at creation (the zones ARE the topology) — a change is a replacement, and groundhold will not replace a stateful cluster"
+		// D830: the sentence is about a NODE POOL and the verdict was about the CLUSTER.
+		// Agent pools are child resources with their own PUT and DELETE at the api-version
+		// this driver pins, so a zone-spread change replaces a pool and leaves the cluster —
+		// its API server, its identity, its workloads — alone. The neighbouring case
+		// (encryption.secrets) already answers `unsupported` for exactly this situation.
+		return "unsupported", "in-place zone-spread change is not wired for AKS in this " +
+			"slice — a node pool's zones are fixed at creation, so the POOL must be " +
+			"replaced (agentPools has its own PUT and DELETE), but the CLUSTER need not be"
 	case "location.region":
 		return "immutable", "region is create-time only on an AKS cluster"
 	case "service.managed":

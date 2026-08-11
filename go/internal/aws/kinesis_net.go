@@ -221,13 +221,19 @@ func (d *Driver) observeKinesis(capability, providerID string) ([]provider.Obser
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"stream not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"stream not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		// a Kinesis stream is always regionally/multi-AZ replicated.
-		{Path: "availability.class", Value: "regional", Derivation: "config-intent"},
+		{Path: "availability.class", Value: "regional", Derivation: "platform-invariant"},
 	}
 	if s.RetentionPeriodHours > 0 {
 		obs = append(obs, provider.Observation{Path: "retention.window",
@@ -236,9 +242,8 @@ func (d *Driver) observeKinesis(capability, providerID string) ([]provider.Obser
 	// KMS encryption can use the AWS-MANAGED default, which DescribeStreamSummary
 	// returns as alias/aws/kinesis — not a customer key, so exclude it (else a
 	// managed-key stream falsely certifies BYOK on adoption).
-	if s.EncryptionType == "KMS" && s.KeyId != "" && !isAWSManagedKMSKey(s.KeyId, "kinesis") {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: true, Derivation: "measured"})
-	}
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+		Value: s.EncryptionType == "KMS" && s.KeyId != "" && !isAWSManagedKMSKey(s.KeyId, "kinesis"), Derivation: "measured"})
 	return obs, nil, nil
 }
 
@@ -278,5 +283,20 @@ func (d *Driver) deleteKinesis(capability, environment, providerID string) provi
 		}
 		return provider.CreateResult{Status: "failed", Reason: fmt.Sprintf("delete HTTP %d (%s)", st, ecsErr(resp))}
 	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// ---- poll to absence (D968 class, D979) ----
+	// DeleteStream is async: the stream enters DELETING, not gone. Reporting succeeded
+	// here tombstones a data-bearing stream still live. Poll describeStream to a
+	// confirmed absence as the create path polls to ACTIVE; unknown on timeout keeps
+	// the handle.
+	deadline := d.Now().Add(d.PollTimeout)
+	for {
+		if _, found, rerr := d.describeStream(region, stream); rerr == nil && !found {
+			return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // confirmed gone
+		}
+		if d.Now().After(deadline) {
+			return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+				Reason: "stream still deleting at poll timeout — reconcile via DescribeStreamSummary"}
+		}
+		time.Sleep(d.PollInterval)
+	}
 }

@@ -16,7 +16,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"groundhold/internal/perr"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -32,8 +34,21 @@ type Finding struct {
 }
 
 type Diagnosis struct {
-	Status           string    `json:"status"` // healthy | corrupt
-	Events           int       `json:"events"`
+	Status string `json:"status"` // healthy | corrupt
+	// Code (D624): "every JSON-emitting verb carries `code`" — this one did not, so
+	// a caller diagnosing a ledger had to match on the status word.
+	Code string `json:"code,omitempty"`
+	// D654: the counts are `attest`'s, so two verbs describing one file use one
+	// vocabulary. This used to be a single `events` field holding the physical LINE
+	// count of the live file — which on a compacted ledger reported 1 where attest
+	// reported 19, and counted blank lines as events.
+	TotalEvents int `json:"totalEvents"`
+	TailEvents  int `json:"tailEvents"`
+	BaseEvents  int `json:"baseEvents"`
+	// TailLines is the physical line count of the live file. It is a different
+	// unit from the events above and keeps its own name, because --quarantine
+	// truncates to a LINE and an off-by-one there throws away real history.
+	TailLines        int       `json:"tailLines"`
 	ValidPrefixLines int       `json:"validPrefixLines"`
 	Findings         []Finding `json:"findings"`
 	Fingerprint      string    `json:"fingerprint"`
@@ -54,8 +69,12 @@ const quarantineRemediation = "quarantine the file (repair --quarantine " +
 func Diagnose(path string) (*Diagnosis, error) {
 	raw, err := readLedger(path)
 	if os.IsNotExist(err) {
-		return &Diagnosis{Status: "healthy", Findings: []Finding{},
-			Fingerprint: fingerprint(nil)}, nil
+		// D617: `repair` is the verb an operator reaches for when they suspect
+		// corruption, and it answered "healthy" — with the fingerprint of the empty
+		// string — for a ledger that is not there. A typo in the path is the ordinary
+		// way to arrive here.
+		return nil, fmt.Errorf("%w at %s — a diagnosis of a file that does not "+
+			"exist is not a clean bill of health", ErrNoLedger, path)
 	}
 	if err != nil {
 		return nil, err
@@ -84,7 +103,8 @@ func Diagnose(path string) (*Diagnosis, error) {
 	// tail, the same fail-closed posture as ReplayFile (which hard-refuses).
 	refuseSnapshot := func(reason string, err error) *Diagnosis {
 		d.Status = "corrupt"
-		d.Events = 0
+		d.Code = string(perr.LedgerCorrupted)
+		d.TailLines, d.TotalEvents, d.TailEvents = 0, 0, 0
 		d.ValidPrefixLines = 0
 		d.Findings = append(d.Findings, Finding{Line: 0,
 			Kind: "snapshot-unreadable",
@@ -102,11 +122,22 @@ func Diagnose(path string) (*Diagnosis, error) {
 		if terr := VerifySnapshotTrust(snap); terr != nil {
 			return refuseSnapshot("the snapshot fails its trust check", terr), nil
 		}
+		// D646: the archive is the only copy of the compacted history, and after
+		// D645 it is what a forensic window reads. A snapshot whose archive does
+		// not match what it pinned is a diagnosis, not a detail.
+		if ai := CheckArchive(path, snap); ai.Status == "mismatched" ||
+			ai.Status == "misnamed" {
+			return refuseSnapshot("the archived history does not match the snapshot",
+				fmt.Errorf("%s", ai.Detail)), nil
+		}
 		seeded, serr := SeedLedger(snap)
 		if serr != nil {
 			return refuseSnapshot("the snapshot will not seed", serr), nil
 		}
 		led = seeded
+		// D654: repair never looked at the compaction, so it reported the tail's
+		// line count as the whole history — 1 where attest said 19.
+		d.BaseEvents = snap.BaseEvents
 	}
 	led.Lenient = true
 	lines := []string{}
@@ -127,13 +158,18 @@ func Diagnose(path string) (*Diagnosis, error) {
 				Remediation: quarantineRemediation + "; lines after this " +
 					"one were not examined (their chain cannot be verified)"})
 			d.ValidPrefixLines = prefixIfClean(d, n-1, clean)
-			// Events must reflect the physical line count even on the
-			// early return, or DroppedLines (Events - ValidPrefixLines)
+			// TailLines must reflect the physical line count even on the
+			// early return, or DroppedLines (TailLines - ValidPrefixLines)
 			// goes NEGATIVE in the quarantine result (bad output).
-			d.Events = len(lines)
+			d.TailLines = len(lines)
+			d.TotalEvents = d.BaseEvents + d.TailEvents
 			d.Status = "corrupt"
+			d.Code = string(perr.LedgerCorrupted)
 			return d, nil
 		}
+		// D654: a line that PARSED is an event record — count it as one. Blank
+		// lines are not events, and the old count was of lines.
+		d.TailEvents++
 		normalize(doc)
 		ev, _ := doc["event"].(map[string]any)
 		occurred, _ := ev["occurredAt"].(string)
@@ -190,7 +226,8 @@ func Diagnose(path string) (*Diagnosis, error) {
 			d.ValidPrefixLines = n
 		}
 	}
-	d.Events = len(lines)
+	d.TailLines = len(lines)
+	d.TotalEvents = d.BaseEvents + d.TailEvents
 	if torn {
 		d.Findings = append(d.Findings, Finding{Line: len(lines) + 1,
 			Kind: "torn-final-line",
@@ -206,6 +243,7 @@ func Diagnose(path string) (*Diagnosis, error) {
 		d.ValidPrefixLines = len(lines)
 	} else {
 		d.Status = "corrupt"
+		d.Code = string(perr.LedgerCorrupted)
 	}
 	return d, nil
 }
@@ -278,7 +316,7 @@ func Quarantine(path, fp string) (*RepairResult, *Diagnosis, error) {
 		return nil, nil, err
 	}
 	if d.Status == "healthy" {
-		return &RepairResult{Status: "healthy", KeptLines: d.Events,
+		return &RepairResult{Status: "healthy", KeptLines: d.TailLines,
 			Findings: d.Findings,
 			Reasons:  []string{"nothing to repair"}}, d, nil
 	}
@@ -305,11 +343,31 @@ func Quarantine(path, fp string) (*RepairResult, *Diagnosis, error) {
 	// preserve history aside, then swap.
 	tmp := path + ".repair-tmp-" +
 		strings.TrimPrefix(d.Fingerprint, "sha256:")[:12]
-	if err := os.WriteFile(tmp, prefix, 0o600); err != nil {
+	if err := writeFsync(tmp, prefix); err != nil {
 		return nil, nil, err
 	}
-	if err := os.Rename(path, qpath); err != nil {
+	// D711: LINK the history aside, never RENAME it. The old order was
+	// rename(path->qpath) then rename(tmp->path), which leaves the ledger path with
+	// NO FILE between the two — and a missing ledger replays as an EMPTY one
+	// (ReplayFile treats IsNotExist as a fresh ledger, deliberately, so a first
+	// converge can create one). A crash in that window therefore hands the next
+	// converge an empty history for a full estate: every capability unbound, every
+	// action a create. That is D253's named cost — "a second VPC, a second paid key" —
+	// produced by the verb that exists to RECOVER from corruption.
+	//
+	// A hard link makes the preserved copy appear while the original stays in place,
+	// so the path never lacks a file; the rename below then swaps the prefix in
+	// atomically. fsync of the directory after each step so the ordering survives a
+	// power loss, matching what compaction already does one file over.
+	if err := os.Link(path, qpath); err != nil {
 		os.Remove(tmp)
+		return nil, nil, fmt.Errorf("cannot preserve the history at %s before "+
+			"cutting: %v", qpath, err)
+	}
+	dir := filepath.Dir(path)
+	if err := fsyncDir(dir); err != nil {
+		os.Remove(tmp)
+		os.Remove(qpath)
 		return nil, nil, err
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -317,7 +375,11 @@ func Quarantine(path, fp string) (*RepairResult, *Diagnosis, error) {
 			"— the full history is at %s, the valid prefix at %s: %v",
 			qpath, tmp, err)
 	}
-	total := d.Events
+	if err := fsyncDir(dir); err != nil {
+		return nil, nil, fmt.Errorf("the prefix was swapped in but the directory "+
+			"could not be synced (%v) — the full history is at %s", err, qpath)
+	}
+	total := d.TailLines
 	if hasTorn(d) {
 		total++ // the torn fragment is dropped bytes too
 	}

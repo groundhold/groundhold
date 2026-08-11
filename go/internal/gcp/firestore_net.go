@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -168,6 +169,19 @@ func (d *Driver) pollFirestoreOperation(opName string) provider.CreateResult {
 	}
 }
 
+// gcpRegionID matches a real GCP region (europe-west1, us-central1). A Firestore
+// location that does NOT match is a multi-region grouping (nam5, eur3) — D799.
+var gcpRegionID = regexp.MustCompile(`^[a-z]+-[a-z]+[0-9]+$`)
+
+// firestoreAvailability answers from the location the database is actually in, rather
+// than from the type of the service (D799).
+func firestoreAvailability(locationID string) string {
+	if locationID != "" && !gcpRegionID.MatchString(locationID) {
+		return "multi-regional"
+	}
+	return "regional"
+}
+
 func (d *Driver) observeFirestore(capability, providerID string) ([]provider.Observation, []string, error) {
 	project, dbID, err := splitFirestoreProviderID(providerID)
 	if err != nil {
@@ -181,11 +195,18 @@ func (d *Driver) observeFirestore(capability, providerID string) ([]provider.Obs
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"database not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"database not found — bound resource is gone (will re-create)"}, nil
 	}
+	var diags []string
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
-		{Path: "availability.class", Value: "regional", Derivation: "config-intent"},
+		{Path: "availability.class", Value: firestoreAvailability(doc.LocationID), Derivation: "measured"},
 		{Path: "backup.pointInTimeRecovery",
 			Value: doc.PointInTimeRecoveryEnablement == "POINT_IN_TIME_RECOVERY_ENABLED", Derivation: "measured"},
 		{Path: "deletion.protection",
@@ -193,11 +214,23 @@ func (d *Driver) observeFirestore(capability, providerID string) ([]provider.Obs
 	}
 	if doc.LocationID != "" {
 		obs = append(obs, provider.Observation{Path: "location.region", Value: doc.LocationID, Derivation: "measured"})
+		if !gcpRegionID.MatchString(doc.LocationID) {
+			// D799: a Firestore database can be created in a MULTI-REGION (nam5, eur3),
+			// and the driver reported that identifier as if it were a region while
+			// calling "regional" a platform invariant. Both were wrong, and the pair of
+			// them let a residency constraint compare against a name that stands for
+			// several regions at once.
+			diags = append(diags, "location.region is "+doc.LocationID+", which is a "+
+				"MULTI-REGION rather than a region: the database's data is resident in "+
+				"more than one region, and a residency constraint comparing region names "+
+				"is not comparing what it appears to")
+		}
 	}
-	if doc.CmekConfig.KmsKeyName != "" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: true, Derivation: "measured"})
-	}
-	return obs, nil, nil
+	// D1003: no customer key is a MEASURED FALSE (Google-managed default), never
+	// an absence — emit the boolean unconditionally so a hard customerManagedKeys
+	// constraint has a value to contradict instead of passing vacuously.
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: doc.CmekConfig.KmsKeyName != "", Derivation: "measured"})
+	return obs, diags, nil
 }
 
 func (d *Driver) deleteFirestore(capability, environment, providerID string) provider.CreateResult {

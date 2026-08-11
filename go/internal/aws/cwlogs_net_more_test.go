@@ -6,6 +6,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 // This file rounds out cwlogs_net.go coverage: mustJSON was untested (0%),
@@ -360,4 +365,44 @@ func TestCwLogsPatchOutcome_TransportErrorIsUnknown(t *testing.T) {
 	if r == nil || r.Status != "unknown" || r.ProviderID != "cwlogs:eu-central-1:x" {
 		t.Fatalf("a transport error must be unknown WITH the pid, got %+v", r)
 	}
+}
+
+func cwLogsRole(req *http.Request, _ []byte) certifynet.Role {
+	tgt := req.Header.Get("X-Amz-Target")
+	switch tgt[strings.LastIndex(tgt, ".")+1:] {
+	case "DescribeLogGroups", "ListTagsForResource":
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingCWLogs enrols CloudWatch Logs in the D391 gate. It adopts
+// REACTIVELY: CreateLogGroup answers ResourceAlreadyExistsException, and the driver
+// then reads the group's tags and repairs onto it. The refused create and the retention
+// write are the mechanism; the proof is that it binds the group that already exists.
+func TestAdoptsExistingCWLogs(t *testing.T) {
+	name := CWLogGroupName("prod", "app-logs", 1)
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/cwlogs",
+		Classify: cwLogsRole,
+		ExistingServer: func() *httptest.Server {
+			return cwLogsFailAlreadyExistsServer(t, name, "app-logs")
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.LogsBaseURL = happyURL
+			d.PollInterval = time.Millisecond
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("cwlogs", "app-logs", "prod", cwLogsAttrs(), nil, "app-logs", 1)
+		},
+		AllowedMutations: 3, // the refused CreateLogGroup + the retention repair
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

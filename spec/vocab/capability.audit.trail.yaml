@@ -40,6 +40,12 @@ attributes:
       home region; EU-only compliance mandates it be an EU region.
     mappings:
       aws.cloudtrail: the trail's HomeRegion (the region CreateTrail ran in)
+      # D544: BOTH other clouds deliberately omit this and say so. An audit export
+      # is global on each; residency belongs to the DESTINATION operand, which is a
+      # separate capability with its own region. Naming the omission is the point —
+      # an attribute silently absent on two of three clouds reads as an oversight.
+      azure.activitylog: not observed — a subscription diagnostic setting is global
+      gcp.auditlogs: not observed — a log sink is global
 
   scope.multiRegion:
     kind: bool
@@ -50,6 +56,8 @@ attributes:
       require it true.
     mappings:
       aws.cloudtrail: IsMultiRegionTrail
+      azure.activitylog: const true — a subscription diagnostic setting spans the subscription
+      gcp.auditlogs: const true — a project/org sink spans the scope
 
   integrity.logValidation:
     kind: bool
@@ -60,6 +68,11 @@ attributes:
       was not altered.
     mappings:
       aws.cloudtrail: EnableLogFileValidation / LogFileValidationEnabled
+      # NOT unmapped by omission: neither cloud HAS the mechanism, and both drivers
+      # say that rather than reporting false (which would read as "off" instead of
+      # "does not exist here").
+      azure.activitylog: unsupported — no Activity Log equivalent of CloudTrail log-file validation
+      gcp.auditlogs: unsupported — no Cloud Audit Logs equivalent
     recommended:
       op: equals
       value: true
@@ -79,6 +92,10 @@ attributes:
       (implementation.kmsKeyArn), never a capability path.
     mappings:
       aws.cloudtrail: KmsKeyId set to a customer key
+      azure.activitylog: >
+        not observed — CMK is a property of the destination operand (a separate
+        capability), not of the export itself
+      gcp.auditlogs: not observed — CMEK likewise belongs to the destination
 
   delivery.assured:
     kind: bool
@@ -88,12 +105,18 @@ attributes:
       logging status, never assumed from the configuration.
     mappings:
       aws.cloudtrail: GetTrailStatus IsLogging (StartLogging/StopLogging)
+      azure.activitylog: >
+        measured from the live category flags — delivering iff at least one Activity
+        Log category is enabled
+      gcp.auditlogs: measured from the sink's `disabled` flag, inverted
 
   service.managed:
     kind: bool
     description: Managed audit-trail service vs a self-operated log pipeline.
     mappings:
       aws.cloudtrail: const true when observed through the driver
+      azure.activitylog: const true
+      gcp.auditlogs: const true
 
   cost.monthly:
     kind: money

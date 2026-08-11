@@ -89,6 +89,20 @@ svc = {"ecredis": "elasticache", "gredis": "redis", "aredis": "rediscache",
        "sbq": "servicebus", "sbt": "servicebus", "flexpg": "flexpostgres"}.get(prefix, prefix)
 
 obs = res.get("observations", [])
+# D606: this script's header promises that "adoption confirms every declared attribute
+# against the same reality groundhold measured". With an empty observation list it
+# generated a contract with ZERO hard constraints, adopted it, and printed `adopted` —
+# a confirmation of nothing, in the tool's own confident words. discover appends a
+# resource with whatever the driver returned, empty included, so the input is reachable
+# by construction rather than hypothetical.
+if not obs:
+    sys.stderr.write(
+        f"adopt-candidate: the discovery document carries NO observed attributes for "
+        f"{rid!r}.\n"
+        "A contract generated from them would have zero constraints, and adopting it "
+        "would confirm nothing while reporting success. Re-run discover for this "
+        "resource, or adopt it by hand with the attributes you mean to hold.\n")
+    sys.exit(3)
 def yval(v):
     if isinstance(v, bool): return "true" if v else "false"
     if isinstance(v, (int, float)): return str(v)
@@ -145,4 +159,13 @@ if [ -n "$SEED" ]; then
   "$GROUNDHOLD" verify "$WORK/contract.yaml" "$WORK/candidate.yaml" --json > "$SEED/verify-$CONTRACT.json"
   echo "→ exported to $SEED (export-$CONTRACT.ndjson, verify-$CONTRACT.json) — the console will pick it up" >&2
 fi
+# D671: the two generated documents are the input to the NEXT step the skill
+# names ("trim the contract, then re-publish"), and they were written into a
+# mktemp directory this script deletes on exit, with the path never printed. Step 4
+# asked the operator to edit a file step 3 had removed. They are kept beside the
+# ledger, and their paths are said out loud.
+KEEP="$(dirname "$LEDGER")"
+cp "$WORK/contract.yaml" "$KEEP/$CONTRACT.contract.yaml"
+cp "$WORK/candidate.yaml" "$KEEP/$CONTRACT.candidate.yaml"
+echo "→ generated documents kept: $KEEP/$CONTRACT.contract.yaml, $KEEP/$CONTRACT.candidate.yaml" >&2
 echo "adopted: $CONTRACT/$CAPABILITY -> $RESOURCE" >&2

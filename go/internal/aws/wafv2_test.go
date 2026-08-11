@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func wafAttrs() map[string]any {
@@ -80,11 +83,30 @@ func wafTarget2(r *http.Request) string {
 	return full[strings.LastIndex(full, ".")+1:]
 }
 
+// wafAssociated controls whether the fake's distribution names this WebACL (D765).
+var wafAssociated = true
+
+func wafDistributions(arn string) string {
+	if !wafAssociated {
+		return `<DistributionSummary><Id>E1</Id><WebACLId></WebACLId></DistributionSummary>`
+	}
+	return `<DistributionSummary><Id>E1</Id><WebACLId>` + arn + `</WebACLId></DistributionSummary>`
+}
+
 func wafServer(t *testing.T, capLabel string, prevention, managed, bot bool) *httptest.Server {
 	t.Helper()
 	const arn = "arn:aws:wafv2:us-east-1:000000000000:global/webacl/pv/id-1"
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			// D765: the CloudFront distribution listing, which is the ONLY place a
+			// CLOUDFRONT-scope WebACL's associations are visible. The fake answered no
+			// such path, so "does this firewall protect anything" could not be asked in
+			// any test — and the field found a live firewall protecting nothing.
+			if r.Method == "GET" && strings.Contains(r.URL.Path, "/distribution") {
+				_, _ = w.Write([]byte(`<DistributionList><Items>` + wafDistributions(arn) +
+					`</Items></DistributionList>`))
+				return
+			}
 			switch wafTarget2(r) {
 			case "CreateWebACL":
 				_, _ = w.Write([]byte(`{"Summary":{"Id":"id-1","ARN":"` + arn + `","LockToken":"lt-1"}}`))
@@ -137,6 +159,9 @@ func wafDriver(t *testing.T, srv *httptest.Server) *Driver {
 	d := NewDriver("us-east-1")
 	d.Account = "000000000000"
 	d.WAFBaseURL = srv.URL
+	// D765: the same fake answers the distribution listing, which is where a
+	// CLOUDFRONT-scope WebACL's associations are visible.
+	d.CloudFrontBaseURL = srv.URL
 	d.Now = time.Now
 	d.PollInterval = time.Millisecond
 	d.PollTimeout = 2 * time.Second
@@ -198,6 +223,14 @@ func TestMetamorphicWAFRoundTrip(t *testing.T) {
 			var prevention, managed, bot bool
 			srv := httptest.NewServer(http.HandlerFunc(
 				func(w http.ResponseWriter, r *http.Request) {
+					// D765: this stateful fake reflects what the create wrote; the association
+					// lives on the distribution, so it answers that path too.
+					if r.Method == "GET" && strings.Contains(r.URL.Path, "/distribution") {
+						_, _ = w.Write([]byte(`<DistributionList><Items>` +
+							wafDistributions(arn) +
+							`</Items></DistributionList>`))
+						return
+					}
 					switch wafTarget2(r) {
 					case "CreateWebACL":
 						body := readJSON3(r)
@@ -263,5 +296,156 @@ func TestMetamorphicWAFRoundTrip(t *testing.T) {
 				t.Errorf("bot round-trip: want %v got %v", c.bot, got["bot.protection"])
 			}
 		})
+	}
+}
+
+func wafRole(req *http.Request, _ []byte) certifynet.Role {
+	switch wafTarget2(req) {
+	case "ListWebACLs", "GetWebACL", "ListTagsForResource":
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingWAF enrols waf in the D391 gate. Unlike apigateway (D410), this
+// driver was already sound: CreateWebACL answers WAFDuplicateItem, the driver resolves
+// by name and checks the tags before binding. The gate turns that from a code path into
+// an asserted property.
+func TestAdoptsExistingWAF(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	const arn = "arn:aws:wafv2:eu-central-1:000000000000:regional/webacl/w/id-1"
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/waf",
+		Classify: wafRole,
+		ExistingServer: func() *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					switch wafTarget2(r) {
+					case "CreateWebACL":
+						w.WriteHeader(400)
+						_, _ = w.Write([]byte(`{"__type":"WAFDuplicateItem","message":"exists"}`))
+					case "ListWebACLs":
+						_, _ = w.Write([]byte(`{"WebACLs":[{"Name":"` + wafListedName(t) +
+							`","Id":"id-1","ARN":"` + arn + `","LockToken":"lt-1"}]}`))
+					case "ListTagsForResource":
+						_, _ = w.Write([]byte(`{"TagInfoForResource":{"TagList":[` +
+							`{"Key":"groundhold-capability","Value":"edge"},` +
+							`{"Key":"groundhold-environment","Value":"prod"}]}}`))
+					default:
+						w.WriteHeader(400)
+					}
+				}))
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.WAFBaseURL = happyURL
+			d.CloudFrontBaseURL = happyURL
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("waf", "edge", "prod", wafAttrs(), nil, "edge", 1)
+		},
+		AllowedMutations: 1, // the refused CreateWebACL — the detection itself
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
+
+// D765, from the field, measured on a live production estate: a WebACL with sensible
+// rules — common, bad-inputs, IP reputation, RATE LIMIT — the WRONG SCOPE, and
+// `ResourceArns: []`. It protected nothing, and in the console, in the code and in the
+// contract it was indistinguishable from one that worked.
+//
+// The reporter's stake makes the direction concrete: for them a rate limit is not a
+// performance control but a defence against enumeration and location triangulation, so a
+// firewall that silently guards nothing has a physical consequence.
+//
+// The vocabulary decides which attribute moves. `bot.protection` says "is managed bot
+// mitigation ON" — a statement about the rules, true of an unattached ACL.
+// `managed.ruleset` says "am I PROTECTED by the managed baseline" — a statement about
+// protection, false when nothing is behind it.
+func TestWAFManagedRulesetIsFalseWhenItGuardsNothing(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		associated bool
+		want       any
+		diag       string
+	}{
+		{"a distribution names this ACL", true, true, ""},
+		{"no distribution names it — it protects nothing", false, false, "protects nothing"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			old := wafAssociated
+			wafAssociated = c.associated
+			defer func() { wafAssociated = old }()
+
+			srv := wafServer(t, "edge", true, true, true)
+			defer srv.Close()
+			d := wafDriver(t, srv)
+
+			obs, diags, err := d.observeWAF("edge", "waf:000000000000:"+wafListedName(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var managed, bot any
+			for _, o := range obs {
+				switch o.Path {
+				case "managed.ruleset":
+					managed = o.Value
+				case "bot.protection":
+					bot = o.Value
+				}
+			}
+			if managed != c.want {
+				t.Fatalf("managed.ruleset = %v, want %v — the vocabulary's own words are "+
+					"\"am I protected by the managed baseline\" (D765)", managed, c.want)
+			}
+			if bot != true {
+				t.Fatalf("bot.protection = %v, want true in both cases: it says whether the "+
+					"bot rules are ON, which an unattached ACL still answers truthfully", bot)
+			}
+			if c.diag != "" {
+				found := false
+				for _, dg := range diags {
+					if strings.Contains(dg, c.diag) {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("a bare false teaches nothing; say why: %v", diags)
+				}
+			}
+		})
+	}
+}
+
+// An unread listing is not an empty one: a denied or failed ListDistributions must leave
+// the attribute unobserved, never claim the firewall guards nothing.
+func TestWAFProtectionUnknownWhenTheListingCannotBeRead(t *testing.T) {
+	srv := wafServer(t, "edge", true, true, true)
+	defer srv.Close()
+	d := wafDriver(t, srv)
+	d.CloudFrontBaseURL = "http://127.0.0.1:1" // nothing answers
+
+	obs, diags, err := d.observeWAF("edge", "waf:000000000000:"+wafListedName(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range obs {
+		if o.Path == "managed.ruleset" {
+			t.Fatalf("managed.ruleset = %v from a listing that never answered — an "+
+				"unattached firewall and an unread one are not the same answer", o.Value)
+		}
+	}
+	found := false
+	for _, dg := range diags {
+		if strings.Contains(dg, "not observed") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("withheld the value and said nothing: %v", diags)
 	}
 }

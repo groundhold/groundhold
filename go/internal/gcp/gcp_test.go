@@ -55,6 +55,35 @@ func TestBuildCreateRequestGolden(t *testing.T) {
 	}
 }
 
+// D950: recovery.rpo maps to point-in-time recovery, but the API spelling is
+// engine-specific and MUTUALLY EXCLUSIVE — MySQL uses binaryLogEnabled and rejects
+// pointInTimeRecoveryEnabled (field: "Point-in-time recovery can only be enabled for
+// Postgres and SQL Server instances"), Postgres the reverse. The old body sent
+// pointInTimeRecoveryEnabled for every engine, so a MySQL create was uncreatable while
+// only Postgres was golden-tested.
+func TestRecoveryRPOIsEngineSpecific(t *testing.T) {
+	build := func(proto string) map[string]any {
+		req, err := BuildCreateRequest("p", "e", "c", map[string]any{
+			"engine.protocol": proto,
+			"location.region": "europe-west1",
+			"recovery.rpo":    "5m",
+		}, map[string]any{"tier": "db-f1-micro"}, 1)
+		if err != nil {
+			t.Fatalf("%s: %v", proto, err)
+		}
+		bc, _ := req.Body["settings"].(map[string]any)["backupConfiguration"].(map[string]any)
+		return bc
+	}
+	my := build("mysql/8.0")
+	if my["binaryLogEnabled"] != true || my["pointInTimeRecoveryEnabled"] != nil {
+		t.Errorf("MySQL rpo must be binaryLogEnabled only, got %v", my)
+	}
+	pg := build("postgresql/16")
+	if pg["pointInTimeRecoveryEnabled"] != true || pg["binaryLogEnabled"] != nil {
+		t.Errorf("Postgres rpo must be pointInTimeRecoveryEnabled only, got %v", pg)
+	}
+}
+
 func TestRefusals(t *testing.T) {
 	cases := []struct {
 		name  string

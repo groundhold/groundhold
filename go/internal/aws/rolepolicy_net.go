@@ -126,9 +126,14 @@ func (d *Driver) observeRolePolicyAttachment(capability, providerID string) ([]p
 		return nil, nil, rerr
 	}
 	if !attached {
-		return nil, []string{"policy not attached — nothing to observe"}, nil
+		// F-LC3 (D522): the attachment IS the resource here — an unattached policy
+		// is a bound grant that no longer exists, not an empty reading.
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"policy not attached — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "grant.role", Value: policyArn, Derivation: "measured"},
 		{Path: "grant.principal", Value: roleName, Derivation: "measured"},
 		{Path: "access.scope", Value: "account", Derivation: "measured"},
@@ -147,6 +152,25 @@ func (d *Driver) deleteRolePolicyAttachment(capability, environment, providerID 
 	roleName, policyArn, err := splitRolePolicyProviderID(providerID)
 	if err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	// OWNERSHIP (D445). An attachment carries no tags and no name of its own — only the
+	// pair it joins — so for a while this looked like the one delete in the family with
+	// nothing to check. It is not: the ROLE has tags, and detaching a policy from a role
+	// MODIFIES that role. Detaching from a stranger's role removes a permission their
+	// workload is using; that it is reversible by re-attaching is a mitigation, not a
+	// licence. So the role is the ownership surface, and it is read before the detach.
+	//
+	// An unreadable role is unknown rather than a refusal: the detach may be legitimate
+	// and we cannot tell, which is exactly what unknown is for.
+	role, found, rerr := d.getRole(roleName)
+	if rerr != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-detach role read gave no answer — reconcile: " + rerr.Error()}
+	}
+	if found && !groundholdTagsMatch(role.tags(), capability, environment) {
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("role %q is not ours (tags do not match) — refusing to "+
+				"detach a policy from a role this contract does not own", roleName)}
 	}
 	st, resp, e := d.iamPost(encodeForm(map[string]string{
 		"Action": "DetachRolePolicy", "Version": iamVersion,

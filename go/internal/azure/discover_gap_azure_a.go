@@ -138,7 +138,7 @@ func (d *Driver) azFilesShareLeaves(rg, account string, diags *[]string) []provi
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.storage.filesystem",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out
@@ -180,10 +180,10 @@ func (d *Driver) discoverAzureCDN(_ string) ([]provider.Discovered, []string, er
 	return out, diags, nil
 }
 
-// azcdnEndpointLeaves lists the endpoints under one CDN profile and projects each
+// azcdnEndpointLeaves lists the afd endpoints under one profile and projects each
 // through observeAzureCDN. A list error appends a diagnostic and yields nothing.
 func (d *Driver) azcdnEndpointLeaves(rg, profile string, diags *[]string) []provider.Discovered {
-	eURL, err := d.armURL(rg, d.cdnProfilePath(profile)+"/endpoints", azureCDNAPIVersion)
+	eURL, err := d.armURL(rg, d.cdnProfilePath(profile)+"/afdEndpoints", azureCDNAPIVersion)
 	if err != nil {
 		*diags = append(*diags, profile+": "+err.Error())
 		return nil
@@ -213,7 +213,7 @@ func (d *Driver) azcdnEndpointLeaves(rg, profile string, diags *[]string) []prov
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.cdn.distribution",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out
@@ -284,7 +284,7 @@ func (d *Driver) dnszoneZonesOfKind(providerPath, apiVersion, kind string) ([]pr
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.dns.zone",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

@@ -26,6 +26,157 @@ cases:
     expect:
       error: contract
 
+  - name: unknown-top-level-key-is-load-error
+    description: >
+      D673. A block this loader does not read is silently non-gating. Measured: a
+      contract whose block is spelled `constraint:` (singular) validated OK, hashed
+      IDENTICALLY to a contract with no constraints, and PROVED a candidate
+      declaring encryption.atRest false. The rule the package doc has stated since
+      D19 — "anything the loader does not recognize is refused" — was true of values
+      and false of keys.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e-topkey, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraint:
+        hard:
+          - id: c-enc
+            subject: db
+            path: encryption.atRest
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: e-topkey
+      capabilities:
+        db:
+          attributes:
+            encryption.atRest: false
+    expect:
+      error: contract
+
+  - name: extension-key-is-not-a-load-error
+    description: >
+      D673's escape hatch, pinned so the refusal cannot widen into "no key the
+      runtime does not read may exist": a YAML anchor block or a tool's own metadata
+      lives under an `x-` prefix and says by its name that it is not runtime data.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      x-notes: { author: "not runtime data" }
+      meta: { id: e-extkey, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-enc
+            subject: db
+            path: encryption.atRest
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: e-extkey
+      capabilities:
+        db:
+          attributes:
+            encryption.atRest: true
+    expect:
+      executable: true
+      verdicts:
+        c-enc: satisfied
+
+  - name: candidate-capability-body-with-id-is-load-error
+    description: >
+      D677. The capability's identity is the key it is written under. An `id:` in
+      the BODY flowed into the canonical model and OVERWROTE it, so two candidates
+      implementing different capabilities hashed identically — one verifying PROVEN
+      and the other BLOCKED under a single sealed identity.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e-capid, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+        - id: app
+          type: capability.workload.container
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: e-capid
+      capabilities:
+        db:
+          id: app
+          attributes: {}
+    expect:
+      error: candidate
+
+  - name: non-string-constraint-path-is-load-error
+    description: >
+      D681. A non-string value for a string-typed field used to be canonicalized RAW
+      by the reference and dropped to "" by the runtime, so ONE document had TWO
+      identities — and each was a DIFFERENT valid document's. `path: 7` took the
+      identity of `path: "7"` under the reference and of a contract with NO path
+      under the runtime, so a plan sealed on either could be satisfied by a document
+      its author never wrote.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e-pathtype, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-num
+            subject: db
+            path: 7
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: e-pathtype
+      capabilities:
+        db:
+          attributes: {}
+    expect:
+      error: contract
+
+  - name: non-string-meta-environment-is-load-error
+    description: >
+      D683. D610 refused a non-integer `meta.version` and left the sibling: a
+      non-string `environment` was dropped and the contract hashed IDENTICALLY to
+      one with no environment at all — while `environment` reaches resource tags and
+      names, so the estate would be stamped with an empty one and `validate` would
+      print OK.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e-envtype, environment: 7, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: e-envtype
+      capabilities:
+        db:
+          attributes: {}
+    expect:
+      error: contract
+
   - name: capability-without-id-is-load-error
     contract:
       apiVersion: contract/v0.1
@@ -376,3 +527,126 @@ cases:
           type: capability.database.relational
     expect:
       error: contract
+
+  - name: non-integer-version-is-load-error
+    description: >
+      D609/D610: `meta.version` is an integer. The runtime read it as
+      `meta["version"].(int)` and DEFAULTED TO 1 when the assertion failed, so a
+      contract declaring `version: "7"` validated OK and reported v1 — a declared
+      input dropped in silence, which is D530's class in the loader itself. The
+      reference coerced instead (`int("7")` -> 7), so the two disagreed about the
+      document AND about its hash. Neither guesses now.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: v1, environment: test, version: "7" }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-managed
+            subject: db
+            path: service.managed
+            op: equals
+            value: true
+            verify: { method: static }
+    expect:
+      error: contract
+
+  - name: fractional-version-is-load-error
+    description: >
+      The same rule from the other side: 3.0 is not an integer. The runtime read v1
+      and the reference read v3.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: v2, environment: test, version: 3.0 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-managed
+            subject: db
+            path: service.managed
+            op: equals
+            value: true
+            verify: { method: static }
+    expect:
+      error: contract
+
+  - name: an-unimplemented-capability-blocks
+    description: >
+      D635: the compiler iterates the CANDIDATE's capabilities and verify iterates
+      CONSTRAINTS, so a capability the contract declares with no hard constraint and
+      no requirements produced no verdict, no action and no entry anywhere — verify
+      printed PROVEN and a second converge printed CONVERGED over a capability that
+      does not exist and never will. Silence about a declared capability reads as
+      success.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: m1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+        - id: assets
+          type: capability.storage.object
+      constraints:
+        hard:
+          - id: c1
+            subject: db
+            path: service.managed
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: m1
+      capabilities:
+        db:
+          provider: fake
+          service: fakedb
+          attributes:
+            service.managed: true
+    expect:
+      executable: false
+      blockingContains: "does not implement"
+
+  - name: a-retired-capability-need-not-be-implemented
+    description: >
+      The control, and the reason the rule is not simply "every declared capability
+      must appear": retirement is how a contract says a capability should NOT exist
+      (D47). Requiring an implementation for one would make retirement unexpressible.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: m2, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+        - id: old
+          type: capability.storage.object
+          state: retired
+      constraints:
+        hard:
+          - id: c1
+            subject: db
+            path: service.managed
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: m2
+      capabilities:
+        db:
+          provider: fake
+          service: fakedb
+          attributes:
+            service.managed: true
+    expect:
+      executable: true

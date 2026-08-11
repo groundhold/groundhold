@@ -146,13 +146,24 @@ func (d *Driver) observeAKSWorkloadIdentity(capability, providerID string) ([]pr
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"federated identity credential not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"federated identity credential not found — bound resource is gone (will re-create)"}, nil
 	}
 	ns, sa, ok := parseFICSubject(doc.Properties.Subject)
 	if !ok {
-		return nil, []string{fmt.Sprintf("federated credential subject %q is not a system:serviceaccount:<ns>:<sa> — no workload identity to map", doc.Properties.Subject)}, nil
+		// D802: the credential EXISTS and its subject is shaped in a way this driver
+		// cannot map. That is unreadable, not absent, and the difference decides whether
+		// an operator goes looking. Block rather than answer with an empty world.
+		return nil, nil, fmt.Errorf("federated credential subject %q is not a "+
+			"system:serviceaccount:<ns>:<sa> — the credential exists but cannot be mapped "+
+			"to a workload identity; refusing to report it as absent", doc.Properties.Subject)
 	}
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "workload.namespace", Value: ns, Derivation: "measured"},
 		{Path: "workload.serviceAccount", Value: sa, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
@@ -270,13 +281,13 @@ func (d *Driver) discoverAKSWorkloadIdentity(region string) ([]provider.Discover
 			}
 			// A non-SA-subject credential yields no observations (diag only) — do not
 			// surface it as a discovered podidentity.
-			if len(obs) == 0 {
+			if len(obs) == 0 || provider.IsAbsent(obs) {
 				continue
 			}
 			out = append(out, provider.Discovered{
 				ProviderID:   pid,
 				ResourceType: "capability.identity.podidentity",
-				Observations: obs,
+				Observations: provider.WithoutAbsence(obs),
 			})
 		}
 	}

@@ -83,7 +83,19 @@ func classifyGCSChange(path string) (string, string) {
 		return "mutable", ""
 	case "location.region", "durability.class",
 		"replication.enabled", "replication.destinationRegion":
-		return "immutable", "a GCS bucket's location/durability/dual-region pair is fixed at creation — a change is a replacement"
+		// D826: this was true when it was written and stopped being true. Cloud Storage
+		// now publishes buckets.relocate ("Initiates a long-running Relocate Bucket
+		// operation on the specified bucket"), whose request carries destinationLocation,
+		// destinationCustomPlacementConfig and destinationKmsKeyName — so the location,
+		// the durability class that follows from it, and the dual-region pair all change
+		// on a live bucket, under its own name, with its objects. Google says it plainly:
+		// "You can relocate a bucket after it's created." Asking for consent to replace a
+		// bucket buys a person the loss of every object in it, for nothing.
+		return "unsupported", "in-place relocation is not wired for GCS in this slice — " +
+			"Cloud Storage does support it (buckets.relocate takes destinationLocation and " +
+			"destinationCustomPlacementConfig, and the durability class follows the " +
+			"location), so this is a gap in groundhold rather than a reason to replace the " +
+			"bucket and its objects"
 	case "retention.minimum", "retention.locked", "retention.maximum",
 		"network.publicExposure", "encryption.customerManagedKeys":
 		return "unsupported", "in-place patch of " + path + " is not wired for GCS in this slice"
@@ -145,8 +157,21 @@ func classifyPubSubQueueChange(path string) (string, string) {
 		// deadLetterPolicy is set/cleared in place via subscriptions.patch (updateMask
 		// deadLetterPolicy) — symmetric with the SQS RedrivePolicy.
 		return "mutable", ""
-	case "delivery.guarantee", "ordering.enabled":
-		return "immutable", "delivery/ordering is create-time only on a Pub/Sub subscription — a change is a replacement"
+	case "ordering.enabled":
+		return "immutable", "message ordering is create-time only on a Pub/Sub subscription " +
+			"— a change is a replacement"
+	case "delivery.guarantee":
+		// D834: this shared a case with ordering.enabled and inherited its verdict. The two
+		// differ: `gcloud pubsub subscriptions update` — a command that builds an explicit
+		// update mask, so its flag set is a statement about what is updatable — carries
+		// --enable-exactly-once-delivery, and carries no ordering flag at all. Replacing a
+		// subscription to turn on exactly-once loses the undelivered backlog for a change
+		// Google makes on the live subscription.
+		return "unsupported", "in-place delivery-guarantee change is not wired for Pub/Sub " +
+			"in this slice — Google does support it on a live subscription " +
+			"(subscriptions.patch with enableExactlyOnceDelivery in the update mask), so " +
+			"this is a gap in groundhold rather than a reason to replace the subscription " +
+			"and drop its backlog"
 	case "network.publicExposure", "encryption.customerManagedKeys", "location.region":
 		return "unsupported", "in-place patch of " + path + " is not wired for Pub/Sub subscriptions in this slice"
 	case "encryption.atRest", "service.managed":
@@ -265,7 +290,15 @@ func BuildUpdateRequest(project, name string, changes []string,
 				}
 			}
 			merged["enabled"] = true
-			merged["pointInTimeRecoveryEnabled"] = true
+			// engine-specific PITR mechanism, mutually exclusive at the API
+			// (D950): MySQL uses binaryLogEnabled, Postgres/SQL Server use
+			// pointInTimeRecoveryEnabled. A patch with the wrong spelling 400s.
+			dv, _ := current["databaseVersion"].(string)
+			if strings.HasPrefix(dv, "MYSQL_") {
+				merged["binaryLogEnabled"] = true
+			} else {
+				merged["pointInTimeRecoveryEnabled"] = true
+			}
 			settings["backupConfiguration"] = merged
 		case "network.publicExposure":
 			merged := map[string]any{}

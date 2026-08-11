@@ -74,7 +74,13 @@ func (d *Driver) createAWSVPC(region, account, environment, capability string,
 	// Tags verifies tags), so it is never adopted — the scan proceeds to a fresh
 	// create, which does not touch the foreign resource. Ambiguous (>1) -> refuse to
 	// guess. A readable-empty or unreadable scan falls through to the normal create.
-	if vpcID, n, serr := d.findVpcByTags(region, capability, environment); serr == nil && n == 1 {
+	// D723: keyed on the generation-bearing Name too. Ownership tags alone do not
+	// carry the generation, so a replacement's generation-2 create used to find the
+	// generation-1 network and return ITS id — which the delete that follows then
+	// destroyed, both actions reporting success. `apigatewayv2` had the right shape
+	// all along: scan by the deterministic name, then verify the tags.
+	if vpcID, n, serr := d.findVpcByTags(region, capability, environment,
+		plan.Tags["Name"]); serr == nil && n == 1 {
 		return provider.CreateResult{ProviderID: awsVpcProviderID(region, vpcID), Status: "succeeded"}
 	} else if serr == nil && n > 1 {
 		return provider.CreateResult{Status: "unknown",
@@ -187,6 +193,27 @@ func (d *Driver) createAWSVPC(region, account, environment, capability string,
 
 	// ---- flow logs (optional) ----
 	if plan.FlowLogs {
+		// D727, refuse-before-mutate at an identity HANDOFF. A field report created a
+		// flow log with a role trusted only by the account root: AWS accepted it,
+		// reported the flow log ACTIVE with delivery SUCCESS, and it wrote nothing —
+		// because `vpc-flow-logs.amazonaws.com` could never assume that role. We would
+		// then have called the security control enabled.
+		//
+		// The role is an OPERAND this driver takes on faith and hands work to. Reading
+		// it first costs one call and turns a control that silently collects nothing
+		// into a refusal naming the missing trust. An UNREADABLE policy does not block
+		// (an account may withhold iam:GetRole) — the D725 delivery reading is the
+		// second line for that case — but a policy we can read and that plainly lacks
+		// the principal is an authoritative negative.
+		if role, found, rerr := d.getRole(roleNameFromARN(plan.FlowLogRole)); rerr == nil && found {
+			if trusts, ok := role.trustsService("vpc-flow-logs.amazonaws.com"); ok && !trusts {
+				return provider.CreateResult{ProviderID: pid, Status: "failed",
+					Reason: "vpc+subnet created; refusing to create flow logs with " +
+						plan.FlowLogRole + " — its trust policy does not let " +
+						"vpc-flow-logs.amazonaws.com assume it, so the flow log would " +
+						"report ACTIVE and deliver nothing"}
+			}
+		}
 		flParams := map[string]string{
 			"Action": "CreateFlowLogs", "Version": ec2Version,
 			"ResourceId.1": vpcResp.VpcID, "ResourceType": "VPC", "TrafficType": "ALL",
@@ -202,17 +229,40 @@ func (d *Driver) createAWSVPC(region, account, environment, capability string,
 			return provider.CreateResult{ProviderID: pid, Status: "unknown",
 				Reason: fmt.Sprintf("vpc+subnet created; flow logs HTTP %d (server error) — reconcile", st)}
 		}
-		// CreateFlowLogs is a BATCH API: a 200 can carry an <unsuccessful> set
-		// (e.g. a bad role ARN) with NO flow log created. Require a flowLogId and
-		// no unsuccessful entries — else audit is NOT on and the contract lies.
-		if st >= 400 || strings.Contains(string(body), "<unsuccessful>") ||
-			!strings.Contains(string(body), "<flowLogId>") {
+		// CreateFlowLogs is a BATCH API: a 200 can carry an unsuccessful set (e.g. a
+		// bad role ARN) with NO flow log created. Require a flow log id and no
+		// unsuccessful entries — else audit is NOT on and the contract lies.
+		//
+		// D727: this was two substring tests against a response shape AWS does not
+		// produce. Its own documented sample of a SUCCESSFUL create is
+		//   <unsuccessful/>
+		//   <flowLogIdSet><item>fl-1a2b3c4d</item></flowLogIdSet>
+		// so `<unsuccessful>` never appears (the element is self-closing when empty)
+		// and `<flowLogId>` never appears either — the element is `flowLogIdSet`, and
+		// `<flowLogIdSet>` does not contain `<flowLogId>` as a substring. Every
+		// successful flow-log create was therefore reported as a failure, on a
+		// composite that had already built the VPC, the subnets and the NAT. Parsed
+		// now, the same way every other batch response in this driver is (D717's
+		// lesson one file over: match the shape the cloud actually sends).
+		var flResp struct {
+			IDs          []string `xml:"flowLogIdSet>item"`
+			Unsuccessful []struct {
+				Code    string `xml:"error>code"`
+				Message string `xml:"error>message"`
+			} `xml:"unsuccessful>item"`
+		}
+		parsed := xml.Unmarshal(body, &flResp) == nil
+		if st >= 400 || !parsed || len(flResp.Unsuccessful) > 0 || len(flResp.IDs) == 0 {
 			if r := provider.MutationResult(st, ec2ErrCode(body), nil, pid, "flow logs"); r != nil {
 				return *r
 			}
+			detail := ec2ErrCode(body)
+			if len(flResp.Unsuccessful) > 0 {
+				detail = flResp.Unsuccessful[0].Code + ": " + flResp.Unsuccessful[0].Message
+			}
 			return provider.CreateResult{ProviderID: pid, Status: "failed",
 				Reason: fmt.Sprintf("vpc+subnet created but flow logs failed (audit NOT on): HTTP %d (%s) %s",
-					st, ec2ErrCode(body), mutDetail(body))}
+					st, detail, mutDetail(body))}
 		}
 	}
 	return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
@@ -479,62 +529,142 @@ func (d *Driver) buildBaselineSG(region, pid, vpcID string, plan awsVPCPlan) *pr
 // ingress.public to true (surfacing violated on the tray); it is NEVER
 // auto-revoked. A garbled/failed read is (false,false) — never a confident
 // "closed", so observe falls back rather than lying.
+// D743: it also answers the EGRESS question, from the same response. `egress.restricted`
+// was `road == "none"` with derivation config-intent — the road says which WAY traffic
+// leaves, never WHERE to — and a field report measured the consequence: a hard constraint
+// satisfied on a network whose every security group allowed `-1` to `0.0.0.0/0`, which is
+// default-ALLOW and the exact opposite of the vocabulary's "default-deny egress
+// allow-list". The rules were one unparsed element away.
 func (d *Driver) describeVpcSecurityGroups(region, vpcID string) (hasOpenIngress bool, err error) {
-	body := encodeForm(map[string]string{"Action": "DescribeSecurityGroups", "Version": ec2Version,
-		"Filter.1.Name": "vpc-id", "Filter.1.Value.1": vpcID})
-	st, resp, e := d.ec2PostBase(region, body)
-	if e != nil || st != http.StatusOK {
-		if e != nil {
-			return false, readTransport("DescribeSecurityGroups", e)
+	open, _, err := d.describeVpcSecurityGroupPosture(region, vpcID)
+	return open, err
+}
+
+// describeVpcSecurityGroupPosture reports both doors. openEgress is true when ANY group
+// in the VPC allows all protocols to every destination — deliberately not "attached to
+// the workload", which is not cheaply knowable: over-reporting an OPEN door is the safe
+// direction for a security constraint, and the diagnostic names what was seen.
+func (d *Driver) describeVpcSecurityGroupPosture(region, vpcID string) (openIngress, openEgress bool, err error) {
+	type perm struct {
+		Protocol string   `xml:"ipProtocol"`
+		V4       []string `xml:"ipRanges>item>cidrIp"`
+		V6       []string `xml:"ipv6Ranges>item>cidrIpv6"`
+	}
+	type sgGroup struct {
+		Perms       []perm `xml:"ipPermissions>item"`
+		EgressPerms []perm `xml:"ipPermissionsEgress>item"`
+	}
+	// D863: EVERY page. A NO to "does any group open a door" is the one answer a single
+	// page cannot support — EC2 returns up to a thousand groups and hands back a token,
+	// the VPC quota is 2500, and observe turns this NO into `egress.restricted = true`
+	// with derivation "measured". A sweep that does not finish must be an ERROR, never a
+	// posture: "I stopped looking" and "there is nothing there" are different answers.
+	var out struct{ Groups []sgGroup }
+	token := ""
+	for page := 0; ; page++ {
+		if page >= maxAWSListPages {
+			return false, false, fmt.Errorf(
+				"DescribeSecurityGroups: more than %d pages — refusing to report a security "+
+					"posture from a sweep that did not finish", maxAWSListPages)
 		}
-		return false, readHTTP("DescribeSecurityGroups", st, ec2ErrCode(resp))
+		form := map[string]string{"Action": "DescribeSecurityGroups", "Version": ec2Version,
+			"Filter.1.Name": "vpc-id", "Filter.1.Value.1": vpcID}
+		if token != "" {
+			form["NextToken"] = token
+		}
+		st, resp, e := d.ec2PostBase(region, encodeForm(form))
+		if e != nil {
+			return false, false, readTransport("DescribeSecurityGroups", e)
+		}
+		if st != http.StatusOK {
+			return false, false, readHTTP("DescribeSecurityGroups", st, ec2ErrCode(resp))
+		}
+		var page struct {
+			Groups    []sgGroup `xml:"securityGroupInfo>item"`
+			NextToken string    `xml:"nextToken"`
+		}
+		if xml.Unmarshal(resp, &page) != nil {
+			return false, false, readBody("DescribeSecurityGroups", st)
+		}
+		out.Groups = append(out.Groups, page.Groups...)
+		if page.NextToken == "" {
+			break
+		}
+		token = page.NextToken
 	}
-	var out struct {
-		Groups []struct {
-			Perms []struct {
-				V4 []string `xml:"ipRanges>item>cidrIp"`
-				V6 []string `xml:"ipv6Ranges>item>cidrIpv6"`
-			} `xml:"ipPermissions>item"`
-		} `xml:"securityGroupInfo>item"`
-	}
-	if xml.Unmarshal(resp, &out) != nil {
-		return false, readBody("DescribeSecurityGroups", st)
+	toEverywhere := func(p perm) bool {
+		for _, c := range p.V4 {
+			if c == "0.0.0.0/0" {
+				return true
+			}
+		}
+		for _, c := range p.V6 {
+			if c == "::/0" {
+				return true
+			}
+		}
+		return false
 	}
 	for _, g := range out.Groups {
 		for _, p := range g.Perms {
-			for _, c := range p.V4 {
-				if c == "0.0.0.0/0" {
-					return true, nil
-				}
+			if toEverywhere(p) {
+				openIngress = true
 			}
-			for _, c := range p.V6 {
-				if c == "::/0" {
-					return true, nil
-				}
+		}
+		for _, p := range g.EgressPerms {
+			// `-1` is every protocol. A rule to every destination on every protocol is
+			// destination discipline's opposite; a narrower one still restricts
+			// something, so it is not counted here.
+			if p.Protocol == "-1" && toEverywhere(p) {
+				openEgress = true
 			}
 		}
 	}
-	return false, nil
+	return openIngress, openEgress, nil
 }
 
 // vpcRouteTableIDs lists every route table id in the VPC (including the AWS
 // main table) so the S3 gateway endpoint routes S3 traffic from every subnet.
 func (d *Driver) vpcRouteTableIDs(region, pid, vpcID string) ([]string, *provider.CreateResult) {
-	st, resp, err := d.ec2PostBase(region, encodeForm(map[string]string{
-		"Action": "DescribeRouteTables", "Version": ec2Version,
-		"Filter.1.Name": "vpc-id", "Filter.1.Value.1": vpcID}))
-	if err != nil || st != http.StatusOK {
-		return nil, &provider.CreateResult{ProviderID: pid, Status: "unknown",
-			Reason: "vpc created but cannot list route tables to place the S3 gateway endpoint — reconcile the partial network"}
+	// D865: EVERY page. "Every route table in the VPC" is the promise the gateway
+	// endpoint keeps, and EC2 hands back a hundred at a time against a quota of 200 —
+	// one table per subnet being an ordinary layout. Wired from one page, the subnets
+	// behind the rest keep sending S3 traffic off the backbone while the create reports
+	// success. This function already refuses on an unreadable or an empty list; a
+	// truncated one is neither, and was the case it could not see.
+	var ids []string
+	token := ""
+	for page := 0; ; page++ {
+		if page >= maxAWSListPages {
+			return nil, &provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "vpc created but the route table list did not finish — refusing to " +
+					"wire the S3 gateway endpoint into part of the network; reconcile"}
+		}
+		form := map[string]string{"Action": "DescribeRouteTables", "Version": ec2Version,
+			"Filter.1.Name": "vpc-id", "Filter.1.Value.1": vpcID}
+		if token != "" {
+			form["NextToken"] = token
+		}
+		st, resp, err := d.ec2PostBase(region, encodeForm(form))
+		if err != nil || st != http.StatusOK {
+			return nil, &provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "vpc created but cannot list route tables to place the S3 gateway endpoint — reconcile the partial network"}
+		}
+		var out struct {
+			IDs       []string `xml:"routeTableSet>item>routeTableId"`
+			NextToken string   `xml:"nextToken"`
+		}
+		if xml.Unmarshal(resp, &out) != nil {
+			return nil, &provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "vpc created but route table list unparseable — reconcile the partial network"}
+		}
+		ids = append(ids, out.IDs...)
+		if out.NextToken == "" {
+			break
+		}
+		token = out.NextToken
 	}
-	var out struct {
-		IDs []string `xml:"routeTableSet>item>routeTableId"`
-	}
-	if xml.Unmarshal(resp, &out) != nil {
-		return nil, &provider.CreateResult{ProviderID: pid, Status: "unknown",
-			Reason: "vpc created but route table list unparseable — reconcile the partial network"}
-	}
-	return out.IDs, nil
+	return ids, nil
 }
 
 // pollVpcEndpoint polls DescribeVpcEndpoints until endpointID reaches wantState
@@ -656,10 +786,13 @@ func (d *Driver) describeVpc(region, vpcID string) (tags map[string]string, foun
 // server-side filter alone) — a match means the VPC provably carries our ownership
 // tags. readable=false on any transport/HTTP/parse failure (the caller then falls
 // back to a normal create rather than blocking a genuine first deploy).
-func (d *Driver) findVpcByTags(region, capability, environment string) (vpcID string, count int, err error) {
+// findVpcByTags finds the ONE VPC of ours at the given deterministic name (D723). The
+// name carries the generation, so a replacement never matches the resource it replaces.
+func (d *Driver) findVpcByTags(region, capability, environment, name string) (vpcID string, count int, err error) {
 	body := encodeForm(map[string]string{"Action": "DescribeVpcs", "Version": ec2Version,
 		"Filter.1.Name": "tag:groundhold-capability", "Filter.1.Value.1": sanitizeTag(capability),
-		"Filter.2.Name": "tag:groundhold-environment", "Filter.2.Value.1": sanitizeTag(environment)})
+		"Filter.2.Name": "tag:groundhold-environment", "Filter.2.Value.1": sanitizeTag(environment),
+		"Filter.3.Name": "tag:Name", "Filter.3.Value.1": name})
 	st, resp, err := d.ec2PostBase(region, body)
 	if err != nil || st != http.StatusOK {
 		if err != nil {
@@ -685,7 +818,10 @@ func (d *Driver) findVpcByTags(region, capability, environment string) (vpcID st
 		for _, t := range v.Tags {
 			m[t.Key] = t.Value
 		}
-		if v.VpcID != "" && groundholdTagsMatch(m, capability, environment) {
+		// The server-side filter is a narrowing hint, never the proof: a fixture or a
+		// provider that ignores a filter must not widen what we adopt (D694's lesson
+		// about a double that answers what the cloud would reject).
+		if v.VpcID != "" && groundholdTagsMatch(m, capability, environment) && m["Name"] == name {
 			owned = append(owned, v.VpcID)
 		}
 	}
@@ -720,24 +856,46 @@ func (d *Driver) describeHasIGW(region, vpcID string) (hasIGW bool, err error) {
 // 0.0.0.0/0 default route to a NAT gateway (nat road) and/or to an IGW (direct
 // road). Local routes (gatewayId=local, non-default CIDR) are ignored.
 func (d *Driver) describeVpcRoutes(region, vpcID string) (hasNatRoute, hasIgwRoute bool, err error) {
-	body := encodeForm(map[string]string{"Action": "DescribeRouteTables", "Version": ec2Version,
-		"Filter.1.Name": "vpc-id", "Filter.1.Value.1": vpcID})
-	st, resp, e := d.ec2PostBase(region, body)
-	if e != nil || st != http.StatusOK {
+	type routeItem struct {
+		Dest string `xml:"destinationCidrBlock"`
+		Nat  string `xml:"natGatewayId"`
+		Gw   string `xml:"gatewayId"`
+	}
+	// D864, the sibling of D863: a hundred route tables per page, 200 per VPC, and the
+	// answer becomes `egress.internet` — with "none" becoming `egress.restricted = true`,
+	// measured. A road missing from page one is not a road that does not exist.
+	var out struct{ Routes []routeItem }
+	token := ""
+	for page := 0; ; page++ {
+		if page >= maxAWSListPages {
+			return false, false, fmt.Errorf(
+				"DescribeRouteTables: more than %d pages — refusing to report a road from a "+
+					"sweep that did not finish", maxAWSListPages)
+		}
+		form := map[string]string{"Action": "DescribeRouteTables", "Version": ec2Version,
+			"Filter.1.Name": "vpc-id", "Filter.1.Value.1": vpcID}
+		if token != "" {
+			form["NextToken"] = token
+		}
+		st, resp, e := d.ec2PostBase(region, encodeForm(form))
 		if e != nil {
 			return false, false, readTransport("DescribeRouteTables", e)
 		}
-		return false, false, readHTTP("DescribeRouteTables", st, ec2ErrCode(resp))
-	}
-	var out struct {
-		Routes []struct {
-			Dest string `xml:"destinationCidrBlock"`
-			Nat  string `xml:"natGatewayId"`
-			Gw   string `xml:"gatewayId"`
-		} `xml:"routeTableSet>item>routeSet>item"`
-	}
-	if xml.Unmarshal(resp, &out) != nil {
-		return false, false, readBody("DescribeRouteTables", st)
+		if st != http.StatusOK {
+			return false, false, readHTTP("DescribeRouteTables", st, ec2ErrCode(resp))
+		}
+		var page struct {
+			Routes    []routeItem `xml:"routeTableSet>item>routeSet>item"`
+			NextToken string      `xml:"nextToken"`
+		}
+		if xml.Unmarshal(resp, &page) != nil {
+			return false, false, readBody("DescribeRouteTables", st)
+		}
+		out.Routes = append(out.Routes, page.Routes...)
+		if page.NextToken == "" {
+			break
+		}
+		token = page.NextToken
 	}
 	for _, r := range out.Routes {
 		if r.Dest != "0.0.0.0/0" {
@@ -764,9 +922,16 @@ func (d *Driver) observeAWSVPC(capability, providerID string) ([]provider.Observ
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"vpc not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"vpc not found — bound resource is gone (will re-create)"}, nil
 	}
-	var obs []provider.Observation
+	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
+	}
 	var diags []string
 	obs = append(obs,
 		provider.Observation{Path: "location.region", Value: region, Derivation: "measured"},
@@ -793,13 +958,47 @@ func (d *Driver) observeAWSVPC(capability, providerID string) ([]provider.Observ
 		// empty -> restricted=true; with a road, this slice installs no egress
 		// filter -> restricted=false (config-intent; a full SG audit is a later
 		// slice, hence the diag rather than a "measured" claim).
-		obs = append(obs, provider.Observation{Path: "egress.restricted", Value: road == "none", Derivation: "config-intent"})
-		if road != "none" {
-			diags = append(diags, "egress.restricted derived from the road only (no egress security-group audit in this slice)")
+		// D743: the security-group audit this comment deferred. The egress rules are in
+		// the SAME DescribeSecurityGroups response the ingress posture already reads, so
+		// "a later slice" cost one unparsed element. With no road the reachable set is
+		// empty and the static claim stands; with a road, the rules decide.
+		_, openEgress, sgPostErr := d.describeVpcSecurityGroupPosture(region, vpcID)
+		switch {
+		case road == "none":
+			obs = append(obs, provider.Observation{Path: "egress.restricted",
+				Value: true, Derivation: "measured"})
+		case sgPostErr != nil:
+			// Unreadable rules are not permission to claim either answer.
+			diags = append(diags, "egress.restricted not observed: the security-group "+
+				"rules could not be read ("+sgPostErr.Error()+"), and a road exists")
+		case openEgress:
+			obs = append(obs, provider.Observation{Path: "egress.restricted",
+				Value: false, Derivation: "measured"})
+			diags = append(diags, "egress.restricted=false: a security group in this VPC "+
+				"allows every protocol to 0.0.0.0/0 outbound — that is default-allow, the "+
+				"opposite of a destination allow-list")
+		default:
+			obs = append(obs, provider.Observation{Path: "egress.restricted",
+				Value: true, Derivation: "measured"})
 		}
 	} else {
 		diags = append(diags, "egress.internet/egress.restricted not observed: "+rtErr.Error())
 	}
+	// D470 — availability.class is REALISED (it drives the private-subnet spread: a
+	// regional network is >=2 subnets in >=2 AZs) and is not read back here. Saying so
+	// is the point: every other AWS service whose attribute cannot be observed emits a
+	// diagnostic naming the cause, and a realised attribute that is silently absent is
+	// reported `unverifiable` with no explanation of why it will stay that way.
+	//
+	// Deriving it needs the PRIVATE subnets specifically, and a zonal VPC creates its
+	// subnets with no AZ pinned — AWS may place the private and public ones in
+	// different zones — so counting distinct AZs across all of them would report
+	// "regional" for a zonal network. Telling them apart means reading route-table
+	// ASSOCIATIONS (a public subnet is one whose table has an IGW default route),
+	// which this observe does not fetch. A wrong derivation here is worse than none.
+	diags = append(diags, "availability.class not observed: deriving it needs the "+
+		"PRIVATE subnets' zone spread, and a zonal VPC pins no AZ — telling private "+
+		"from public needs route-table associations this read does not fetch")
 
 	// ingress.public: is a path from the internet INTO the network present? Two
 	// independent doors, OR-combined (the posture is public if EITHER is open):
@@ -843,14 +1042,43 @@ func (d *Driver) observeAWSVPC(capability, providerID string) ([]provider.Observ
 	flBody := encodeForm(map[string]string{"Action": "DescribeFlowLogs", "Version": ec2Version,
 		"Filter.1.Name": "resource-id", "Filter.1.Value.1": vpcID})
 	if st, resp, e := d.ec2PostBase(region, flBody); e == nil && st == http.StatusOK {
+		// D725: existence is not delivery. This read `len(flowLogId) > 0` — "a row
+		// exists" — and a field report measured the consequence: a flow log created
+		// with a role that has neither the log permissions nor a trust policy the
+		// flow-logs service can assume is reported by AWS as ACTIVE, and writes
+		// nothing. AWS carries the answer in the SAME response:
+		//   deliverLogsStatus       "The status of the logs delivery (SUCCESS | FAILED)"
+		//   deliverLogsErrorMessage "Access error indicates that the IAM role associated
+		//                            with the flow log does not have sufficient
+		//                            permissions to publish to CloudWatch Logs"
 		var fl struct {
-			IDs []string `xml:"flowLogSet>item>flowLogId"`
+			Items []struct {
+				ID       string `xml:"flowLogId"`
+				Deliver  string `xml:"deliverLogsStatus"`
+				ErrMsg   string `xml:"deliverLogsErrorMessage"`
+				LogState string `xml:"flowLogStatus"`
+			} `xml:"flowLogSet>item"`
 		}
 		if xml.Unmarshal(resp, &fl) != nil {
 			diags = append(diags, "flowLogs.enabled not observed: "+readBody("DescribeFlowLogs", st).Error())
 		} else {
+			delivering, failing := false, ""
+			for _, f := range fl.Items {
+				if f.ID == "" {
+					continue
+				}
+				if f.Deliver == "FAILED" {
+					failing = f.ErrMsg
+					continue
+				}
+				delivering = true
+			}
 			obs = append(obs, provider.Observation{Path: "flowLogs.enabled",
-				Value: len(fl.IDs) > 0, Derivation: "measured"})
+				Value: delivering, Derivation: "measured"})
+			if !delivering && failing != "" {
+				diags = append(diags, "flowLogs.enabled=false: a flow log exists but AWS "+
+					"reports its delivery as FAILED ("+failing+")")
+			}
 		}
 	} else if e != nil {
 		diags = append(diags, "flowLogs.enabled not observed: "+readTransport("DescribeFlowLogs", e).Error())
@@ -1326,4 +1554,13 @@ func allBetween(s, a, b string) []string {
 		out = append(out, s[:j])
 		s = s[j+len(b):]
 	}
+}
+
+// roleNameFromARN extracts the role name from an IAM role ARN (arn:aws:iam::acct:role/
+// Name, possibly with a path). Returns the input unchanged when it is already a name.
+func roleNameFromARN(arn string) string {
+	if i := strings.LastIndex(arn, "/"); i >= 0 {
+		return arn[i+1:]
+	}
+	return arn
 }

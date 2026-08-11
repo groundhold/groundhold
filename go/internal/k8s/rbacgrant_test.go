@@ -172,7 +172,7 @@ func TestObserveRoleBindingAndClaim(t *testing.T) {
 	d := NewDriver(srv.URL, "tok")
 	pid := rbacProviderID(rbacGroup, rbacVersion, "RoleBinding", "team", "ops-admin")
 
-	mp := d.genericMapping("rbac-grant")
+	mp, _ := d.serviceMapping("rbac-grant", forWrite)
 	if mp == nil {
 		t.Fatal("rbac-grant must route through the schema-driven engine")
 	}

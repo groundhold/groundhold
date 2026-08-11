@@ -160,3 +160,24 @@ func TestObserveAzureCustomRoleMeasuresPrivilege(t *testing.T) {
 		t.Fatalf("an Authorization/write action must observe mutating+privileged: %+v", got)
 	}
 }
+
+// D797, one cloud over: the same first-element read, the same under-report.
+func TestRoleActionsUnionEveryPermissionBlock(t *testing.T) {
+	var doc azureCustomRoleDoc
+	if err := json.Unmarshal([]byte(`{"properties":{"permissions":[
+	  {"actions":["Microsoft.Storage/storageAccounts/read"]},
+	  {"actions":["Microsoft.Authorization/roleAssignments/write"],"notActions":["x/delete"]}]}}`),
+		&doc); err != nil {
+		t.Fatal(err)
+	}
+	actions, narrowed := azRoleActions(doc)
+	if len(actions) != 2 {
+		t.Fatalf("permission blocks past the first were not read: %v", actions)
+	}
+	if !azRolePrivileged(actions) {
+		t.Fatal("an Authorization/write grant in the SECOND block reported as unprivileged")
+	}
+	if !narrowed {
+		t.Fatal("notActions present but the reported set was not flagged as a ceiling")
+	}
+}

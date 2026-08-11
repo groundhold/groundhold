@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,4 +204,57 @@ func TestReadErrorDoesNotRecreate(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "re-observe first") {
 		t.Fatalf("a read error (no evidence) must block re-observe, not recreate; got err=%v", err)
 	}
+}
+
+// refusingDrifter models the shape the second pilot hit: a driver whose desired
+// operand shape cannot be BUILT from the declared candidate, so OperandTargets
+// refuses. Their case was `implementation.url_auth=iam` with
+// `network.publicExposure: false` — a combination the Lambda builder rejects.
+type refusingDrifter struct {
+	*provider.Fake
+	why string
+}
+
+func (o refusingDrifter) OperandTargets(service string, attrs, impl map[string]any) ([]provider.OperandTarget, error) {
+	return nil, fmt.Errorf("%s", o.why)
+}
+
+// D721. Reported from the field: a capability declared in the candidate was absent
+// from the plan — "nie ma jej w actions, nie ma w noop, nie ma w unverified, nie ma
+// w advisories. 24 zdolności z 27 zadeklarowanych, bez słowa o brakujących."
+//
+// This test asks the compiler what it actually does, because the difference between
+// "reported somewhere the reporter did not look" and "reported nowhere" decides
+// whether the defect is the silence or the surfacing.
+func TestACapabilityThatCannotBeBuiltIsNamedSomewhere(t *testing.T) {
+	c, cand, report := fnFixture(t)
+	at := "2026-07-25T10:00:00Z"
+	clock, _ := ledger.ParseTs(at)
+	in := Inputs{
+		Bindings:    map[string]string{"fn": "lambda:eu-central-1:000000000000:fn"},
+		Generations: map[string]int{"fn": 1},
+		Observed:    map[string]bool{"fn": true},
+		Observations: map[string]map[string]ledger.ObsRecord{
+			"fn": {"location.region": {Value: "eu-central-1", ObservedAt: at,
+				TTLSeconds: 86400, Derivation: "measured"}},
+		},
+		EvalClock: clock,
+		Providers: map[string]provider.Provider{
+			"aws": refusingDrifter{Fake: &provider.Fake{},
+				why: "implementation.url_auth=iam contradicts network.publicExposure: true"},
+		},
+	}
+	doc, err := Compile(c, cand, nil, report, "proj", in)
+	if err != nil {
+		t.Fatalf("one unbuildable capability must not abort the compile: %v", err)
+	}
+	named := len(doc.Plan.Actions) > 0 || len(doc.Plan.Blocked) > 0 ||
+		len(doc.Plan.NoOp) > 0 || len(doc.Plan.Unverified) > 0
+	if !named {
+		t.Fatalf("the capability vanished: actions=%d blocked=%d noop=%d unverified=%d",
+			len(doc.Plan.Actions), len(doc.Plan.Blocked), len(doc.Plan.NoOp),
+			len(doc.Plan.Unverified))
+	}
+	t.Logf("actions=%d blocked=%v noop=%d unverified=%d",
+		len(doc.Plan.Actions), doc.Plan.Blocked, len(doc.Plan.NoOp), len(doc.Plan.Unverified))
 }

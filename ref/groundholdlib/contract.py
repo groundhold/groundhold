@@ -9,7 +9,6 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
-import yaml
 
 from .yamlcompat import safe_load as _core12_load
 
@@ -18,7 +17,43 @@ from . import scalars
 VALID_STATUSES = {"declared", "inferred", "assumed", "unknown"}
 VALID_SEVERITIES = {"hard", "soft"}
 VALID_METHODS = {"static", "provider-api", "probe"}
+# D728: the evidence ladder, so the loader can refuse an incoherent pair at load time.
+_METHOD_RANK = {"static": 0, "provider-api": 1, "probe": 2}
 VALID_OPS = set(scalars.OPERATORS) | scalars.PRESENCE_OPERATORS
+
+def _edit_distance(a: str, b: str) -> int:
+    """Levenshtein. Identical to the Go half — two implementations that suggest
+    different things are two tools (D25, D719)."""
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(cur[j - 1] + 1, prev[j] + 1,
+                           prev[j - 1] + (0 if ca == cb else 1)))
+        prev = cur
+    return prev[len(b)]
+
+
+def _nearest_types(want: str, known: list[str], n: int) -> list[str]:
+    return [t for _, t in sorted((_edit_distance(want, k), k) for k in known)][:n]
+
+
+def _unknown_type_message(unknown: list[str]) -> str:
+    known = sorted(CAPABILITY_TYPES_V01)
+    if len(unknown) == 1:
+        parts = [f"unknown capability type: {unknown[0]}"]
+    else:
+        parts = [f"{len(unknown)} unknown capability types"]
+    for u in unknown:
+        if len(unknown) > 1:
+            parts.append(f"  {u}")
+        near = _nearest_types(u, known, 3)
+        if near:
+            parts.append("    closest known types: " + ", ".join(near))
+    parts.append(f"  the vocabulary is closed and has {len(known)} types; "
+                 "`groundhold explain <capability.type>` describes one")
+    return "\n".join(parts)
+
 
 CAPABILITY_TYPES_V01 = {
     "capability.database.relational",
@@ -116,6 +151,7 @@ class Constraint:
     value: Any
     severity: str
     verify_method: str
+    runtime_method: str = "static"
     objective: str | None = None       # minimize | maximize (soft only)
     expected: scalars.Scalar | None = None  # D19: value parsed at load
 
@@ -155,7 +191,9 @@ def _provenanced(v: Any) -> Provenanced:
                                  or not isinstance(conf, (int, float))
                                  or not 0 <= conf <= 1):
             raise ContractError(f"confidence must be a number in [0,1]: {conf!r}")
-        return Provenanced(sc, status, v.get("source"), conf)
+        return Provenanced(sc, status,
+                           _want_string(v, "source", "attribute source") or None,
+                           conf)
     return Provenanced(scalars.parse(v))
 
 
@@ -167,7 +205,7 @@ def _id_clean(s: str) -> bool:
 
 
 def _constraint(raw: dict, severity: str, idx: int) -> Constraint:
-    cid = raw.get("id")
+    cid = _want_string(raw, "id", "constraint id") or None
     if not cid:
         raise ContractError(f"{severity} constraint #{idx} missing id")
     if not _id_clean(cid):
@@ -206,14 +244,126 @@ def _constraint(raw: dict, severity: str, idx: int) -> Constraint:
         if op in ("lte", "gte") and expected.kind not in scalars.ORDERABLE_KINDS:
             raise ContractError(
                 f"{cid}: {expected.kind} value is not orderable")
-    verify = (raw.get("verify") or {}).get("method", "static")
+    vb = raw.get("verify") or {}
+    verify = vb.get("method", "static")
+    runtime = verify
+    # D728: the two-bar form. `verify` compares the contract with the CANDIDATE, before
+    # anything exists, so it can never hold provider evidence; `audit` judges recorded
+    # reality, where provider evidence is the point. One field served both, so demanding
+    # measurement made `verify` unpassable while accepting `static` let a hard security
+    # constraint be satisfied by the document's own word.
+    has_design, has_runtime = "design" in vb, "runtime" in vb
+    if has_design or has_runtime:
+        if "method" in vb:
+            raise ContractError(
+                f"{cid}: verify carries both `method` and `design`/`runtime` — one bar "
+                "or two, never both spellings of the same thing")
+        if not (has_design and has_runtime):
+            raise ContractError(
+                f"{cid}: the two-bar verify form needs BOTH `design` and `runtime` — "
+                "half of it would leave the other bar to a default nobody wrote")
+        verify, runtime = vb["design"], vb["runtime"]
+        if not isinstance(verify, str) or not isinstance(runtime, str):
+            raise ContractError(
+                f"{cid}: verify.design and verify.runtime must be strings — a bar the "
+                "loader cannot read must not fall back to the weakest evidence there is")
     if verify not in VALID_METHODS:
         raise ContractError(f"{cid}: unknown verify method {verify!r}")
+    if runtime not in VALID_METHODS:
+        raise ContractError(f"{cid}: unknown verify.runtime {runtime!r}")
+    if _METHOD_RANK[verify] > _METHOD_RANK[runtime]:
+        raise ContractError(
+            f"{cid}: verify.design {verify!r} is stronger than verify.runtime "
+            f"{runtime!r} — a constraint cannot demand more evidence before it ships "
+            "than after")
     return Constraint(
-        id=cid, subject=raw.get("subject", ""), path=raw.get("path"),
+        id=cid,
+        subject=_want_string(raw, "subject", f"constraint {cid} subject"),
+        path=_want_string(raw, "path", f"constraint {cid} path") or None,
         op=op, value=raw.get("value"), severity=severity,
-        verify_method=verify, objective=objective, expected=expected,
+        verify_method=verify, runtime_method=runtime, objective=objective,
+        expected=expected,
     )
+
+
+def _int_version(meta: dict) -> int:
+    """D610: `meta.version` is an integer or the document is refused.
+
+    This coerced (`int("7")` -> 7, `int(3.0)` -> 3) and raised a bare TypeError on a
+    list, while the runtime silently defaulted to 1 for anything non-int. Two readings
+    of the same declaration, neither of them what the author wrote.
+    """
+    if "version" not in meta:
+        return 1
+    v = meta["version"]
+    if not isinstance(v, int) or isinstance(v, bool):
+        raise ContractError(f"meta.version must be an integer, got {type(v).__name__}")
+    return v
+
+
+
+# D673: what a document of each kind MEANS. Nothing checked this, so a misspelled
+# block was silently dropped — `constraint:` (singular) made a contract requiring
+# encryption PROVE a candidate that refuses it, and the contract then hashed
+# identically to one with no constraints. An `x-` prefix is the escape hatch for
+# anchor blocks and tool metadata.
+_KNOWN_TOP_LEVEL = {
+    "InfrastructureContract": {
+        "apiVersion", "kind", "meta", "capabilities", "constraints",
+        "assumptions", "outcomes", "autonomy", "budget", "requirements",
+    },
+    "ImplementationCandidate": {
+        "apiVersion", "kind", "contract", "capabilities", "meta",
+    },
+}
+
+
+def _check_top_level_keys(doc: dict, kind: str) -> None:
+    known = _KNOWN_TOP_LEVEL.get(kind)
+    if known is None:
+        return
+    unknown = sorted(k for k in doc
+                     if k not in known and not str(k).startswith("x-"))
+    if unknown:
+        raise ContractError(
+            f"{kind} declares unknown top-level key(s) {', '.join(unknown)} — a "
+            "block this loader does not read is silently non-gating, and a "
+            "misspelling of `constraints` proves a candidate that violates them. "
+            "Rename it, or prefix it with `x-` if it is deliberately not runtime "
+            "data")
+
+
+
+
+def _want_list(m: dict, key: str, where: str) -> list:
+    """D683: a block of the wrong shape is not an empty block. `assumptions` was
+    gated and `outcomes` beside it was not, so a mis-shaped one was dropped and the
+    contract hashed identically to one without it."""
+    if key not in m or m[key] is None:
+        return []
+    v = m[key]
+    if not isinstance(v, list):
+        raise ContractError(
+            f"{where} must be a list, got {type(v).__name__} — a block of the wrong "
+            "shape is not an empty block, and reading it as one would silently drop "
+            "everything in it")
+    return v
+
+
+def _want_string(m: dict, key: str, where: str) -> str:
+    """D681: a non-string value for a string-typed field used to be canonicalized
+    RAW here and dropped to "" in the Go runtime, so one document had two
+    identities — each of them a DIFFERENT valid document's. The schema types these
+    as strings; both implementations refuse."""
+    if key not in m or m[key] is None:
+        return ""
+    v = m[key]
+    if not isinstance(v, str):
+        raise ContractError(
+            f"{where} must be a string, got {type(v).__name__} ({v!r}) — a value "
+            "of the wrong type is not an absent one, and dropping it silently "
+            "gives this document the identity of a DIFFERENT one")
+    return v
 
 
 def load_contract(path: str) -> Contract:
@@ -225,12 +375,14 @@ def load_contract(path: str) -> Contract:
         raise ContractError("kind must be InfrastructureContract")
     if doc.get("apiVersion") != "contract/v0.1":
         raise ContractError("apiVersion must be contract/v0.1")
+    _check_top_level_keys(doc, "InfrastructureContract")
     meta = doc.get("meta") or {}
     if not meta.get("id"):
         raise ContractError("meta.id is required")
 
     caps: dict[str, dict] = {}
     retired: set[str] = set()
+    unknown_types: list[str] = []
     for cap in doc.get("capabilities") or []:
         if not cap.get("id"):
             raise ContractError("capability missing id")
@@ -240,7 +392,12 @@ def load_contract(path: str) -> Contract:
         if cap["id"] in caps:
             raise ContractError(f"duplicate capability id: {cap['id']}")
         if cap.get("type") not in CAPABILITY_TYPES_V01:
-            raise ContractError(f"unknown capability type: {cap.get('type')}")
+            # D719: collect, do not raise. Refusing at the FIRST unknown type made a
+            # contract with two mistakes cost two runs to discover, and named what was
+            # wrong without naming what is right over a CLOSED vocabulary this loader
+            # is holding.
+            unknown_types.append(str(cap.get("type")))
+            continue
         state = cap.get("state", "active")
         if state not in ("active", "retired"):
             raise ContractError(f"{cap['id']}: invalid state {state!r}")
@@ -252,6 +409,8 @@ def load_contract(path: str) -> Contract:
                     f"{cap['id']}: retired capability cannot carry requirements")
             retired.add(cap["id"])
         caps[cap["id"]] = cap
+    if unknown_types:
+        raise ContractError(_unknown_type_message(unknown_types))
 
     constraints: list[Constraint] = []
     cblock = doc.get("constraints") or {}
@@ -311,11 +470,19 @@ def load_contract(path: str) -> Contract:
             raise ContractError(
                 f"autonomy.forbidden: disable references "
                 f"unknown constraint {entry['disable']!r}")
-    for ref in (doc.get("autonomy") or {}).get("allow_replace_stateful") or []:
-        if ref not in caps:
-            raise ContractError(
-                f"autonomy.allow_replace_stateful references "
-                f"unknown capability {ref!r}")
+    # D597 + D698: every consent list that names capabilities, from ONE list of keys.
+    # The runtime learned this when `allow_intrusive_probes` turned out to be
+    # unchecked — the list that SPENDS, since an intrusive probe restores a backup
+    # into a scratch instance. The reference never learned it: it checked
+    # `allow_replace_stateful` alone, so a typo in the other two loaded CLEAN here and
+    # REFUSED in the runtime. A document one implementation accepts and the other
+    # rejects breaks the dual guarantee as surely as a hash divergence does.
+    for key in ("allow_replace_stateful", "allow_intrusive_probes",
+                "allow_protection_lift"):
+        for ref in (doc.get("autonomy") or {}).get(key) or []:
+            if ref not in caps:
+                raise ContractError(
+                    f"autonomy.{key} references unknown capability {ref!r}")
     # D195: a malformed knob must not silently disarm the gate.
     _autonomy = doc.get("autonomy") or {}
     if "no_assumed_hard_basis" in _autonomy \
@@ -323,10 +490,12 @@ def load_contract(path: str) -> Contract:
         raise ContractError("autonomy.no_assumed_hard_basis must be a boolean")
 
     return Contract(
-        id=meta["id"], environment=meta.get("environment", ""),
-        version=int(meta.get("version", 1)), capabilities=caps,
+        id=_want_string(meta, "id", "meta.id"),
+        environment=_want_string(meta, "environment", "meta.environment"),
+        version=_int_version(meta), capabilities=caps,
         constraints=constraints, assumptions=doc.get("assumptions") or [],
-        outcomes=doc.get("outcomes") or [], autonomy=doc.get("autonomy") or {},
+        outcomes=_want_list(doc, "outcomes", "outcomes"),
+        autonomy=doc.get("autonomy") or {},
     )
 
 
@@ -363,6 +532,7 @@ def load_candidate(path: str, contract: Contract | None = None,
         raise ContractError("candidate document is empty or not a mapping")
     if doc.get("kind") != "ImplementationCandidate":
         raise ContractError("kind must be ImplementationCandidate")
+    _check_top_level_keys(doc, "ImplementationCandidate")
     if doc.get("apiVersion") != "candidate/v0.1":
         raise ContractError("apiVersion must be candidate/v0.1")
     if not doc.get("contract"):
@@ -377,6 +547,13 @@ def load_candidate(path: str, contract: Contract | None = None,
             except scalars.TypeMismatch as e:
                 raise ContractError(f"{cap_id}.{p}: {e}") from e
         caps[cap_id] = attrs
+        # D677: the identity is the key it is written under; a second one can only
+        # disagree, and it used to overwrite the first in the canonical model.
+        if "id" in body:
+            raise ContractError(
+                f"capabilities.{cap_id} carries an `id:` field — the capability's "
+                "identity is the key it is written under, and a second one can only "
+                "disagree with it")
         extra = {k: v for k, v in body.items() if k != "attributes"}
         if extra:
             extras[cap_id] = extra
@@ -405,8 +582,31 @@ def _vocab_check(cand: Candidate, contract: Contract, vocabs: dict) -> None:
                 raise ContractError(
                     f"{cap_id}.{p}: vocabulary defines kind {want}, "
                     f"got {pv.scalar.kind} ({pv.scalar.raw!r})")
+            # D532: a list the vocabulary marks `unordered: true` is a SET, and a
+            # set has no order. Canonicalize (sort) here, where the vocabulary is
+            # known, so declared and observed compare equal everywhere without a
+            # second meaning of equality. A plain `kind: list` stays an ordered
+            # sequence (D21).
+            if spec.get("unordered") and pv.scalar.kind == "list":
+                _sort_scalar_list(pv.scalar)
             enum = spec.get("enum")
             if enum and pv.scalar.value not in enum:
                 raise ContractError(
                     f"{cap_id}.{p}: {pv.scalar.raw!r} not in "
                     f"vocabulary enum {enum}")
+
+
+def _sort_scalar_list(sc) -> None:
+    """Canonicalize an unordered list in place by sorting on the canonical
+    rendering of each element (D532). Raw follows value, or two spellings of one
+    set would hash differently."""
+    elems = sc.value
+    if not isinstance(elems, list):
+        return
+    # The Scalar is frozen on purpose — a parsed value is not edited after the
+    # fact. Sort the underlying lists IN PLACE instead of rebinding the fields.
+    ordered = sorted(elems, key=lambda e: str(e.raw))
+    raws = [e.raw for e in ordered]
+    elems[:] = ordered
+    if isinstance(sc.raw, list) and len(sc.raw) == len(raws):
+        sc.raw[:] = raws

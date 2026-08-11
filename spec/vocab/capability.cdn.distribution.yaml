@@ -41,7 +41,7 @@ attributes:
       edge hostname is provider-assigned and observed, not requested.
     mappings:
       aws.cloudfront: Origins.Items[0].DomainName
-      azure.cdn: endpoint origins[0].hostName
+      azure.azurecdn: endpoint origins[0].hostName
 
   viewer.protocol:
     kind: string
@@ -54,7 +54,7 @@ attributes:
       out of this single-endpoint slice) — refused rather than silently downgraded.
     mappings:
       aws.cloudfront: DefaultCacheBehavior.ViewerProtocolPolicy
-      azure.cdn: endpoint isHttpAllowed / isHttpsAllowed (redirect refused on classic)
+      azure.azurecdn: endpoint isHttpAllowed / isHttpsAllowed (redirect refused on classic)
 
   service.managed:
     kind: bool

@@ -35,6 +35,9 @@ func runOnce(p *Probe, op Op, faultAt int, fault Fault) runResult {
 // applicable fault and asserts the law-derived honesty invariants.
 func CertifyDriverNet(t TestingT, p *Probe) {
 	t.Helper()
+	if p.ObserveAbsent != nil {
+		certifyAbsence(t, p)
+	}
 	for _, op := range p.Ops {
 		base := runOnce(p, op, -1, FaultNone)
 		if base.res.Status != "succeeded" {

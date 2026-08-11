@@ -141,10 +141,16 @@ func (d *Driver) observeAMI(capability, providerID string) ([]provider.Observati
 		return nil, nil, rerr
 	}
 	if len(imgs) == 0 {
-		return nil, []string{"image not found — nothing to observe"}, nil
+		// F-LC3 (D521): a BOUND resource the API says is GONE. A diagnostic
+		// alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"image not found — bound resource is gone (will re-create)"}, nil
 	}
 	img := imgs[0]
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		// `isPublic` is the account-level sharing state: true means any AWS account
@@ -213,7 +219,7 @@ func (d *Driver) discoverAMIs(region string) ([]provider.Discovered, []string, e
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.compute.image",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

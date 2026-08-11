@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func efsAttrs() map[string]any {
@@ -80,9 +83,22 @@ func TestBuildEFSRefusals(t *testing.T) {
 func efsServer(t *testing.T, capLabel, kms, az string) *httptest.Server {
 	t.Helper()
 	const fsID = "fs-0123456789abcdef0"
+	deleted := false
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			// once deleted, the file system is GONE — the delete's poll-to-absence
+			// (D975) must be able to confirm FileSystemNotFound.
+			if deleted && r.Method == "GET" && r.URL.Path == efsPath+"/file-systems" {
+				w.WriteHeader(404)
+				_, _ = w.Write([]byte(`{"ErrorCode":"FileSystemNotFound","Message":"gone"}`))
+				return
+			}
 			switch {
+			// D800: the driver now traces the key to KMS to tell a customer key from the
+			// account-default one, so the fixture has to answer that question too. CUSTOMER
+			// here because these cases are about a key the customer brought.
+			case strings.HasSuffix(r.Header.Get("X-Amz-Target"), ".DescribeKey"):
+				_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"CUSTOMER"}}`))
 			case r.Method == "POST" && r.URL.Path == efsPath+"/file-systems":
 				w.WriteHeader(201)
 				_, _ = w.Write([]byte(`{"FileSystemId":"` + fsID + `","LifeCycleState":"available"}`))
@@ -100,6 +116,7 @@ func efsServer(t *testing.T, capLabel, kms, az string) *httptest.Server {
 				b, _ := json.Marshal(map[string]any{"FileSystems": []any{fs}})
 				_, _ = w.Write(b)
 			case r.Method == "DELETE":
+				deleted = true
 				w.WriteHeader(204)
 			default:
 				w.WriteHeader(404)
@@ -114,6 +131,7 @@ func efsDriver(t *testing.T, srv *httptest.Server) *Driver {
 	d := NewDriver("eu-central-1")
 	d.Account = "000000000000"
 	d.EFSBaseURL = srv.URL
+	d.KMSBaseURL = srv.URL // D800: the driver traces the key to KMS
 	d.Now = time.Now
 	d.PollInterval = time.Millisecond
 	d.PollTimeout = 2 * time.Second
@@ -155,6 +173,34 @@ func TestDeleteEFSForeignRefused(t *testing.T) {
 	}
 }
 
+// TestDeleteEFSAsyncNotGoneIsUnknown pins D975: a file-system delete the provider
+// ACCEPTS but that stays present (deleting, not gone) must report unknown — never
+// a terminal "succeeded" that tombstones a data-bearing file system still live.
+func TestDeleteEFSAsyncNotGoneIsUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && strings.HasPrefix(r.URL.Path, efsPath+"/resource-tags/"):
+				_, _ = w.Write([]byte(`{"Tags":[{"Key":"groundhold-capability","Value":"shared"},` +
+					`{"Key":"groundhold-environment","Value":"prod"}]}`))
+			case r.Method == "GET" && r.URL.Path == efsPath+"/file-systems": // never gone
+				_, _ = w.Write([]byte(`{"FileSystems":[{"FileSystemId":"fs-0123456789abcdef0","LifeCycleState":"deleting"}]}`))
+			case r.Method == "DELETE":
+				w.WriteHeader(204)
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	defer srv.Close()
+	d := efsDriver(t, srv)
+	d.PollTimeout = 5 * time.Millisecond // the file system never leaves "deleting" → times out fast
+	res := d.deleteEFS("shared", "prod", "efs:eu-central-1:000000000000:fs-0123456789abcdef0")
+	if res.Status != "unknown" {
+		t.Fatalf("an accepted-but-still-deleting file system must be unknown (keep the handle), "+
+			"got %+v — reporting succeeded tombstones a file system still live", res)
+	}
+}
+
 // Weapon 2 (D87), the metamorphic write/read round-trip for
 // capability.storage.filesystem on AWS EFS. A STATEFUL fake records the KmsKeyId
 // and AvailabilityZoneName createEFS writes and reflects them on the describe
@@ -177,6 +223,9 @@ func TestMetamorphicEFSRoundTrip(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(
 				func(w http.ResponseWriter, r *http.Request) {
 					switch {
+					// D800: the driver asks KMS who manages the key, so the fixture answers.
+					case strings.HasSuffix(r.Header.Get("X-Amz-Target"), ".DescribeKey"):
+						_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"CUSTOMER"}}`))
 					case r.Method == "POST" && r.URL.Path == efsPath+"/file-systems":
 						body, _ := io.ReadAll(r.Body)
 						var doc struct {
@@ -233,4 +282,70 @@ func TestMetamorphicEFSRoundTrip(t *testing.T) {
 			}
 		})
 	}
+}
+
+// efsExistingServer: the file system our deterministic CreationToken already made is
+// standing, so the create is answered FileSystemAlreadyExists and the driver must
+// recover the SAME handle by that token — the property that makes an EFS retry safe.
+func efsExistingServer(t *testing.T, capLabel string) *httptest.Server {
+	t.Helper()
+	const fsID = "fs-0123456789abcdef0"
+	return httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "POST" && r.URL.Path == efsPath+"/file-systems":
+				w.WriteHeader(409)
+				_, _ = w.Write([]byte(`{"ErrorCode":"FileSystemAlreadyExists","Message":"exists"}`))
+			case r.Method == "GET" && strings.HasPrefix(r.URL.Path, efsPath+"/resource-tags/"):
+				_, _ = w.Write([]byte(`{"Tags":[{"Key":"groundhold-capability","Value":"` + capLabel +
+					`"},{"Key":"groundhold-environment","Value":"prod"}]}`))
+			case r.Method == "GET" && r.URL.Path == efsPath+"/file-systems":
+				b, _ := json.Marshal(map[string]any{"FileSystems": []any{map[string]any{
+					"FileSystemId": fsID, "LifeCycleState": "available", "Encrypted": true}}})
+				_, _ = w.Write(b)
+			case r.Method == "PUT":
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{}`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+}
+
+func efsRESTRole(req *http.Request, _ []byte) certifynet.Role {
+	if req.Method == http.MethodGet {
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingEFS enrols efs in the D391 gate. EFS is one of the nine drivers that
+// carry a deterministic idempotency token (D390's idempotencyCarried), and this is the
+// other half of that story: the token makes AWS refuse the duplicate, and the recovery
+// path turns that refusal into the SAME handle rather than a failure.
+func TestAdoptsExistingEFS(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:           "aws/efs",
+		Classify:       efsRESTRole,
+		ExistingServer: func() *httptest.Server { return efsExistingServer(t, "shared") },
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.EFSBaseURL = happyURL
+			d.KMSBaseURL = happyURL
+			d.Now = time.Now
+			d.PollInterval = time.Millisecond
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("efs", "shared", "prod", efsAttrs(), efsImpl(), "shared", 1)
+		},
+		PID:              efsProviderID("eu-central-1", "000000000000", "fs-0123456789abcdef0"),
+		AllowedMutations: 2, // the refused create + backup-policy convergence
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

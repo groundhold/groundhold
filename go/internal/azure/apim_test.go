@@ -148,14 +148,15 @@ func TestDeleteAPIMForeignRefused(t *testing.T) {
 func TestHonestyHarnessAPIM(t *testing.T) {
 	pid := apimProviderID(testSub, "rg1", apimServiceName("prod", "front", 1))
 	p := &certifynet.Probe{
-		// AssertTransient left false — D237 TODO: this driver's create/delete ladder
-		// still maps 429/503/403 to terminal failed (and drops the providerId); it must
-		// route through provider.MutationResult before the transient invariant can lock.
 		Name:            "azure/apim",
 		Classify:        armRole,
 		OwnerTagValue:   "front",
 		AssertTransient: true, // D237
 		DeterministicID: true,
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("apim", "front", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL

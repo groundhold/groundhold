@@ -154,6 +154,112 @@ cases:
       error: plan
       code: consent-required
 
+  - name: plan-refuses-to-retire-a-protection-without-consent
+    impl: go
+    description: >
+      D698: threat detection is `stateful: false` — correctly, it holds no data a
+      delete would lose — so none of D47's stateful friction applied and a plain
+      retirement switched detection OFF. Its delete removes a CONTROL, not a
+      resource, and this repo's rule is that a protection is never lifted as a side
+      effect. Refused, naming both ways forward: consent deliberately, or drop the
+      capability from the contract and stop asserting it while the control stays on.
+    plan:
+      at: "2026-07-11T19:00:00Z"
+      bindings: { threats: "fake:detector-1" }
+      contract: &prot-retired
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: r-prot, environment: test, version: 2 }
+        capabilities:
+          - id: threats
+            type: capability.security.threatdetection
+            state: retired
+      candidate: &prot-cand
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: r-prot
+        capabilities: {}
+      vocab: &prot-vocab
+        - capability: capability.security.threatdetection
+          version: "0.1"
+          stateful: false
+          protection: true
+          attributes:
+            detection.enabled:
+              kind: bool
+              description: Whether the detector is on
+    expect:
+      error: plan
+      code: consent-required
+
+  - name: plan-retires-a-protection-with-scoped-consent
+    impl: go
+    description: >
+      D698: the same retirement compiles once the contract scopes
+      `autonomy.allow_protection_lift` to that capability — the D48 shape, where
+      consent names what it covers rather than being a blanket. The gate exists to
+      make the decision explicit, not to make it impossible.
+    plan:
+      at: "2026-07-11T19:00:00Z"
+      bindings: { threats: "fake:detector-1" }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: r-prot, environment: test, version: 2 }
+        capabilities:
+          - id: threats
+            type: capability.security.threatdetection
+            state: retired
+        autonomy:
+          allow_protection_lift:
+            - threats
+      candidate: *prot-cand
+      vocab: *prot-vocab
+    expect:
+      actions:
+        a-delete-threats:
+          operation: delete
+          capability: threats
+
+  - name: protection-lift-consent-naming-an-unknown-capability-is-a-load-error
+    description: >
+      D597 + D698: every consent list that names capabilities is checked from one
+      list of keys, so the newest one is covered without anyone remembering to add a
+      branch. A typo grants nothing, and it must say so at load rather than surface
+      as a refusal later.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: r-prot-typo, environment: test, version: 2 }
+      capabilities:
+        - id: threats
+          type: capability.security.threatdetection
+          state: retired
+      autonomy:
+        allow_protection_lift:
+          - htreats
+    expect:
+      error: contract
+
+  - name: intrusive-probe-consent-naming-an-unknown-capability-is-a-load-error
+    description: >
+      D597 fixed this in the runtime and the reference never learned it: it checked
+      `allow_replace_stateful` alone, so a typo in the list that SPENDS — an
+      intrusive probe restores a backup into a scratch instance — loaded clean in one
+      implementation and refused in the other. Dual on purpose (D698 found it).
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: r-probe-typo, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      autonomy:
+        allow_intrusive_probes:
+          - bd
+    expect:
+      error: contract
+
   - name: plan-skips-retired-unbound-capability
     impl: go
     description: retired and unbound is already converged - nothing to change.

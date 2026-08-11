@@ -202,7 +202,7 @@ func scopedPreflight(pf provider.Preflighter, prov provider.Provider,
 
 	deniedSet, unattSet := map[string]bool{}, map[string]bool{}
 	for _, g := range groups {
-		d, rerr := rpf.CheckResourcePermissions(g.service, g.providerID, sortedKeys(g.perms))
+		d, u, rerr := rpf.CheckResourcePermissions(g.service, g.providerID, sortedKeys(g.perms))
 		switch {
 		case errors.Is(rerr, provider.ErrNoResourceSurface):
 			for p := range g.perms { // no per-resource surface: use the project check
@@ -215,6 +215,9 @@ func scopedPreflight(pf provider.Preflighter, prov provider.Provider,
 		default:
 			for _, p := range d { // AUTHORITATIVE resource-level denial
 				deniedSet[p] = true
+			}
+			for _, p := range u { // D720: the provider could not stand behind these
+				unattSet[p] = true
 			}
 		}
 	}
@@ -417,6 +420,19 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 	for _, it := range actions {
 		a, _ := it.(map[string]any)
 		capID, _ := a["capability"].(string)
+		// D959: the plan's field-reclaim consent (D699) is RE-DERIVED from the pinned
+		// contract here, not trusted from the plan's bool. Sealing it defeats granting the
+		// consent AFTER a plan is sealed, but a hand-authored or stale plan can still assert
+		// fieldReclaim=true for a capability the contract never scoped — force-taking fields
+		// another manager owns. Re-check on the same unconditional-gate principle as the
+		// delete/replace consents above.
+		if reclaim, _ := a["fieldReclaim"].(bool); reclaim && !policy.AllowsFieldReclaim(c, capID) {
+			r := refused(perr.ConsentRequired, 2, fmt.Sprintf(
+				"action %v reclaims fields on %s (force over another manager) without "+
+					"autonomy.allow_field_reclaim consent", a["id"], capID))
+			r.Capability = capID // D230
+			return r
+		}
 		switch op, _ := a["operation"].(string); op {
 		case "create":
 			// D76: the service comes from the SEALED plan target, cross-
@@ -468,6 +484,20 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 					"action %v deletes stateful %s and the pinned contract "+
 						"forbids delete_stateful", a["id"], capID))
 			}
+			// D959: deleting a protection: capability switches a security CONTROL off
+			// (GuardDuty/WAF/SCC/Defender). The compiler refuses this without
+			// autonomy.allow_protection_lift (D698) — re-check here on the SAME
+			// unconditional-gate principle, so a hand-authored or stale plan cannot lift a
+			// control the pinned contract never consented to lift. A protection cap is
+			// stateful:false, so the delete_stateful gate above never catches it; without
+			// this the D698 consent lived only at compile.
+			if policy.ProtectionOf(c, capID, vocabs) && !policy.AllowsProtectionLift(c, capID) {
+				r := refused(perr.ConsentRequired, 2, fmt.Sprintf(
+					"action %v deletes protection %s (its delete removes a control, not a "+
+						"resource) without autonomy.allow_protection_lift consent", a["id"], capID))
+				r.Capability = capID // D230: main builds the allow_protection_lift edit
+				return r
+			}
 			pinnedID, _ := a["targetProviderId"].(string)
 			pinnedGen, _ := a["targetGeneration"].(int)
 			if dep, _ := a["deposed"].(bool); dep {
@@ -506,7 +536,7 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 			}
 		case "update":
 			if bound[capID] == "" {
-				return refused(perr.StaleDecision, 2, fmt.Sprintf(
+				return refused(perr.StaleDecision, 3, fmt.Sprintf(
 					"action %v updates %s, which has no binding", a["id"], capID))
 			}
 			// D46: every change must be honorable in place — preflight
@@ -528,7 +558,7 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 			// D52 takeover: stamp authorship on an adopted resource. It must
 			// still be bound, and the driver must be able to take ownership.
 			if bound[capID] == "" {
-				return refused(perr.StaleDecision, 2, fmt.Sprintf(
+				return refused(perr.StaleDecision, 3, fmt.Sprintf(
 					"action %v claims %s, which has no binding", a["id"], capID))
 			}
 			if _, ok := prov.(provider.Claimer); !ok {
@@ -553,13 +583,15 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 
 	// decision-heads CAS, pre-lease (D41)
 	if reason := staleReason(led, reads); reason != "" {
-		return refused(perr.StructuralError, 3, reason)
+		// D619: the SAME condition was refused as stale-decision on the writer
+		// path below; the documents are fine, the world moved.
+		return refused(perr.StaleDecision, 3, reason)
 	}
 
 	// ---- evaluation clock (explicit, never wall time) ----
 	evalClock, err := parseTs(at)
 	if err != nil {
-		return refused(perr.StructuralError, 2, fmt.Sprintf("bad evaluation time: %v", err))
+		return refused(perr.StructuralError, 1, fmt.Sprintf("bad evaluation time: %v", err))
 	}
 	if evalClock < led.Clock {
 		return refused(perr.ClockRegress, 2, "evaluation time precedes ledger history")
@@ -573,7 +605,18 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 	// reading. Either way the remedy is re-observe + re-seal, the stale-plan
 	// class (exit 3), checked pre-lease like the decision heads above.
 	if reason := foldStaleReason(led, actions, evalClock); reason != "" {
-		return refused(perr.StructuralError, 3, reason)
+		return refused(perr.StaleDecision, 3, reason)
+	}
+	if reason := changeStaleReason(led, actions, evalClock); reason != "" {
+		return refused(perr.StaleDecision, 3, reason)
+	}
+	// D634: the vocabulary the plan was compiled against decides whether a delete is
+	// forbidden by the contract's own autonomy block. `spec/sealed-plan.md` step 3
+	// says apply re-checks the read-set's vocabulary versions; it never did — and the
+	// pin was a version STRING, so an edited file with an untouched version changed
+	// the meaning of the plan invisibly.
+	if reason := vocabDriftReason(planDoc, vocabs); reason != "" {
+		return refused(perr.ReadSetMismatch, 2, reason)
 	}
 
 	planHash, err := canonical.HashPlan(planDoc)
@@ -643,6 +686,24 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 	}
 
 	// ---- execution ----
+	// D665: a plan with nothing to write has nothing to apply. This used to take the
+	// empty set into appendLease, where the ledger's own document validator refused
+	// ("event.capabilities must be a non-empty list of ids") — and that refusal was
+	// reported as a LEASE CONFLICT, exit 3, with the validator's internal text in the
+	// reasons. The published remediation for lease-conflict is "wait for expiry, or
+	// break the lease deliberately"; there is no lease, so the operator waits for
+	// nothing and every retry produces the same empty plan.
+	//
+	// Reachable from the documented quickstart with no credentials: a candidate
+	// declaring an attribute the provider cannot witness converges once, and D249
+	// then correctly isolates that attribute as unverifiable, so the second plan
+	// carries no actions at all.
+	if len(writes) == 0 {
+		return refused(perr.NothingToChange, 2,
+			"the sealed plan carries no actions — the world already matches the "+
+				"candidate on everything this run can compare, so there is nothing "+
+				"to apply")
+	}
 	tok, err := w.appendLease(writes)
 	if err != nil {
 		code := perr.LeaseConflict
@@ -842,13 +903,26 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 			})
 		}
 
+		// D699: the sealed field-reclaim consent, per action. Set from the PLAN so an
+		// operator cannot widen it after sealing, and cleared after the call so it
+		// never leaks onto the next action.
+		if fr, ok := prov.(provider.FieldReclaimer); ok {
+			reclaim, _ := a["fieldReclaim"].(bool)
+			fr.SetFieldReclaim(reclaim)
+		}
+
 		var cr provider.CreateResult
 		op, _ := a["operation"].(string)
 		svc := serviceOf(asStr(a["target"]))
 		switch op {
 		case "update":
+			// implArgs carries the action's D283/D961 compile-folded operand literals
+			// (foldedImplementation), so a driver that re-pushes a full body (Lambda's
+			// UpdateFunctionConfiguration) sees the RESOLVED wired operand — not the raw
+			// $ref, which the builder drops, STRIPPING it as collateral (D962). Same
+			// folded map the create branch below feeds prov.Create.
 			cr = prov.Update(svc, capID, env, bound[capID],
-				attributesRaw(c, cand, vocabs, capID), implementationOf(cand, capID),
+				attributesRaw(c, cand, vocabs, capID), implArgs,
 				changePaths(a), key)
 		case "delete":
 			// D48: delete acts on the PINNED identity, never on the
@@ -863,10 +937,35 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 			// action consumes them; otherwise it IS the candidate's map.
 			cr = prov.Create(svc, capID, env, attributesRaw(c, cand, vocabs, capID),
 				implArgs, key, actionGeneration(a))
+			// D723: a replacement's create must not come back holding the identity it
+			// is replacing. Several drivers adopt an existing resource by ownership
+			// tags before creating (D253, so a lost ledger does not mint a duplicate),
+			// and those tags do not carry the generation — so the generation-2 create
+			// of a replacement could find the generation-1 resource, return ITS id with
+			// zero mutations, and the delete that follows, pinned to that same id,
+			// destroys it. Both actions report success and the capability is left
+			// unbound with its resource gone.
+			//
+			// This is the provider-independent backstop: whatever a driver's scan does,
+			// a create that returns the identity being replaced did not create anything,
+			// and continuing would write a binding to a resource this run is about to
+			// delete. Refuse before that binding is written.
+			if rep, ok := a["replaces"].(map[string]any); ok && cr.Status == "succeeded" {
+				if old, _ := rep["providerId"].(string); old != "" && cr.ProviderID == old {
+					cr = provider.CreateResult{Status: "failed", Reason: fmt.Sprintf(
+						"the replacement create returned the identity it is replacing "+
+							"(%s) — it adopted the resource the following delete would "+
+							"destroy; nothing was created and nothing has been deleted",
+						old)}
+				}
+			}
 		}
 		// D257: detach the heartbeat — a phase must never leak onto the next action.
 		if pr, ok := prov.(provider.ProgressReporter); ok {
 			pr.SetProgress(nil)
+		}
+		if fr, ok := prov.(provider.FieldReclaimer); ok {
+			fr.SetFieldReclaim(false)
 		}
 
 		// D275: a succeeded create's declared outputs are filtered through the
@@ -1549,6 +1648,112 @@ func foldedImplementation(a map[string]any, cand *contract.Candidate, capID stri
 // sealed against superseded knowledge), and still be within its TTL. Any
 // miss is the stale-plan class — re-observe + re-seal — never a silent apply
 // of a decayed literal.
+// changeStaleReason re-checks the EVIDENCE a change set rests on (D632).
+//
+// `plan` refuses to seal against a decayed observation; `apply` never re-judged it.
+// Its only freshness check was foldStaleReason, which covers folded operands and
+// nothing else — so the change set's own `from:` value, the assertion about current
+// reality that justifies the mutation, was trusted from the plan however old the plan
+// was. Measured: an observation with ttl 3600 recorded at 01:00:00Z, a plan sealed one
+// second later, and
+//
+//	plan  … --at 2030-01-01T00:00:00Z   exit 2  "observation is stale — re-observe first"
+//	apply … --at 2030-01-01T00:00:00Z   exit 0  APPLIED
+//
+// with a real receipt in the ledger: a mutation justified by a proof that died four
+// years earlier. `converge` was safe only because it re-plans; the hole is reachable
+// exactly through the seal-now-apply-later review workflow that D36/D89 promote.
+//
+// D42/D47/D325 say apply re-derives rather than trusts. Freshness was the one thing it
+// still took on the plan's word.
+// vocabDriftReason compares the vocabularies the plan pinned against the ones this
+// process loaded (D634). The pin is "<version> <canonical-hash-of-the-model>", so a
+// version bump AND a same-version content edit both surface; a comment or a reordering
+// does not, because the hash covers the model the runtime reads rather than the bytes.
+func vocabDriftReason(planDoc map[string]any, vocabs map[string]vocab.Vocabulary) string {
+	plan, _ := planDoc["plan"].(map[string]any)
+	reads, _ := plan["reads"].(map[string]any)
+	pinned, _ := reads["vocabularies"].(map[string]any)
+	for typ, want := range pinned {
+		w, _ := want.(string)
+		if w == "" {
+			continue
+		}
+		voc, ok := vocabs[typ]
+		if !ok {
+			return fmt.Sprintf("the plan was compiled against vocabulary %s and this "+
+				"run has no vocabulary for it — re-plan against the vocabulary you "+
+				"intend to execute with", typ)
+		}
+		h, err := canonical.HashVocabulary(voc)
+		if err != nil {
+			return fmt.Sprintf("cannot identify vocabulary %s: %v", typ, err)
+		}
+		got := voc.Version + " " + h
+		// A plan sealed before D634 pins the bare version; compare what it pinned.
+		if !strings.Contains(w, " ") {
+			got = voc.Version
+		}
+		if got != w {
+			return fmt.Sprintf("vocabulary %s changed since the plan was sealed "+
+				"(pinned %q, loaded %q) — the vocabulary decides statefulness and "+
+				"therefore which deletes the contract forbids; re-plan", typ, w, got)
+		}
+	}
+	return ""
+}
+
+func changeStaleReason(led *ledger.Ledger, actions []any, evalClock int) string {
+	for _, it := range actions {
+		a, _ := it.(map[string]any)
+		capID, _ := a["capability"].(string)
+		changes, _ := a["changes"].([]any)
+		for _, ci := range changes {
+			c, _ := ci.(map[string]any)
+			path, _ := c["path"].(string)
+			if path == "" {
+				continue
+			}
+			// An attribute with NO observation is not this check's business: the
+			// compiler derives changes from bindings as well as observations, and a
+			// legitimate seeded binding carries no observation.recorded at all
+			// (conformance: apply-updates-a-bound-capability). Refusing those was an
+			// over-reach of mine that the suite caught — this check is about evidence
+			// that EXPIRED, not evidence that was never of this kind.
+			rec, ok := led.Observations[capID][path]
+			if !ok {
+				continue
+			}
+			obsClock, err := ledger.ParseTs(rec.ObservedAt)
+			if err != nil {
+				return fmt.Sprintf("stale plan: action %v changes %s.%s and its "+
+					"observation carries an unreadable time %q",
+					a["id"], capID, path, rec.ObservedAt)
+			}
+			// D967: judge freshness like ledger.ObservationExpired and foldStaleReason
+			// below — NOT with a `TTLSeconds > 0` conjunct (that let a ttl==0
+			// observation, which every sibling calls stale at any age, justify a
+			// mutation), and WITH the D189 future guard (an observation dated after the
+			// evaluation time is invalid, never fresh). Both holes let apply re-seal a
+			// change on evidence nothing currently witnesses — the D632 gate the
+			// conjunct claimed to close, left open for ttl==0 and future dates.
+			if evalClock-obsClock > rec.TTLSeconds {
+				return fmt.Sprintf("stale plan: action %v changes %s.%s, and the "+
+					"observation that justifies it expired %ds ago — the plan asserts "+
+					"a `from` value nothing currently witnesses; re-observe and re-seal",
+					a["id"], capID, path, evalClock-obsClock-rec.TTLSeconds)
+			}
+			if evalClock-obsClock < 0 {
+				return fmt.Sprintf("stale plan: action %v changes %s.%s, and the "+
+					"observation that justifies it is dated after the evaluation time — "+
+					"invalid, cannot re-seal against it (D189)",
+					a["id"], capID, path)
+			}
+		}
+	}
+	return ""
+}
+
 func foldStaleReason(led *ledger.Ledger, actions []any, evalClock int) string {
 	for _, it := range actions {
 		a, _ := it.(map[string]any)

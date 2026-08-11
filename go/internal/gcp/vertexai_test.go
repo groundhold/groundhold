@@ -52,12 +52,27 @@ func (f *fakeVertex) handler(t *testing.T) http.HandlerFunc {
 			f.createBody = string(raw)
 			_, _ = w.Write([]byte(`{"name":"` + "projects/" + vtxProj + "/locations/" + f.loc + "/operations/opc" + `"}`))
 		case r.Method == "DELETE" && strings.Contains(p, "/endpoints/"):
+			// D995: the real Vertex endpoints.delete has no etag parameter and 400s any
+			// `?etag=` ("Unknown name 'etag': Cannot bind query parameter"). The fake
+			// mirrors that, so a delete that appends an etag fails exactly as in the field.
+			if r.URL.Query().Has("etag") {
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`{"error":{"message":"Invalid JSON payload received. Unknown name \"etag\": Cannot bind query parameter."}}`))
+				return
+			}
 			f.order = append(f.order, "delete")
 			_, _ = w.Write([]byte(`{"name":"` + "projects/" + vtxProj + "/locations/" + f.loc + "/operations/opd" + `"}`))
 		case r.Method == "GET" && strings.HasSuffix(p, "/endpoints"):
 			f.order = append(f.order, "list")
+			// D424: the real endpoints.list returns displayName and labels, and the
+			// create-adoption scan reads both. Serving only the name made the fake
+			// unable to describe a standing endpoint at all.
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"endpoints": []map[string]any{{"name": vtxEndpointName(f.loc, vtxID)}},
+				"endpoints": []map[string]any{{
+					"name":        vtxEndpointName(f.loc, vtxID),
+					"displayName": "claude-eu",
+					"labels":      f.labels,
+				}},
 			})
 		case r.Method == "GET" && strings.Contains(p, "/endpoints/"):
 			f.order = append(f.order, "get")
@@ -163,11 +178,13 @@ func TestVertexAIClassifyChange(t *testing.T) {
 	cases := map[string]string{
 		"inference.destinationRegions": "immutable",
 		"location.region":              "immutable",
-		"model.provider":               "immutable",
-		"model.access":                 "unsupported",
-		"service.managed":              "unsupported",
-		"cost.monthly":                 "unsupported",
-		"whatever.else":                "unsupported",
+		// D828: Vertex swaps a model ON the endpoint (undeployModel then deployModel), so
+		// the old expectation pinned replacing an endpoint every caller holds by id.
+		"model.provider":  "unsupported",
+		"model.access":    "unsupported",
+		"service.managed": "unsupported",
+		"cost.monthly":    "unsupported",
+		"whatever.else":   "unsupported",
 	}
 	for path, want := range cases {
 		got, reason := classifyVertexChange(path)
@@ -303,8 +320,11 @@ func TestVertexAIObserveNotFound(t *testing.T) {
 	f := &fakeVertex{loc: vtxRegion, notFound: true}
 	d, _ := vtxDriver(t, f)
 	obs, diags, err := d.observeVertexAI(vtxCap, vertexProviderID(vtxProj, vtxRegion, vtxID))
-	if err != nil || obs != nil || !anyContains(diags, "nothing to observe") {
-		t.Fatalf("not-found should be nothing-to-observe: obs=%v diags=%v err=%v", obs, diags, err)
+	// Corrected with D519: this asserted SILENCE for an absent bound resource,
+	// which is the defect F-LC3 exists to prevent — the compile sees an empty set,
+	// plans nothing, and converge reports a world that no longer contains it.
+	if err != nil || !absentMarked(obs) || !anyContains(diags, "bound resource is gone") {
+		t.Fatalf("not-found must mark the resource absent: obs=%v diags=%v err=%v", obs, diags, err)
 	}
 }
 
@@ -322,6 +342,20 @@ func TestVertexAIDeleteOwned(t *testing.T) {
 	res := d.deleteVertexAI(vtxCap, "prod", vertexProviderID(vtxProj, vtxRegion, vtxID))
 	if res.Status != "succeeded" {
 		t.Fatalf("owned delete: got %+v", res)
+	}
+}
+
+// TestVertexAIDeleteSendsNoEtag (D995): a present endpoint always carries an etag,
+// but Vertex endpoints.delete rejects an `?etag=` param. The delete must NOT append
+// one — the ownership pre-read is the guard — so it succeeds against the faithful fake
+// (which 400s an etag query, exactly like the real API). Before the fix every delete
+// of a present endpoint 400'd, so the retire could never complete.
+func TestVertexAIDeleteSendsNoEtag(t *testing.T) {
+	f := &fakeVertex{loc: vtxRegion, labels: groundholdLabels(), etag: "etag-abc123"}
+	d, _ := vtxDriver(t, f)
+	res := d.deleteVertexAI(vtxCap, "prod", vertexProviderID(vtxProj, vtxRegion, vtxID))
+	if res.Status != "succeeded" {
+		t.Fatalf("delete must succeed without appending an etag param, got %+v", res)
 	}
 }
 

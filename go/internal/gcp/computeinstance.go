@@ -35,8 +35,13 @@ var (
 	gceZoneOK = regexp.MustCompile(`^[a-z]+-[a-z]+[0-9]-[a-z]$`)
 	// gceMachineTypeOK bounds a machine type (family-cpus, or a custom form).
 	gceMachineTypeOK = regexp.MustCompile(`^[a-z0-9]+-[a-z0-9-]+$`)
-	// gceImageOK bounds a source image reference: a full URL or projects/<p>/global/images/<i>.
-	gceImageOK = regexp.MustCompile(`^(https://[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]+|projects/[a-z0-9-]+/global/images/[A-Za-z0-9-]+(/family/[A-Za-z0-9-]+)?|global/images/family/[A-Za-z0-9-]+)$`)
+	// gceImageOK bounds a source image reference: a full URL, a specific image
+	// projects/<p>/global/images/<image>, the canonical FAMILY form
+	// projects/<p>/global/images/family/<family> (D891 — the old pattern put `/family/`
+	// AFTER the image name, which is not how GCP writes a family ref, so the standard
+	// projects/debian-cloud/global/images/family/debian-12 was rejected), or the
+	// project-relative short family form global/images/family/<family>.
+	gceImageOK = regexp.MustCompile(`^(https://[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]+|projects/[a-z0-9-]+/global/images/(family/)?[A-Za-z0-9-]+|global/images/family/[A-Za-z0-9-]+)$`)
 	// gceSubnetOK bounds a subnetwork reference.
 	gceSubnetOK = regexp.MustCompile(`^(https://[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]+|projects/[a-z0-9-]+/regions/[a-z0-9-]+/subnetworks/[a-z0-9-]+|regions/[a-z0-9-]+/subnetworks/[a-z0-9-]+)$`)
 )
@@ -265,11 +270,27 @@ func classifyGCEInstanceChange(path string) (string, string) {
 	case "availability.class":
 		return "immutable", "placement is fixed by the zone the instance was created in — a change is a new machine"
 	case "network.publicExposure":
-		return "immutable", "the external address is attached to the interface at creation — a change is a new machine, not a toggle"
+		// D821: this said "a change is a new machine, not a toggle". Compute Engine has
+		// three toggles: instances.addAccessConfig, deleteAccessConfig and
+		// updateAccessConfig, all on an existing instance's network interface. Destroying a
+		// machine to add or remove an external address loses local SSD data and the uptime,
+		// for a change Google makes in one call.
+		return "unsupported", "in-place exposure change is not wired for Compute Engine in " +
+			"this slice — GCE does support it (instances.addAccessConfig / deleteAccessConfig " +
+			"/ updateAccessConfig on the running interface), so this is a gap in groundhold, " +
+			"not a property of the instance: do it directly rather than replace the machine"
 	case "encryption.atRest":
 		return "unsupported", "Compute Engine encrypts every persistent disk at rest and offers no way to disable it — there is nothing to patch"
 	case "encryption.customerManagedKeys":
-		return "immutable", "the key encrypting a disk is fixed when the disk is created — re-keying is a new disk, and so a new machine"
+		// D829: the twin of the EC2 case, and the same false inference. A persistent disk's
+		// key is fixed at creation, so re-keying is a new DISK — and Compute Engine has
+		// instances.detachDisk and instances.attachDisk, so the machine keeps its id and
+		// its addresses while the disk is swapped under it.
+		return "unsupported", "in-place re-keying is not wired for Compute Engine in this " +
+			"slice — the DISK must be recreated (a snapshot restored under the new key), but " +
+			"the INSTANCE does not: instances.detachDisk and attachDisk swap it underneath a " +
+			"machine that keeps its id, so this is a gap in groundhold rather than a reason " +
+			"to replace the machine"
 	case "service.managed":
 		return "unsupported", "platform/projection property — nothing to patch"
 	}

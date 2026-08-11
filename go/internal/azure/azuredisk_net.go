@@ -128,12 +128,18 @@ func (d *Driver) observeAzureDisk(capability, providerID string) ([]provider.Obs
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"managed disk not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"managed disk not found — bound resource is gone (will re-create)"}, nil
 	}
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: doc.Location, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
-		{Path: "encryption.atRest", Value: true, Derivation: "config-intent"},
+		{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"},
 		// A platform key is NOT customer-managed: reporting true on its strength
 		// would certify a BYOK control the customer cannot revoke.
 		{Path: "encryption.customerManagedKeys",
@@ -188,24 +194,10 @@ func (d *Driver) deleteAzureDisk(capability, environment, providerID string) pro
 			Reason: "managed disk tags do not match — refusing to destroy data that is not ours"}
 	}
 	url, _ := d.armURL(rg, d.azureDiskPath(name), azureDiskAPIVersion)
-	dst, dresp, de := d.doARM("DELETE", url, nil)
-	switch {
-	case de != nil:
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
-			Reason: fmt.Sprintf("delete outcome unknown: %v", de)}
-	case dst == http.StatusNotFound:
-		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // idempotent
-	case dst >= 500:
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
-			Reason: fmt.Sprintf("delete HTTP %d (server error — may have landed) — reconcile", dst)}
-	case dst < 200 || dst >= 300:
-		if r := provider.MutationResult(dst, azErrCode(dresp), nil, providerID, "delete"); r != nil {
-			return *r
-		}
-		return provider.CreateResult{ProviderID: providerID, Status: "failed",
-			Reason: fmt.Sprintf("delete HTTP %d: %s", dst, mutDetailAz(dresp))}
-	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// D984: route the delete through deleteAndConfirm (D971) — a disk DELETE returns
+	// 202 Accepted (async); concluding succeeded here tombstoned data still live.
+	// The helper polls to a confirmed 404, unknown on timeout.
+	return *d.deleteAndConfirm(url, providerID, "managed disk")
 }
 
 // discoverAzureDisks enumerates managed disks in the subscription as
@@ -256,7 +248,7 @@ func (d *Driver) discoverAzureDisks(region string) ([]provider.Discovered, []str
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.storage.block",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

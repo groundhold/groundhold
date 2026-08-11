@@ -46,10 +46,35 @@ func TestLiveAWSSmoke(t *testing.T) {
 	// (2) Full SIGNED pre-read — catches SigV4 regressions AND the NotFound->found=false
 	// branch that D269 turned into "unreadable" (the exact path a create relies on). Needs
 	// creds; skipped (with the protocol check still asserted) when absent.
-	if os.Getenv("AWS_ACCESS_KEY_ID") == "" {
-		t.Log("no AWS creds in env — signed DescribeCluster check skipped (protocol check passed)")
-		return
+	// D604: the signed half is its OWN test now. It used to be the tail of this one,
+	// behind a `t.Log` + `return` when credentials were absent — which reports PASS,
+	// with the one check `scripts/preship.sh` exists for never executed. Split, the
+	// protocol half still passes on a credential-free box and the signed half reports
+	// SKIP, which is what it is. Both are what a reader downstream needs to see.
+}
+
+// TestLiveAWSSignedSmoke is the SigV4 half (D604): a signed pre-read against real AWS.
+// It catches a signing regression and the NotFound->found=false branch D269 turned into
+// "unreadable" — the exact path a create relies on. Nothing else in the project covers
+// signing against a real endpoint, so when this SKIPs, that class is unmeasured and
+// `scripts/preship.sh` refuses to call the run clean.
+func TestLiveAWSSignedSmoke(t *testing.T) {
+	if os.Getenv("GROUNDHOLD_LIVE_AWS_SMOKE") == "" {
+		t.Skip("set GROUNDHOLD_LIVE_AWS_SMOKE=1 to run the live AWS smoke")
 	}
+	if os.Getenv("AWS_ACCESS_KEY_ID") == "" && os.Getenv("AWS_PROFILE") == "" {
+		t.Skip("no AWS credentials in the environment — the SIGNED DescribeCluster " +
+			"check cannot run, and no other gate sees a SigV4 regression")
+	}
+	region := os.Getenv("AWS_REGION")
+	if region == "" {
+		region = os.Getenv("AWS_DEFAULT_REGION")
+	}
+	if region == "" {
+		region = "eu-central-1"
+	}
+	d := NewDriver(region)
+
 	_, found, rerr := d.describeEKSCluster(region, "groundhold-smoke-none")
 	if rerr != nil {
 		t.Fatal("signed DescribeCluster on a nonexistent cluster must be READABLE (a clean 404) — " +
@@ -61,15 +86,47 @@ func TestLiveAWSSmoke(t *testing.T) {
 	t.Log("signed DescribeCluster check: nonexistent cluster -> readable=true, found=false (create pre-read OK)")
 }
 
-// TestLiveAWSEndpointReality (D274) is the generalizable gate for the D273 wrong-path
-// class: it validates that EVERY EKS endpoint the driver constructs ACTUALLY EXISTS on
-// real AWS. AWS API Gateway returns a DISTINGUISHABLE signal for an unmatched route
-// ("Unable to determine service/operation name") vs a real one ("Missing Authentication
-// Token"), so this needs network egress but NO credentials. It drives the DRIVER's own
-// HTTP client, so a transport regression (the D269 ALPN break -> a connection error)
-// fails here too. The nonexistent path that caused F29 (D273) is a NEGATIVE control the
-// gate MUST flag. Gated by GROUNDHOLD_LIVE_AWS_SMOKE=1. The pattern extends to every
-// service/cloud: list the (method,path) a driver calls, assert each is a real route.
+// awsServiceHost maps a SigV4 service name to the host the drivers address in
+// production — taken from the drivers' own defaults, not from AWS documentation, so
+// the live gate asks about the endpoint the binary would really call. An unmapped
+// service returns "", which TestEveryRecordedServiceHasAHost turns into a make-check
+// failure rather than a route nobody asked about.
+func awsServiceHost(service, region string) string {
+	switch service {
+	// Global endpoints (no region in the host).
+	case "iam", "budgets", "cloudfront", "route53":
+		return service + ".amazonaws.com"
+	// The endpoint prefix differs from the signing name.
+	case "ses":
+		return "email." + region + ".amazonaws.com"
+	case "ecr":
+		return "api.ecr." + region + ".amazonaws.com"
+	case "acm", "aoss", "apigateway", "apprunner", "autoscaling", "backup", "bedrock",
+		"cloudtrail", "dynamodb", "ec2", "ecs", "eks", "elasticache", "elasticfilesystem",
+		"elasticloadbalancing", "es", "events", "guardduty", "kafka", "kinesis", "kms",
+		"lambda", "logs", "monitoring", "rds", "redshift-serverless", "s3", "s3-control",
+		"scheduler", "secretsmanager", "sns", "sqs", "sts", "tagging", "wafv2":
+		return service + "." + region + ".amazonaws.com"
+	}
+	return ""
+}
+
+// TestLiveAWSEndpointReality (D274) asks real AWS whether every route the drivers
+// construct is a route AWS actually has. AWS returns a DISTINGUISHABLE signal for an
+// unmatched route ("Unable to determine service/operation name") versus a real one
+// ("Missing Authentication Token"), so this needs network egress but NO credentials.
+// It drives the DRIVER's own HTTP client, so a transport regression (the D269 ALPN
+// break) fails here too. Gated by GROUNDHOLD_LIVE_AWS_SMOKE=1.
+//
+// D717: the subject is DERIVED, not typed. This gate used to carry two hand-written
+// route lists — EKS from D273 and Lambda from D694 — so it covered two services out
+// of forty, and the driver that shipped a nonexistent MSK delete route was never
+// asked about. It now reads testdata/aws-routes.txt, which TestMain records from what
+// the drivers actually build, so a new driver is covered without anyone remembering.
+//
+// The three known-wrong routes stay written down as NEGATIVE CONTROLS: the drivers do
+// not construct them any more, so the capture cannot produce them, and without them a
+// green run would not prove the classifier still works.
 func TestLiveAWSEndpointReality(t *testing.T) {
 	if os.Getenv("GROUNDHOLD_LIVE_AWS_SMOKE") != "1" {
 		t.Skip("live AWS endpoint-reality disabled (set GROUNDHOLD_LIVE_AWS_SMOKE=1 with network egress)")
@@ -78,42 +135,109 @@ func TestLiveAWSEndpointReality(t *testing.T) {
 	if region == "" {
 		region = "eu-central-1"
 	}
-	base := "https://eks." + region + ".amazonaws.com"
-	const unmatched = "Unable to determine service/operation name"
+	// D820: AWS gives MORE THAN ONE answer for a route it does not have, and this gate
+	// knew one of them. The Query/JSON frontend says "Unable to determine service/
+	// operation name"; the REST services answer `<UnknownOperationException/>` with a
+	// 404. Reading only the first meant every fabricated REST path passed as real — and
+	// two did, for OpenSearch, until an offline check of the provider's models found
+	// them. A classifier that recognises one of two failure signals is not a classifier
+	// for the half it cannot see.
+	unmatchedSignals := []string{
+		"Unable to determine service/operation name",
+		"UnknownOperationException",
+	}
 	d := NewDriver(region)
 
-	route := func(method, path string) (recognized bool, detail string) {
-		req, _ := http.NewRequest(method, base+path, nil)
+	ask := func(host, method, target string) (recognized bool, detail string) {
+		req, err := http.NewRequest(method, "https://"+host+target, nil)
+		if err != nil {
+			return false, "unbuildable request: " + err.Error()
+		}
 		resp, err := d.HTTP.Do(req) // the DRIVER's client — a transport/ALPN break fails here
 		if err != nil {
 			return false, "transport error: " + err.Error()
 		}
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<12))
 		resp.Body.Close()
-		return !strings.Contains(string(b), unmatched), strings.TrimSpace(string(b))
+		for _, u := range unmatchedSignals {
+			if strings.Contains(string(b), u) {
+				return false, strings.TrimSpace(string(b))
+			}
+		}
+		return true, strings.TrimSpace(string(b))
 	}
 
-	// EVERY (method, path) the EKS driver constructs, with bogus placeholders.
-	for _, e := range []struct{ method, path string }{
-		{"GET", "/clusters"}, {"POST", "/clusters"},
-		{"GET", "/clusters/x"}, {"DELETE", "/clusters/x"},
-		{"GET", "/clusters/x/node-groups"}, {"POST", "/clusters/x/node-groups"},
-		{"GET", "/clusters/x/node-groups/y"}, {"DELETE", "/clusters/x/node-groups/y"},
-		{"POST", "/clusters/x/node-groups/y/update-version"},
-		{"GET", "/clusters/x/updates/z"},
-		{"GET", "/clusters/x/addons"}, {"POST", "/clusters/x/addons"},
-		{"GET", "/clusters/x/addons/a"}, {"DELETE", "/clusters/x/addons/a"},
-		{"POST", "/clusters/x/addons/a/update"},
-		{"GET", "/clusters/x/pod-identity-associations"}, {"POST", "/clusters/x/pod-identity-associations"},
-		{"GET", "/clusters/x/pod-identity-associations/id"}, {"DELETE", "/clusters/x/pod-identity-associations/id"},
-	} {
-		if ok, detail := route(e.method, e.path); !ok {
-			t.Errorf("EKS endpoint %s %s is NOT a real AWS route (%q) — the driver calls a nonexistent "+
-				"path (the D273 class), or the client cannot connect (a transport regression)", e.method, e.path, detail)
+	raw, err := os.ReadFile(routesFile)
+	if err != nil {
+		t.Fatalf("read %s: %v", routesFile, err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	// D328: assert the subject before reporting on it. A truncated file would make this
+	// gate print a clean run over nothing.
+	if len(lines) < 100 {
+		t.Fatalf("%s holds %d routes — too few to be the real set; the gate would report "+
+			"clean without asking about most of what the drivers call", routesFile, len(lines))
+	}
+	services := map[string]bool{}
+	var unasked []string
+	asked := 0
+	for _, l := range lines {
+		parts := strings.SplitN(l, "\t", 3)
+		if len(parts) != 3 {
+			t.Fatalf("malformed line in %s: %q", routesFile, l)
+		}
+		service, method, target := parts[0], parts[1], parts[2]
+		host := awsServiceHost(service, region)
+		if host == "" {
+			t.Errorf("no endpoint host for service %q — its routes went unasked", service)
+			continue
+		}
+		// D820: a bare "/" carries no operation. The Query and JSON services choose it
+		// with an Action form field or an X-Amz-Target header, neither of which this
+		// unauthenticated probe sends — so AWS answers UnknownOperationException for a
+		// route that is perfectly real. Counted and named, never silently passed: a gate
+		// that quietly stops applying to part of its subject is how one becomes
+		// decorative. The offline check (TestEveryRouteTheDriverBuildsIsARouteAWSHas)
+		// holds the same ceiling over the same routes.
+		if strings.Trim(strings.SplitN(target, "?", 2)[0], "/") == "" {
+			unasked = append(unasked, service+" "+method+" "+target)
+			continue
+		}
+		services[service] = true
+		asked++
+		if ok, detail := ask(host, method, target); !ok {
+			t.Errorf("%s %s %s is NOT a real AWS route (%q) — the driver calls a path AWS "+
+				"does not have (the D273/D694/D717 class)", service, method, target, detail)
 		}
 	}
-	// NEGATIVE CONTROL: the exact D273 wrong path MUST be flagged, or the gate is toothless.
-	if ok, _ := route("GET", "/clusters/x/node-groups/y/updates/z"); ok {
-		t.Error("negative control FAILED: the known-nonexistent D273 path was not flagged — the gate has no teeth")
+	t.Logf("asked AWS about %d routes across %d services", asked, len(services))
+	if len(unasked) > 0 {
+		t.Logf("%d routes carry no path to ask about (the protocol roots): %s",
+			len(unasked), strings.Join(unasked, ", "))
+	}
+	// D328 in its sharpest form: if almost everything were unaskable, the run above would
+	// be clean and would mean nothing.
+	if asked < 100 {
+		t.Fatalf("only %d routes carried a path to ask about — this gate stopped applying "+
+			"to its subject", asked)
+	}
+
+	// NEGATIVE CONTROLS: three routes this project shipped, each read as an answer
+	// about the world when it was an answer about our URL. If any reads as real, the
+	// classifier has stopped working and every result above is meaningless.
+	for _, c := range []struct{ why, service, method, target string }{
+		{"D273", "eks", "GET", "/clusters/x/node-groups/y/updates/z"},
+		{"D694", "lambda", "GET", "/2021-10-31/functions/x/policy"},
+		{"D717", "kafka", "DELETE", "/api/v2/clusters/x"},
+		// D820: this one answers with the OTHER signal, so the half of the classifier
+		// added for it is proven rather than asserted. The first three all produce
+		// "Unable to determine service/operation name"; every one of them would still
+		// pass with the REST half deleted.
+		{"D820", "es", "GET", "/2021-01-01/opensearch/domain"},
+	} {
+		if ok, _ := ask(awsServiceHost(c.service, region), c.method, c.target); ok {
+			t.Errorf("negative control FAILED (%s): the known-nonexistent route %s %s %s "+
+				"was not flagged — the gate has no teeth", c.why, c.service, c.method, c.target)
+		}
 	}
 }

@@ -2,6 +2,7 @@ package azure
 
 import (
 	"encoding/json"
+	"groundhold/internal/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -135,8 +136,11 @@ func aksAddonServer(t *testing.T, initialEnabled, clusterFound bool, lastPut *[]
 			}
 			var doc map[string]any
 			_ = json.Unmarshal(body, &doc)
-			if en, present := aksAddonReadEnabled(doc, "azureKeyvaultSecretsProvider"); present {
-				enabled = en
+			switch aksAddonReadState(doc, "azureKeyvaultSecretsProvider") {
+			case aksAddonOn:
+				enabled = true
+			case aksAddonOff:
+				enabled = false
 			}
 			_, _ = w.Write([]byte(clusterDoc()))
 		case r.Method == "GET" && strings.HasSuffix(strings.Split(r.URL.Path, "?")[0], "/managedClusters"):
@@ -209,10 +213,21 @@ func TestCreateObserveDeleteAKSAddon(t *testing.T) {
 	if del := d.deleteAKSAddon("csi", "prod", res.ProviderID); del.Status != "succeeded" {
 		t.Fatalf("delete: %+v", del)
 	}
-	// after disable, observe reports nothing to observe.
+	// After disable the addon is not on the cluster, and D802 changed how that is SAID:
+	// "nothing to observe" left the last reading taken while it was ON standing as the
+	// freshest word, so posture kept calling it managed. The marker is the statement.
 	obs, diags, _ = d.observeAKSAddon("csi", res.ProviderID)
-	if len(obs) != 0 || len(diags) == 0 {
-		t.Fatalf("after disable, expected nothing-to-observe, got obs=%v diags=%v", obs, diags)
+	if len(diags) == 0 {
+		t.Fatalf("after disable, expected a diagnostic, got obs=%v", obs)
+	}
+	gone := false
+	for _, o := range obs {
+		if o.Path == provider.ResourceAbsentPath && o.Value == true {
+			gone = true
+		}
+	}
+	if !gone {
+		t.Fatalf("after disable, the addon was not marked absent: %v", obs)
 	}
 }
 
@@ -281,5 +296,75 @@ func TestUpdateAKSAddonRefusesHonestly(t *testing.T) {
 	res := d.updateAKSAddon("csi", "prod", pid, nil, nil, []string{"addon.version"})
 	if res.Status != "failed" || !strings.Contains(res.Reason, "no in-place AKS addon mapping") {
 		t.Fatalf("update must refuse honestly, got %+v", res)
+	}
+}
+
+// D801, the twin of the GKE case. ARM serializes false explicitly, so the proto3 trap
+// does not apply here — but the unreadable-becomes-absent half did, and a delete
+// answered SUCCEEDED about a control whose state nobody could read.
+func TestAKSAddonUnreadableProfileIsNotAbsent(t *testing.T) {
+	on := map[string]any{"properties": map[string]any{"addonProfiles": map[string]any{
+		"azureKeyvaultSecretsProvider": map[string]any{"enabled": true}}}}
+	if got := aksAddonReadState(on, "azureKeyvaultSecretsProvider"); got != aksAddonOn {
+		t.Errorf("enabled profile read as %v", got)
+	}
+	off := map[string]any{"properties": map[string]any{"addonProfiles": map[string]any{
+		"azureKeyvaultSecretsProvider": map[string]any{"enabled": false}}}}
+	if got := aksAddonReadState(off, "azureKeyvaultSecretsProvider"); got != aksAddonOff {
+		t.Errorf("disabled profile read as %v", got)
+	}
+	bad := map[string]any{"properties": map[string]any{"addonProfiles": map[string]any{
+		"azureKeyvaultSecretsProvider": "yes"}}}
+	if got := aksAddonReadState(bad, "azureKeyvaultSecretsProvider"); got != aksAddonUnreadable {
+		t.Errorf("an unparseable profile read as %v", got)
+	}
+	badFlag := map[string]any{"properties": map[string]any{"addonProfiles": map[string]any{
+		"azureKeyvaultSecretsProvider": map[string]any{"enabled": "yes"}}}}
+	if got := aksAddonReadState(badFlag, "azureKeyvaultSecretsProvider"); got != aksAddonUnreadable {
+		t.Errorf("a non-bool enabled flag read as %v", got)
+	}
+	if got := aksAddonReadState(map[string]any{}, "azureKeyvaultSecretsProvider"); got != aksAddonAbsent {
+		t.Errorf("a missing profile read as %v", got)
+	}
+}
+
+// D815. The Azure twin of the shared paging loop, and one guard the Google side does not
+// need: an ARM nextLink is a COMPLETE URL chosen by the response, so following it blindly
+// sends an Azure bearer token wherever a response says to.
+func TestARMPagingFollowsNextLinkOnTheSameHost(t *testing.T) {
+	asked := false
+	var base string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "2" {
+			asked = true
+			_, _ = w.Write([]byte(`{"value":[]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"value":[],"nextLink":"` + base + `/x?page=2"}`))
+	}))
+	defer srv.Close()
+	base = srv.URL
+	d := vnetTestDriver(t, srv)
+	pages := 0
+	if err := d.listAllARMPages("test.list", srv.URL+"/x", func([]byte) error {
+		pages++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !asked || pages != 2 {
+		t.Fatalf("nextLink not followed: asked=%v pages=%d", asked, pages)
+	}
+}
+
+func TestARMPagingRefusesANextLinkToAnotherHost(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"value":[],"nextLink":"https://attacker.example/steal?t=1"}`))
+	}))
+	defer srv.Close()
+	d := vnetTestDriver(t, srv)
+	err := d.listAllARMPages("test.list", srv.URL+"/x", func([]byte) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "refusing to send an Azure token") {
+		t.Fatalf("a nextLink to another host must be refused, got %v", err)
 	}
 }

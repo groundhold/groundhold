@@ -309,6 +309,22 @@ func (p ConsumptionBudgetPlan) notificationBlock() map[string]any {
 // createBody is the PUT body. startDate (RFC3339) is a temporal fact the vocab
 // does not carry — the create supplies the first of the current period from the
 // coordination clock; the update preserves the existing one (a full PUT replace).
+// contractBody is createBody WITHOUT the time window — the fields this contract
+// describes and nothing else (D804). The ownership pre-read compares against this,
+// because timePeriod.startDate is a provisioning fact of the run rather than a term of
+// the contract: comparing it would make the driver refuse its OWN budget after every
+// period boundary.
+func (p ConsumptionBudgetPlan) contractBody() map[string]any {
+	return map[string]any{
+		"properties": map[string]any{
+			"category":      "Cost",
+			"amount":        p.Amount,
+			"timeGrain":     p.TimeGrain,
+			"notifications": p.notificationBlock(),
+		},
+	}
+}
+
 func (p ConsumptionBudgetPlan) createBody(startDate string) map[string]any {
 	return map[string]any{
 		"properties": map[string]any{

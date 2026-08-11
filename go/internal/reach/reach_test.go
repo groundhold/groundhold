@@ -24,8 +24,11 @@ func TestClassifyHTTP(t *testing.T) {
 		{401, Unknown}, // an anonymous denial is AMBIGUOUS — never a confident accusation
 		{403, Unknown},
 		{404, Unknown}, // answered, but not confirming the public path
-		{500, Unknown},
-		{503, Unknown},
+		// D696: a 5xx is the edge saying it failed. No policy reads that way and no
+		// vantage point produces it, so it is the third state — not the absence of
+		// knowledge that `unknown` means.
+		{500, Failing},
+		{503, Failing},
 	}
 	for _, tc := range cases {
 		srv := httptest.NewServer(http.HandlerFunc(
@@ -50,20 +53,36 @@ func TestClassifyHTTP(t *testing.T) {
 	}
 }
 
-// TestClassifyTransport pins the transport-failure branch: every no-response
-// failure is UNKNOWN (unreachable-from-here), NEVER denied, with a distinct
-// named cause per kind.
+// TestClassifyTransport pins the transport-failure branch. None of it is ever a
+// DENIAL; D696 splits it by whether the failure admits a second reading.
+//
+// The three that stay unknown are the point of the test: minutes after a create,
+// NXDOMAIN is propagation, a refused connection is an edge still provisioning, and a
+// timeout is a firewalled vantage point. Calling any of them a confirmed failure would
+// be a confident accusation — the same error this package refuses in the other
+// direction, wearing the opposite sign.
 func TestClassifyTransport(t *testing.T) {
-	// a refused connection: point at a closed port on the loopback via the fake,
-	// plus the real-getter path against an unroutable address.
-	for _, spec := range []string{"refused", "dns", "tls", "timeout"} {
-		status, err := FakeGetter(spec).Get("https://edge.invalid/")
+	for _, tc := range []struct {
+		spec string
+		want Verdict
+	}{
+		{"refused", Unknown}, // an edge may still be provisioning
+		{"dns", Unknown},     // propagation, or split-horizon DNS
+		{"timeout", Unknown}, // a firewalled vantage point
+		// A certificate that does not verify is not a policy and not a propagation
+		// delay: the edge is there and the connection to it is broken.
+		{"tls", Failing},
+	} {
+		status, err := FakeGetter(tc.spec).Get("https://edge.invalid/")
 		v, cause := Classify(status, err)
-		if v != Unknown {
-			t.Errorf("%s: verdict = %q, want unknown (unreachable-from-here is never a denial)", spec, v)
+		if v != tc.want {
+			t.Errorf("%s: verdict = %q, want %q", tc.spec, v, tc.want)
+		}
+		if v == Reachable {
+			t.Errorf("%s: a transport failure must never read as success", tc.spec)
 		}
 		if strings.TrimSpace(cause) == "" {
-			t.Errorf("%s: cause is empty — never a bare 'unreachable' (D306)", spec)
+			t.Errorf("%s: cause is empty — never a bare 'unreachable' (D306)", tc.spec)
 		}
 	}
 }
@@ -97,7 +116,10 @@ func TestTargetsFromOutputs(t *testing.T) {
 		"fn":  {"functionUrl": "https://abc.lambda-url.eu-central-1.on.aws/"},
 		"db":  {"endpoint": "db.internal"},
 	}
-	ts := Targets(capTypes, outputs, nil)
+	// D537: a serverless edge is gated on DECLARED public exposure now, because a
+	// Function URL exists for a private (AuthType AWS_IAM) function too. Passing
+	// nil used to mean "probe it anyway"; it now means "nobody said it is public".
+	ts := Targets(capTypes, outputs, map[string]bool{"fn": true})
 	if len(ts) != 2 {
 		t.Fatalf("expected 2 edge targets (cdn, fn), got %d: %+v", len(ts), ts)
 	}
@@ -126,9 +148,11 @@ func TestTargetsCrossCloud(t *testing.T) {
 		"gfn": {"url": "https://fn-abc123-ew.a.run.app"},
 		"cdn": {"domainName": "d111.cloudfront.net"},
 	}
-	// Cloud Run's uri exists regardless of exposure, so it is gated on the public
-	// map; the function.serverless url and cdn domainName are output-presence gated.
-	public := map[string]bool{"cr": true}
+	// Cloud Run's uri and the serverless url both exist regardless of exposure, so
+	// both are gated on the public map (D537 — a Lambda Function URL exists for an
+	// AuthType AWS_IAM function too, which the old comment here got wrong). Only
+	// the cdn domainName is output-presence gated: a distribution IS the public path.
+	public := map[string]bool{"cr": true, "gfn": true}
 	ts := Targets(capTypes, outputs, public)
 	if len(ts) != 3 {
 		t.Fatalf("expected 3 cross-cloud targets, got %d: %+v", len(ts), ts)

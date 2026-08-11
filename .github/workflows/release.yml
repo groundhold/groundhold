@@ -61,8 +61,95 @@ jobs:
 
       # The project gate (D25): vet + both conformance suites (Go + Python).
       # A tag never ships a binary that has not passed `make check`.
+      # D629: `make check`, `make differential` and `make export-check` all run the
+      # PYTHON reference implementation. `ci.yml` installs PyYAML explicitly on this
+      # same runner pool; this job assumed the pool's python3 already had it. The
+      # probe recorded above covered python3, not its packages — so the release was
+      # resting on an assumption the sibling workflow does not make.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install the one Python dependency (PyYAML)
+        run: python -m pip install --disable-pip-version-check pyyaml
+
       - name: Gate (make check)
         run: make check
+
+      # D626: the gates a release runs, rather than the gates the repository has.
+      #
+      # `ci.yml`, `security.yml`, `lint.yml` and `codeql.yml` all trigger on
+      # pull_request and on push to main/master — none of them has a `tags:` filter.
+      # A tag push therefore ran release.yml ALONE: no gitleaks, no govulncheck, no
+      # golangci-lint, no CodeQL, no race detector, no mutation meter, no differential
+      # fuzz, no export gate. Every one of those exists because something shipped
+      # without it, and a release was the one event that skipped them all.
+      #
+      # The FIVE that run here, in this job, before anything is built: `make check`
+      # above, and the four `Gate (...)` steps below — differential fuzz, race
+      # detector, mutation meter, public-export gate. That is what "the gate has to
+      # be in the job that publishes" bought.
+      #
+      # D670: the sentence this replaces claimed all EIGHT ran here, gitleaks,
+      # govulncheck, golangci-lint and CodeQL among them. Each of those four appears
+      # exactly once in this file — in that sentence. They run in `security.yml` and
+      # `lint.yml`, on pull_request and on push, which is precisely the parallel
+      # arrangement the same paragraph calls insufficient; and `codeql.yml` is
+      # additionally gated on `repository.visibility == 'public'`, so on the private
+      # repository it does not run at all.
+      #
+      # Adding them here is a real option and deliberately NOT taken blind: each
+      # needs a network install or a marketplace action, and none of it is testable
+      # from this working copy. What IS fixed is the claim — a comment that names a
+      # gate is a published claim, and `TestReleaseNotesClaimOnlyGatesThatRun` now
+      # reads this prose too, so the next author cannot widen it for free.
+      - name: Gate (cross-implementation fuzz)
+        run: make differential SEED=${{ github.run_id }} N=60
+
+      - name: Gate (race detector)
+        run: make race
+
+      - name: Gate (mutation meter — every known bug re-injected must be caught)
+        run: make mutation
+
+      - name: Gate (public export is publishable)
+        run: make export-check
+
+      # D484: half of the MANDATORY pre-ship gate, automated.
+      #
+      # D272 defined the delivery process after two broken binaries shipped GREEN:
+      # tag -> release.yml gates and attests -> *run scripts/preship.sh on a box with
+      # AWS egress* -> hand the attested artifact to the client. That middle step lived
+      # only in a design entry. Nothing in the release, the README or any checklist
+      # named it, so "the ONE gate that must pass before a client binary ships" was a
+      # thing somebody had to remember.
+      #
+      # These two checks need NO credentials — only egress — so the release can run
+      # them itself. They are precisely the two that caught nothing in `make check`:
+      # the protocol level (D269, an ALPN break that made every request fail with
+      # "malformed HTTP response") and endpoint-reality (D273, a driver polling a path
+      # that does not exist in the cloud API, mirrored by a fake that shared the wrong
+      # assumption). A release that cannot reach the endpoint is a release worth
+      # pausing.
+      - name: Live protocol + endpoint-reality (no credentials, egress only)
+        working-directory: go
+        env:
+          GROUNDHOLD_LIVE_AWS_SMOKE: "1"
+        run: |
+          set -euo pipefail
+          # D663: `go test -run` over a name that matches NOTHING exits 0. A rename
+          # or a move would leave this step green with the two live checks never
+          # running — the same vacuity the mutation meter guards against with
+          # `go test -list` before every mutant, and which this step lacked.
+          for t in TestLiveAWSSmoke TestLiveAWSEndpointReality; do
+            listed="$(go test -list "^${t}\$" ./internal/aws)"
+            case "$listed" in
+              *"$t"*) ;;
+              *) echo "$t is not in ./internal/aws — this step would pass without " \
+                      "running the live checks it exists for" >&2
+                 exit 1 ;;
+            esac
+          done
+          go test ./internal/aws -run 'TestLiveAWSSmoke|TestLiveAWSEndpointReality' -count=1 -v
 
       - name: Cross-build binaries
         working-directory: go
@@ -88,12 +175,82 @@ jobs:
             cp "../dist/${out}" "../dist/groundhold_${os}_${arch}"
           done
 
-      - name: Checksums
-        working-directory: dist
-        run: sha256sum groundhold_* | tee SHA256SUMS
+      # D478: BUILDINFO below tells a third party how to rebuild bit-identically.
+      # Until now nothing checked that a rebuild PRODUCES the same bytes, so the
+      # instruction was an invitation, not a verified property. Rebuild every
+      # artifact a second time and compare — an embedded timestamp, an absolute
+      # path -trimpath missed, or a non-deterministic link fails the release here
+      # rather than being discovered by the first reader who tries it.
+      #
+      # This proves determinism in ONE environment. Environment-independence is
+      # what BUILDINFO exists for and stays a reader's check (threat model,
+      # accepted risks).
+      - name: Verify the build is reproducible
+        working-directory: go
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${t%/*}"; arch="${t#*/}"
+            out="groundhold_${VERSION}_${os}_${arch}"
+            GOOS="$os" GOARCH="$arch" go build -trimpath \
+              -ldflags "-s -w -X main.buildVersion=${VERSION}" \
+              -o "/tmp/${out}.rebuild" ./cmd/groundhold
+            a=$(sha256sum "../dist/${out}" | cut -d' ' -f1)
+            b=$(sha256sum "/tmp/${out}.rebuild" | cut -d' ' -f1)
+            if [ "$a" != "$b" ]; then
+              echo "NOT REPRODUCIBLE: ${out} $a != $b" >&2
+              exit 1
+            fi
+            echo "reproducible: ${out}"
+          done
+
+      # D626: this used to RUN `version` and never look at the answer. `-X` is
+      # silently a no-op when the symbol path stops matching (a rename, a moved
+      # package), so the binary would report `dev`, the step would go green, and the
+      # release notes would still tell the user to check `groundhold version`.
+      # D680: every published binary that this runner CAN execute is executed, and
+      # the ones it cannot are named. Before this, ONE of the eight assets was ever
+      # run — `groundhold_<tag>_linux_amd64` — and the four version-less copies,
+      # including `groundhold_linux_amd64` (the asset the README's one-line install
+      # fetches), were never executed anywhere.
+      - name: Run every runnable artefact
+        run: |
+          set -euo pipefail
+          host_os="$(go env GOOS)"; host_arch="$(go env GOARCH)"
+          ran=0; skipped=""
+          for f in dist/groundhold_*; do
+            case "$(basename "$f")" in
+              *"${host_os}_${host_arch}")
+                echo "== $f"
+                "./$f" version
+                ran=$((ran + 1)) ;;
+              *) skipped="$skipped $(basename "$f")" ;;
+            esac
+          done
+          if [ "$ran" -lt 2 ]; then
+            echo "only $ran artefact(s) were executed — the versioned and the " \
+                 "version-less copy of this host's platform must both run" >&2
+            exit 1
+          fi
+          echo "executed $ran artefact(s); NOT executed on this runner:$skipped"
+          echo "(cross-built targets are not run here — that is a coverage gap, " \
+               "stated rather than implied)"
 
       - name: Verify version stamp
-        run: ./dist/groundhold_${GITHUB_REF_NAME}_linux_amd64 version
+        run: |
+          set -euo pipefail
+          got="$(./dist/groundhold_${GITHUB_REF_NAME}_linux_amd64 version)"
+          echo "$got"
+          case "$got" in
+            *"${GITHUB_REF_NAME}"*) ;;
+            *) echo "the binary reports '$got' but this release is ${GITHUB_REF_NAME}" \
+                    " — the -ldflags stamp did not land, and the notes tell users to" \
+                    " check exactly this" >&2
+               exit 1 ;;
+          esac
 
       # S10: record the exact toolchain + build command so anyone can rebuild a
       # bit-identical binary from the tagged source and compare against SHA256SUMS.
@@ -103,8 +260,13 @@ jobs:
           {
             go version
             echo "tag: ${GITHUB_REF_NAME}"
+            # D662: a tag is mutable; a commit is not. A third party rebuilding
+            # from "the tag" resolves whatever it points at today, which is the
+            # wrong direction for a reproducibility check to fail.
+            echo "commit: ${GITHUB_SHA}"
             echo "build: CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> go build -trimpath -ldflags \"-s -w -X main.buildVersion=${GITHUB_REF_NAME}\" ./cmd/groundhold"
-          } | tee BUILDINFO.txt
+          } > BUILDINFO.txt
+          cat BUILDINFO.txt
 
       # S3: SBOM of the built source tree (CycloneDX).
       - name: Generate SBOM
@@ -119,6 +281,34 @@ jobs:
       # pre-launch repo this step is best-effort and does not block the
       # release. It becomes authoritative at the public flip — flip
       # continue-on-error to false then so a missing attestation fails the build.
+      # D680: the checksums are taken LAST, after every published artefact exists.
+      # They used to be computed before BUILDINFO.txt and the SBOM were written, and
+      # the glob was `groundhold_*` — so two of the four asset kinds could not be
+      # covered by construction, including the BUILDINFO the rebuild instructions
+      # themselves live in.
+      #
+      # D662: NOT `| tee`. GitHub's default shell is `bash -e {0}` with no
+      # `pipefail`, so the step's status was `tee`'s: an unhashable artefact left
+      # SHA256SUMS short and the job green, and nothing downstream re-read it. The
+      # published verification command (`sha256sum -c SHA256SUMS --ignore-missing`)
+      # then passes over the file it does not list.
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum groundhold_* BUILDINFO.txt sbom.cdx.json > SHA256SUMS
+          cat SHA256SUMS
+          # Every artefact that will be uploaded must be listed. A checksum file
+          # that silently omits one is worse than none: it reads as coverage.
+          for f in groundhold_* BUILDINFO.txt sbom.cdx.json; do
+            grep -q "  $f\$" SHA256SUMS || {
+              echo "$f is not in SHA256SUMS — refusing to publish an artefact " \
+                   "nobody can verify" >&2
+              exit 1
+            }
+          done
+          sha256sum -c SHA256SUMS
+
       - name: Attest build provenance
         id: attest
         continue-on-error: true
@@ -151,6 +341,25 @@ jobs:
             echo "verified=false" >> "$GITHUB_OUTPUT"
             echo "::warning::attestation is NOT retrievable (private repo on a free plan produces none); the notes will say so instead of promising it"
           fi
+
+      # The half that still needs credentials — a SIGNED DescribeCluster proving SigV4
+      # survived — cannot run here, and saying so on the release itself is the point:
+      # the step that was forgotten was forgotten because nothing said it.
+      - name: State the manual gate that remains
+        run: |
+          {
+            echo "### Before this artifact reaches a client"
+            echo
+            echo "\`make check\`, the differential fuzz, the race detector, the mutation"
+            echo "meter, the export gate, the reproducible rebuild, and the"
+            echo "credential-free live protocol + endpoint-reality checks ran above."
+            echo
+            echo "**Still manual (D272/D484):** \`scripts/preship.sh\` on a box with AWS"
+            echo "CREDENTIALS, for the signed-request half of the live smoke. A SigV4"
+            echo "regression is invisible to every check in this pipeline."
+            echo
+            echo "Copy the ATTESTED artifact from this release — never a hand-build."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish release
         env:

@@ -136,12 +136,24 @@ func (d *Driver) observeGCEInstance(capability, providerID string) ([]provider.O
 	if err != nil {
 		return nil, nil, err
 	}
+	// D466 — the project boundary. 39 of 44 GCP deletes already guard it; these
+	// families did not, and the label check is not a substitute: our capability +
+	// environment labels are IDENTICAL in every project we manage, so a providerId
+	// naming another project passes it. sameProject is a no-op when nothing is
+	// pinned (observe/discover), a refusal when apply/converge pinned one.
+	if err := d.sameProject(project); err != nil {
+		return nil, nil, err
+	}
 	doc, found, rerr := d.getGCEInstance(project, zone, name)
 	if rerr != nil {
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"instance not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"instance not found — bound resource is gone (will re-create)"}, nil
 	}
 	public := false
 	for _, nic := range doc.NetworkInterfaces {
@@ -158,10 +170,12 @@ func (d *Driver) observeGCEInstance(capability, providerID string) ([]provider.O
 		}
 	}
 	return []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: gceRegionOfZone(zone), Derivation: "measured"},
 		{Path: "availability.class", Value: "zonal", Derivation: "measured"},
 		{Path: "network.publicExposure", Value: public, Derivation: "measured"},
-		{Path: "encryption.atRest", Value: true, Derivation: "config-intent"},
+		{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"},
 		{Path: "encryption.customerManagedKeys", Value: cmk, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}, nil, nil
@@ -170,6 +184,14 @@ func (d *Driver) observeGCEInstance(capability, providerID string) ([]provider.O
 func (d *Driver) deleteGCEInstance(capability, environment, providerID string) provider.CreateResult {
 	project, zone, name, err := splitGCEProviderID(providerID)
 	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	// D466 — the project boundary. 39 of 44 GCP deletes already guard it; these
+	// families did not, and the label check is not a substitute: our capability +
+	// environment labels are IDENTICAL in every project we manage, so a providerId
+	// naming another project passes it. sameProject is a no-op when nothing is
+	// pinned (observe/discover), a refusal when apply/converge pinned one.
+	if err := d.sameProject(project); err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	doc, found, rerr := d.getGCEInstance(project, zone, name)
@@ -217,33 +239,41 @@ func (d *Driver) deleteGCEInstance(capability, environment, providerID string) p
 // aggregatedList is one call for the whole project; the zone keys are filtered
 // to the region asked for, so a per-region sweep does not become a per-zone fan-out.
 func (d *Driver) discoverGCEInstances(region string) ([]provider.Discovered, []string, error) {
-	st, body, err := d.call("GET", fmt.Sprintf("%s/projects/%s/aggregated/instances",
-		d.computeBase(), d.Project), nil)
-	if err != nil {
-		return nil, nil, readTransport("instances.aggregatedList", err)
+	// D813: FOLLOW the pages. aggregatedList answers 500 at a time and hands back a
+	// nextPageToken; an estate with more instances than that reported the first 500 as
+	// all of them. Pages are MERGED per scope, because the zone lives in the map key and
+	// losing it would lose which zone an instance is in.
+	type gceInst struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
 	}
-	if st != http.StatusOK {
-		return nil, nil, readHTTP("instances.aggregatedList", st, gcpErrCode(body))
-	}
-	var page struct {
-		Items map[string]struct {
-			Instances []struct {
-				Name   string `json:"name"`
-				Status string `json:"status"`
-			} `json:"instances"`
-		} `json:"items"`
-	}
-	if json.Unmarshal(body, &page) != nil {
-		return nil, nil, readBody("instances.aggregatedList", st)
+	merged := map[string][]gceInst{}
+	if err := d.listAllPages("instances.aggregatedList",
+		fmt.Sprintf("%s/projects/%s/aggregated/instances", d.computeBase(), d.Project),
+		func(body []byte) error {
+			var page struct {
+				Items map[string]struct {
+					Instances []gceInst `json:"instances"`
+				} `json:"items"`
+			}
+			if json.Unmarshal(body, &page) != nil {
+				return readBody("instances.aggregatedList", http.StatusOK)
+			}
+			for scope, group := range page.Items {
+				merged[scope] = append(merged[scope], group.Instances...)
+			}
+			return nil
+		}); err != nil {
+		return nil, nil, err
 	}
 	var out []provider.Discovered
 	var diags []string
-	for scope, group := range page.Items {
+	for scope, instances := range merged {
 		zone := strings.TrimPrefix(scope, "zones/")
 		if zone == scope || gceRegionOfZone(zone) != region {
 			continue
 		}
-		for _, inst := range group.Instances {
+		for _, inst := range instances {
 			if inst.Name == "" || inst.Status == "TERMINATED" {
 				continue
 			}
@@ -259,7 +289,7 @@ func (d *Driver) discoverGCEInstances(region string) ([]provider.Discovered, []s
 			out = append(out, provider.Discovered{
 				ProviderID:   pid,
 				ResourceType: "capability.compute.instance",
-				Observations: obs,
+				Observations: provider.WithoutAbsence(obs),
 			})
 		}
 	}

@@ -210,7 +210,14 @@ func classifyElastiCacheServerlessChange(path string) (string, string) {
 	case "location.region":
 		return "immutable", "the region is the cache's home — a change is a new cache (replacement; stateful, consent-gated)"
 	case "engine.protocol":
-		return "immutable", "a serverless engine/version change is not wired in this slice — reconciling a drift is a replacement (stateful, consent-gated)"
+		// D830: the reason already said the gap was "in this slice", and the verdict
+		// destroyed a stateful cache anyway — the D822 shape, still standing after four
+		// batches. ModifyServerlessCache accepts Engine and MajorEngineVersion
+		// (botocore elasticache/2015-02-02).
+		return "unsupported", "in-place engine/version change is not wired for ElastiCache " +
+			"Serverless in this slice — AWS does support it (ModifyServerlessCache takes " +
+			"Engine and MajorEngineVersion), so this is a gap in groundhold rather than a " +
+			"reason to replace the cache and its data"
 	case "encryption.customerManagedKeys":
 		return "immutable", "the KMS key is set at create — reconciling a drift is a replacement (stateful, consent-gated)"
 	case "network.publicExposure":

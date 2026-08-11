@@ -26,6 +26,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"groundhold/internal/secretshape"
 )
 
 // SecretFinding names one suspicious value and why it is suspicious. `Pointer`
@@ -51,20 +53,10 @@ const (
 // credentialPatterns are shapes that are credentials essentially always. Kept
 // narrow on purpose: a pattern that fires on ordinary configuration trains people
 // to ignore the warning, which is worse than not having it.
-var credentialPatterns = []struct {
-	name string
-	re   *regexp.Regexp
-}{
-	{"a PEM private key", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)},
-	{"a PEM certificate", regexp.MustCompile(`-----BEGIN CERTIFICATE-----`)},
-	{"a connection string with an inline password", regexp.MustCompile(`^[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@`)},
-	{"an AWS access key id", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
-	{"a Google OAuth client secret", regexp.MustCompile(`\bGOCSPX-[A-Za-z0-9_-]{10,}`)},
-	{"a SendGrid API key", regexp.MustCompile(`\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}`)},
-	{"a Brevo API key", regexp.MustCompile(`\bxkeysib-[A-Za-z0-9]{32,}`)},
-	{"a Slack token", regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9-]{10,}`)},
-	{"a private key in OpenSSH format", regexp.MustCompile(`-----BEGIN OPENSSH PRIVATE KEY-----`)},
-}
+// D648: the value alphabet moved to internal/secretshape and is shared with the
+// redactor and the capsule certifier. This list was one of four that disagreed —
+// it knew connection strings and SendGrid keys; the certifier knew bearer tokens
+// and JWTs; neither was a superset of the other.
 
 // placeholderPatterns are template markers that should have been substituted
 // before the document reached groundhold. Reaching a provider verbatim is not a
@@ -121,6 +113,20 @@ func ScanForPlaintextSecrets(c *Candidate) []SecretFinding {
 	return out
 }
 
+// ScanValue runs the same detection over ANY decoded document value, so a caller
+// outside the candidate path can ask the identical question (D536). The backup
+// path uses it on recorded ledger events: a capsule carries a capability's history
+// VERBATIM, so a value that was a plaintext credential when it was recorded is
+// still one inside every copy made afterwards.
+//
+// The same instrument deliberately: two detectors would drift, and the one nobody
+// exercised would be the one that mattered.
+func ScanValue(pointer string, v any) []SecretFinding {
+	var out []SecretFinding
+	scanValue(&out, pointer, v)
+	return out
+}
+
 // scanValue recurses through the free-form shapes a YAML operand block can take.
 func scanValue(out *[]SecretFinding, pointer string, v any) {
 	switch t := v.(type) {
@@ -150,10 +156,9 @@ func classifySecretish(pointer, s string) (SecretFinding, bool) {
 	if trimmed == "" {
 		return SecretFinding{}, false
 	}
-	for _, p := range credentialPatterns {
-		if p.re.MatchString(trimmed) {
-			return SecretFinding{Code: CodePlaintextCredential, Pointer: pointer, Kind: p.name, Advice: adviceCredential}, true
-		}
+	if kind, ok := secretshape.ValueLooksLikeCredential(trimmed); ok {
+		return SecretFinding{Code: CodePlaintextCredential, Pointer: pointer,
+			Kind: kind, Advice: adviceCredential}, true
 	}
 	for _, p := range placeholderPatterns {
 		if p.re.MatchString(trimmed) {

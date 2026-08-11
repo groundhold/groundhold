@@ -91,7 +91,12 @@ func (d *Driver) describeServerlessCache(region, name string) (serverlessCache, 
 		return serverlessCache{}, false, readHTTP(op, st, rdsErrCode(resp))
 	}
 	var r struct {
-		Caches []serverlessCache `xml:"DescribeServerlessCachesResult>ServerlessCaches>ServerlessCache"`
+		// D936: AWS wraps each list member in <member>, not <ServerlessCache> — the
+		// old tag matched nothing, so a live cache read as len==0 (an unreadable
+		// error), and the driver could POST a create but never confirm, observe,
+		// resume, or verify-delete one. The golden fixture emitted the fake
+		// <ServerlessCache> shape, so the test agreed with the bug.
+		Caches []serverlessCache `xml:"DescribeServerlessCachesResult>ServerlessCaches>member"`
 	}
 	if xml.Unmarshal(resp, &r) != nil || len(r.Caches) == 0 {
 		return serverlessCache{}, false, readBody(op, st)
@@ -212,19 +217,25 @@ func (d *Driver) observeElastiCacheServerless(capability, providerID string) ([]
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"serverless cache not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"serverless cache not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		// a serverless cache is VPC-only — no public endpoint is assignable.
 		{Path: "network.publicExposure", Value: false, Derivation: "measured"},
 		// serverless ALWAYS encrypts at rest and in transit — structural guarantees
 		// (config-intent, like App Runner's HTTPS-only endpoint), not read fields.
-		{Path: "encryption.atRest", Value: true, Derivation: "config-intent"},
-		{Path: "encryption.inTransit", Value: true, Derivation: "config-intent"},
+		{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"},
+		{Path: "encryption.inTransit", Value: true, Derivation: "platform-invariant"},
 		// regional (multi-AZ) by construction.
-		{Path: "availability.class", Value: "regional", Derivation: "config-intent"},
+		{Path: "availability.class", Value: "regional", Derivation: "platform-invariant"},
 	}
 	var diags []string
 	if c.Engine != "" && c.MajorEngineVersion != "" {
@@ -322,7 +333,7 @@ func (d *Driver) discoverElastiCacheServerless(region string) ([]provider.Discov
 	var r struct {
 		Caches []struct {
 			Name string `xml:"ServerlessCacheName"`
-		} `xml:"DescribeServerlessCachesResult>ServerlessCaches>ServerlessCache"`
+		} `xml:"DescribeServerlessCachesResult>ServerlessCaches>member"` // D937: <member>, not <ServerlessCache> — see D936
 	}
 	if xml.Unmarshal(body, &r) != nil {
 		return nil, nil, fmt.Errorf("elasticache-serverless DescribeServerlessCaches: HTTP %d but the response did not parse", st)
@@ -347,7 +358,7 @@ func (d *Driver) discoverElastiCacheServerless(region string) ([]provider.Discov
 			diags = append(diags, c.Name+": "+dg)
 		}
 		out = append(out, provider.Discovered{
-			ProviderID: pid, ResourceType: "capability.cache.keyvalue", Observations: obs})
+			ProviderID: pid, ResourceType: "capability.cache.keyvalue", Observations: provider.WithoutAbsence(obs)})
 	}
 	return out, diags, nil
 }

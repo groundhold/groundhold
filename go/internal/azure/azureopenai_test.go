@@ -85,9 +85,11 @@ func TestBuildAzureOpenAIModelAccessNeedsGate(t *testing.T) {
 
 func TestAzureOpenAIClassifyChange(t *testing.T) {
 	cases := map[string]string{
-		"inference.destinationRegions": "immutable",
+		// D828: both follow the DEPLOYMENT, a child resource with its own PUT — the account
+		// is untouched, so the old expectations pinned replacing it for nothing.
+		"inference.destinationRegions": "unsupported",
 		"location.region":              "immutable",
-		"model.provider":               "immutable",
+		"model.provider":               "unsupported",
 		"model.access":                 "unsupported",
 		"service.managed":              "unsupported",
 		"cost.monthly":                 "unsupported",
@@ -158,6 +160,10 @@ type fakeAOI struct {
 	deployments    []map[string]any // {name, sku:{name}, properties:{model:{format,name}}}
 	notFound       bool             // 404 on account GET
 	unreadableDeps bool             // 500 on deployments list
+	// D869: ARM pages this listing. A second page proves the reduction reads past the
+	// first; an endless chain proves an unfinished read is not reported as a surface.
+	deploymentsPage2 []map[string]any
+	endlessDeps      bool
 }
 
 func aoiDeployment(name, sku, format, model string) map[string]any {
@@ -177,7 +183,17 @@ func (f *fakeAOI) handler(t *testing.T) http.HandlerFunc {
 				w.WriteHeader(500)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"value": f.deployments})
+			next := "http://" + r.Host + p + "?api-version=x&$skiptoken=2"
+			switch {
+			case f.endlessDeps:
+				_ = json.NewEncoder(w).Encode(map[string]any{"value": f.deployments, "nextLink": next})
+			case f.deploymentsPage2 == nil:
+				_ = json.NewEncoder(w).Encode(map[string]any{"value": f.deployments})
+			case strings.Contains(r.URL.RawQuery, "skiptoken"):
+				_ = json.NewEncoder(w).Encode(map[string]any{"value": f.deploymentsPage2})
+			default:
+				_ = json.NewEncoder(w).Encode(map[string]any{"value": f.deployments, "nextLink": next})
+			}
 		case strings.Contains(p, "/deployments/"): // single deployment PUT + poll GET
 			_ = json.NewEncoder(w).Encode(map[string]any{"properties": map[string]any{"provisioningState": "Succeeded"}})
 		case r.Method == "PUT" && strings.Contains(p, "/accounts/"): // account create
@@ -355,8 +371,11 @@ func TestAzureOpenAIObserveNotFound(t *testing.T) {
 	d := aoiDriver(t, srv)
 	pid := aoiProviderID(testSub, "rg1", aoiAccountName("prod", "inference", 1))
 	obs, diags, err := d.observeAzureOpenAI(aoiCap, pid)
-	if err != nil || obs != nil || !aoiHasDiag(diags, "nothing to observe") {
-		t.Fatalf("not-found should be nothing-to-observe: obs=%v diags=%v err=%v", obs, diags, err)
+	// Corrected with D518: this asserted SILENCE for an absent bound resource,
+	// which is the defect F-LC3 exists to prevent — the compile sees an empty set,
+	// plans nothing, and converge reports a world that no longer contains it.
+	if err != nil || !absentMarked(obs) || !aoiHasDiag(diags, "bound resource is gone") {
+		t.Fatalf("not-found must mark the resource absent: obs=%v diags=%v err=%v", obs, diags, err)
 	}
 }
 
@@ -458,15 +477,18 @@ func TestHonestyHarnessAzureOpenAI(t *testing.T) {
 		return d
 	}
 	p := &certifynet.Probe{
-		// AssertTransient left false — D237 TODO: this driver's create/delete ladder
-		// still maps 429/503/403 to terminal failed (and drops the providerId); it must
-		// route through provider.MutationResult before the transient invariant can lock.
 		Name:            "azure/azureopenai",
 		Classify:        armRole,
 		OwnerTagValue:   sanitizeAzTag(aoiCap),
 		AssertTransient: true, // D237
 		DeterministicID: true,
 		New:             newDriver,
+		// F-LC3 (D523): hand-wired — this probe declares New as a value rather
+		// than a literal, so the sweep could not find its anchor.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("azureopenai", aoiCap,
+				aoiProviderID(testSub, "rg1", aoiAccountName("prod", "inference", 1)))
+		},
 		Ops: []certifynet.Op{
 			{
 				Name:  "create",

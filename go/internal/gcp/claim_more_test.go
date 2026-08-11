@@ -297,7 +297,11 @@ func TestClaimCertManagerMergesLabelsLRO(t *testing.T) {
 
 func TestClaimCloudFunctionMergesLabelsLRO(t *testing.T) {
 	srv := httptest.NewServer(opDoneHandler(`{"labels":{"team":"ops"}}`,
-		"operations/op1"))
+		// D718: a production-shaped operation name. GCP returns the FULL resource name
+		// here, and the driver polls base+"/"+name — a fixture emitting a bare
+		// "operations/op1" produced a URL no GCP API routes, which is a fixture
+		// standing in for a cloud that does not exist.
+		"projects/acme-prod/locations/europe-west1/operations/op1"))
 	defer srv.Close()
 	d := testDriver(t, srv)
 	d.CfBaseURL = srv.URL

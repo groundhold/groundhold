@@ -58,6 +58,11 @@ func TestLambdaURLAuthIAMNoAnonymousGrant(t *testing.T) {
 	d := lambdaDriver(t, srv)
 
 	attrs := lambdaAttrs()
+	// D749: the edge function is NOT publicly exposed — a SigV4-signed CloudFront is
+	// the only caller. This test declared `true` because the create path used to read
+	// the attribute as "has a Function URL"; under the vocabulary's definition, which
+	// observe has always measured, that declaration can never converge.
+	attrs["network.publicExposure"] = false
 	impl := lambdaImpl()
 	impl["url_auth"] = "iam"
 	res := d.createLambda("eu-central-1", "000000000000", "prod", "api", attrs, impl, 1)
@@ -72,14 +77,20 @@ func TestLambdaURLAuthIAMNoAnonymousGrant(t *testing.T) {
 	}
 }
 
-// TestLambdaURLAuthIAMRequiresPublic: url_auth=iam on a private function refuses.
-func TestLambdaURLAuthIAMRequiresPublic(t *testing.T) {
-	attrs := lambdaAttrs()
-	attrs["network.publicExposure"] = false
+// D749 SUPERSEDES TestLambdaURLAuthIAMRequiresPublic, which asserted that
+// `url_auth: iam` on a private function must REFUSE. That assertion was the defect
+// written down: it read `network.publicExposure` as "has a Function URL", while the
+// vocabulary defines it as "invokable over public HTTPS by anyone" and observe measures
+// it that way. Under the old rule the edge pattern had no honest declaration, and the
+// one declaration that passed made the plan want to open the function. The refusal that
+// remains is the MIRROR: iam WITH public exposure, which cannot converge.
+func TestLambdaURLAuthContradictionsRefuse(t *testing.T) {
+	attrs := lambdaAttrs() // publicExposure: true
 	impl := lambdaImpl()
 	impl["url_auth"] = "iam"
 	if _, err := BuildLambda("000000000000", "prod", "api", attrs, impl, 1); err == nil {
-		t.Fatal("url_auth=iam on a private function must refuse")
+		t.Fatal("url_auth=iam with publicExposure:true must refuse — an AWS_IAM URL has " +
+			"no anonymous grant, so observe measures false forever and it never converges")
 	}
 	// an unknown url_auth value refuses
 	impl2 := lambdaImpl()

@@ -1023,10 +1023,16 @@ var reconcileAdapters = map[string]reconcileAdapter{
 			if !found {
 				return genProbe{readable: true, found: false}
 			}
-			enabled, present := gkeAddonRegistry[addon].readEnabled(doc.AddonsConfig)
-			// the addon is "created" when it is present AND enabled on the cluster.
-			return genProbe{readable: true, found: present && enabled,
-				ours: present && enabled, ready: true}
+			// D801: an addonsConfig block we cannot parse is unreadable, not "off". A
+			// reconcile that reads it as off concludes the create never landed.
+			st := gkeAddonRegistry[addon].readState(doc.AddonsConfig)
+			if st == addonUnreadable {
+				return probeUnreadable("the addonsConfig block for " + addon +
+					" is present but not readable")
+			}
+			// the addon is "created" when the cluster says it is ON.
+			return genProbe{readable: true, found: st == addonOn,
+				ours: st == addonOn, ready: true}
 		},
 	},
 	"scc": {

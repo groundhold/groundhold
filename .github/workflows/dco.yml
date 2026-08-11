@@ -1,0 +1,57 @@
+# CONTRIBUTING says: "A PR whose commits are not signed off cannot be merged."
+# That was a promise with nothing behind it (D715) — no workflow read a commit
+# trailer, so the only thing stopping an unsigned commit was a maintainer
+# remembering. The DCO is what stands in for a CLA here (GOVERNANCE's
+# never-relicense promise), so it is the one contributor obligation that cannot
+# rest on memory.
+name: dco
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  signed-off:
+    # The same selection every fork-triggerable job makes (D713): a fork's PR goes to a
+    # hosted runner, which is free on a public repository and is where untrusted code
+    # belongs; a PR from a branch in this repository stays on the fleet, because on a
+    # PRIVATE repository hosted minutes are billed and the D383 gate refuses to spend
+    # them unasked. Both rules are satisfied by choosing rather than by picking a side.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Every commit carries a real Signed-off-by
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          bad=0
+          # Merge commits carry no authorship of their own; the commits they bring do.
+          for c in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            subject=$(git log -1 --format=%s "$c")
+            author=$(git log -1 --format='%an <%ae>' "$c")
+            if ! git log -1 --format=%B "$c" | grep -qiE '^Signed-off-by: .+ <[^@]+@[^@]+>$'; then
+              echo "::error::$c ($subject) has no Signed-off-by — commit with 'git commit -s'"
+              bad=1
+              continue
+            fi
+            # The sign-off must be the author's own certification, not a name typed
+            # for someone else: DCO is a statement about who wrote this.
+            if ! git log -1 --format=%B "$c" | grep -qiF "Signed-off-by: $author"; then
+              echo "::error::$c ($subject) is signed off by someone other than its author ($author)"
+              bad=1
+            fi
+          done
+          if [ "$bad" -ne 0 ]; then
+            echo "The DCO (https://developercertificate.org) is how contributions are"
+            echo "accepted here — no CLA, no copyright assignment. Amend with:"
+            echo "  git rebase --signoff $BASE && git push --force-with-lease"
+            exit 1
+          fi
+          echo "every commit in this pull request is signed off"

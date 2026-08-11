@@ -27,7 +27,8 @@ those two voices from blurring.
    (follow [emit-candidate]) — declare only attributes the provider can
    observe; adoption will verify every one of them against reality.
 4. **Adopt**: `bin/groundhold-go adopt <contract> <candidate> --ledger L
-   --map <cap>=<providerId> --discovery <saved-discovery-file>` —
+   --map <cap>=<providerId> --discovery <saved-discovery-file>
+   --provider <cloud> --at <now>` —
    deterministic gate; refusals are verdicts, not obstacles:
    - "declared X but reality says Y" — the candidate lies; fix the
      candidate (or the resource), never argue with the gate;
@@ -35,12 +36,13 @@ those two voices from blurring.
      observation support to the driver; unknown never passes as a match;
    - "already bound" — no double adoption, in either direction.
 5. **Prove the takeover**: `bin/groundhold-go converge <contract>
-   <candidate> --ledger L --yes` must report **converged** without
+   <candidate> --ledger L --provider <cloud> --at <now> --yes` must
+   report **converged** without
    executing anything. If it plans changes instead, the draft does not
    match reality — go back to 2; do NOT apply your way out of a failed
    proof during onboarding.
 6. **Mistaken adoption**: `bin/groundhold-go unadopt <contract> <cap>
-   --ledger L` releases the binding and never touches the resource.
+   --ledger L --at <now>` releases the binding and never touches the resource.
    Retirement (D47) is the destructive verb; unadopt is the eraser.
 
 ## Terraform / pulumi migration

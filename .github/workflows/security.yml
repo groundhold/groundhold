@@ -8,6 +8,9 @@ on:
   pull_request:
   push:
     branches: [main, master]
+    # D626: a tag is the one event that ships something to a user, and it used to
+    # trigger release.yml alone — so this check never ran on the code being released.
+    tags: ['v*']
   schedule:
     - cron: "0 6 * * 1" # weekly — catch newly-published advisories
 
@@ -67,3 +70,54 @@ jobs:
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
             | tar -xz gitleaks
           ./gitleaks dir . --config .gitleaks.toml --redact --no-banner
+
+  # D479: a pin is only as good as the hash somebody wrote down. The make-check gate
+  # proves every action is a 40-character SHA, that the same action carries the same
+  # pin everywhere, and that each pin says which tag it claims to be (`# v1.2.3`).
+  # None of that proves the hash IS that tag's commit — the threat model listed it as
+  # an accepted risk, and this closes it.
+  #
+  # Scheduled, not blocking on pull requests, and that is deliberate. Upstream tags
+  # MOVE (a v6 retagged onto a new commit is routine), so a mismatch is not necessarily
+  # a compromise — it is an event somebody must look at. Failing the security schedule
+  # surfaces it; failing every PR would train people to ignore it.
+  action-pins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Re-resolve every pinned tag and compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The list goes to a FILE and the loop reads the file. Piping into `while`
+          # runs the loop in a subshell, where the failure flag cannot escape — a job
+          # that reports success no matter what it found, which is the failure mode
+          # this whole session keeps finding in other people's gates and which the
+          # first draft of this one had.
+          grep -rhoE "uses:[[:space:]]+[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}[[:space:]]*#[[:space:]]*v[^[:space:]]+" \
+            .github/workflows/*.yml \
+            | sed -E 's|uses:[[:space:]]+||; s|@| |; s|[[:space:]]*#[[:space:]]*| |' \
+            | sort -u > /tmp/pins.txt
+          n=$(wc -l < /tmp/pins.txt)
+          if [ "$n" -lt 5 ]; then
+            echo "only $n pins found — this job would be vacuous" >&2
+            exit 1
+          fi
+          fail=0
+          while read -r repo sha tag; do
+            typ=$(gh api "repos/$repo/git/ref/tags/$tag" --jq '.object.type' 2>/dev/null || true)
+            obj=$(gh api "repos/$repo/git/ref/tags/$tag" --jq '.object.sha' 2>/dev/null || true)
+            if [ "$typ" = "tag" ] && [ -n "$obj" ]; then
+              obj=$(gh api "repos/$repo/git/tags/$obj" --jq '.object.sha' 2>/dev/null || true)
+            fi
+            if [ -z "$obj" ]; then
+              echo "UNRESOLVED $repo@$tag — the tag is gone or renamed" >&2; fail=1
+            elif [ "$obj" != "$sha" ]; then
+              echo "MOVED $repo@$tag pinned=$sha now=$obj" >&2; fail=1
+            else
+              echo "ok $repo@$tag"
+            fi
+          done < /tmp/pins.txt
+          echo "checked $n pins"
+          exit "$fail"

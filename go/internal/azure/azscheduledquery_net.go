@@ -93,7 +93,11 @@ func (d *Driver) observeAzureScheduledQuery(capability, providerID string) ([]pr
 		return nil, nil, fmt.Errorf("scheduledQueryRules.get: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"scheduled query rule not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"scheduled query rule not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("scheduledQueryRules.get: HTTP %d", st)
@@ -108,6 +112,8 @@ func (d *Driver) observeAzureScheduledQuery(capability, providerID string) ([]pr
 		kind = "gauge"
 	}
 	return []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "metric.name", Value: doc.Properties.DisplayName, Derivation: "measured"},
 		{Path: "metric.filter", Value: c.Query, Derivation: "measured"},
 		{Path: "metric.kind", Value: kind, Derivation: "measured"},

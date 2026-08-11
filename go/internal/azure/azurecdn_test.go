@@ -23,27 +23,42 @@ func azCDNAttrs() map[string]any {
 
 func azCDNImpl() map[string]any { return map[string]any{"resource_group": "rg1"} }
 
+// azCDNRoute returns the route body's properties for a plan (test helper).
+func azCDNRouteProps(p AzureCDNPlan) map[string]any {
+	return p.routeBody(testSub, "rg1")["properties"].(map[string]any)
+}
+
 func TestBuildAzureCDNHonors(t *testing.T) {
 	p, err := BuildAzureCDN("prod", "edge", azCDNAttrs(), azCDNImpl(), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.OriginDomain != "origin.example.com" || p.HTTPAllowed || !p.HTTPSAllowed {
+	if p.OriginDomain != "origin.example.com" || p.HTTPAllowed || !p.HTTPSAllowed || p.Redirect {
 		t.Fatalf("plan = %+v", p)
 	}
-	ep := p.endpointBody()["properties"].(map[string]any)
-	if ep["isHttpAllowed"] != false || ep["isHttpsAllowed"] != true {
-		t.Fatalf("endpoint = %+v", ep)
+	// https-only: the route accepts only Https, no redirect.
+	rt := azCDNRouteProps(p)
+	sp := rt["supportedProtocols"].([]any)
+	if len(sp) != 1 || sp[0] != "Https" || rt["httpsRedirect"] != "Disabled" {
+		t.Fatalf("route = %+v", rt)
+	}
+	// the origin carries origin.domain as hostName + host header.
+	or := p.originBody()["properties"].(map[string]any)
+	if or["hostName"] != "origin.example.com" || or["originHostHeader"] != "origin.example.com" {
+		t.Fatalf("origin = %+v", or)
+	}
+	// the profile is the AFD Standard SKU.
+	if p.profileBody(nil)["sku"].(map[string]any)["name"] != "Standard_AzureFrontDoor" {
+		t.Fatalf("profile sku = %+v", p.profileBody(nil))
 	}
 }
 
 func TestBuildAzureCDNRefusals(t *testing.T) {
 	cases := map[string]map[string]any{
-		"redirect-refused": {"viewer.protocol": "redirect-to-https"}, // needs a delivery rule
-		"bad-viewer":       {"viewer.protocol": "carrier-pigeon"},
-		"bad-domain":       {"origin.domain": "not a domain"},
-		"unmanaged":        {"service.managed": false},
-		"unknown-attr":     {"cdn.tier": "x"},
+		"bad-viewer":   {"viewer.protocol": "carrier-pigeon"},
+		"bad-domain":   {"origin.domain": "not a domain"},
+		"unmanaged":    {"service.managed": false},
+		"unknown-attr": {"cdn.tier": "x"},
 	}
 	for name, extra := range cases {
 		a := azCDNAttrs()
@@ -61,43 +76,59 @@ func TestBuildAzureCDNRefusals(t *testing.T) {
 	}
 }
 
-// TestBuildAzureCDNCachePolicy pins the D331 cache_policy operand. Azure's default is
-// header-honoring (no deliveryPolicy), so no dangerous default to fix; cache_policy:
-// disabled attaches a global CacheExpiration BypassCache rule; honor is the no-op
-// default; an unknown value refuses (closed vocabulary).
+// TestBuildAzureCDNRedirectHonored (D999): the classic CDN refused
+// viewer.protocol=redirect-to-https; AFD honors it natively via the route's
+// httpsRedirect=Enabled (accepting Http+Https and 301-ing to HTTPS).
+func TestBuildAzureCDNRedirectHonored(t *testing.T) {
+	a := azCDNAttrs()
+	a["viewer.protocol"] = "redirect-to-https"
+	p, err := BuildAzureCDN("prod", "edge", a, azCDNImpl(), 1)
+	if err != nil {
+		t.Fatalf("redirect-to-https must be honored on AFD, got %v", err)
+	}
+	if !p.HTTPAllowed || !p.Redirect {
+		t.Fatalf("plan = %+v", p)
+	}
+	rt := azCDNRouteProps(p)
+	sp := rt["supportedProtocols"].([]any)
+	if len(sp) != 2 || rt["httpsRedirect"] != "Enabled" {
+		t.Fatalf("redirect route = %+v", rt)
+	}
+}
+
+// TestBuildAzureCDNCachePolicy pins the D331 cache_policy operand mapped onto AFD.
+// AFD caching is OFF by default, so the header-honoring default (and cache_policy:
+// honor) ATTACHES a cacheConfiguration; cache_policy: disabled OMITS it (no caching) —
+// the inverse wire of classic CDN's bypass rule. An unknown value refuses.
 func TestBuildAzureCDNCachePolicy(t *testing.T) {
-	// default: no deliveryPolicy (header-honoring — Azure's safe default).
+	// default: caching enabled honoring origin headers -> cacheConfiguration present.
 	p, err := BuildAzureCDN("prod", "edge", azCDNAttrs(), azCDNImpl(), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if p.CacheBypass {
-		t.Fatal("default must be header-honoring (no cache bypass)")
+		t.Fatal("default must not bypass")
 	}
-	if _, has := p.endpointBody()["properties"].(map[string]any)["deliveryPolicy"]; has {
-		t.Fatal("default endpoint must carry no deliveryPolicy")
+	if _, has := azCDNRouteProps(p)["cacheConfiguration"]; !has {
+		t.Fatal("default route must carry a cacheConfiguration")
 	}
-	// honor: still the header-honoring default.
+	// honor: same as default.
 	impl := azCDNImpl()
 	impl["cache_policy"] = "honor"
 	if p, err = BuildAzureCDN("prod", "edge", azCDNAttrs(), impl, 1); err != nil || p.CacheBypass {
 		t.Fatalf("honor must not bypass: %+v err=%v", p, err)
 	}
-	// disabled: a global CacheExpiration BypassCache rule.
+	if _, has := azCDNRouteProps(p)["cacheConfiguration"]; !has {
+		t.Fatal("honor route must carry a cacheConfiguration")
+	}
+	// disabled: no caching -> NO cacheConfiguration.
 	impl["cache_policy"] = "disabled"
 	p, err = BuildAzureCDN("prod", "edge", azCDNAttrs(), impl, 1)
 	if err != nil || !p.CacheBypass {
 		t.Fatalf("disabled must bypass: %+v err=%v", p, err)
 	}
-	dp, has := p.endpointBody()["properties"].(map[string]any)["deliveryPolicy"]
-	if !has {
-		t.Fatal("disabled endpoint must carry a deliveryPolicy")
-	}
-	rule := dp.(map[string]any)["rules"].([]any)[0].(map[string]any)
-	act := rule["actions"].([]any)[0].(map[string]any)
-	params := act["parameters"].(map[string]any)
-	if act["name"] != "CacheExpiration" || params["cacheBehavior"] != azCacheBypass {
-		t.Fatalf("bypass rule = %+v", act)
+	if _, has := azCDNRouteProps(p)["cacheConfiguration"]; has {
+		t.Fatal("disabled route must carry NO cacheConfiguration")
 	}
 	// unknown value refuses.
 	impl["cache_policy"] = "aggressive"
@@ -109,9 +140,10 @@ func TestBuildAzureCDNCachePolicy(t *testing.T) {
 const azKVSecretID = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg1/" +
 	"providers/Microsoft.KeyVault/vaults/gh-vault/secrets/gh-cert"
 
-// TestBuildAzureCDNCustomDomain pins the D332 aliases + certificate operands. A managed
-// cert takes certificateSource: Cdn (Azure-native, no external resource); a Key Vault
-// secret id takes AzureKeyVault (BYO). A $ref refuses honestly (no certificate.tls twin).
+// TestBuildAzureCDNCustomDomain pins the D332/D999 aliases + certificate operands on
+// AFD. A managed cert is tlsSettings.certificateType ManagedCertificate (Azure-native,
+// no external resource); a Key Vault secret id lands as a profile secret referenced by
+// certificateType CustomerCertificate. A $ref refuses (no certificate.tls twin).
 func TestBuildAzureCDNCustomDomain(t *testing.T) {
 	impl := azCDNImpl()
 	impl["aliases"] = []any{"api.acme.eu", "www.acme.eu"}
@@ -126,22 +158,29 @@ func TestBuildAzureCDNCustomDomain(t *testing.T) {
 	if got := customDomainResourceName("api.acme.eu"); got != "api-acme-eu" {
 		t.Fatalf("custom domain name = %q", got)
 	}
-	if b := p.customHTTPSBody(); b["certificateSource"] != "Cdn" {
-		t.Fatalf("managed https body = %+v", b)
+	tls := p.customDomainBody(testSub, "rg1", "api.acme.eu")["properties"].(map[string]any)["tlsSettings"].(map[string]any)
+	if tls["certificateType"] != "ManagedCertificate" {
+		t.Fatalf("managed tlsSettings = %+v", tls)
 	}
-	// BYO Key Vault secret.
+	// the route must associate the custom domain by id.
+	cds := azCDNRouteProps(p)["customDomains"].([]any)
+	if len(cds) != 2 || !strings.Contains(cds[0].(map[string]any)["id"].(string), "/customDomains/api-acme-eu") {
+		t.Fatalf("route customDomains = %+v", cds)
+	}
+	// BYO Key Vault secret: a profile secret + a CustomerCertificate reference.
+	impl["aliases"] = []any{"api.acme.eu"}
 	impl["certificate"] = azKVSecretID
 	p, err = BuildAzureCDN("prod", "edge", azCDNAttrs(), impl, 1)
 	if err != nil || p.CertKeyVault == nil || p.CertKeyVault.vault != "gh-vault" || p.CertKeyVault.secret != "gh-cert" {
 		t.Fatalf("byo plan = %+v err=%v", p, err)
 	}
-	b := p.customHTTPSBody()
-	if b["certificateSource"] != "AzureKeyVault" {
-		t.Fatalf("byo https body = %+v", b)
+	sec := p.secretBody()["properties"].(map[string]any)["parameters"].(map[string]any)
+	if sec["type"] != "CustomerCertificate" || !strings.Contains(sec["secretSource"].(map[string]any)["id"].(string), "/vaults/gh-vault/secrets/gh-cert") {
+		t.Fatalf("byo secret = %+v", sec)
 	}
-	params := b["certificateSourceParameters"].(map[string]any)
-	if params["vaultName"] != "gh-vault" || params["secretName"] != "gh-cert" {
-		t.Fatalf("byo params = %+v", params)
+	tls = p.customDomainBody(testSub, "rg1", "api.acme.eu")["properties"].(map[string]any)["tlsSettings"].(map[string]any)
+	if tls["certificateType"] != "CustomerCertificate" || !strings.Contains(tls["secret"].(map[string]any)["id"].(string), "/secrets/"+p.secretName()) {
+		t.Fatalf("byo tlsSettings = %+v", tls)
 	}
 }
 
@@ -171,31 +210,28 @@ func TestBuildAzureCDNCustomDomainRefusals(t *testing.T) {
 	}
 }
 
-// TestCreateAzureCDNCustomDomainGolden is the httptest golden: the create issues the
-// customDomains PUT (hostName) and the enableCustomHttps POST (certificateSource), and
-// cache_policy: disabled sends the endpoint deliveryPolicy.
+// TestCreateAzureCDNCustomDomainGolden is the httptest golden: the AFD create issues the
+// customDomains PUT (tlsSettings ManagedCertificate) and the route PUT (associating the
+// custom domain), and cache_policy: disabled omits the route's cacheConfiguration.
 func TestCreateAzureCDNCustomDomainGolden(t *testing.T) {
-	var epBody, cdBody, httpsBody string
+	var cdBody, rtBody string
 	srv := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			body, _ := io.ReadAll(r.Body)
 			switch {
-			case r.Method == "POST" && strings.Contains(r.URL.Path, "/enableCustomHttps"):
-				httpsBody = string(body)
-				w.WriteHeader(202)
 			case r.Method == "PUT" && strings.Contains(r.URL.Path, "/customDomains/"):
 				cdBody = string(body)
 				w.WriteHeader(200)
 				_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded"}}`))
-			case r.Method == "PUT" && strings.Contains(r.URL.Path, "/endpoints/"):
-				epBody = string(body)
+			case r.Method == "PUT" && strings.Contains(r.URL.Path, "/routes/"):
+				rtBody = string(body)
 				w.WriteHeader(200)
 				_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded"}}`))
 			case r.Method == "PUT":
 				w.WriteHeader(200)
 				_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded"}}`))
 			case r.Method == "GET":
-				// the profile pre-read must carry OUR tags (refuseForeignUpsert).
+				// pre-reads (refuseForeignUpsert + provisioningState poll) carry OUR tags.
 				w.WriteHeader(200)
 				_, _ = w.Write([]byte(`{"tags":{"groundhold-capability":"edge","groundhold-environment":"prod"},` +
 					`"properties":{"provisioningState":"Succeeded"}}`))
@@ -213,47 +249,56 @@ func TestCreateAzureCDNCustomDomainGolden(t *testing.T) {
 	if res.Status != "succeeded" {
 		t.Fatalf("create: %+v", res)
 	}
-	if !strings.Contains(cdBody, `"hostName":"api.acme.eu"`) {
-		t.Fatalf("customDomains body missing hostName: %s", cdBody)
+	if !strings.Contains(cdBody, `"hostName":"api.acme.eu"`) || !strings.Contains(cdBody, `"certificateType":"ManagedCertificate"`) {
+		t.Fatalf("customDomains body wrong: %s", cdBody)
 	}
-	if !strings.Contains(httpsBody, `"certificateSource":"Cdn"`) {
-		t.Fatalf("enableCustomHttps body missing certificateSource Cdn: %s", httpsBody)
+	if !strings.Contains(rtBody, "/customDomains/api-acme-eu") {
+		t.Fatalf("route body missing custom domain association: %s", rtBody)
 	}
-	if !strings.Contains(epBody, `"cacheBehavior":"BypassCache"`) {
-		t.Fatalf("endpoint body missing cache bypass: %s", epBody)
+	if strings.Contains(rtBody, "cacheConfiguration") {
+		t.Fatalf("disabled route must omit cacheConfiguration: %s", rtBody)
 	}
 }
 
-func azCDNServer(t *testing.T, capLabel, origin string, httpAllowed bool) *httptest.Server {
+// azRouteJSON returns the route properties JSON fragment for a viewer.protocol.
+func azRouteJSON(viewer string) string {
+	switch viewer {
+	case "allow-all":
+		return `"supportedProtocols":["Http","Https"],"httpsRedirect":"Disabled"`
+	case "redirect-to-https":
+		return `"supportedProtocols":["Http","Https"],"httpsRedirect":"Enabled"`
+	default: // https-only
+		return `"supportedProtocols":["Https"],"httpsRedirect":"Disabled"`
+	}
+}
+
+// azCDNServer is the AFD happy-path fake: every PUT succeeds; a GET on the route returns
+// the viewer posture, on the origin the hostName, elsewhere the profile tags — all with
+// provisioningState Succeeded so putAndPoll concludes; DELETE is a synchronous 200.
+func azCDNServer(t *testing.T, capLabel, origin, viewer string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
-			isEndpoint := strings.Contains(r.URL.Path, "/endpoints/")
 			switch r.Method {
 			case "PUT":
 				w.WriteHeader(200)
 				_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded"}}`))
 			case "GET":
-				if isEndpoint {
-					_, _ = w.Write([]byte(`{"properties":{"isHttpAllowed":` + azBoolStr(httpAllowed) + `,"isHttpsAllowed":true,` +
-						`"origins":[{"name":"origin1","properties":{"hostName":"` + origin + `"}}]}}`))
-					return
+				switch {
+				case strings.Contains(r.URL.Path, "/routes/"):
+					_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded",` + azRouteJSON(viewer) + `}}`))
+				case strings.Contains(r.URL.Path, "/origins/"):
+					_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded","hostName":"` + origin + `"}}`))
+				default:
+					_, _ = w.Write([]byte(`{"tags":{"groundhold-capability":"` + capLabel + `","groundhold-environment":"prod"},` +
+						`"properties":{"provisioningState":"Succeeded"}}`))
 				}
-				_, _ = w.Write([]byte(`{"tags":{"groundhold-capability":"` + capLabel + `","groundhold-environment":"prod"},` +
-					`"properties":{"provisioningState":"Succeeded"}}`))
 			case "DELETE":
 				w.WriteHeader(200)
 			default:
 				w.WriteHeader(404)
 			}
 		}))
-}
-
-func azBoolStr(b bool) string {
-	if b {
-		return "true"
-	}
-	return "false"
 }
 
 func azCDNDriver(t *testing.T, srv *httptest.Server) *Driver {
@@ -268,7 +313,7 @@ func azCDNDriver(t *testing.T, srv *httptest.Server) *Driver {
 }
 
 func TestCreateObserveDeleteAzureCDN(t *testing.T) {
-	srv := azCDNServer(t, "edge", "origin.example.com", false)
+	srv := azCDNServer(t, "edge", "origin.example.com", "https-only")
 	defer srv.Close()
 	d := azCDNDriver(t, srv)
 	res := d.createAzureCDN("prod", "edge", azCDNAttrs(), azCDNImpl(), 1)
@@ -292,7 +337,7 @@ func TestCreateObserveDeleteAzureCDN(t *testing.T) {
 }
 
 func TestDeleteAzureCDNForeignRefused(t *testing.T) {
-	srv := azCDNServer(t, "someone-else", "origin.example.com", false)
+	srv := azCDNServer(t, "someone-else", "origin.example.com", "https-only")
 	defer srv.Close()
 	d := azCDNDriver(t, srv)
 	pid := azureCDNProviderID(testSub, "rg1", azCDNProfileName("prod", "edge", 1), azResourceName("pv-ep", "prod", "edge", 1))
@@ -305,14 +350,15 @@ func TestDeleteAzureCDNForeignRefused(t *testing.T) {
 func TestHonestyHarnessAzureCDN(t *testing.T) {
 	pid := azureCDNProviderID(testSub, "rg1", azCDNProfileName("prod", "edge", 1), azResourceName("pv-ep", "prod", "edge", 1))
 	p := &certifynet.Probe{
-		// AssertTransient left false — D237 TODO: this driver's create/delete ladder
-		// still maps 429/503/403 to terminal failed (and drops the providerId); it must
-		// route through provider.MutationResult before the transient invariant can lock.
 		Name:            "azure/azurecdn",
 		Classify:        armRole,
 		OwnerTagValue:   "edge",
 		AssertTransient: true, // D237
 		DeterministicID: true,
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("azurecdn", "edge", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -326,14 +372,14 @@ func TestHonestyHarnessAzureCDN(t *testing.T) {
 		Ops: []certifynet.Op{
 			{
 				Name:  "create",
-				Happy: func() *httptest.Server { return azCDNServer(t, "edge", "origin.example.com", false) },
+				Happy: func() *httptest.Server { return azCDNServer(t, "edge", "origin.example.com", "https-only") },
 				Run: func(pr provider.Provider) provider.CreateResult {
 					return pr.Create("azurecdn", "edge", "prod", azCDNAttrs(), azCDNImpl(), "k", 1)
 				},
 			},
 			{
 				Name:  "delete",
-				Happy: func() *httptest.Server { return azCDNServer(t, "edge", "origin.example.com", false) },
+				Happy: func() *httptest.Server { return azCDNServer(t, "edge", "origin.example.com", "https-only") },
 				Run: func(pr provider.Provider) provider.CreateResult {
 					return pr.Delete("azurecdn", "edge", "prod", pid, "k")
 				},
@@ -343,54 +389,57 @@ func TestHonestyHarnessAzureCDN(t *testing.T) {
 	certifynet.CertifyDriverNet(t, p)
 }
 
-// Weapon 2 (D87), the metamorphic write/read round-trip for
-// capability.cdn.distribution on Azure CDN.
+// Weapon 2 (D87), the metamorphic write/read round-trip for capability.cdn.distribution
+// on AFD: the fake captures the route PUT's supportedProtocols/httpsRedirect and echoes
+// them on the route GET, so viewer.protocol must survive write -> read unchanged —
+// including redirect-to-https, which classic CDN could not express.
 func TestMetamorphicAzureCDNRoundTrip(t *testing.T) {
-	cases := []struct {
-		name       string
-		viewer     string
-		wantHTTP   bool
-		wantViewer string
-	}{
-		{"https-only", "https-only", false, "https-only"},
-		{"allow-all", "allow-all", true, "allow-all"},
+	cases := []struct{ name, viewer string }{
+		{"https-only", "https-only"},
+		{"allow-all", "allow-all"},
+		{"redirect-to-https", "redirect-to-https"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			var httpAllowed bool
-			var origin string
+			var supported []any
+			var httpsRedirect, origin string
 			srv := httptest.NewServer(http.HandlerFunc(
 				func(w http.ResponseWriter, r *http.Request) {
-					isEndpoint := strings.Contains(r.URL.Path, "/endpoints/")
 					switch r.Method {
 					case "PUT":
-						if isEndpoint {
-							body, _ := io.ReadAll(r.Body)
+						body, _ := io.ReadAll(r.Body)
+						if strings.Contains(r.URL.Path, "/routes/") {
 							var doc struct {
 								Properties struct {
-									IsHttpAllowed bool `json:"isHttpAllowed"`
-									Origins       []struct {
-										Properties struct {
-											HostName string `json:"hostName"`
-										} `json:"properties"`
-									} `json:"origins"`
+									SupportedProtocols []any  `json:"supportedProtocols"`
+									HTTPSRedirect      string `json:"httpsRedirect"`
 								} `json:"properties"`
 							}
 							_ = json.Unmarshal(body, &doc)
-							httpAllowed = doc.Properties.IsHttpAllowed
-							if len(doc.Properties.Origins) > 0 {
-								origin = doc.Properties.Origins[0].Properties.HostName
+							supported = doc.Properties.SupportedProtocols
+							httpsRedirect = doc.Properties.HTTPSRedirect
+						} else if strings.Contains(r.URL.Path, "/origins/") {
+							var doc struct {
+								Properties struct {
+									HostName string `json:"hostName"`
+								} `json:"properties"`
 							}
+							_ = json.Unmarshal(body, &doc)
+							origin = doc.Properties.HostName
 						}
 						w.WriteHeader(200)
 						_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded"}}`))
 					case "GET":
-						if isEndpoint {
-							_, _ = w.Write([]byte(`{"properties":{"isHttpAllowed":` + azBoolStr(httpAllowed) + `,"isHttpsAllowed":true,` +
-								`"origins":[{"properties":{"hostName":"` + origin + `"}}]}}`))
-							return
+						switch {
+						case strings.Contains(r.URL.Path, "/routes/"):
+							sp, _ := json.Marshal(supported)
+							_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded","supportedProtocols":` +
+								string(sp) + `,"httpsRedirect":"` + httpsRedirect + `"}}`))
+						case strings.Contains(r.URL.Path, "/origins/"):
+							_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded","hostName":"` + origin + `"}}`))
+						default:
+							_, _ = w.Write([]byte(`{"tags":{"groundhold-capability":"edge","groundhold-environment":"prod"},"properties":{"provisioningState":"Succeeded"}}`))
 						}
-						_, _ = w.Write([]byte(`{"tags":{"groundhold-capability":"edge","groundhold-environment":"prod"},"properties":{"provisioningState":"Succeeded"}}`))
 					default:
 						w.WriteHeader(200)
 					}
@@ -411,8 +460,8 @@ func TestMetamorphicAzureCDNRoundTrip(t *testing.T) {
 			for _, o := range obs {
 				got[o.Path] = o.Value
 			}
-			if got["viewer.protocol"] != c.wantViewer {
-				t.Errorf("viewer round-trip: want %q got %v", c.wantViewer, got["viewer.protocol"])
+			if got["viewer.protocol"] != c.viewer {
+				t.Errorf("viewer round-trip: want %q got %v", c.viewer, got["viewer.protocol"])
 			}
 		})
 	}

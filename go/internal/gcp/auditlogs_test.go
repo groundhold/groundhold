@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"groundhold/internal/provider"
 )
 
 func auditAttrs() map[string]any {
@@ -130,13 +132,15 @@ func TestBuildAuditSinkRefusals(t *testing.T) {
 func TestClassifyAuditLogsChange(t *testing.T) {
 	want := map[string]string{
 		"delivery.assured":               "mutable",
-		"location.region":                "immutable",
-		"encryption.customerManagedKeys": "immutable",
+		"location.region":                "unsupported",
+		"encryption.customerManagedKeys": "unsupported",
 		"scope.multiRegion":              "unsupported",
 		"integrity.logValidation":        "unsupported",
 		"service.managed":                "unsupported",
 		"cost.monthly":                   "unsupported",
 	}
+	// D825: residency and CMEK belong to the sink's DESTINATION, which is what the reason
+	// always said — and the neighbouring cases answer unsupported for exactly that.
 	for path, w := range want {
 		got, _ := classifyAuditLogsChange(path)
 		if got != w {
@@ -212,6 +216,19 @@ func TestCreateObserveDeleteAuditLogs(t *testing.T) {
 	got := map[string]any{}
 	for _, o := range obs {
 		got[o.Path] = o.Value
+		// D738: `delivery.assured` is config-intent, deliberately. It reads the sink's
+		// own `disabled` flag, and this driver creates the sink with its own writer
+		// identity whose grant on the DESTINATION nothing here verifies — so a sink
+		// that delivers nothing reports the same as one that delivers. This assertion
+		// demanded `measured` for every path, which is why the over-claim was pinned
+		// rather than caught. Everything else here must still be measured.
+		if o.Path == "delivery.assured" {
+			if o.Derivation != "config-intent" {
+				t.Fatalf("delivery.assured derivation = %q — reading the sink's own flag "+
+					"is not a measurement that anything arrives", o.Derivation)
+			}
+			continue
+		}
 		if o.Derivation != "measured" {
 			t.Fatalf("observation %s derivation = %q, want measured", o.Path, o.Derivation)
 		}
@@ -226,8 +243,20 @@ func TestCreateObserveDeleteAuditLogs(t *testing.T) {
 			t.Fatalf("%s must NOT be observed (no honest GCP analog on the sink)", unfaked)
 		}
 	}
-	if len(diags) != 3 {
-		t.Fatalf("expected 3 honesty diagnostics, got %v", diags)
+	// D738: four now — the fourth says why delivery.assured is config-intent. A count
+	// is a weak assertion (it cannot tell WHICH diagnostic), so the substance is checked
+	// too: the one a reader most needs is the one about the grant nobody verified.
+	if len(diags) != 4 {
+		t.Fatalf("expected 4 honesty diagnostics, got %v", diags)
+	}
+	var saidWhy bool
+	for _, dg := range diags {
+		if strings.Contains(dg, "write access on the destination") {
+			saidWhy = true
+		}
+	}
+	if !saidWhy {
+		t.Fatalf("the diagnostics do not say that the destination grant is unverified: %v", diags)
 	}
 
 	if del := d.deleteAuditLogs("capability.audit.trail", "prod", res.ProviderID); del.Status != "succeeded" {
@@ -312,8 +341,12 @@ func TestObserveAuditLogsNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(obs) != 0 || len(diags) == 0 {
-		t.Fatalf("a missing sink observes nothing with a diagnostic, got obs=%v diags=%v", obs, diags)
+	// Corrected with D519: this asserted SILENCE for an absent bound resource,
+	// which is the defect F-LC3 exists to prevent — the compile sees an empty set,
+	// plans nothing, and converge reports a world that no longer contains it.
+	if !absentMarked(obs) || len(diags) == 0 {
+		t.Fatalf("a missing sink must report %s=true with a diagnostic, got obs=%v diags=%v",
+			provider.ResourceAbsentPath, obs, diags)
 	}
 }
 
