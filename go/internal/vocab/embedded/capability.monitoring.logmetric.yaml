@@ -31,9 +31,9 @@ attributes:
       The name of the metric this rule manufactures — the semantic identity. Other
       capabilities (an alert, a dashboard) reference it by this name.
     mappings:
-      gcp.logging: the log-based metric name
-      aws.cloudwatch: the metricTransformations metricName
-      azure.monitor: the scheduled query rule / metric name
+      gcp.logmetric: the log-based metric name
+      aws.cwlogfilter: the metricTransformations metricName
+      azure.scheduledquery: the scheduled query rule / metric name
 
   metric.filter:
     kind: string
@@ -42,9 +42,9 @@ attributes:
       DATA, passed through and never interpreted (no expression language is built on it).
       A contract pins it with equals to guarantee the metric counts the right thing.
     mappings:
-      gcp.logging: the metric's filter (Logging query language)
-      aws.cloudwatch: the metric filter's filterPattern (over a log group)
-      azure.monitor: the scheduled query rule's KQL query
+      gcp.logmetric: the metric's filter (Logging query language)
+      aws.cwlogfilter: the metric filter's filterPattern (over a log group)
+      azure.scheduledquery: the scheduled query rule's KQL query
 
   metric.kind:
     kind: string
@@ -54,9 +54,9 @@ attributes:
       field is implementation detail — implementation.value_field, required for gauge).
       A closed enum.
     mappings:
-      gcp.logging: metricDescriptor.metricKind DELTA (counter) vs a valueExtractor (gauge)
-      aws.cloudwatch: metricValue "1" (counter) vs "$field" (gauge)
-      azure.monitor: count() (counter) vs a metricMeasureColumn (gauge)
+      gcp.logmetric: metricDescriptor.metricKind DELTA (counter) vs a valueExtractor (gauge)
+      aws.cwlogfilter: metricValue "1" (counter) vs "$field" (gauge)
+      azure.scheduledquery: count() (counter) vs a metricMeasureColumn (gauge)
 
   service.managed:
     kind: bool

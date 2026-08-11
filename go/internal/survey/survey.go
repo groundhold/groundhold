@@ -95,7 +95,9 @@ type CoverageRow struct {
 type OrphanRow struct {
 	Capability string `json:"capability"`
 	Type       string `json:"type"`
-	// unwitnessed (information) | orphaned (drift, --complete only)
+	// unwitnessed (information) | orphaned (drift, --complete only) |
+	// witnessed-by-type (information, D707: a sibling of the same type was
+	// witnessed and a type-level finding cannot say which one)
 	Status string `json:"status"`
 }
 
@@ -135,6 +137,11 @@ func Run(c *contract.Contract, docs []*Doc, complete bool) *Report {
 	}
 
 	witnessed := map[string]bool{} // capability id -> has a required finding
+	// byTypeOnly: witnessed only through a sibling of the same type (D707). Not
+	// drift — a type-level finding is real evidence that SOMETHING of that type is
+	// used — but not a sighting of this capability either, and `--complete` exists
+	// to find capabilities nobody uses. Reported so the silence is visible.
+	byTypeOnly := map[string]bool{}
 	for _, d := range docs {
 		rep.Surveys = append(rep.Surveys, Source{
 			Repo: d.Repo.Name, Commit: d.Repo.Commit, Service: d.Service})
@@ -151,6 +158,12 @@ func Run(c *contract.Contract, docs []*Doc, complete bool) *Report {
 				row.Capability = capsByType[f.CapabilityHint][0]
 				for _, id := range capsByType[f.CapabilityHint] {
 					witnessed[id] = true
+					// D707: a finding names a TYPE, so with several capabilities of
+					// that type it cannot say which one this repo uses. Remember that
+					// the answer was an inference, not a sighting.
+					if len(capsByType[f.CapabilityHint]) > 1 {
+						byTypeOnly[id] = true
+					}
 				}
 			default:
 				row.Status = "uncovered"
@@ -166,10 +179,21 @@ func Run(c *contract.Contract, docs []*Doc, complete bool) *Report {
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
+		typ, _ := c.Capabilities[id]["type"].(string)
 		if witnessed[id] {
+			// D707: witnessed, but only because a SIBLING of the same type was. The
+			// report used to say nothing at all about these, so an operator running
+			// --complete to find a capability nobody uses got silence about the one
+			// case the evidence cannot settle. Information, never drift: turning it
+			// into drift would accuse every contract with two capabilities of one
+			// type and a single witnessing repo.
+			if byTypeOnly[id] {
+				rep.Orphans = append(rep.Orphans, OrphanRow{
+					Capability: id, Type: typ, Status: "witnessed-by-type"})
+			}
 			continue
 		}
-		t, _ := c.Capabilities[id]["type"].(string)
+		t := typ
 		status := "unwitnessed"
 		if complete {
 			status = "orphaned"

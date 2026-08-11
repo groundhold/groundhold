@@ -9,6 +9,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 const (
@@ -28,12 +31,14 @@ type fakeSES struct {
 	domain    string
 	configSet string
 
-	identityExists  bool
-	tags            []map[string]string
-	dkimSigning     bool
-	dkimStatus      string
-	configSetExists bool
-	eventDestExists bool
+	identityExists bool
+	tags           []map[string]string
+	dkimSigning    bool
+	dkimStatus     string
+	// D746: the identity's default configuration set, set by the create.
+	defaultConfigSet string
+	configSetExists  bool
+	eventDestExists  bool
 
 	productionAccess bool // SESv2 GetAccount ProductionAccessEnabled (sandbox exit)
 	failGetAccount   bool // inject a 500 on GetAccount to exercise the unreadable path
@@ -85,8 +90,18 @@ func (f *fakeSES) handler(t *testing.T, rec *capture) *httptest.Server {
 			out, _ := json.Marshal(map[string]any{
 				"DkimAttributes": map[string]any{"SigningEnabled": f.dkimSigning, "Status": f.dkimStatus},
 				"Tags":           f.tags,
+				// D746: the identity's DEFAULT configuration set. Absent until the
+				// create associates one — which it did not do until this entry, so a
+				// set nothing routed through reported bounce.tracked: true.
+				"ConfigurationSetName": f.defaultConfigSet,
 			})
 			_, _ = w.Write(out)
+		case p == idPath+"/configuration-set" && m == http.MethodPut: // D746
+			f.order = append(f.order, "PutIdentityConfigurationSet")
+			var in struct{ ConfigurationSetName string }
+			_ = json.Unmarshal(b, &in)
+			f.defaultConfigSet = in.ConfigurationSetName
+			_, _ = w.Write([]byte(`{}`))
 		case p == idPath+"/dkim" && m == http.MethodPut: // PutEmailIdentityDkimAttributes
 			f.order = append(f.order, "PutDkim")
 			var in struct{ SigningEnabled bool }
@@ -223,6 +238,10 @@ func TestSESSending_ObserveReverseMap(t *testing.T) {
 	f.identityExists = true
 	f.dkimSigning, f.dkimStatus = true, "SUCCESS"
 	f.configSetExists, f.eventDestExists = true, true
+	// D746: the set is the identity's DEFAULT, which is what routes messages through
+	// it. A set with the right destinations and nothing routing to it captures nothing,
+	// and this fixture used to describe exactly that while asserting tracking.
+	f.defaultConfigSet = sesConfigSetName(sesCap, sesDomain)
 	srv := f.handler(t, nil)
 	defer srv.Close()
 	d := sesDriver(t, srv)
@@ -549,5 +568,130 @@ func TestSESSending_UpdateForeignRefuses(t *testing.T) {
 		if o == "PutDkim" {
 			t.Fatal("no patch may touch a foreign identity")
 		}
+	}
+}
+
+func sesRESTRole(req *http.Request, _ []byte) certifynet.Role {
+	if req.Method == http.MethodGet {
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingSESSending enrols ses-sending in the D391 gate. It is a COMPOSITE
+// (email identity plus configuration set plus event destination) and the identity is
+// name-addressed by domain, so an estate that already sends mail is exactly what a
+// converge meets. The foreign case had a test; ours did not.
+func TestAdoptsExistingSESSending(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	attrs, impl := sesCandidate()
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/ses-sending",
+		Classify: sesRESTRole,
+		ExistingServer: func() *httptest.Server {
+			f := newFakeSES()
+			f.identityExists = true
+			f.configSetExists, f.eventDestExists = true, true
+			f.tags = []map[string]string{
+				{"Key": "groundhold-capability", "Value": sanitizeTag(sesCap)},
+				{"Key": "groundhold-environment", "Value": sanitizeTag("prod")},
+			}
+			return f.handler(t, nil)
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver(sesRegion)
+			d.HTTP = &http.Client{Transport: rt}
+			d.SESBaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.PollInterval = 0
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("ses-sending", sesCap, "prod", attrs, impl, "k", 1)
+		},
+		PID:              sesSendingProviderID(sesRegion, sesDomain),
+		AllowedMutations: 3, // convergence onto the standing identity/config set
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
+
+// D746: a configuration set captures nothing unless something routes messages through
+// it. AWS applies one when the sender names it per send, or when it is the identity's
+// DEFAULT. The driver built the set and its BOUNCE+COMPLAINT destination and stopped —
+// so `bounce.tracked` reported true for a set nothing pointed at, while the vocabulary's
+// promise for that attribute is "a failed demand returns to the record, never the void".
+func TestBounceTrackedNeedsSomethingRoutingThroughTheSet(t *testing.T) {
+	cases := []struct {
+		name         string
+		destinations bool
+		defaultSet   string
+		want         any // nil => withheld
+	}{
+		{"no destination at all", false, "", false},
+		{"destination, and the identity routes through it", true, "DEFAULT", true},
+		{"destination, but nothing routes through it", true, "", nil},
+		{"destination, and a DIFFERENT set is the default", true, "someone-elses", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFakeSES()
+			f.identityExists = true
+			f.dkimSigning, f.dkimStatus = true, "SUCCESS"
+			f.configSetExists, f.eventDestExists = true, c.destinations
+			if c.defaultSet == "DEFAULT" {
+				f.defaultConfigSet = sesConfigSetName(sesCap, sesDomain)
+			} else {
+				f.defaultConfigSet = c.defaultSet
+			}
+			srv := f.handler(t, nil)
+			defer srv.Close()
+			d := sesDriver(t, srv)
+
+			obs, diags, err := d.Observe("ses-sending", sesCap, sesSendingProviderID(sesRegion, sesDomain))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got any
+			for _, o := range obs {
+				if o.Path == "bounce.tracked" {
+					got = o.Value
+				}
+			}
+			if got != c.want {
+				t.Fatalf("bounce.tracked = %v, want %v", got, c.want)
+			}
+			if c.want == nil {
+				var saidWhy bool
+				for _, dg := range diags {
+					if strings.Contains(dg, "not the identity's default set") {
+						saidWhy = true
+					}
+				}
+				if !saidWhy {
+					t.Fatalf("withholding without saying why is its own defect: %v", diags)
+				}
+			}
+		})
+	}
+}
+
+// D746: and the create now makes that association itself, so the guarantee is one the
+// infrastructure provides rather than one every caller must remember.
+func TestSESCreateAssociatesTheConfigurationSetWithTheIdentity(t *testing.T) {
+	f := newFakeSES()
+	srv := f.handler(t, nil)
+	defer srv.Close()
+	d := sesDriver(t, srv)
+
+	attrs, impl := sesCandidate()
+	res := d.Create("ses-sending", sesCap, "prod", attrs, impl, "k1", 1)
+	if res.Status != "succeeded" {
+		t.Fatalf("create: %+v", res)
+	}
+	if f.defaultConfigSet != sesConfigSetName(sesCap, sesDomain) {
+		t.Fatalf("the identity's default configuration set is %q — a set nothing routes "+
+			"through captures nothing, and the create claimed tracking", f.defaultConfigSet)
 	}
 }

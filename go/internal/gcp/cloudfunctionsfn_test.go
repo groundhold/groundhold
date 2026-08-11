@@ -94,6 +94,11 @@ func TestBuildCloudFunctionFnHonorsAndRefuses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// D925: the body name must be the FULL resource path — Cloud Functions v2 rejects a bare
+	// deterministic name ("Invalid resource name ... for pattern projects/.../functions/{function}").
+	if nm, _ := req.Body["name"].(string); !strings.HasPrefix(nm, "projects/acme-prod/locations/europe-west1/functions/") {
+		t.Fatalf("body name must be the full resource path, got %q", nm)
+	}
 	sc := req.Body["serviceConfig"].(map[string]any)
 	if sc["ingressSettings"] != "ALLOW_ALL" || sc["timeoutSeconds"] != 300 || sc["minInstanceCount"] != 0 {
 		t.Fatalf("serviceConfig = %+v", sc)
@@ -262,6 +267,10 @@ func TestReadStormCloudFunctionFn(t *testing.T) {
 		Classify:        fnServerlessRole,
 		OwnerTagValue:   "api",
 		DeterministicID: true,
+		// F-LC3 (D523): hand-wired.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("cloudfunctions-fn", "api", "cffn:acme-prod:europe-west1:api-fn")
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := newGcpHonestyDriver(happyURL, rt)
 			d.PollInterval = 0

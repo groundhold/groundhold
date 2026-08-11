@@ -24,14 +24,34 @@ attributes:
 
   addon.name:
     kind: string
-    description: The managed addon (vpc-cni, coredns, kube-proxy, aws-ebs-csi-driver, eks-pod-identity-agent, ...)
+    # D690: NO `enum:`, deliberately, and this comment is the reason. The three
+    # drivers accept three DISJOINT closed sets — an EKS addon is a versioned
+    # package, a GKE addon is a cluster flag, an AKS addon is an addonProfile key —
+    # so their union is not a set any single candidate can draw from, and declaring
+    # it would make the loader accept a name the chosen cloud refuses while
+    # implying it is portable. The per-provider sets are published below instead,
+    # where `explain` prints them, and each driver refuses a name outside its own.
+    description: >
+      The managed addon. The accepted names are PER PROVIDER and do not overlap —
+      see the mappings below for each cloud's set.
     mappings:
-      aws.eks-addon: DescribeAddon addonName
+      aws.eks-addon: >
+        DescribeAddon addonName — free-form EKS addon names (vpc-cni, coredns,
+        kube-proxy, aws-ebs-csi-driver, eks-pod-identity-agent, ...)
       # GKE addons are cluster addonsConfig FLAGS, not versioned packages: the
       # canonical name maps to an addonsConfig field (gce-pd-csi-driver ->
       # gcePersistentDiskCsiDriverConfig, http-load-balancing -> httpLoadBalancing,
       # network-policy -> networkPolicyConfig, ...).
-      gcp.gke-addon: cluster addonsConfig field (canonical name -> field + toggle)
+      gcp.gke-addon: >
+        cluster addonsConfig field (canonical name -> field + toggle); the driver
+        accepts exactly: backup-agent, config-connector, dns-cache,
+        filestore-csi-driver, gce-pd-csi-driver, horizontal-pod-autoscaling,
+        http-load-balancing, network-policy
+      # D545: read from the driver.
+      azure.aks-addon: >
+        the addon profile key on the managed cluster; the driver accepts exactly:
+        azure-policy, http-application-routing, ingress-appgw,
+        keyvault-secrets-provider, monitoring, open-service-mesh
 
   addon.version:
     kind: string
@@ -49,3 +69,4 @@ attributes:
     mappings:
       aws.eks-addon: const true when observed through the driver
       gcp.gke-addon: const true when observed through the driver
+      azure.aks-addon: const true

@@ -11,6 +11,7 @@ import (
 	"groundhold/internal/aws"
 	"groundhold/internal/azure"
 	"groundhold/internal/gcp"
+	"groundhold/internal/k8s"
 	"groundhold/internal/provider"
 )
 
@@ -38,6 +39,11 @@ func TestDocServiceCountsMatchTheDrivers(t *testing.T) {
 		"AWS":   aws.NewDriver("eu-central-1"),
 		"GCP":   gcp.NewDriver("p"),
 		"Azure": azure.NewDriver("s"),
+		// D562: the fourth driver's count was published in this very table and
+		// gated nowhere, for the same reason D561 found in the mappings gate —
+		// k8s had no CapabilityMapper, so every "ask all the drivers" loop
+		// silently meant three. It has one now.
+		"k8s": k8s.NewDriver("https://example.invalid", "t"),
 	} {
 		m, ok := p.(provider.CapabilityMapper)
 		if !ok {
@@ -149,6 +155,11 @@ func TestMaturityCountsMatchReality(t *testing.T) {
 		"AWS":   aws.NewDriver("eu-central-1"),
 		"GCP":   gcp.NewDriver("p"),
 		"Azure": azure.NewDriver("s"),
+		// D562: the fourth driver's count was published in this very table and
+		// gated nowhere, for the same reason D561 found in the mappings gate —
+		// k8s had no CapabilityMapper, so every "ask all the drivers" loop
+		// silently meant three. It has one now.
+		"k8s": k8s.NewDriver("https://example.invalid", "t"),
 	} {
 		m, ok := p.(provider.CapabilityMapper)
 		if !ok {
@@ -176,6 +187,7 @@ func TestMaturityCountsMatchReality(t *testing.T) {
 	claim("AWS services", `AWS drivers \((\d+) services`, got["AWS"])
 	claim("GCP services", `GCP drivers \((\d+) services`, got["GCP"])
 	claim("Azure services", `Azure drivers \((\d+) services`, got["Azure"])
+	claim("k8s mapped services", `k8s driver \((\d+) mapped services\)`, got["k8s"])
 
 	// The conformance suite's own size, counted from the cases it runs.
 	cases, err := filepath.Glob(filepath.Join(repoRoot(t), "conformance", "cases", "*.yaml"))
@@ -259,4 +271,51 @@ func suiteCounts(t *testing.T) (total, dual int) {
 		t.Fatalf("only %d cases parsed — the parser broke, not the docs", total)
 	}
 	return total, dual
+}
+
+// D476: CLAUDE.md's suite counts, gated like its vocabulary count already was.
+//
+// The file said 514 cases / 232 dual; the suite holds 521 / 235. Nobody was misled into
+// a wrong verdict by that — but CLAUDE.md is the document every agent working in this
+// repository reads first, its header says the instructions OVERRIDE default behaviour,
+// and three lines below the stale numbers it says "These numbers drift. Read them from
+// the tools, never from this file." It was right, and the drift was sitting under the
+// warning.
+//
+// The vocabulary count beside them has been gated since D324. The case counts were not,
+// which is the whole difference between a number that stays true and a number that
+// carries a disclaimer.
+func TestClaudeMdSuiteCountsMatchTheSuite(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "CLAUDE.md"))
+	if os.IsNotExist(err) {
+		t.Skip("CLAUDE.md not present (the public export tree omits it); the website " +
+			"conformance-count gate still guards these numbers")
+	}
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	total, dual := suiteCounts(t)
+	claude := string(raw)
+
+	for _, c := range []struct {
+		what, pattern string
+		actual        int
+	}{
+		{"the suite size", `(\d+) conformance cases through the Go binary`, total},
+		{"the dual subset", `\((\d+) of them dual`, dual},
+	} {
+		m := regexp.MustCompile(c.pattern).FindStringSubmatch(claude)
+		if m == nil {
+			t.Fatalf("CLAUDE.md no longer states %s in the form this gate checks — "+
+				"update both, or the number is unguarded again", c.what)
+		}
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			t.Fatalf("%s: %q is not a number", c.what, m[1])
+		}
+		if n != c.actual {
+			t.Errorf("CLAUDE.md claims %s = %d, the suite holds %d", c.what, n, c.actual)
+		}
+	}
 }

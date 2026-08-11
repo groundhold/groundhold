@@ -93,6 +93,10 @@ const ec2RunningXML = `<DescribeInstancesResponse><reservationSet><item><instanc
 <item><key>groundhold-environment</key><value>production</value></item></tagSet>
 </item></instancesSet></item></reservationSet></DescribeInstancesResponse>`
 
+// ec2GoneXML is an empty reservation set — DescribeInstances after a completed
+// termination. The delete's poll-to-absence (D976) confirms gone against it.
+const ec2GoneXML = `<DescribeInstancesResponse><reservationSet/></DescribeInstancesResponse>`
+
 const ec2RunOKXML = `<RunInstancesResponse><instancesSet><item><instanceId>i-0123456789abcdef0</instanceId></item></instancesSet></RunInstancesResponse>`
 
 func TestCreateEC2InstanceHappyPath(t *testing.T) {
@@ -260,12 +264,27 @@ func TestObserveEC2InstanceUnreadableVolumeIsNotDefaulted(t *testing.T) {
 
 func TestDeleteEC2Instance(t *testing.T) {
 	t.Run("terminates our own machine", func(t *testing.T) {
-		s := &ec2InstanceServer{describe: []string{ec2RunningXML}, termStatus: 200, termBody: `<TerminateInstancesResponse/>`}
+		// pre-delete read sees it running (owned); the poll-to-absence (D976) then
+		// sees it gone before concluding succeeded.
+		s := &ec2InstanceServer{describe: []string{ec2RunningXML, ec2GoneXML}, termStatus: 200, termBody: `<TerminateInstancesResponse/>`}
 		d, done := ec2TestDriver(t, s)
 		defer done()
 		got := d.deleteEC2Instance("web", "production", "ec2:eu-central-1:000000000000:i-0123456789abcdef0")
 		if got.Status != "succeeded" {
 			t.Errorf("status = %q (%s), want succeeded", got.Status, got.Reason)
+		}
+	})
+
+	t.Run("an accepted terminate that never leaves running is unknown (D976)", func(t *testing.T) {
+		// TerminateInstances accepted, but the machine stays present (shutting-down
+		// forever in this fixture). Concluding succeeded would tombstone a still-billable
+		// VM; the poll must time out to unknown and keep the handle.
+		s := &ec2InstanceServer{describe: []string{ec2RunningXML}, termStatus: 200, termBody: `<TerminateInstancesResponse/>`}
+		d, done := ec2TestDriver(t, s)
+		defer done()
+		got := d.deleteEC2Instance("web", "production", "ec2:eu-central-1:000000000000:i-0123456789abcdef0")
+		if got.Status != "unknown" {
+			t.Fatalf("status = %q, want unknown — an accepted-but-still-terminating VM keeps its handle", got.Status)
 		}
 	})
 
@@ -359,6 +378,16 @@ func TestEC2InstanceHonestyNet(t *testing.T) {
 		}
 		return httptest.NewServer(s.handler())
 	}
+	// the delete op polls to absence (D976): running when read for ownership, gone
+	// when polled after the accepted terminate.
+	happyDel := func() *httptest.Server {
+		s := &ec2InstanceServer{
+			describe:   []string{ec2RunningXML, ec2GoneXML},
+			volumeBody: `<DescribeVolumesResponse><volumeSet><item><encrypted>true</encrypted></item></volumeSet></DescribeVolumesResponse>`,
+			termStatus: 200, termBody: `<TerminateInstancesResponse/>`,
+		}
+		return httptest.NewServer(s.handler())
+	}
 
 	p := &certifynet.Probe{
 		Name:            "aws/ec2",
@@ -366,6 +395,10 @@ func TestEC2InstanceHonestyNet(t *testing.T) {
 		Classify:        queryXMLRole, // Query-XML: RunInstances is parsed for its instanceId
 		OwnerTagValue:   "web",
 		DeterministicID: false, // the instance id is server-assigned; ClientToken recovers it
+		// F-LC3 (D521): protocol-aware gone estate.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("ec2", "web", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -379,7 +412,7 @@ func TestEC2InstanceHonestyNet(t *testing.T) {
 			},
 			{
 				Name:  "delete",
-				Happy: happy,
+				Happy: happyDel,
 				Run: func(pr provider.Provider) provider.CreateResult {
 					return pr.Delete("ec2", "web", "production", pid, "k")
 				},

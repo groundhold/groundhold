@@ -603,3 +603,98 @@ func TestLoadContractRejectsNonMapping(t *testing.T) {
 		t.Fatalf("want not-a-mapping error, got %v", err)
 	}
 }
+
+// D719. Acme's first field report: a contract with two unknown capability types
+// cost one run per mistake, because the loader refused at the first — and the
+// refusal named what was wrong without naming what is right, over a vocabulary it
+// was holding. The conformance suite pins this cross-implementation; this pins it
+// where `go test` can see it, which is where the mutation meter looks.
+func TestUnknownCapabilityTypesAreAllNamedWithSuggestions(t *testing.T) {
+	doc := map[string]any{
+		"apiVersion": "contract/v0.1",
+		"kind":       "InfrastructureContract",
+		"meta":       map[string]any{"id": "e719", "environment": "production", "version": 1},
+		"capabilities": []any{
+			map[string]any{"id": "fw", "type": "capability.network.firewall"},
+			map[string]any{"id": "det", "type": "capability.security.detection"},
+			map[string]any{"id": "db", "type": "capability.database.relational"},
+		},
+	}
+	_, err := LoadContractDoc(doc)
+	if err == nil {
+		t.Fatal("a contract with unknown capability types must be refused")
+	}
+	got := err.Error()
+	for _, want := range []string{
+		"2 unknown capability types",
+		"capability.network.firewall",
+		"capability.security.detection",
+		"closest known types: capability.security.threatdetection",
+		"the vocabulary is closed and has 57 types",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("refusal does not say %q; it said:\n%s", want, got)
+		}
+	}
+	// A refusal that stops at the first mistake reads the same as one that found
+	// only one. The count is what tells the two apart.
+	if strings.Contains(got, "unknown capability type:") {
+		t.Errorf("the refusal is in the single-type form, so it stopped at the first "+
+			"of two; it said:\n%s", got)
+	}
+}
+
+// D728: the two-bar verify form, and the three ways it is refused rather than allowed
+// to become the defect it fixes. The conformance suite pins these cross-implementation;
+// this pins them where the mutation meter looks.
+func TestVerifyTwoBarFormRefusals(t *testing.T) {
+	base := func(v map[string]any) map[string]any {
+		return map[string]any{
+			"apiVersion": "contract/v0.1",
+			"kind":       "InfrastructureContract",
+			"meta":       map[string]any{"id": "d728", "environment": "test", "version": 1},
+			"capabilities": []any{
+				map[string]any{"id": "net", "type": "capability.network.private"}},
+			"constraints": map[string]any{"hard": []any{map[string]any{
+				"id": "c", "subject": "net", "path": "egress.restricted",
+				"op": "equals", "value": true, "verify": v}}},
+		}
+	}
+	cases := []struct {
+		name   string
+		verify map[string]any
+		want   string
+	}{
+		{"design stronger than runtime",
+			map[string]any{"design": "probe", "runtime": "static"},
+			"stronger than verify.runtime"},
+		{"both spellings of the same bar",
+			map[string]any{"method": "static", "design": "static", "runtime": "provider-api"},
+			"one bar or two, never both spellings"},
+		{"half the two-bar form",
+			map[string]any{"design": "static"},
+			"needs BOTH `design` and `runtime`"},
+		{"a bar the loader cannot read",
+			map[string]any{"design": nil, "runtime": "provider-api"},
+			"must be strings"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := LoadContractDoc(base(c.verify))
+			if err == nil {
+				t.Fatalf("accepted; this is the shape that made the fix into its own defect")
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("refusal does not say %q; it said %q", c.want, err)
+			}
+		})
+	}
+	// The coherent pair loads, and both bars survive.
+	c, err := LoadContractDoc(base(map[string]any{"design": "static", "runtime": "provider-api"}))
+	if err != nil {
+		t.Fatalf("the two-bar form must load: %v", err)
+	}
+	if c.Constraints[0].VerifyMethod != "static" || c.Constraints[0].RuntimeMethod != "provider-api" {
+		t.Fatalf("bars did not survive: %+v", c.Constraints[0])
+	}
+}

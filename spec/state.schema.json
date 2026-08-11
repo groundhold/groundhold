@@ -127,8 +127,8 @@
         "value": {},
         "source": { "enum": ["provider-api", "probe", "manual"] },
         "derivation": {
-          "enum": ["config-intent", "measured"],
-          "description": "D44: evidence quality, mirroring candidate provenance (D5) — a config-derived fact is not a measurement"
+          "enum": ["config-intent", "measured", "platform-invariant"],
+          "description": "D44/D759: how this fact was come by. measured = read from THIS resource's live state; config-intent = a value the resource stores but does not itself enforce; platform-invariant = true of every instance of the service by the provider's own guarantee, read from nothing on this resource. A config-derived fact is not a measurement, and neither is a platform guarantee."
         },
         "observedAt": { "$ref": "#/$defs/timestamp" },
         "ttlSeconds": { "type": "integer", "minimum": 0 }

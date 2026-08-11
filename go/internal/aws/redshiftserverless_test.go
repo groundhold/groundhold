@@ -46,6 +46,23 @@ func TestBuildRedshiftServerlessHonors(t *testing.T) {
 	if wb["publiclyAccessible"] != false {
 		t.Fatalf("workgroup body = %+v", wb)
 	}
+	// D887: no VPC operands given → no subnet/security-group keys (an account with a
+	// default VPC still works). With them, the workgroup body carries the lists.
+	if _, has := wb["subnetIds"]; has {
+		t.Fatalf("workgroup body must omit subnetIds when none given: %+v", wb)
+	}
+	pv, err := BuildRedshiftServerless("prod", "lake", rssAttrs(),
+		map[string]any{"subnetIds": []any{"subnet-1", "subnet-2"}, "securityGroupIds": []any{"sg-1"}}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wbv := pv.workgroupBody("lake", "prod")
+	if sn, _ := wbv["subnetIds"].([]string); len(sn) != 2 {
+		t.Fatalf("VPC placement not in workgroup body: %+v", wbv)
+	}
+	if sg, _ := wbv["securityGroupIds"].([]string); len(sg) != 1 {
+		t.Fatalf("security groups not in workgroup body: %+v", wbv)
+	}
 }
 
 func TestBuildRedshiftServerlessCMKRequiresKey(t *testing.T) {
@@ -78,14 +95,20 @@ func TestBuildRedshiftServerlessRefusals(t *testing.T) {
 	}
 }
 
-// rssServer is a happy JSON-protocol double. GetWorkgroup reports AVAILABLE so create
-// polls once and succeeds; ListTagsForResource reflects the owner tags.
+// rssServer is a STATEFUL JSON-protocol double. GetWorkgroup reports AVAILABLE so create
+// polls once and succeeds; ListTagsForResource reflects the owner tags. D888: after a
+// DeleteWorkgroup, GetWorkgroup returns ResourceNotFound, exactly as the real cloud does
+// — so the delete's poll for the workgroup to disappear terminates. A fixture that kept
+// reporting the workgroup AVAILABLE after its delete would never let the poll break, and
+// hid that the namespace delete was firing while the workgroup still existed.
 func rssServer(t *testing.T, capLabel string, public bool) *httptest.Server {
 	t.Helper()
 	pub := "false"
 	if public {
 		pub = "true"
 	}
+	wgDeleted := false
+	nsDeleted := false
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			switch rssAction(r) {
@@ -94,13 +117,29 @@ func rssServer(t *testing.T, capLabel string, public bool) *httptest.Server {
 			case "CreateWorkgroup":
 				_, _ = w.Write([]byte(`{"workgroup":{"workgroupName":"w","workgroupArn":"arn:wg","status":"CREATING","publiclyAccessible":` + pub + `}}`))
 			case "GetWorkgroup":
+				if wgDeleted {
+					w.WriteHeader(404)
+					_, _ = w.Write([]byte(`{"__type":"ResourceNotFoundException","message":"workgroup not found"}`))
+					return
+				}
 				_, _ = w.Write([]byte(`{"workgroup":{"workgroupName":"w","workgroupArn":"arn:wg","namespaceName":"n","status":"AVAILABLE","publiclyAccessible":` + pub + `}}`))
 			case "GetNamespace":
+				if nsDeleted {
+					// the namespace has finished deleting — the delete's poll-to-absence (D983)
+					// confirms gone, as the workgroup leg already did (D888).
+					w.WriteHeader(404)
+					_, _ = w.Write([]byte(`{"__type":"ResourceNotFoundException","message":"namespace not found"}`))
+					return
+				}
 				_, _ = w.Write([]byte(`{"namespace":{"namespaceName":"n","namespaceArn":"arn:ns","status":"AVAILABLE","kmsKeyId":"AWS_OWNED_KMS_KEY"}}`))
 			case "ListTagsForResource":
 				_, _ = w.Write([]byte(`{"tags":[{"key":"groundhold-capability","value":"` + capLabel +
 					`"},{"key":"groundhold-environment","value":"prod"}]}`))
-			case "DeleteWorkgroup", "DeleteNamespace":
+			case "DeleteWorkgroup":
+				wgDeleted = true // the workgroup is gone from the next GetWorkgroup on
+				_, _ = w.Write([]byte(`{}`))
+			case "DeleteNamespace":
+				nsDeleted = true // the namespace is gone from the next GetNamespace on
 				_, _ = w.Write([]byte(`{}`))
 			default:
 				w.WriteHeader(400)
@@ -118,6 +157,64 @@ func rssDriver(t *testing.T, srv *httptest.Server) *Driver {
 	d.PollInterval = time.Millisecond
 	d.PollTimeout = 2 * time.Second
 	return d
+}
+
+// TestDeleteRedshiftServerlessWaitsForWorkgroup (D888) models the real cloud: the
+// workgroup lingers for one GetWorkgroup poll after DeleteWorkgroup, and DeleteNamespace
+// 409s while ANY workgroup still references the namespace. The baseline delete must still
+// succeed — proof the driver POLLS for the workgroup to vanish before deleting the
+// namespace. A driver that skips the poll fires DeleteNamespace against the lingering
+// workgroup and fails, orphaning the namespace (the field defect this fixes).
+func TestDeleteRedshiftServerlessWaitsForWorkgroup(t *testing.T) {
+	getsSinceDelete := -1 // -1 until DeleteWorkgroup; then counts GetWorkgroup calls
+	namespaceDeleted := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch rssAction(r) {
+		case "GetWorkgroup":
+			if getsSinceDelete >= 0 {
+				getsSinceDelete++
+				if getsSinceDelete >= 2 { // gone from the SECOND poll — it lingered once
+					w.WriteHeader(404)
+					_, _ = w.Write([]byte(`{"__type":"ResourceNotFoundException","message":"gone"}`))
+					return
+				}
+			}
+			_, _ = w.Write([]byte(`{"workgroup":{"workgroupName":"w","namespaceName":"n","status":"AVAILABLE","publiclyAccessible":false}}`))
+		case "GetNamespace":
+			// the namespace poll (D983) after DeleteNamespace: gone once it fired.
+			if namespaceDeleted {
+				w.WriteHeader(404)
+				_, _ = w.Write([]byte(`{"__type":"ResourceNotFoundException","message":"gone"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"namespace":{"namespaceName":"n","namespaceArn":"arn:ns","status":"AVAILABLE","kmsKeyId":"AWS_OWNED_KMS_KEY"}}`))
+		case "ListTagsForResource":
+			_, _ = w.Write([]byte(`{"tags":[{"key":"groundhold-capability","value":"lake"},{"key":"groundhold-environment","value":"prod"}]}`))
+		case "DeleteWorkgroup":
+			getsSinceDelete = 0
+			_, _ = w.Write([]byte(`{}`))
+		case "DeleteNamespace":
+			if getsSinceDelete < 2 { // workgroup still visible → the real cloud 409s
+				w.WriteHeader(409)
+				_, _ = w.Write([]byte(`{"__type":"ConflictException","message":"a workgroup still references this namespace"}`))
+				return
+			}
+			namespaceDeleted = true
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			w.WriteHeader(400)
+		}
+	}))
+	defer srv.Close()
+	d := rssDriver(t, srv)
+	pid := rssProviderID("eu-central-1", RSSName("prod", "lake", 1))
+	res := d.Delete("redshiftserverless", "lake", "prod", pid, "k")
+	if res.Status != "succeeded" {
+		t.Fatalf("delete must wait for the workgroup then succeed, got %+v", res)
+	}
+	if !namespaceDeleted {
+		t.Fatal("DeleteNamespace never fired after the workgroup vanished")
+	}
 }
 
 func TestCreateObserveDeleteRedshiftServerless(t *testing.T) {
@@ -156,19 +253,58 @@ func TestDeleteRedshiftServerlessForeignRefused(t *testing.T) {
 	}
 }
 
+// TestDeleteRedshiftServerlessNamespaceAsyncNotGoneIsUnknown pins D983: the workgroup
+// leg polls to gone (D888), but the NAMESPACE — the data half — did not. A DeleteNamespace
+// the provider ACCEPTS while the namespace stays present (still deleting) must report
+// unknown, never a terminal "succeeded" that tombstones data still being torn down.
+func TestDeleteRedshiftServerlessNamespaceAsyncNotGoneIsUnknown(t *testing.T) {
+	wgDeleted := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch rssAction(r) {
+		case "GetWorkgroup":
+			if wgDeleted { // workgroup vanishes so the delete reaches the namespace leg
+				w.WriteHeader(404)
+				_, _ = w.Write([]byte(`{"__type":"ResourceNotFoundException","message":"gone"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"workgroup":{"workgroupName":"w","namespaceName":"n","status":"AVAILABLE","publiclyAccessible":false}}`))
+		case "GetNamespace": // never gone — the namespace stays "deleting"
+			_, _ = w.Write([]byte(`{"namespace":{"namespaceName":"n","namespaceArn":"arn:ns","status":"AVAILABLE","kmsKeyId":"AWS_OWNED_KMS_KEY"}}`))
+		case "ListTagsForResource":
+			_, _ = w.Write([]byte(`{"tags":[{"key":"groundhold-capability","value":"lake"},{"key":"groundhold-environment","value":"prod"}]}`))
+		case "DeleteWorkgroup":
+			wgDeleted = true
+			_, _ = w.Write([]byte(`{}`))
+		case "DeleteNamespace":
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			w.WriteHeader(400)
+		}
+	}))
+	defer srv.Close()
+	d := rssDriver(t, srv)
+	d.PollTimeout = 5 * time.Millisecond // the namespace never goes gone → times out fast
+	pid := rssProviderID("eu-central-1", RSSName("prod", "lake", 1))
+	res := d.Delete("redshiftserverless", "lake", "prod", pid, "k")
+	if res.Status != "unknown" {
+		t.Fatalf("an accepted-but-still-deleting namespace must be unknown (keep the handle), got %+v", res)
+	}
+}
+
 func TestHonestyHarnessRedshiftServerless(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 	pid := rssProviderID("eu-central-1", RSSName("prod", "lake", 1))
 	p := &certifynet.Probe{
-		// AssertTransient left false — D237 TODO: this driver's create/delete ladder
-		// still maps 429/503/403 to terminal failed (and drops the providerId); it must
-		// route through provider.MutationResult before the transient invariant can lock.
 		Name:            "aws/redshiftserverless",
 		AssertTransient: true,           // D237: create/delete route through provider.MutationResult
 		Classify:        jsonTargetRole, // Create*/Delete* opaque; Get*/List* reads
 		OwnerTagValue:   "lake",
 		DeterministicID: true, // the namespace/workgroup names are chosen
+		// F-LC3 (D521): protocol-aware gone estate.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("redshiftserverless", "lake", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -190,4 +326,60 @@ func TestHonestyHarnessRedshiftServerless(t *testing.T) {
 		},
 	}
 	certifynet.CertifyDriverNet(t, p)
+}
+
+func rssRole(req *http.Request, _ []byte) certifynet.Role {
+	switch rssAction(req) {
+	case "GetWorkgroup", "GetNamespace", "ListTagsForResource", "ListWorkgroups", "ListNamespaces":
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingRedshiftServerless enrols redshiftserverless in the D391 gate. It is
+// a COMPOSITE (namespace plus workgroup) where BOTH halves answer ConflictException on a
+// re-run, so the adoption has to hold twice in one create — the only two-step adoption
+// in the AWS family.
+func TestAdoptsExistingRedshiftServerless(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/redshiftserverless",
+		Classify: rssRole,
+		ExistingServer: func() *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					switch rssAction(r) {
+					case "CreateNamespace", "CreateWorkgroup":
+						w.WriteHeader(409)
+						_, _ = w.Write([]byte(`{"__type":"ConflictException","message":"already exists"}`))
+					case "GetWorkgroup":
+						_, _ = w.Write([]byte(`{"workgroup":{"workgroupName":"w","workgroupArn":"arn:wg",` +
+							`"namespaceName":"n","status":"AVAILABLE","publiclyAccessible":false}}`))
+					case "GetNamespace":
+						_, _ = w.Write([]byte(`{"namespace":{"namespaceName":"n","namespaceArn":"arn:ns",` +
+							`"status":"AVAILABLE","kmsKeyId":"AWS_OWNED_KMS_KEY"}}`))
+					case "ListTagsForResource":
+						_, _ = w.Write([]byte(`{"tags":[{"key":"groundhold-capability","value":"lake"},` +
+							`{"key":"groundhold-environment","value":"prod"}]}`))
+					default:
+						w.WriteHeader(400)
+					}
+				}))
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.RedshiftServerlessBaseURL = happyURL
+			d.PollInterval = time.Millisecond
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("redshiftserverless", "lake", "prod", rssAttrs(), nil, "lake", 1)
+		},
+		AllowedMutations: 2, // the two refused creates — namespace and workgroup
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

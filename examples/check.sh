@@ -40,19 +40,21 @@ report() {
   fi
 }
 
-# contracts that must load and validate on their own
-for c in \
-  examples/acme/platform.contract.yaml \
-  examples/acme/gitops-coupling.contract.yaml \
-  examples/canary-azure/canary.contract.yaml \
-  examples/laptop/laptop.contract.yaml \
-  examples/lifecycle/1-create.contract.yaml \
-  examples/lifecycle/2-refused.contract.yaml \
-  examples/lifecycle/3-retire.contract.yaml \
-  examples/voice/drafted.contract.yaml \
-  spec/examples/orders-production.contract.yaml \
-  spec/examples/workforce-sso.contract.yaml
-do
+# contracts that must load and validate on their own — DISCOVERED from the tree,
+# never retyped.
+#
+# D692: this was a hand-written list of ten paths, and the first shipped contract
+# to test it was the canary's own retirement contract — added in the same commit
+# as this line, missed by the list. A scope an author has to remember to widen
+# gates the author's memory, not the tree (D583). The floor keeps the discovery
+# from silently finding nothing (D328).
+mapfile -t CONTRACTS < <(find examples spec/examples -name '*.contract.yaml' | sort)
+if [ "${#CONTRACTS[@]}" -lt 11 ]; then
+  echo "found only ${#CONTRACTS[@]} shipped contracts — the scan broke, and every"
+  echo "validate check below would have passed over an empty set"
+  exit 1
+fi
+for c in "${CONTRACTS[@]}"; do
   rc=0
   "$CLI" validate "$c" >/dev/null 2>&1 || rc=$?
   report "validate $(basename "$c")" 0 "$rc"
@@ -80,6 +82,15 @@ check_pair examples/canary-azure/canary.contract.yaml \
            examples/canary-azure/canary.candidate.yaml 0 0
 check_pair examples/laptop/laptop.contract.yaml \
            examples/laptop/laptop.candidate.yaml 0 0
+# The canary's TEARDOWN pair (D692). The README tells a reader with a live Azure
+# resource to run it, so it is checked like any other shipped document: the
+# retired contract loads, and the candidate that no longer mentions the capability
+# verifies clean. `plan` refuses with `nothing-to-change` here and that is right —
+# a delete needs the binding the reader's own converge recorded, and this check has
+# no ledger. The delete half of retirement is proven on `fake` by the lifecycle
+# example below, which does have one.
+check_pair examples/canary-azure/canary-retired.contract.yaml \
+           examples/canary-azure/canary-retired.candidate.yaml 0 2
 # THE THESIS, not a defect: c-rto is provable only by a restore test, so the
 # candidate is not executable and plan refuses (exit 2). The README shows this
 # refusal on purpose; if it ever starts compiling, the guarantee broke.
@@ -134,6 +145,25 @@ case "$out" in
   *"delete a-delete-assets"*target=*) report "lifecycle delete pins its target" yes yes ;;
   *)                                  report "lifecycle delete pins its target" yes no ;;
 esac
+
+# Completeness: every shipped candidate must be NAMED somewhere above (D692).
+#
+# Expectations stay declared — this script refuses to guess whether an example is
+# meant to pass or to be refused — but WHICH examples get checked must not be a
+# matter of memory. A candidate that ships and appears nowhere here is a document
+# a reader can run and this suite never did.
+mapfile -t CANDIDATES < <(find examples spec/examples -name '*.candidate.yaml' | sort)
+if [ "${#CANDIDATES[@]}" -lt 10 ]; then
+  echo "found only ${#CANDIDATES[@]} shipped candidates — the scan broke"
+  exit 1
+fi
+for cand in "${CANDIDATES[@]}"; do
+  if grep -qF -- "$cand" "$ROOT/examples/check.sh"; then
+    report "covered $(basename "$cand")" yes yes
+  else
+    report "covered $(basename "$cand")" yes no
+  fi
+done
 
 echo
 if [ "$fail" -gt 0 ]; then

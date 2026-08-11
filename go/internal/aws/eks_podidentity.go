@@ -259,16 +259,26 @@ func (d *Driver) observeEKSPodIdentity(capability, providerID string) ([]provide
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"pod identity association not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"pod identity association not found — bound resource is gone (will re-create)"}, nil
 	}
 	a, f2, r2 := d.describePodIdentity(region, cluster, id)
 	if r2 != nil {
 		return nil, nil, r2
 	}
 	if !f2 {
-		return nil, []string{"pod identity association not found — nothing to observe"}, nil
+		return []provider.Observation{
+			// F-LC3 (D802): the bound subject is GONE; an empty return would leave the
+			// last good reading standing as the freshest word about it.
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"pod identity association not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "workload.namespace", Value: a.Namespace, Derivation: "measured"},
 		{Path: "workload.serviceAccount", Value: a.ServiceAccount, Derivation: "measured"},
@@ -380,7 +390,7 @@ func (d *Driver) discoverEKSPodIdentity(region string) ([]provider.Discovered, [
 			}
 			diags = append(diags, od...)
 			found = append(found, provider.Discovered{
-				ProviderID: pid, ResourceType: "capability.identity.podidentity", Observations: obs})
+				ProviderID: pid, ResourceType: "capability.identity.podidentity", Observations: provider.WithoutAbsence(obs)})
 		}
 	}
 	return found, diags, nil

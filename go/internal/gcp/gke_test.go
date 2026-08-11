@@ -740,3 +740,36 @@ func TestCreateGKE_RidesOutReadStorm(t *testing.T) {
 		}
 	}
 }
+
+// D763. The refusals and the registry contradicted each other: the driver refuses
+// `network.apiExposure: mixed` unless `implementation.masterAuthorizedCidrs` is supplied,
+// and the compiler's silent-ignore guard refused that operand because the registry did
+// not list it — with the sentence "is not an operand the gcp/gke driver reads", which was
+// false. Two refusals pointing at each other and no declaration in between.
+//
+// This pins both ends: the driver READS them, and the registry DECLARES them. Either half
+// alone leaves the loop closed.
+func TestGKEOperandsTheDriverReadsAreDeclared(t *testing.T) {
+	d := NewDriver("acme-prod")
+	declared := map[string]bool{}
+	for _, k := range d.ConsumedOperands("gke") {
+		declared[k] = true
+	}
+	for _, k := range []string{"masterAuthorizedCidrs", "kmsKeyName"} {
+		if !declared[k] {
+			t.Errorf("%s is demanded by a refusal and not declared consumed — supplying it "+
+				"is then refused as an unknown operand, and the capability cannot be "+
+				"expressed at all (D763)", k)
+		}
+	}
+
+	// And the driver really does read them, or declaring them would be the lie.
+	attrs, impl := gkeCandidate()
+	p, err := BuildGKE("test-proj", "prod", gkeCap, attrs, impl, 1)
+	if err != nil {
+		t.Fatalf("the declaration the refusals ask for must build: %v", err)
+	}
+	if len(p.MasterAuthorizedCidrs) != 1 || p.KmsKeyName == "" {
+		t.Fatalf("operands declared and not read: %+v", p)
+	}
+}

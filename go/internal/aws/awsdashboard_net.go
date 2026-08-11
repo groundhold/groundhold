@@ -49,6 +49,37 @@ func (d *Driver) createCWDashboard(environment, capability string,
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	pid := cwDashProviderID(plan.DashboardName)
+	// D700: read before writing at a name anyone can compute.
+	//
+	// PutDashboard is an upsert and this create used to send it blind, on the stated
+	// grounds that "a dashboard present at cwDashName is ours by construction". D526
+	// measured that reasoning and found it unearned: the name hashes environment and
+	// capability and carries no estate identity, so two groundhold deployments over
+	// one account compute the SAME name. The claim was about a name, and the name is
+	// computable by anyone.
+	//
+	// A dashboard carries no tags, so ownership cannot be read from one. What CAN be
+	// read is the dashboard itself, and that is enough for the only question that
+	// matters here: if what stands at that name is byte-identical to what we would
+	// write, overwriting it changes nothing and binding it is safe — the D525
+	// identity-from-content reasoning, applied to content we actually read instead of
+	// asserted. If it differs, something else authored it and this create refuses
+	// rather than silently replacing someone's dashboard.
+	if body, found, rerr := d.cwDashBody(plan.DashboardName); rerr != nil {
+		return provider.CreateResult{Status: "unknown", Reason: "ownership pre-read " +
+			"gave no answer, so a write at this deterministic name cannot be shown to " +
+			"be safe — reconcile: " + rerr.Error()}
+	} else if found {
+		if body == plan.body() {
+			// already exactly what this contract describes: bind it, mutate nothing.
+			return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
+		}
+		return provider.CreateResult{Status: "unknown", Reason: "a dashboard already " +
+			"exists at " + plan.DashboardName + " and its content is NOT what this " +
+			"contract describes — the name is derived from environment and capability " +
+			"alone, so another deployment over this account computes the same one. " +
+			"Refusing to overwrite it; adopt it explicitly to take it over"}
+	}
 	st, resp, e := d.cwDashPost(encodeForm(map[string]string{
 		"Action": "PutDashboard", "Version": cwDashVersion,
 		"DashboardName": plan.DashboardName, "DashboardBody": plan.body()}))
@@ -67,6 +98,30 @@ func (d *Driver) createCWDashboard(environment, capability string,
 	return provider.CreateResult{Status: "failed", Reason: fmt.Sprintf("PutDashboard HTTP %d (%s): %s", st, rdsErrCode(resp), mutDetail(resp))}
 }
 
+// cwDashBody reads the dashboard at name. found=false with a nil error is an
+// authoritative absence; any transport/HTTP/parse failure is an error, never an
+// absence — the four-valued discipline, at the one read a create depends on.
+func (d *Driver) cwDashBody(name string) (body string, found bool, err error) {
+	st, resp, e := d.cwDashPost(encodeForm(map[string]string{
+		"Action": "GetDashboard", "Version": cwDashVersion, "DashboardName": name}))
+	if e != nil {
+		return "", false, fmt.Errorf("GetDashboard: %v", e)
+	}
+	if strings.Contains(rdsErrCode(resp), "NotFound") {
+		return "", false, nil
+	}
+	if st != http.StatusOK {
+		return "", false, fmt.Errorf("GetDashboard: HTTP %d (%s)", st, rdsErrCode(resp))
+	}
+	var r struct {
+		Body string `xml:"GetDashboardResult>DashboardBody"`
+	}
+	if xml.Unmarshal(resp, &r) != nil {
+		return "", false, fmt.Errorf("GetDashboard: unparseable")
+	}
+	return r.Body, true, nil
+}
+
 func (d *Driver) observeCWDashboard(capability, providerID string) ([]provider.Observation, []string, error) {
 	name, err := splitCWDashProviderID(providerID)
 	if err != nil {
@@ -78,7 +133,11 @@ func (d *Driver) observeCWDashboard(capability, providerID string) ([]provider.O
 		return nil, nil, fmt.Errorf("GetDashboard: %v", e)
 	}
 	if strings.Contains(rdsErrCode(resp), "NotFound") {
-		return nil, []string{"dashboard not found — nothing to observe"}, nil
+		// F-LC3 (D521): a BOUND resource the API says is GONE. A diagnostic
+		// alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"dashboard not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("GetDashboard: HTTP %d", st)
@@ -106,6 +165,8 @@ func (d *Driver) observeCWDashboard(capability, providerID string) ([]provider.O
 		}
 	}
 	return []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "dashboard.metrics", Value: metrics, Derivation: "measured"},
 		{Path: "dashboard.widgetCount", Value: float64(len(doc.Widgets)), Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
@@ -116,6 +177,17 @@ func (d *Driver) deleteCWDashboard(capability, environment, providerID string) p
 	name, err := splitCWDashProviderID(providerID)
 	if err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	// OWNERSHIP (D449). A CloudWatch dashboard carries NO TAGS — the API offers none —
+	// so its deterministic NAME is the only ownership evidence, the fifth service in this
+	// family with that shape (budgets D443, IAM policy and metric filter D444, SES
+	// receipt rule D446). Deleting a stranger's dashboard destroys the view an on-call
+	// rotation works from, and nothing about the failure is visible until someone opens
+	// it during an incident.
+	if !nameLooksOurs(name, capability, environment, cwDashBad, 8, true) {
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("dashboard %q is not named by groundhold for %s/%s — refusing "+
+				"to delete a dashboard this contract does not own", name, capability, environment)}
 	}
 	st, resp, e := d.cwDashPost(encodeForm(map[string]string{
 		"Action": "DeleteDashboards", "Version": cwDashVersion, "DashboardNames.member.1": name}))

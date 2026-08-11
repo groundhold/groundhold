@@ -5,6 +5,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 const r53RecordCap = "capability.dns.record"
@@ -189,4 +192,33 @@ func TestCreateRoute53RecordForeignZoneRefused(t *testing.T) {
 	if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
 		t.Fatalf("a foreign parent zone must refuse the record write, got %+v", res)
 	}
+}
+
+// TestAdoptsExistingRoute53Record enrols route53record in the D391 gate. The rrset call
+// is an UPSERT keyed by (zone, name, type), so re-running it repoints rather than
+// creating a second record — DNS cannot hold two rrsets at one name and type. The
+// ownership gate is the parent ZONE's tags, which is the interesting part: this is the
+// only service in the family whose ownership evidence lives on a DIFFERENT resource.
+func TestAdoptsExistingRoute53Record(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:           "aws/route53record",
+		Classify:       r53Role,
+		ExistingServer: func() *httptest.Server { return r53RecordServer(t, sanitizeTag(r53RecordCap)) },
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.Route53BaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("route53record", r53RecordCap, "prod",
+				r53RecordAttrs(), r53RecordImpl(), "rec", 1)
+		},
+		PID:              r53RecordProviderID("Z123ABC", "CNAME", "connect.example.com."),
+		AllowedMutations: 1, // the UPSERT itself
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

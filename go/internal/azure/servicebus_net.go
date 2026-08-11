@@ -159,7 +159,11 @@ func (d *Driver) sbObserve(capability, providerID string) ([]provider.Observatio
 		return nil, nil, fmt.Errorf("namespaces.get: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"service bus namespace not found — nothing to observe"}, nil
+		// F-LC3 (D523): the namespace holds the queue, so its absence is the bound
+		// resource's absence. A diagnostic alone leaves the binding a no-op forever.
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"service bus namespace not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("namespaces.get: HTTP %d", st)
@@ -169,8 +173,10 @@ func (d *Driver) sbObserve(capability, providerID string) ([]provider.Observatio
 		return nil, nil, &armReadError{Op: "namespaces.get", Cause: "body", Status: st}
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3).
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
-		{Path: "encryption.atRest", Value: true, Derivation: "config-intent"},
+		{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"},
 	}
 	if nsDoc.Location != "" {
 		obs = append(obs, provider.Observation{Path: "location.region", Value: strings.ToLower(nsDoc.Location), Derivation: "measured"})
@@ -251,6 +257,15 @@ func (d *Driver) updateServiceBus(capability, environment, providerID string,
 		return provider.CreateResult{Status: "failed",
 			Reason: "rebuilt queue identity does not match the bound providerId — refusing to redirect the mutation"}
 	}
+	// D460 — ownership, before the PUT. The identity check above only proves the bound
+	// providerId is self-consistent with the candidate; it says nothing about who owns
+	// the namespace standing at that deterministic path. sbDelete has read the tags
+	// since it was written. This did not, so an update wrote our queue properties into
+	// a stranger's namespace — and an ARM PUT to an occupied path overwrites (D254).
+	if r := d.refuseForeignSBNamespace(rg, ns, capability, environment, providerID,
+		"update"); r != nil {
+		return *r
+	}
 	qURL, _ := d.armURL(rg, d.sbNamespacePath(ns)+"/queues/"+entity, serviceBusAPIVersion)
 	body, _ := json.Marshal(map[string]any{"properties": sbQueueProps(plan)})
 	if r := d.putSetting(qURL, body, providerID, "service bus queue"); r != nil {
@@ -259,30 +274,56 @@ func (d *Driver) updateServiceBus(capability, environment, providerID string,
 	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
 }
 
+// refuseForeignSBNamespace is the ownership boundary both mutating verbs share. A queue
+// has no tags of its own — the NAMESPACE carries them — so update and delete must ask
+// the same question of the same resource. Sharing the code is the point: the two verbs
+// disagreed about ownership for as long as each carried its own copy, and only one of
+// the copies existed (D460).
+//
+// A namespace that is absent answers nil: the caller decides what "gone" means for its
+// verb (idempotent success for delete, a failing PUT for update).
+func (d *Driver) refuseForeignSBNamespace(rg, ns, capability, environment, providerID,
+	verb string) *provider.CreateResult {
+	nsURL, _ := d.armURL(rg, d.sbNamespacePath(ns), serviceBusAPIVersion)
+	st, resp, e := d.doARM("GET", nsURL, nil)
+	if e != nil {
+		return &provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-" + verb + " read gave no answer — reconcile: " + azReadWhy(st, resp, e)}
+	}
+	if st == http.StatusNotFound {
+		if verb == "delete" {
+			return &provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+		}
+		return &provider.CreateResult{Status: "failed",
+			Reason: "service bus namespace no longer exists — reconcile"}
+	}
+	if st != http.StatusOK {
+		return &provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: fmt.Sprintf("pre-%s read HTTP %d — reconcile", verb, st)}
+	}
+	var nsDoc sbNamespaceDoc
+	if json.Unmarshal(resp, &nsDoc) != nil {
+		return &provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-" + verb + " read answered HTTP 200 with an unparseable body — reconcile"}
+	}
+	if nsDoc.Tags["groundhold-capability"] != sanitizeAzTag(capability) ||
+		nsDoc.Tags["groundhold-environment"] != sanitizeAzTag(environment) {
+		return &provider.CreateResult{Status: "failed",
+			Reason: "service bus namespace tags do not match — refusing to " + verb +
+				" a resource that is not ours"}
+	}
+	return nil
+}
+
 func (d *Driver) sbDelete(capability, environment, providerID string) provider.CreateResult {
 	_, _, rg, ns, _, err := splitSBProviderID(providerID)
 	if err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	nsURL, _ := d.armURL(rg, d.sbNamespacePath(ns), serviceBusAPIVersion)
-	st, resp, e := d.doARM("GET", nsURL, nil)
-	if e != nil {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: "pre-delete read gave no answer — reconcile: " + azReadWhy(st, resp, e)}
-	}
-	if st == http.StatusNotFound {
-		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
-	}
-	if st != http.StatusOK {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("pre-delete read HTTP %d — reconcile", st)}
-	}
-	var nsDoc sbNamespaceDoc
-	if json.Unmarshal(resp, &nsDoc) != nil {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: "pre-delete read answered HTTP 200 with an unparseable body — reconcile"}
-	}
-	if nsDoc.Tags["groundhold-capability"] != sanitizeAzTag(capability) ||
-		nsDoc.Tags["groundhold-environment"] != sanitizeAzTag(environment) {
-		return provider.CreateResult{Status: "failed",
-			Reason: "service bus namespace tags do not match — refusing to delete a resource that is not ours"}
+	if r := d.refuseForeignSBNamespace(rg, ns, capability, environment, providerID,
+		"delete"); r != nil {
+		return *r
 	}
 	if r := d.deleteAndConfirm(nsURL, providerID, "service bus namespace"); r != nil {
 		return *r

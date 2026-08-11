@@ -40,12 +40,12 @@ the same next action, they share a code, wherever they were detected.
 | `apply-failed` | 4 | inspect the reason and receipts; re-plan (terminal provider failure) |
 | `ledger-corrupted` | 5 | `groundhold repair` (D69): diagnose, then quarantine on fingerprint consent; nothing proceeds over corruption |
 | `run-done` | 0 | none — the background run concluded successfully |
-| `run-running` | 3 | none — wait; a writer holds a live lease and the run has not concluded (`wait --handle` blocks until it does) |
+| `run-running` | 3 | none — wait; a writer holds a live lease and the run has not concluded (`wait <handle>` blocks until it does) |
 | `run-stalled` | 3 | run `resume` — the writer's lease lapsed without concluding the run |
 | `run-needs-reconcile` | 3 | run `resume` — the run concluded leaving receipts unsettled |
-| `run-failed` | 4 | inspect the run's own refusal: this code reports the OUTCOME, the run's code says why. `wait`/`runstatus` relay the run's exit code when it has one, else 4 |
+| `run-failed` | 4 | inspect the run's own refusal: this code reports the OUTCOME, the run's code says why. `wait`/`status` relay the run's exit code when it has one, else 4 |
 | `run-unknown` | 3 | check the handle; a `registry-only` run was launched but never admitted (it may have died before its first event) — read its log |
-| `wait-timeout` | 3 | re-run `wait` with a longer `--timeout`, or poll `runstatus`; nothing was cancelled and no state changed — the run is unaffected |
+| `wait-timeout` | 3 | re-run `wait` with a longer `--timeout`, or poll `status`; nothing was cancelled and no state changed — the run is unaffected |
 
 The last seven are the background-run family (D229/D231). They report a run's
 state rather than refusing an operation, which is why several are not failures —

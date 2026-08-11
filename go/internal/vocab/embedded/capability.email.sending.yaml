@@ -35,6 +35,10 @@ attributes:
     description: Whether the sending domain is DKIM-signed (Easy DKIM) — the authentication posture that keeps statutory mail out of spam
     mappings:
       aws.ses-sending: email identity DkimAttributes SigningEnabled + Status SUCCESS
+      # D545: read from the driver.
+      azure.acsemail: >
+        true when ANY domain attached to the email service has DKIM verified — one
+        verified domain is enough for the service to send signed mail
 
   bounce.tracked:
     kind: bool
@@ -60,3 +64,4 @@ attributes:
     description: Whether groundhold manages this sending identity
     mappings:
       aws.ses-sending: const true when observed through the driver
+      azure.acsemail: const true

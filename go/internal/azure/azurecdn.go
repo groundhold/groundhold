@@ -1,10 +1,16 @@
-// Azure CDN request building (D118): the semantic core of the Azure
-// capability.cdn.distribution driver — the SAME vocabulary AWS CloudFront fulfils
-// (GCP Cloud CDN is a backend-service flag, not a standalone resource, so the domain
-// is honestly two-cloud). Azure CDN is a namespace+entity COMPOSITE (the servicebus
-// shape): a profile carries the SKU + ownership tags, an endpoint carries the origin
-// and the viewer TLS posture. Invariant #4: cache behaviors are opaque impl config.
-// redirect-to-https needs a Standard-profile delivery rule, so it is REFUSED here.
+// Azure Front Door Standard request building (D118, reimplemented D999): the semantic
+// core of the Azure capability.cdn.distribution driver — the SAME vocabulary AWS
+// CloudFront fulfils (GCP Cloud CDN is a backend-service flag, not a standalone
+// resource, so the domain is honestly two-cloud). The classic "Azure CDN from
+// Microsoft" (SKU Standard_Microsoft) was RETIRED for new profiles by Azure, so this
+// targets Azure Front Door Standard (SKU Standard_AzureFrontDoor) — the same
+// Microsoft.Cdn provider, a richer composite: a profile (SKU + ownership tags) holds
+// an origin group + origin (the backend), an afdEndpoint (the edge hostname), and a
+// route that ties them together and carries the viewer TLS posture + caching. Custom
+// domains are afd customDomains sub-resources with tlsSettings (a managed cert, or a
+// BYO Key Vault cert via a profile secret), associated on the route. Invariant #4:
+// cache behaviors stay opaque impl config. Unlike classic CDN, AFD honors
+// redirect-to-https NATIVELY (the route's httpsRedirect), so it is no longer refused.
 package azure
 
 import (
@@ -28,23 +34,19 @@ var azKVSecretIDOK = regexp.MustCompile(
 	`^/subscriptions/([0-9a-fA-F-]{36})/resourceGroups/([A-Za-z0-9._()-]{1,90})` +
 		`/providers/Microsoft\.KeyVault/vaults/([A-Za-z0-9-]{3,24})/secrets/([A-Za-z0-9-]{1,127})(?:/([0-9a-fA-F]{32}))?$`)
 
-// azCacheBypass is the CacheExpiration delivery-rule behavior that DISABLES caching
-// outright. Azure CDN's DEFAULT already honors the origin's Cache-Control/Expires
-// headers (a dynamic origin returning no-store/no-cache/private is NOT cached), so —
-// UNLIKE CloudFront's CachingOptimized managed policy (the Acme finding, D331) —
-// there is no dangerous default to override; the default is left header-honoring.
-const azCacheBypass = "BypassCache"
-
 // azKVCertRef is a parsed Key Vault secret reference for a BYO custom-domain cert.
 type azKVCertRef struct{ sub, rg, vault, secret, version string }
 
 // AzureCDNPlan is the attribute-derived shape a create assembles into ARM bodies.
 type AzureCDNPlan struct {
 	Profile      string
-	Endpoint     string
+	Endpoint     string // the afdEndpoint (edge hostname)
+	OriginGroup  string // the origin group holding the backend origin
+	Route        string // the route tying endpoint -> origin group
 	OriginDomain string
-	HTTPAllowed  bool // allow-all => true; https-only => false
-	HTTPSAllowed bool
+	HTTPAllowed  bool // Http is in the route's supportedProtocols (allow-all / redirect)
+	HTTPSAllowed bool // always true — Https is always supported
+	Redirect     bool // viewer.protocol=redirect-to-https -> route httpsRedirect Enabled
 
 	// CacheBypass attaches a global CacheExpiration delivery rule that BYPASSES the
 	// cache (cache_policy: disabled). Unset keeps Azure's header-honoring default.
@@ -81,6 +83,8 @@ func BuildAzureCDN(environment, capability string,
 	p := AzureCDNPlan{
 		Profile:      azCDNProfileName(environment, capability, generation),
 		Endpoint:     azResourceName("pv-ep", environment, capability, generation),
+		OriginGroup:  azCDNOriginGroup,
+		Route:        azCDNRoute,
 		HTTPSAllowed: true,
 	}
 	viewerSet := false
@@ -104,14 +108,14 @@ func BuildAzureCDN(environment, capability string,
 			viewerSet = true
 			switch raw {
 			case "https-only":
-				p.HTTPAllowed, p.HTTPSAllowed = false, true
+				p.HTTPAllowed, p.HTTPSAllowed, p.Redirect = false, true, false
 			case "allow-all":
-				p.HTTPAllowed, p.HTTPSAllowed = true, true
+				p.HTTPAllowed, p.HTTPSAllowed, p.Redirect = true, true, false
 			case "redirect-to-https":
-				return AzureCDNPlan{}, fmt.Errorf(
-					"viewer.protocol=redirect-to-https cannot be honored by Azure CLASSIC CDN — a redirect " +
-						"needs a URL-redirect delivery rule (an HTTP-to-HTTPS rewrite action), which this " +
-						"slice does not build; refusing rather than silently downgrading to https-only")
+				// AFD honors this natively: the route accepts Http+Https but its
+				// httpsRedirect=Enabled issues a 301 to HTTPS (D999). Classic CDN could
+				// not, and refused here.
+				p.HTTPAllowed, p.HTTPSAllowed, p.Redirect = true, true, true
 			default:
 				return AzureCDNPlan{}, fmt.Errorf("viewer.protocol %v has no Azure CDN mapping", raw)
 			}
@@ -255,94 +259,144 @@ func customDomainResourceName(host string) string {
 	return strings.ReplaceAll(host, ".", "-")
 }
 
-// profileBody is the CDN profile PUT body (the constitutive substrate).
+// cdnChildID builds the ARM resource id of a Microsoft.Cdn/profiles child — the route
+// references its origin group by id, and (for aliases) its custom domains by id, so
+// the wire needs the full id, not just the name.
+func (p AzureCDNPlan) cdnChildID(sub, rg, child string) string {
+	return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Cdn/profiles/%s/%s",
+		sub, rg, p.Profile, child)
+}
+
+// profileBody is the AFD profile PUT body (the constitutive substrate). SKU
+// Standard_AzureFrontDoor — the classic Standard_Microsoft is retired for new profiles.
 func (p AzureCDNPlan) profileBody(tags map[string]any) map[string]any {
 	return map[string]any{
 		"location": "Global",
-		"sku":      map[string]any{"name": "Standard_Microsoft"},
+		"sku":      map[string]any{"name": "Standard_AzureFrontDoor"},
 		"tags":     tags,
 	}
 }
 
-// endpointBody is the CDN endpoint PUT body (the leaf carrying origin + TLS posture).
-// When CacheBypass is set (cache_policy: disabled) it carries a global CacheExpiration
-// delivery rule that disables caching; otherwise no deliveryPolicy is sent and Azure's
-// header-honoring default stands (D331).
-func (p AzureCDNPlan) endpointBody() map[string]any {
-	props := map[string]any{
-		"isHttpAllowed":    p.HTTPAllowed,
-		"isHttpsAllowed":   p.HTTPSAllowed,
-		"originHostHeader": p.OriginDomain,
-		"origins": []any{map[string]any{
-			"name":       "origin1",
-			"properties": map[string]any{"hostName": p.OriginDomain},
-		}},
-	}
-	if p.CacheBypass {
-		props["deliveryPolicy"] = p.deliveryPolicy()
-	}
-	return map[string]any{"location": "Global", "properties": props}
+// originGroupBody is the origin group PUT body — load-balancing + health-probe defaults
+// for the single backend origin.
+func (p AzureCDNPlan) originGroupBody() map[string]any {
+	return map[string]any{"properties": map[string]any{
+		"loadBalancingSettings": map[string]any{
+			"sampleSize":                      4,
+			"successfulSamplesRequired":       3,
+			"additionalLatencyInMilliseconds": 50,
+		},
+		"healthProbeSettings": map[string]any{
+			"probePath":              "/",
+			"probeRequestType":       "HEAD",
+			"probeProtocol":          "Https",
+			"probeIntervalInSeconds": 100,
+		},
+	}}
 }
 
-// deliveryPolicy is a single global (order 0, no conditions) CacheExpiration rule that
-// BYPASSES the cache — the honest Azure way to disable caching for a dynamic origin.
-func (p AzureCDNPlan) deliveryPolicy() map[string]any {
+// originBody is the origin PUT body — the backend the edge fetches from
+// (origin.domain), enabled, with the origin.domain echoed as the host header.
+func (p AzureCDNPlan) originBody() map[string]any {
+	return map[string]any{"properties": map[string]any{
+		"hostName":                    p.OriginDomain,
+		"originHostHeader":            p.OriginDomain,
+		"httpPort":                    80,
+		"httpsPort":                   443,
+		"priority":                    1,
+		"weight":                      1000,
+		"enabledState":                "Enabled",
+		"enforceCertificateNameCheck": true,
+	}}
+}
+
+// afdEndpointBody is the AFD endpoint PUT body — the edge hostname (xxx.azurefd.net).
+func (p AzureCDNPlan) afdEndpointBody() map[string]any {
 	return map[string]any{
-		"description": "groundhold cache policy",
-		"rules": []any{map[string]any{
-			"name":       "global",
-			"order":      0,
-			"conditions": []any{},
-			"actions": []any{map[string]any{
-				"name": "CacheExpiration",
-				"parameters": map[string]any{
-					"typeName":      "DeliveryRuleCacheExpirationActionParameters",
-					"cacheBehavior": azCacheBypass,
-					"cacheType":     "All",
-				},
-			}},
-		}},
+		"location":   "Global",
+		"properties": map[string]any{"enabledState": "Enabled"},
 	}
 }
 
-// customDomainBody is the customDomains PUT body (the custom hostname sub-resource).
-func (p AzureCDNPlan) customDomainBody(host string) map[string]any {
-	return map[string]any{"properties": map[string]any{"hostName": host}}
-}
-
-// customHTTPSBody is the enableCustomHttps POST body — the custom-domain TLS binding.
-// certificateSource: Cdn (an Azure CDN-managed cert) or AzureKeyVault (a BYO cert),
-// always SNI + TLS 1.2. The whole object IS the CustomDomainHttpsParameters (no
-// wrapper) — the ARM shape flagged for live validation.
-func (p AzureCDNPlan) customHTTPSBody() map[string]any {
-	if p.CertManaged {
-		return map[string]any{
-			"certificateSource": "Cdn",
-			"protocolType":      "ServerNameIndication",
-			"minimumTlsVersion": "TLS12",
-			"certificateSourceParameters": map[string]any{
-				"typeName":        "CdnCertificateSourceParameters",
-				"certificateType": "Dedicated",
-			},
+// routeBody is the route PUT body — it ties the endpoint to the origin group and
+// carries the viewer TLS posture (supportedProtocols + httpsRedirect), the caching
+// posture (cacheConfiguration present unless cache_policy=disabled), and any custom
+// domains. sub/rg are needed to build the origin-group and custom-domain resource ids.
+func (p AzureCDNPlan) routeBody(sub, rg string) map[string]any {
+	supported := []any{"Https"}
+	if p.HTTPAllowed {
+		supported = []any{"Http", "Https"}
+	}
+	redirect := "Disabled"
+	if p.Redirect {
+		redirect = "Enabled"
+	}
+	props := map[string]any{
+		"originGroup":         map[string]any{"id": p.cdnChildID(sub, rg, "originGroups/"+p.OriginGroup)},
+		"supportedProtocols":  supported,
+		"patternsToMatch":     []any{"/*"},
+		"forwardingProtocol":  "MatchRequest",
+		"linkToDefaultDomain": "Enabled",
+		"httpsRedirect":       redirect,
+		"enabledState":        "Enabled",
+	}
+	// cache_policy: honor (default) enables caching that respects the origin's
+	// Cache-Control headers; disabled omits cacheConfiguration entirely (AFD's default
+	// is no caching), the inverse wire of classic CDN's bypass rule.
+	if !p.CacheBypass {
+		props["cacheConfiguration"] = map[string]any{"queryStringCachingBehavior": "IgnoreQueryString"}
+	}
+	if len(p.Aliases) > 0 {
+		cds := make([]any, 0, len(p.Aliases))
+		for _, host := range p.Aliases {
+			cds = append(cds, map[string]any{"id": p.cdnChildID(sub, rg, "customDomains/"+customDomainResourceName(host))})
 		}
+		props["customDomains"] = cds
 	}
+	return map[string]any{"properties": props}
+}
+
+// azCDNSecretName is the deterministic profile-secret name that wraps a BYO Key Vault
+// certificate (AFD references a Key Vault cert through a profiles/secrets resource,
+// not inline). One secret per distribution — every alias shares the same BYO cert.
+func (p AzureCDNPlan) secretName() string {
+	return "pv-sec-" + strings.TrimPrefix(p.Endpoint, "pv-ep-")
+}
+
+// secretBody is the profiles/secrets PUT body for a BYO Key Vault certificate. The
+// secretSource id is the Key Vault SECRET resource id (a NAME, never key material,
+// D53); useLatestVersion follows automatically unless a version was pinned.
+func (p AzureCDNPlan) secretBody() map[string]any {
 	kv := p.CertKeyVault
 	params := map[string]any{
-		"typeName":          "KeyVaultCertificateSourceParameters",
-		"subscriptionId":    kv.sub,
-		"resourceGroupName": kv.rg,
-		"vaultName":         kv.vault,
-		"secretName":        kv.secret,
-		"updateRule":        "NoAction",
-		"deleteRule":        "NoAction",
+		"type": "CustomerCertificate",
+		"secretSource": map[string]any{
+			"id": fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.KeyVault/vaults/%s/secrets/%s",
+				kv.sub, kv.rg, kv.vault, kv.secret),
+		},
+		"useLatestVersion": kv.version == "",
 	}
 	if kv.version != "" {
 		params["secretVersion"] = kv.version
 	}
-	return map[string]any{
-		"certificateSource":           "AzureKeyVault",
-		"protocolType":                "ServerNameIndication",
-		"minimumTlsVersion":           "TLS12",
-		"certificateSourceParameters": params,
+	return map[string]any{"properties": map[string]any{"parameters": params}}
+}
+
+// customDomainBody is the AFD customDomains PUT body — the custom hostname plus its
+// tlsSettings. A managed cert (certificate: managed) is certificateType
+// ManagedCertificate (free, AFD-provisioned, needs domain validation out of band); a
+// BYO cert is certificateType CustomerCertificate referencing the profile secret above.
+// sub/rg build the secret id for the BYO case.
+func (p AzureCDNPlan) customDomainBody(sub, rg, host string) map[string]any {
+	tls := map[string]any{"minimumTlsVersion": "TLS12"}
+	if p.CertManaged {
+		tls["certificateType"] = "ManagedCertificate"
+	} else if p.CertKeyVault != nil {
+		tls["certificateType"] = "CustomerCertificate"
+		tls["secret"] = map[string]any{"id": p.cdnChildID(sub, rg, "secrets/"+p.secretName())}
 	}
+	return map[string]any{"properties": map[string]any{
+		"hostName":    host,
+		"tlsSettings": tls,
+	}}
 }

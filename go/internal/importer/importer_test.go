@@ -166,8 +166,61 @@ func TestDetectUnknownFormatRefuses(t *testing.T) {
 	}
 }
 
+// D950: a MySQL instance expresses PITR as binaryLogEnabled (not
+// pointInTimeRecoveryEnabled). The importer must read it as PITR — defer the value to a
+// probe — rather than emit a wrong 24h rpo hint off the missing Postgres spelling.
+func TestImportMySQLBinaryLogIsPITR(t *testing.T) {
+	state := `{"version":3,"deployment":{"resources":[
+	  {"urn":"urn:pulumi:p::a::pulumi:pulumi:Stack::a","type":"pulumi:pulumi:Stack"},
+	  {"urn":"urn:pulumi:p::a::gcp:sql/databaseInstance:DatabaseInstance::m",
+	   "type":"gcp:sql/databaseInstance:DatabaseInstance",
+	   "outputs":{"name":"m-db","project":"acme-prod","region":"europe-central2",
+	     "databaseVersion":"MYSQL_8_0",
+	     "settings":{"backupConfiguration":{"enabled":true,"binaryLogEnabled":true}}}}]}}`
+	res, err := Map(parse(t, state), "auto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Hints) != 1 {
+		t.Fatalf("expected 1 hint, got %d", len(res.Hints))
+	}
+	if _, ok := res.Hints[0].Expected["recovery.rpo"]; ok {
+		t.Error("MySQL binaryLogEnabled is PITR — recovery.rpo must not be fabricated")
+	}
+	if !strings.Contains(strings.Join(res.Diagnostics, "\n"), "PITR enabled") {
+		t.Errorf("missing PITR diagnostic for MySQL binlog: %v", res.Diagnostics)
+	}
+}
+
 // Review blocker 1: identity disagreement refuses the hint — a
 // mis-seeded adoption is worse than no suggestion.
+// D951: the tfstate importer path (snake_case) must also read binary_log_enabled as
+// MySQL PITR — the D950 fix taught the pulumi (camelCase) path but a camelCase grep
+// missed this sibling, leaving a wrong 24h hint for a MySQL instance with PITR on.
+func TestImportMySQLTFStateBinaryLogIsPITR(t *testing.T) {
+	state := `{"version":4,"serial":1,"lineage":"x","resources":[
+	  {"mode":"managed","type":"google_sql_database_instance","name":"m",
+	   "instances":[{"attributes":{
+	     "name":"m-db","project":"acme-prod","region":"europe-central2",
+	     "database_version":"MYSQL_8_0",
+	     "settings":[{"tier":"db-f1-micro",
+	       "backup_configuration":[{"enabled":true,"binary_log_enabled":true,
+	         "point_in_time_recovery_enabled":false}]}]}}]}]}`
+	res, err := Map(parse(t, state), "auto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Hints) != 1 {
+		t.Fatalf("expected 1 hint, got %d", len(res.Hints))
+	}
+	if _, ok := res.Hints[0].Expected["recovery.rpo"]; ok {
+		t.Error("MySQL binary_log_enabled is PITR — recovery.rpo must not be fabricated")
+	}
+	if !strings.Contains(strings.Join(res.Diagnostics, "\n"), "PITR enabled") {
+		t.Errorf("missing PITR diagnostic for MySQL tfstate binlog: %v", res.Diagnostics)
+	}
+}
+
 func TestIdentityDisagreementRefusesHint(t *testing.T) {
 	state := `{"version": 4, "serial": 1, "lineage": "x", "resources": [
 	  {"mode": "managed", "type": "google_sql_database_instance",

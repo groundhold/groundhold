@@ -42,8 +42,8 @@ attributes:
     description: The region the instance runs in — the residency surface for anything on its disks
     mappings:
       aws.ec2: the instance's region
-      gcp.computeengine: the region of the instance's zone
-      azure.vm: the virtual machine's location
+      gcp.gce: the region of the instance's zone
+      azure.azvm: the virtual machine's location
 
   availability.class:
     kind: string
@@ -51,32 +51,32 @@ attributes:
     description: Whether the instance's placement is pinned to one availability zone. A single VM is zonal; regional placement is a property of a group, not a machine.
     mappings:
       aws.ec2: derived from the subnet's availability zone
-      gcp.computeengine: zonal for a standard instance
-      azure.vm: zonal when an availability zone is set
+      gcp.gce: zonal for a standard instance
+      azure.azvm: zonal when an availability zone is set
 
   network.publicExposure:
     kind: bool
     description: Whether any path from the public internet to the instance exists — a public address, not merely an open security-group rule
     mappings:
       aws.ec2: a public or elastic IP is associated
-      gcp.computeengine: the network interface has an external IP
-      azure.vm: a public IP is attached to the NIC
+      gcp.gce: the network interface has an external IP
+      azure.azvm: a public IP is attached to the NIC
 
   encryption.atRest:
     kind: bool
     description: Whether the instance's attached disks are encrypted at rest
     mappings:
       aws.ec2: EBS volume encryption state
-      gcp.computeengine: persistent disk encryption (always on; CMEK reported separately)
-      azure.vm: managed disk encryption state
+      gcp.gce: persistent disk encryption (always on; CMEK reported separately)
+      azure.azvm: managed disk encryption state
 
   encryption.customerManagedKeys:
     kind: bool
     description: Disks are encrypted with a CUSTOMER-managed key (CMEK/KMS), not merely the provider's default key — an independently revocable key, which is what a BYOK control actually means
     mappings:
       aws.ec2: the volume's KMS key is customer-managed, not the aws/ebs default
-      gcp.computeengine: the disk carries a customer-managed encryption key
-      azure.vm: the disk uses a disk-encryption set backed by a customer key
+      gcp.gce: the disk carries a customer-managed encryption key
+      azure.azvm: the disk uses a disk-encryption set backed by a customer key
 
   cost.monthly:
     kind: money
@@ -84,13 +84,13 @@ attributes:
     description: Projected monthly cost of the instance — a projection from published rates, never a quote
     mappings:
       aws.ec2: on-demand rate for the instance type in the region
-      gcp.computeengine: on-demand rate for the machine type in the region
-      azure.vm: pay-as-you-go rate for the VM size in the region
+      gcp.gce: on-demand rate for the machine type in the region
+      azure.azvm: pay-as-you-go rate for the VM size in the region
 
   service.managed:
     kind: bool
     description: Whether groundhold manages this instance's lifecycle (the machine is self-operated compute by nature; this says who owns its existence, not who runs the software inside)
     mappings:
       aws.ec2: const true when observed through the driver
-      gcp.computeengine: const true when observed through the driver
-      azure.vm: const true when observed through the driver
+      gcp.gce: const true when observed through the driver
+      azure.azvm: const true when observed through the driver

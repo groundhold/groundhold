@@ -228,12 +228,18 @@ func (d *Driver) observeAWSKMS(capability, providerID string) ([]provider.Observ
 		return nil, nil, fmt.Errorf("DescribeKey: %v", e)
 	}
 	if strings.Contains(ecsErr(resp), "NotFound") {
-		return nil, []string{"key not found — nothing to observe"}, nil
+		// F-LC3 (D521): a BOUND resource the API says is GONE. A diagnostic
+		// alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"key not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("DescribeKey: HTTP %d", st)
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		// every AWS KMS key is HSM-backed (FIPS 140-2).

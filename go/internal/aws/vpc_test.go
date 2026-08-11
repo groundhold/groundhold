@@ -2,11 +2,15 @@ package aws
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func awsVpcAttrs() map[string]any {
@@ -236,6 +240,12 @@ func awsVpcNatServer(t *testing.T) *httptest.Server {
 				_, _ = w.Write([]byte(`<DescribeVpcEndpointsResponse><vpcEndpointSet/></DescribeVpcEndpointsResponse>`))
 			case "CreateSecurityGroup":
 				_, _ = w.Write([]byte(`<CreateSecurityGroupResponse><groupId>sg-01</groupId></CreateSecurityGroupResponse>`))
+			case "DescribeSecurityGroups":
+				// D743: every VPC has AWS's default group, whose egress is `-1` to
+				// 0.0.0.0/0. Without it this fixture described a VPC with no security
+				// groups at all — an estate AWS does not produce.
+				_, _ = w.Write([]byte(`<DescribeSecurityGroupsResponse><securityGroupInfo>` +
+					awsVpcDefaultSG + `</securityGroupInfo></DescribeSecurityGroupsResponse>`))
 			case "AttachInternetGateway", "CreateRoute", "AssociateRouteTable", "AuthorizeSecurityGroupIngress":
 				_, _ = w.Write([]byte(`<Response/>`))
 			default:
@@ -281,6 +291,13 @@ func TestObserveAWSVPCNatEgress(t *testing.T) {
 		t.Fatalf("nat road must observe egress.restricted=false, got %v", got["egress.restricted"])
 	}
 }
+
+// awsVpcDefaultSG is the security group AWS attaches to every new VPC: no ingress, and
+// an egress rule allowing every protocol to every destination. A test that wants a
+// destination-disciplined VPC overrides it (D743).
+var awsVpcDefaultSG = `<item><groupId>sg-default</groupId><ipPermissions/>` +
+	`<ipPermissionsEgress><item><ipProtocol>-1</ipProtocol>` +
+	`<ipRanges><item><cidrIp>0.0.0.0/0</cidrIp></item></ipRanges></item></ipPermissionsEgress></item>`
 
 // awsVpcServer routes EC2 Query actions (by the Action= form param).
 func awsVpcServer(t *testing.T, tagCap string) *httptest.Server {
@@ -330,10 +347,14 @@ func awsVpcServer(t *testing.T, tagCap string) *httptest.Server {
 			case "CreateSecurityGroup":
 				_, _ = w.Write([]byte(`<CreateSecurityGroupResponse><groupId>sg-01</groupId></CreateSecurityGroupResponse>`))
 			case "DescribeSecurityGroups":
-				// empty child list (like the route-table/NAT/EIP stubs above): the VPC
-				// tag on DescribeVpcs is the sole ownership gate the honesty harness
-				// probes. Owned-SG teardown is exercised by TestDeleteAWSVPCBaselineSG.
-				_, _ = w.Write([]byte(`<DescribeSecurityGroupsResponse><securityGroupInfo/></DescribeSecurityGroupsResponse>`))
+				// D743: the DEFAULT security group AWS creates with every VPC, whose
+				// egress rule is `-1` to 0.0.0.0/0. This used to answer with an empty
+				// list — an estate AWS does not produce, and one that now reads as
+				// destination-restricted because nothing can leave. A double that
+				// describes an impossible account is not a double (D694).
+				// Ownership is still gated by the VPC tag on DescribeVpcs.
+				_, _ = w.Write([]byte(`<DescribeSecurityGroupsResponse><securityGroupInfo>` +
+					awsVpcDefaultSG + `</securityGroupInfo></DescribeSecurityGroupsResponse>`))
 			case "DeleteSubnet", "DeleteVpc", "DeleteFlowLogs", "DeleteVpcEndpoints",
 				"DisassociateRouteTable", "DeleteRouteTable", "DeleteNatGateway",
 				"ReleaseAddress", "DetachInternetGateway", "DeleteInternetGateway",
@@ -855,8 +876,9 @@ func vpcScanServer(t *testing.T, vpcID, capTag, envTag string) *httptest.Server 
 		if strings.Contains(string(b), "Action=DescribeVpcs") {
 			_, _ = w.Write([]byte(`<DescribeVpcsResponse><vpcSet><item><vpcId>` + vpcID + `</vpcId>` +
 				`<tagSet><item><key>groundhold-capability</key><value>` + capTag + `</value></item>` +
-				`<item><key>groundhold-environment</key><value>` + envTag + `</value></item></tagSet>` +
-				`</item></vpcSet></DescribeVpcsResponse>`))
+				`<item><key>groundhold-environment</key><value>` + envTag + `</value></item>` +
+				`<item><key>Name</key><value>` + ECSName("000000000000", "prod", "net", 1) + `</value></item>` +
+				`</tagSet></item></vpcSet></DescribeVpcsResponse>`))
 			return
 		}
 		t.Errorf("create-adoption must not call %s — bind the existing VPC, never create/mutate", string(b))
@@ -871,17 +893,29 @@ func TestFindVpcByTags_VerifiesOwnership(t *testing.T) {
 	// ours -> counted
 	srv := vpcScanServer(t, "vpc-ours", "net", "prod")
 	d := awsVpcTestDriver(t, srv)
-	if id, n, err := d.findVpcByTags("eu-central-1", "net", "prod"); err != nil || n != 1 || id != "vpc-ours" {
+	g1 := ECSName("000000000000", "prod", "net", 1)
+	if id, n, err := d.findVpcByTags("eu-central-1", "net", "prod", g1); err != nil || n != 1 || id != "vpc-ours" {
 		t.Fatalf("our-tagged VPC must count as 1 ours, got id=%q n=%d err=%v", id, n, err)
 	}
 	srv.Close()
 	// foreign -> NOT counted
 	srv2 := vpcScanServer(t, "vpc-foreign", "someone-else", "prod")
 	d2 := awsVpcTestDriver(t, srv2)
-	if id, n, err := d2.findVpcByTags("eu-central-1", "net", "prod"); err != nil || n != 0 || id != "" {
+	if id, n, err := d2.findVpcByTags("eu-central-1", "net", "prod", g1); err != nil || n != 0 || id != "" {
 		t.Fatalf("a FOREIGN-tagged VPC must never be counted as ours, got id=%q n=%d err=%v", id, n, err)
 	}
 	srv2.Close()
+
+	// D723: ours, but a DIFFERENT generation — the resource a replacement is about to
+	// delete. It must not count as adoptable.
+	srv3 := vpcScanServer(t, "vpc-ours", "net", "prod")
+	d3 := awsVpcTestDriver(t, srv3)
+	g2 := ECSName("000000000000", "prod", "net", 2)
+	if id, n, err := d3.findVpcByTags("eu-central-1", "net", "prod", g2); err != nil || n != 0 || id != "" {
+		t.Fatalf("a generation-1 VPC must not be adoptable by a generation-2 create, "+
+			"got id=%q n=%d err=%v", id, n, err)
+	}
+	srv3.Close()
 }
 
 // TestCreateAWSVPC_AdoptsExistingOwned (D253): a create whose tag-scan finds our
@@ -990,5 +1024,471 @@ func TestPublicSubnetCIDRs(t *testing.T) {
 	if _, err = publicSubnetCIDRs("10.9.0.0/20", nil, 2); err == nil ||
 		!strings.Contains(err.Error(), "public_subnet_cidrs") {
 		t.Fatalf("non-/24 base must refuse naming the operand, got %v", err)
+	}
+}
+
+// vpcRole classifies the EC2 query protocol: every call is a POST carrying an Action,
+// so the method says nothing — DescribeVpcs is the ownership scan, anything else
+// changes the world.
+func vpcRole(_ *http.Request, body []byte) certifynet.Role {
+	if strings.Contains(string(body), "Action=Describe") {
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// vpcAdoptServer is the scan fixture PLUS the reads adoption actually performs. The
+// isolated vpcScanServer covers findVpcByTags alone; binding an existing VPC then goes
+// on to derive the capability's declared outputs, which reads its subnets. Anything
+// beyond those reads is a mutation and fails the gate.
+func vpcAdoptServer(t *testing.T, vpcID, capTag, envTag string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b := make([]byte, r.ContentLength)
+		r.Body.Read(b)
+		switch {
+		case strings.Contains(string(b), "Action=DescribeVpcs"):
+			_, _ = w.Write([]byte(`<DescribeVpcsResponse><vpcSet><item><vpcId>` + vpcID + `</vpcId>` +
+				`<tagSet><item><key>groundhold-capability</key><value>` + capTag + `</value></item>` +
+				`<item><key>groundhold-environment</key><value>` + envTag + `</value></item>` +
+				`<item><key>Name</key><value>` + ECSName("000000000000", "prod", "net", 1) + `</value></item>` +
+				`</tagSet></item></vpcSet></DescribeVpcsResponse>`))
+		case strings.Contains(string(b), "Action=DescribeRouteTables"):
+			_, _ = w.Write([]byte(`<DescribeRouteTablesResponse><routeTableSet>` +
+				`<item><routeTableId>rtb-0a1b2c3d</routeTableId></item>` +
+				`</routeTableSet></DescribeRouteTablesResponse>`))
+		case strings.Contains(string(b), "Action=DescribeSubnets"):
+			_, _ = w.Write([]byte(`<DescribeSubnetsResponse><subnetSet>` +
+				`<item><subnetId>subnet-0a1b2c3d</subnetId></item>` +
+				`</subnetSet></DescribeSubnetsResponse>`))
+		default:
+			t.Errorf("create-adoption must not call %s — bind the existing VPC, never create/mutate", string(b))
+			w.WriteHeader(400)
+		}
+	}))
+}
+
+// TestAdoptsExistingVPC enrolls VPC in the D391 create-time-adoption gate. With KMS it
+// is the pair D253 named: a VPC id is server-assigned with no idempotency token, so a
+// create that fails to adopt mints a SECOND VPC and leaves it unmanaged. The existing
+// tests pin findVpcByTags in isolation; this drives the public Create dispatch and
+// counts the wire.
+func TestAdoptsExistingVPC(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/vpc",
+		Classify: vpcRole,
+		// A format-PLAUSIBLE id: the repo's own scan fixture uses "vpc-ours", which the
+		// outputs validator rightly rejects — findVpcByTags was only ever tested in
+		// isolation, so the implausible stand-in never reached the code that checks it
+		// (the D289 lesson, applied to fixtures).
+		ExistingServer: func() *httptest.Server { return vpcAdoptServer(t, "vpc-0abc123", "net", "prod") },
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.EC2BaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("vpc", "net", "prod", awsVpcAttrs(), nil, "net", 1)
+		},
+		PID: "vpc:eu-central-1:vpc-0abc123",
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
+
+// TestRefusesForeignDeleteVPC enrols vpc in the D439 delete-ownership gate. Of every
+// resource in this driver family a VPC is among the worst to destroy by mistake: it takes
+// its subnets, routes and anything still attached with it.
+func TestRefusesForeignDeleteVPC(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ForeignProbe{
+		Name:          "aws/vpc",
+		Classify:      vpcRole,
+		ForeignServer: func() *httptest.Server { return awsVpcServer(t, "other") },
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.EC2BaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			return d
+		},
+		Delete: func(pr provider.Provider) provider.CreateResult {
+			return pr.Delete("vpc", "net", "prod", "vpc:eu-central-1:vpc-0abc123", "k")
+		},
+	}
+	certifynet.CertifyDeleteRefusesForeign(t, p)
+}
+
+// D723. Found by sweeping the generalization of a field report about an endless
+// replacement loop, and it is worse than the loop.
+//
+// A replacement runs create-before-destroy: create at generation 2, then delete the
+// generation-1 resource, pinned by providerId. The create's adoption scan (D253) exists
+// so a lost ledger does not mint a duplicate — but it filters on
+// `groundhold-capability` + `groundhold-environment` ONLY. The generation lives in the
+// `Name` tag, which the scan does not read.
+//
+// So the generation-2 create finds the generation-1 network, returns ITS id with
+// `succeeded` and zero mutations, and the delete — acting on the pinned identity, which
+// is that same id — destroys it. Both actions report success, apply exits 0, and the
+// capability is left unbound with its network gone.
+//
+// The fixture is the estate at the moment of a replacement: exactly one VPC of ours,
+// carrying generation 1's Name.
+func TestAReplacementDoesNotAdoptTheResourceItIsAboutToDelete(t *testing.T) {
+	const gen1VPC = "vpc-generation-one"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		action := ""
+		for _, kv := range strings.Split(string(b), "&") {
+			if strings.HasPrefix(kv, "Action=") {
+				action = strings.TrimPrefix(kv, "Action=")
+			}
+		}
+		switch action {
+		case "DescribeVpcs":
+			// The account holds the generation-1 network, tagged ours, named g1.
+			_, _ = w.Write([]byte(`<DescribeVpcsResponse><vpcSet><item>` +
+				`<vpcId>` + gen1VPC + `</vpcId><tagSet>` +
+				`<item><key>groundhold-capability</key><value>net</value></item>` +
+				`<item><key>groundhold-environment</key><value>prod</value></item>` +
+				`<item><key>Name</key><value>` + ECSName("000000000000", "prod", "net", 1) + `</value></item>` +
+				`</tagSet></item></vpcSet></DescribeVpcsResponse>`))
+		case "CreateVpc":
+			_, _ = w.Write([]byte(`<CreateVpcResponse><vpc><vpcId>vpc-generation-two</vpc` +
+				`Id></vpc></CreateVpcResponse>`))
+		case "CreateSubnet":
+			_, _ = w.Write([]byte(`<CreateSubnetResponse><subnet><subnetId>subnet-0x</subnetId></subnet></CreateSubnetResponse>`))
+		case "CreateTags":
+			_, _ = w.Write([]byte(`<CreateTagsResponse><return>true</return></CreateTagsResponse>`))
+		default:
+			_, _ = w.Write([]byte(`<Response/>`))
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	d := NewDriver("eu-central-1")
+	d.EC2BaseURL = srv.URL
+	d.Account = "000000000000"
+
+	// The generation-2 create of a replacement.
+	res := d.createAWSVPC("eu-central-1", "000000000000", "prod", "net",
+		map[string]any{"location.region": "eu-central-1"}, nil, 2)
+
+	if res.ProviderID == awsVpcProviderID("eu-central-1", gen1VPC) {
+		t.Fatalf("the generation-2 create ADOPTED the generation-1 network (%s) — the "+
+			"delete that follows is pinned to that same id, so the replacement destroys "+
+			"the resource it just bound and both actions report success", res.ProviderID)
+	}
+}
+
+// D725, the field report's own case: a flow log created with a role that has no
+// permissions and no service trust. AWS reports the flow log as ACTIVE and delivers
+// nothing; `deliverLogsStatus: FAILED` with "Access error indicates that the IAM role
+// associated with the flow log does not have sufficient permissions to publish to
+// CloudWatch Logs" is how it says so, in the same response the driver already reads.
+// Reported as `flowLogs.enabled: true`, this satisfies a CIS-3.9-shaped constraint on a
+// network with no flow records at all.
+func TestFlowLogsEnabledIsFalseWhenDeliveryFailed(t *testing.T) {
+	cases := []struct {
+		name   string
+		status string
+		want   bool
+	}{
+		{"delivering", "SUCCESS", true},
+		{"exists but delivers nothing", "FAILED", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				action := ""
+				for _, kv := range strings.Split(string(b), "&") {
+					if strings.HasPrefix(kv, "Action=") {
+						action = strings.TrimPrefix(kv, "Action=")
+					}
+				}
+				switch action {
+				case "DescribeFlowLogs":
+					_, _ = w.Write([]byte(`<DescribeFlowLogsResponse><flowLogSet><item>` +
+						`<flowLogId>fl-1</flowLogId><flowLogStatus>ACTIVE</flowLogStatus>` +
+						`<deliverLogsStatus>` + c.status + `</deliverLogsStatus>` +
+						`<deliverLogsErrorMessage>Access error</deliverLogsErrorMessage>` +
+						`</item></flowLogSet></DescribeFlowLogsResponse>`))
+				case "DescribeVpcs":
+					_, _ = w.Write([]byte(`<DescribeVpcsResponse><vpcSet><item><vpcId>vpc-1</vpcId>` +
+						`<tagSet><item><key>groundhold-capability</key><value>net</value></item>` +
+						`<item><key>groundhold-environment</key><value>prod</value></item></tagSet>` +
+						`</item></vpcSet></DescribeVpcsResponse>`))
+				default:
+					_, _ = w.Write([]byte(`<Response/>`))
+				}
+			}))
+			defer srv.Close()
+			t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+			t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+			d := NewDriver("eu-central-1")
+			d.EC2BaseURL = srv.URL
+			d.Account = "000000000000"
+
+			obs, diags, err := d.Observe("vpc", "net", "vpc:eu-central-1:vpc-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got any
+			for _, o := range obs {
+				if o.Path == "flowLogs.enabled" {
+					got = o.Value
+				}
+			}
+			if got != c.want {
+				t.Fatalf("flowLogs.enabled = %v, want %v — AWS reported delivery %s",
+					got, c.want, c.status)
+			}
+			if !c.want {
+				var named bool
+				for _, dg := range diags {
+					if strings.Contains(dg, "FAILED") {
+						named = true
+					}
+				}
+				if !named {
+					t.Fatalf("a flow log that delivers nothing must say so; diags=%v", diags)
+				}
+			}
+		})
+	}
+}
+
+// D727, the half of the field report that a measurement afterwards cannot cover: the
+// reporter created a flow log with a role whose trust policy names only the account
+// root. AWS accepted it, reported the flow log ACTIVE with delivery SUCCESS, and it
+// wrote nothing — `vpc-flow-logs.amazonaws.com` could never assume that role. Their own
+// words: "create-flow-logs zwracające Unsuccessful: [] NIE JEST dowodem działania."
+//
+// So the create reads the role first and refuses. An unreadable policy does not block
+// (an account may withhold iam:GetRole); a readable one that plainly lacks the service
+// principal does.
+func TestFlowLogCreateRefusesARoleTheServiceCannotAssume(t *testing.T) {
+	trustFor := func(principal string) string {
+		return url.QueryEscape(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow",` +
+			`"Principal":{` + principal + `},"Action":"sts:AssumeRole"}]}`)
+	}
+	cases := []struct {
+		name      string
+		principal string
+		wantFail  bool
+	}{
+		{"account root only, the reported estate", `"AWS":"arn:aws:iam::000000000000:root"`, true},
+		{"the flow-logs service", `"Service":"vpc-flow-logs.amazonaws.com"`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				body := string(b)
+				switch {
+				case strings.Contains(body, "Action=GetRole"):
+					_, _ = w.Write([]byte(`<GetRoleResponse><GetRoleResult><Role>` +
+						`<RoleName>flowlog</RoleName>` +
+						`<AssumeRolePolicyDocument>` + trustFor(c.principal) +
+						`</AssumeRolePolicyDocument></Role></GetRoleResult></GetRoleResponse>`))
+				case strings.Contains(body, "Action=DescribeVpcs"):
+					_, _ = w.Write([]byte(`<DescribeVpcsResponse><vpcSet/></DescribeVpcsResponse>`))
+				case strings.Contains(body, "Action=CreateVpc"):
+					_, _ = w.Write([]byte(`<CreateVpcResponse><vpc><vpcId>vpc-1</vpcId></vpc></CreateVpcResponse>`))
+				case strings.Contains(body, "Action=CreateSubnet"):
+					_, _ = w.Write([]byte(`<CreateSubnetResponse><subnet><subnetId>subnet-1</subnetId></subnet></CreateSubnetResponse>`))
+				case strings.Contains(body, "Action=CreateFlowLogs"):
+					_, _ = w.Write([]byte(`<CreateFlowLogsResponse><flowLogIdSet><item>fl-1</item></flowLogIdSet>` +
+						`<unsuccessful/></CreateFlowLogsResponse>`))
+				default:
+					_, _ = w.Write([]byte(`<Response/>`))
+				}
+			}))
+			defer srv.Close()
+			t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+			t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+			d := NewDriver("eu-central-1")
+			d.EC2BaseURL = srv.URL
+			d.IAMBaseURL = srv.URL
+			d.Account = "000000000000"
+
+			res := d.createAWSVPC("eu-central-1", "000000000000", "prod", "net",
+				map[string]any{"location.region": "eu-central-1", "flowLogs.enabled": true},
+				map[string]any{
+					"flow_log_destination": "arn:aws:logs:eu-central-1:000000000000:log-group:/x",
+					"flow_log_role_arn":    "arn:aws:iam::000000000000:role/flowlog",
+				}, 1)
+
+			if c.wantFail {
+				if res.Status != "failed" || !strings.Contains(res.Reason, "assume it") {
+					t.Fatalf("a flow log whose role the service cannot assume must be "+
+						"refused before it is created, got %+v", res)
+				}
+				return
+			}
+			if res.Status == "failed" {
+				t.Fatalf("a correctly trusted role must not be refused: %+v", res)
+			}
+		})
+	}
+}
+
+// D727: AWS's own documented sample of a SUCCESSFUL CreateFlowLogs, verbatim. The
+// driver used to test for the substrings `<unsuccessful>` and `<flowLogId>`, neither of
+// which occurs here — the empty element is self-closing, and the element is
+// `flowLogIdSet`, which does not contain `<flowLogId>`. So every successful flow-log
+// create was reported as a failure, on a composite that had already built the VPC, the
+// subnets and the NAT road.
+func TestASuccessfulFlowLogCreateIsNotReportedAsFailure(t *testing.T) {
+	const awsSample = `<CreateFlowLogsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+    <requestId>2d96dae3-504b-4fc4-bf50-266EXAMPLE</requestId>
+    <unsuccessful/>
+    <flowLogIdSet>
+        <item>fl-1a2b3c4d</item>
+    </flowLogIdSet>
+</CreateFlowLogsResponse>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body := string(b)
+		switch {
+		case strings.Contains(body, "Action=GetRole"):
+			_, _ = w.Write([]byte(`<GetRoleResponse><GetRoleResult><Role><RoleName>flowlog</RoleName>` +
+				`<AssumeRolePolicyDocument>` +
+				url.QueryEscape(`{"Statement":[{"Effect":"Allow","Principal":{"Service":"vpc-flow-logs.amazonaws.com"},"Action":"sts:AssumeRole"}]}`) +
+				`</AssumeRolePolicyDocument></Role></GetRoleResult></GetRoleResponse>`))
+		case strings.Contains(body, "Action=DescribeVpcs"):
+			_, _ = w.Write([]byte(`<DescribeVpcsResponse><vpcSet/></DescribeVpcsResponse>`))
+		case strings.Contains(body, "Action=CreateVpc"):
+			_, _ = w.Write([]byte(`<CreateVpcResponse><vpc><vpcId>vpc-1</vpcId></vpc></CreateVpcResponse>`))
+		case strings.Contains(body, "Action=CreateSubnet"):
+			_, _ = w.Write([]byte(`<CreateSubnetResponse><subnet><subnetId>subnet-1</subnetId></subnet></CreateSubnetResponse>`))
+		case strings.Contains(body, "Action=CreateFlowLogs"):
+			_, _ = w.Write([]byte(awsSample))
+		default:
+			_, _ = w.Write([]byte(`<Response/>`))
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	d := NewDriver("eu-central-1")
+	d.EC2BaseURL = srv.URL
+	d.IAMBaseURL = srv.URL
+	d.Account = "000000000000"
+
+	res := d.createAWSVPC("eu-central-1", "000000000000", "prod", "net",
+		map[string]any{"location.region": "eu-central-1", "flowLogs.enabled": true},
+		map[string]any{
+			"flow_log_destination": "arn:aws:logs:eu-central-1:000000000000:log-group:/x",
+			"flow_log_role_arn":    "arn:aws:iam::000000000000:role/flowlog",
+		}, 1)
+
+	if res.Status == "failed" {
+		t.Fatalf("AWS's own sample of a successful create was read as a failure: %s", res.Reason)
+	}
+}
+
+// And the batch failure it was meant to catch still fails: an unsuccessful item with no
+// flow log created.
+func TestAFlowLogBatchFailureIsStillAFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body := string(b)
+		switch {
+		case strings.Contains(body, "Action=GetRole"):
+			_, _ = w.Write([]byte(`<GetRoleResponse><GetRoleResult><Role><RoleName>flowlog</RoleName>` +
+				`<AssumeRolePolicyDocument>` +
+				url.QueryEscape(`{"Statement":[{"Effect":"Allow","Principal":{"Service":"vpc-flow-logs.amazonaws.com"},"Action":"sts:AssumeRole"}]}`) +
+				`</AssumeRolePolicyDocument></Role></GetRoleResult></GetRoleResponse>`))
+		case strings.Contains(body, "Action=DescribeVpcs"):
+			_, _ = w.Write([]byte(`<DescribeVpcsResponse><vpcSet/></DescribeVpcsResponse>`))
+		case strings.Contains(body, "Action=CreateVpc"):
+			_, _ = w.Write([]byte(`<CreateVpcResponse><vpc><vpcId>vpc-1</vpcId></vpc></CreateVpcResponse>`))
+		case strings.Contains(body, "Action=CreateSubnet"):
+			_, _ = w.Write([]byte(`<CreateSubnetResponse><subnet><subnetId>subnet-1</subnetId></subnet></CreateSubnetResponse>`))
+		case strings.Contains(body, "Action=CreateFlowLogs"):
+			_, _ = w.Write([]byte(`<CreateFlowLogsResponse><flowLogIdSet/><unsuccessful><item>` +
+				`<error><code>InvalidParameter</code><message>the role cannot be assumed</message></error>` +
+				`</item></unsuccessful></CreateFlowLogsResponse>`))
+		default:
+			_, _ = w.Write([]byte(`<Response/>`))
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	d := NewDriver("eu-central-1")
+	d.EC2BaseURL = srv.URL
+	d.IAMBaseURL = srv.URL
+	d.Account = "000000000000"
+
+	res := d.createAWSVPC("eu-central-1", "000000000000", "prod", "net",
+		map[string]any{"location.region": "eu-central-1", "flowLogs.enabled": true},
+		map[string]any{
+			"flow_log_destination": "arn:aws:logs:eu-central-1:000000000000:log-group:/x",
+			"flow_log_role_arn":    "arn:aws:iam::000000000000:role/flowlog",
+		}, 1)
+
+	if res.Status != "failed" {
+		t.Fatalf("a batch that created no flow log must fail — audit is NOT on: %+v", res)
+	}
+	if !strings.Contains(res.Reason, "cannot be assumed") {
+		t.Fatalf("the batch error must reach the operator, got %q", res.Reason)
+	}
+}
+
+// D743, the field report's own measurement: a network whose security groups allow `-1`
+// to 0.0.0.0/0 outbound is default-ALLOW, which is the opposite of the vocabulary's
+// "default-deny egress allow-list". `egress.restricted` used to come from the ROAD —
+// which says which way traffic leaves, never where to — with derivation config-intent,
+// so a hard constraint read satisfied on exactly that estate.
+func TestEgressRestrictedIsMeasuredFromTheRules(t *testing.T) {
+	restricted := `<item><groupId>sg-tight</groupId><ipPermissions/>` +
+		`<ipPermissionsEgress><item><ipProtocol>tcp</ipProtocol>` +
+		`<ipRanges><item><cidrIp>10.0.0.0/8</cidrIp></item></ipRanges></item></ipPermissionsEgress></item>`
+	cases := []struct {
+		name string
+		sg   string
+		want any
+	}{
+		{"the account the report measured", awsVpcDefaultSG, false},
+		{"outbound limited to declared destinations", restricted, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			old := awsVpcDefaultSG
+			awsVpcDefaultSG = c.sg
+			defer func() { awsVpcDefaultSG = old }()
+
+			srv := awsVpcNatServer(t)
+			defer srv.Close()
+			d := awsVpcTestDriver(t, srv)
+			obs, _, err := d.observeAWSVPC("net", "vpc:eu-central-1:vpc-0abc123")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got any
+			var deriv string
+			for _, o := range obs {
+				if o.Path == "egress.restricted" {
+					got, deriv = o.Value, o.Derivation
+				}
+			}
+			if got != c.want {
+				t.Fatalf("egress.restricted = %v, want %v", got, c.want)
+			}
+			if deriv != "measured" {
+				t.Fatalf("derivation = %q — the rules were read, so this is a measurement "+
+					"and after D722 a hard constraint may rest on it", deriv)
+			}
+		})
 	}
 }

@@ -283,10 +283,16 @@ func BuildBackupPlan(environment, capability string,
 	}
 
 	// --- optional operands: job windows ---
-	if v, ok := implInt(impl, "startWindowMinutes"); ok {
+	// D674: same rule for the job windows — a mistyped window silently became the
+	// default, and a backup window is a recovery guarantee.
+	if v, ok, err := implIntOperand(impl, "startWindowMinutes", "implementation"); err != nil {
+		return BackupPlanPlan{}, err
+	} else if ok {
 		p.StartWindowMin = v
 	}
-	if v, ok := implInt(impl, "completionWindowMinutes"); ok {
+	if v, ok, err := implIntOperand(impl, "completionWindowMinutes", "implementation"); err != nil {
+		return BackupPlanPlan{}, err
+	} else if ok {
 		p.CompletionWindowMin = v
 	}
 	if p.CompletionWindowMin <= p.StartWindowMin {

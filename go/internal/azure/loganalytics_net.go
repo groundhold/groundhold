@@ -91,9 +91,10 @@ func (d *Driver) getLA(rg, name string) (doc laDoc, found bool, err error) {
 
 // observeLogAnalytics reverse-maps a live workspace: location.region, retention.days
 // (retentionInDays -> a duration), service.managed, and encryption.customerManagedKeys
-// (true ONLY when the workspace is linked to a dedicated cluster — the sole way a
-// customer key covers Log Analytics; a standalone workspace exposes no key, so CMK is
-// simply not emitted rather than faked).
+// (true ONLY when the workspace is linked to a dedicated cluster AND that cluster
+// carries a key vault key — a standalone workspace exposes no key, and a linked cluster
+// is only a prerequisite, so CMK is confirmed against the cluster, never inferred from
+// the linkage or faked).
 func (d *Driver) observeLogAnalytics(capability, providerID string) ([]provider.Observation, []string, error) {
 	sub, rg, name, err := splitLAProviderID(providerID)
 	if err != nil {
@@ -107,9 +108,15 @@ func (d *Driver) observeLogAnalytics(capability, providerID string) ([]provider.
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"log analytics workspace not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"log analytics workspace not found — bound resource is gone (will re-create)"}, nil
 	}
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
 	if doc.Location != "" {
@@ -120,11 +127,38 @@ func (d *Driver) observeLogAnalytics(capability, providerID string) ([]provider.
 		obs = append(obs, provider.Observation{Path: "retention.days",
 			Value: fmt.Sprintf("%dd", *doc.Properties.RetentionInDays), Derivation: "measured"})
 	}
-	if strings.TrimSpace(doc.Properties.Features.ClusterResourceId) != "" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
-			Value: true, Derivation: "measured"})
+	var diags []string
+	if cid := strings.TrimSpace(doc.Properties.Features.ClusterResourceId); cid != "" {
+		// D985: a linked dedicated cluster is a PREREQUISITE for a customer key, not
+		// proof of one — a commitment-tier cluster can run on Microsoft's platform key
+		// (keyVaultProperties unset). Reporting customerManagedKeys=true from the linkage
+		// alone certifies a BYOK control that may not exist. Read the cluster and require
+		// an actual keyVaultProperties key; leave it unread otherwise, never a false true
+		// (the D954 shape — confirm the key, do not infer it).
+		var cl struct {
+			Properties struct {
+				KeyVaultProperties struct {
+					KeyVaultURI string `json:"keyVaultUri"`
+					KeyName     string `json:"keyName"`
+				} `json:"keyVaultProperties"`
+			} `json:"properties"`
+		}
+		curl := d.BaseURL + cid + "?api-version=" + laAPIVersion
+		cfound, cerr := d.armGetURLInto("clusters.get", curl, &cl)
+		switch {
+		case cerr != nil:
+			diags = append(diags, "encryption.customerManagedKeys not observed: the linked dedicated cluster could not be read — "+cerr.Error())
+		case !cfound:
+			diags = append(diags, "encryption.customerManagedKeys not observed: the linked dedicated cluster was not found")
+		case strings.TrimSpace(cl.Properties.KeyVaultProperties.KeyName) != "" ||
+			strings.TrimSpace(cl.Properties.KeyVaultProperties.KeyVaultURI) != "":
+			obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+				Value: true, Derivation: "measured"})
+		default:
+			diags = append(diags, "encryption.customerManagedKeys not observed: the linked cluster carries no key vault key (platform-managed, not BYOK)")
+		}
 	}
-	return obs, nil, nil
+	return obs, diags, nil
 }
 
 // updateLogAnalytics patches a workspace IN PLACE for the mutable paths (D46):
@@ -283,7 +317,7 @@ func (d *Driver) discoverLogAnalytics(region string) ([]provider.Discovered, []s
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.monitoring.logs",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

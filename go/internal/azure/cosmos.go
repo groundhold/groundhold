@@ -29,6 +29,12 @@ type CosmosPlan struct {
 	Region         string
 	PITR           bool   // continuous backup
 	KmsKeyVaultURI string // CMEK, from impl; "" = provider-managed
+
+	// ZoneRedundant is what `availability.class: regional` MEANS in this vocabulary:
+	// "replicated across zones in one region". The create used to send false for it
+	// unconditionally while accepting the declaration, so the tool built a
+	// single-zone account and reported zone resilience (D753).
+	ZoneRedundant bool
 }
 
 // cosmosAccountName is a deterministic, globally-unique account name (pure hash;
@@ -65,7 +71,10 @@ func BuildCosmos(environment, capability string,
 		case "availability.class":
 			switch raw {
 			case "regional":
-				// a single write region
+				// D753: NOT merely "a single write region", which is what this branch
+				// used to say. The vocabulary defines regional as replicated ACROSS
+				// ZONES in one region, and a Cosmos account carries that per location.
+				p.ZoneRedundant = true
 			case "multi-regional":
 				return CosmosPlan{}, fmt.Errorf(
 					"availability.class=multi-regional cannot be honored in v0 — Cosmos multi-region " +
@@ -111,7 +120,16 @@ func BuildCosmos(environment, capability string,
 
 // createBody is the databaseAccounts PUT body. Ownership is tags.
 func (p CosmosPlan) createBody(tags map[string]any) map[string]any {
-	backup := map[string]any{"type": "Periodic"}
+	// D934: Periodic is not a bare type — Azure rejects {"type":"Periodic"} with
+	// "PeriodicModeProperties must be specified when BackupPolicyType is Periodic",
+	// so the default (non-PITR) account was uncreatable. Carry the mode's defaults
+	// (4-hour interval, 8-hour retention) explicitly; the Continuous branch already
+	// carried its own continuousModeProperties.
+	backup := map[string]any{"type": "Periodic",
+		"periodicModeProperties": map[string]any{
+			"backupIntervalInMinutes":        240,
+			"backupRetentionIntervalInHours": 8,
+		}}
 	if p.PITR {
 		backup = map[string]any{"type": "Continuous",
 			"continuousModeProperties": map[string]any{"tier": "Continuous7Days"}}
@@ -119,7 +137,8 @@ func (p CosmosPlan) createBody(tags map[string]any) map[string]any {
 	props := map[string]any{
 		"databaseAccountOfferType": "Standard",
 		"locations": []any{
-			map[string]any{"locationName": p.Region, "failoverPriority": 0, "isZoneRedundant": false},
+			map[string]any{"locationName": p.Region, "failoverPriority": 0,
+				"isZoneRedundant": p.ZoneRedundant},
 		},
 		"backupPolicy":        backup,
 		"publicNetworkAccess": "Disabled",

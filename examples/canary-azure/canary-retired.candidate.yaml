@@ -1,0 +1,9 @@
+apiVersion: candidate/v0.1
+kind: ImplementationCandidate
+contract: azure-canary
+# D692: the capability is GONE from the candidate entirely — the README's third
+# refusal says an empty attribute map is still a declaration, and a retired
+# capability the candidate still mentions does not converge. The delete acts on the
+# pinned providerId from the binding, so there is nothing left for the candidate to
+# say about it.
+capabilities: {}

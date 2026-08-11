@@ -23,7 +23,7 @@
           },
           "implementation": {
             "type": "object",
-            "description": "Free-form provider detail (tiers, disk types, flags). The verifier ignores it; the compiler consumes it (D26). An operand VALUE may instead be an intra-plan output reference — a mapping whose sole key is `$ref` (D226/#/$defs/outputRef) — resolved to another same-candidate capability's typed output; the compiler never coerces it into a string."
+            "description": "Free-form provider detail (tiers, disk types, flags). The verifier ignores it; the compiler consumes it (D26). An operand VALUE may instead be an intra-plan output reference — a mapping whose sole key is `$ref` (D226/#/$defs/outputRef) — resolved to another same-candidate capability's typed output; the compiler never coerces it into a string. Every operand value is RECORDED IN THE LEDGER VERBATIM and stays there for the life of that ledger; capsules and exports carry it onward. Do not put a credential in one. groundhold warns when a value has the SHAPE of a credential (D364), but that detector is deliberately narrow — a pattern that fires on ordinary configuration teaches people to ignore it — so it cannot recognise an arbitrary random secret, and its silence is not a clearance. Where an operand is the only channel to the target (an EventBridge Scheduler payload reaches the target exactly as written, with no header channel available), the secret belongs in a secret manager the TARGET resolves for itself, so that only its name is written here (D851)."
           }
         }
       }

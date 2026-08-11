@@ -24,6 +24,22 @@ func TestReservedWiringNamespaceIsFree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("vocab.Embedded(): %v", err)
 	}
+	// D579: a gate that scans a set must prove it HAD one. An empty embedded
+	// vocabulary passes this loop silently, and D565 showed that copy can drift from
+	// its source without anything noticing — so "no reserved attribute found" and
+	// "no attribute found at all" must not read the same.
+	if len(v) < 20 {
+		t.Fatalf("only %d embedded vocabularies — this gate would pass on an empty "+
+			"vocabulary set, which is exactly the state it must not bless", len(v))
+	}
+	attrs := 0
+	for _, voc := range v {
+		attrs += len(voc.Attributes)
+	}
+	if attrs < 100 {
+		t.Fatalf("the embedded vocabularies declare %d attributes in total — too few "+
+			"to be the real set, so this scan proves nothing", attrs)
+	}
 	for capType, voc := range v {
 		for path := range voc.Attributes {
 			if strings.HasPrefix(path, ledger.WiringPrefix) {

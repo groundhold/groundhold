@@ -105,3 +105,28 @@ func TestObserveAcceptsAzure(t *testing.T) {
 		t.Fatalf("observe dropped azure to the inner default:\n%s", stderr)
 	}
 }
+
+// D505: observe was the ONE verb whose provider switch had no k8s case, so a capability
+// could be created, updated, claimed, probed and retired on a cluster and never read
+// back. The union gate (help_test.go) only notices if k8s disappears from EVERY switch;
+// this pins the observe seam itself, which is where the gap actually was.
+//
+// A kubeconfig is neither present nor needed: reaching the resolver at all is the
+// property. Its refusal ("exec credential plugin", "no such file") is the k8s driver
+// answering, which is exactly what "unknown provider" would prove it never did.
+func TestObserveReachesTheK8sDriver(t *testing.T) {
+	dir := t.TempDir()
+	at := "2026-07-30T00:00:00Z"
+	led := filepath.Join(dir, "led.ndjson")
+	if err := os.WriteFile(led, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stderr := captureStderr(t, func() {
+		run([]string{"observe", "--provider", "k8s", "--ledger", led, "--at", at,
+			"--kubeconfig", filepath.Join(dir, "absent-kubeconfig")})
+	})
+	if strings.Contains(stderr, "unknown provider") {
+		t.Fatalf("observe dropped k8s to the inner default — the verb cannot read back "+
+			"what the other verbs can write (D505):\n%s", stderr)
+	}
+}

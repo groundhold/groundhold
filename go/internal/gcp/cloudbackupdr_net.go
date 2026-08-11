@@ -77,6 +77,13 @@ func (d *Driver) pollBackupDROperation(opName string) provider.CreateResult {
 type backupDRDoc struct {
 	Labels                                 map[string]string `json:"labels"`
 	BackupMinimumEnforcedRetentionDuration string            `json:"backupMinimumEnforcedRetentionDuration"`
+
+	// EffectiveTime is, in Google's own words in the public discovery document,
+	// "Time after which the BackupVault resource is locked" — and it is OPTIONAL.
+	// Until it passes, `patch` updates the vault's settings and `delete` with
+	// force=true removes the vault "and any data source from this backup vault"
+	// (D752). It decides the lock mode; nothing else in this response does.
+	EffectiveTime string `json:"effectiveTime"`
 }
 
 func (doc backupDRDoc) ours(capability, environment string) bool {
@@ -160,18 +167,49 @@ func (d *Driver) observeBackupDR(capability, providerID string) ([]provider.Obse
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"backup vault not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"backup vault not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: location, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
-		// a GCP backup vault's enforced retention is immutable by construction.
-		{Path: "retention.lockMode", Value: "compliance", Derivation: "measured"},
+	}
+	var diags []string
+	// D752, the D724 shape one cloud over. This emitted the CONSTANT "compliance",
+	// on the belief that a GCP vault's retention is immutable by construction. The
+	// provider's own contract says otherwise, and this driver's own create proves it:
+	// createBody sets no effectiveTime at all, so every vault it builds is UNLOCKED —
+	// and it then reported that vault as WORM.
+	switch lockedAt, err := time.Parse(time.RFC3339, doc.EffectiveTime); {
+	case doc.EffectiveTime == "":
+		// no lock time: settings are patchable and the data is deletable — which is
+		// exactly what this vocabulary calls governance.
+		obs = append(obs, provider.Observation{Path: "retention.lockMode",
+			Value: "governance", Derivation: "measured"})
+	case err != nil:
+		// a lock time we cannot read is not a lock we can vouch for (D306).
+		diags = append(diags, fmt.Sprintf("retention.lockMode not observed: the vault's "+
+			"effectiveTime %q is not a timestamp this driver can read", doc.EffectiveTime))
+	case !lockedAt.After(d.Now()):
+		obs = append(obs, provider.Observation{Path: "retention.lockMode",
+			Value: "compliance", Derivation: "measured"})
+	default:
+		// configured to lock, not locked YET — the same cooling-off branch D724 opened
+		// on AWS. Claiming WORM before it is in force is the false reading itself.
+		diags = append(diags, fmt.Sprintf("retention.lockMode not observed: the vault "+
+			"locks only at %s — until then its settings can be patched and its data "+
+			"deleted", lockedAt.UTC().Format(time.RFC3339)))
 	}
 	if s := doc.BackupMinimumEnforcedRetentionDuration; s != "" {
 		obs = append(obs, provider.Observation{Path: "retention.minimum", Value: s, Derivation: "measured"})
 	}
-	return obs, []string{"encryption.customerManagedKeys not observed: Backup and DR vaults use Google-managed encryption"}, nil
+	diags = append(diags, "encryption.customerManagedKeys not observed: Backup and DR vaults use Google-managed encryption")
+	return obs, diags, nil
 }
 
 func (d *Driver) deleteBackupDR(capability, environment, providerID string) provider.CreateResult {

@@ -6,6 +6,7 @@ package scalars
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -509,4 +510,36 @@ var Operators = map[string]Op{
 	"not-in":          negate(opIn),
 	"subset-of":       opSubsetOf,
 	"compatible-with": opCompatibleWith,
+}
+
+// SortList canonicalizes an unordered list in place by sorting its elements on
+// their canonical rendering, so two spellings of the same SET become one form
+// (D532). Non-lists and nested structures are left alone: only the top level is a
+// set, and a nested list keeps whatever order it was written with.
+//
+// D660: this lives here because BOTH sides of a comparison need it. It used to be
+// unexported in internal/contract and was applied only to the candidate's value,
+// so an `equals`/`not-equals` constraint compared a sorted list against the
+// operand exactly as the contract author typed it — and list equality is
+// positional.
+func SortList(sc *Scalar) {
+	if sc == nil || sc.Kind != List {
+		return
+	}
+	elems, ok := sc.Value.([]*Scalar)
+	if !ok {
+		return
+	}
+	sort.SliceStable(elems, func(i, j int) bool {
+		return fmt.Sprint(elems[i].Raw) < fmt.Sprint(elems[j].Raw)
+	})
+	raw, ok := sc.Raw.([]any)
+	if !ok || len(raw) != len(elems) {
+		return
+	}
+	// Raw must follow, or the hashed candidate keeps the pre-canonical spelling
+	// and two equal sets hash differently.
+	for i, e := range elems {
+		raw[i] = e.Raw
+	}
 }

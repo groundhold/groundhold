@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"groundhold/internal/provider"
@@ -22,18 +23,18 @@ func (d *Driver) List(region string) ([]provider.Discovered, []string, error) {
 	if region == "" {
 		return nil, nil, fmt.Errorf("azure discovery requires a region")
 	}
-	var out []provider.Discovered
-	var diags []string
-	for _, e := range d.serviceDiscoverers() {
-		found, ds, err := e.fn(region)
-		if err != nil {
-			diags = append(diags, err.Error())
-			continue
-		}
-		out = append(out, found...)
-		diags = append(diags, ds...)
+	// D642: shared sweep loop. Azure's registry is a SLICE (one sweep may cover
+	// two tokens), so the "token" handed to SweepAll is the slice index — the rule
+	// is about how many sweeps failed, not what they were named.
+	sweeps := d.serviceDiscoverers()
+	idx := make([]string, len(sweeps))
+	for i := range sweeps {
+		idx[i] = strconv.Itoa(i)
 	}
-	return out, diags, nil
+	return provider.SweepAll(idx, func(i string) ([]provider.Discovered, []string, error) {
+		n, _ := strconv.Atoi(i)
+		return sweeps[n].fn(region)
+	}, d.trunc)
 }
 
 // azSweep pairs a read-only discovery sweep with the SERVICE token(s) it covers.
@@ -129,23 +130,27 @@ func (d *Driver) NonListableServices() map[string]string {
 func (d *Driver) discoverBlob(region string) ([]provider.Discovered, []string, error) {
 	listURL := fmt.Sprintf("%s/subscriptions/%s/providers/Microsoft.Storage/storageAccounts?api-version=%s",
 		d.BaseURL, d.Subscription, storageAPIVersion)
-	st, resp, err := d.doARM("GET", listURL, nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("storageAccounts.list: %v", err)
-	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("storageAccounts.list: HTTP %d", st)
+	// D816: FOLLOW the pages (the shared ARM loop, D815).
+	type azStorageaccountsItem struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Location string `json:"location"`
 	}
 	var accts struct {
-		Value []struct {
-			ID       string `json:"id"`
-			Name     string `json:"name"`
-			Location string `json:"location"`
-		} `json:"value"`
+		Value []azStorageaccountsItem `json:"value"`
 	}
-	if json.Unmarshal(resp, &accts) != nil {
-		return nil, nil, &armReadError{Op: "storageAccounts.list", Cause: "body", Status: st}
+	var allazStorageaccountsItem []azStorageaccountsItem
+	if err := d.listAllARMPages("storageAccounts.list", listURL, func(body []byte) error {
+		accts.Value = nil
+		if json.Unmarshal(body, &accts) != nil {
+			return &armReadError{Op: "storageAccounts.list", Cause: "body", Status: http.StatusOK}
+		}
+		allazStorageaccountsItem = append(allazStorageaccountsItem, accts.Value...)
+		return nil
+	}); err != nil {
+		return nil, nil, err
 	}
+	accts.Value = allazStorageaccountsItem
 
 	want := azRegion(region)
 	var out []provider.Discovered
@@ -192,7 +197,7 @@ func (d *Driver) discoverBlob(region string) ([]provider.Discovered, []string, e
 			out = append(out, provider.Discovered{
 				ProviderID:   pid,
 				ResourceType: "capability.storage.object",
-				Observations: obs,
+				Observations: provider.WithoutAbsence(obs),
 			})
 		}
 	}
@@ -204,23 +209,27 @@ func (d *Driver) discoverBlob(region string) ([]provider.Discovered, []string, e
 func (d *Driver) discoverPostgres(region string) ([]provider.Discovered, []string, error) {
 	listURL := fmt.Sprintf("%s/subscriptions/%s/providers/Microsoft.DBforPostgreSQL/flexibleServers?api-version=%s",
 		d.BaseURL, d.Subscription, pgAPIVersion)
-	st, resp, err := d.doARM("GET", listURL, nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("flexibleServers.list: %v", err)
-	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("flexibleServers.list: HTTP %d", st)
+	// D815: FOLLOW the pages (the shared ARM loop).
+	type pgServer struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Location string `json:"location"`
 	}
 	var servers struct {
-		Value []struct {
-			ID       string `json:"id"`
-			Name     string `json:"name"`
-			Location string `json:"location"`
-		} `json:"value"`
+		Value []pgServer `json:"value"`
 	}
-	if json.Unmarshal(resp, &servers) != nil {
-		return nil, nil, &armReadError{Op: "flexibleServers.list", Cause: "body", Status: st}
+	var allServers []pgServer
+	if err := d.listAllARMPages("flexibleServers.list", listURL, func(body []byte) error {
+		servers.Value = nil
+		if json.Unmarshal(body, &servers) != nil {
+			return &armReadError{Op: "flexibleServers.list", Cause: "body", Status: http.StatusOK}
+		}
+		allServers = append(allServers, servers.Value...)
+		return nil
+	}); err != nil {
+		return nil, nil, err
 	}
+	servers.Value = allServers
 	want := azRegion(region)
 	var out []provider.Discovered
 	var diags []string
@@ -245,7 +254,7 @@ func (d *Driver) discoverPostgres(region string) ([]provider.Discovered, []strin
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.database.relational",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -274,23 +283,27 @@ func azRegion(s string) string {
 func (d *Driver) discoverRedis(region string) ([]provider.Discovered, []string, error) {
 	listURL := fmt.Sprintf("%s/subscriptions/%s/providers/Microsoft.Cache/redis?api-version=%s",
 		d.BaseURL, d.Subscription, redisAPIVersion)
-	st, resp, err := d.doARM("GET", listURL, nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("redis.list: %v", err)
-	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("redis.list: HTTP %d", st)
+	// D816: FOLLOW the pages (the shared ARM loop, D815).
+	type azRedisItem struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Location string `json:"location"`
 	}
 	var caches struct {
-		Value []struct {
-			ID       string `json:"id"`
-			Name     string `json:"name"`
-			Location string `json:"location"`
-		} `json:"value"`
+		Value []azRedisItem `json:"value"`
 	}
-	if json.Unmarshal(resp, &caches) != nil {
-		return nil, nil, &armReadError{Op: "redis.list", Cause: "body", Status: st}
+	var allazRedisItem []azRedisItem
+	if err := d.listAllARMPages("redis.list", listURL, func(body []byte) error {
+		caches.Value = nil
+		if json.Unmarshal(body, &caches) != nil {
+			return &armReadError{Op: "redis.list", Cause: "body", Status: http.StatusOK}
+		}
+		allazRedisItem = append(allazRedisItem, caches.Value...)
+		return nil
+	}); err != nil {
+		return nil, nil, err
 	}
+	caches.Value = allazRedisItem
 	want := azRegion(region)
 	var out []provider.Discovered
 	var diags []string
@@ -315,7 +328,7 @@ func (d *Driver) discoverRedis(region string) ([]provider.Discovered, []string, 
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.cache.keyvalue",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -396,7 +409,7 @@ func (d *Driver) sbEntities(kind, path, resourceType, rg, ns string, diags *[]st
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: resourceType,
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out
@@ -407,23 +420,27 @@ func (d *Driver) sbEntities(kind, path, resourceType, rg, ns string, diags *[]st
 func (d *Driver) discoverCosmos(region string) ([]provider.Discovered, []string, error) {
 	listURL := fmt.Sprintf("%s/subscriptions/%s/providers/Microsoft.DocumentDB/databaseAccounts?api-version=%s",
 		d.BaseURL, d.Subscription, cosmosAPIVersion)
-	st, resp, err := d.doARM("GET", listURL, nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("databaseAccounts.list: %v", err)
-	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("databaseAccounts.list: HTTP %d", st)
+	// D816: FOLLOW the pages (the shared ARM loop, D815).
+	type azDatabaseaccountsItem struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Location string `json:"location"`
 	}
 	var accts struct {
-		Value []struct {
-			ID       string `json:"id"`
-			Name     string `json:"name"`
-			Location string `json:"location"`
-		} `json:"value"`
+		Value []azDatabaseaccountsItem `json:"value"`
 	}
-	if json.Unmarshal(resp, &accts) != nil {
-		return nil, nil, &armReadError{Op: "databaseAccounts.list", Cause: "body", Status: st}
+	var allazDatabaseaccountsItem []azDatabaseaccountsItem
+	if err := d.listAllARMPages("databaseAccounts.list", listURL, func(body []byte) error {
+		accts.Value = nil
+		if json.Unmarshal(body, &accts) != nil {
+			return &armReadError{Op: "databaseAccounts.list", Cause: "body", Status: http.StatusOK}
+		}
+		allazDatabaseaccountsItem = append(allazDatabaseaccountsItem, accts.Value...)
+		return nil
+	}); err != nil {
+		return nil, nil, err
 	}
+	accts.Value = allazDatabaseaccountsItem
 	want := azRegion(region)
 	var out []provider.Discovered
 	var diags []string
@@ -448,7 +465,7 @@ func (d *Driver) discoverCosmos(region string) ([]provider.Discovered, []string,
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.database.nosql",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

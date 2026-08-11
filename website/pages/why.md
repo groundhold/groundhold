@@ -1,21 +1,15 @@
 # Why Groundhold
 
-## TL;DR
+AI can now propose infrastructure faster than any human can read it, and an agent is
+a probabilistic author: fluent, confident, and wrong often enough that "looks right"
+is not a safe basis for touching a cloud account. Terraform and its kin are authoring
+media built for careful humans, so handing them to a probabilistic author
+industrializes the mistake.
 
-AI can now propose infrastructure faster than any human can read it. But an agent
-is a **probabilistic** author — fluent, confident, and wrong often enough that
-"looks right" is not safe enough to execute against a cloud account. Terraform
-and its kin are authoring media built for careful humans; handing them to a
-probabilistic author industrializes the mistake.
-
-Groundhold is the other half. It is a **machine-first medium where agents declare
-what must be TRUE about infrastructure, and a deterministic runtime verifies,
-gates, executes, and proves it.** Three words:
-
-> **Probabilistic proposal. Deterministic verification. Sealed execution.**
-
-A claim nobody proved never deploys. A refusal is the system working. Reality is
-measured, not assumed. That is the whole idea.
+Groundhold is a machine-first medium where agents declare what must be TRUE about
+infrastructure, and a deterministic runtime verifies, gates, executes and proves it.
+A claim nobody proved never deploys, and a refusal is the system working rather than
+an error to route around.
 
 ## The problem we kept hitting
 
@@ -51,13 +45,12 @@ reviewed contract. And a deterministic runtime, with **no model and no network
 in its core**, decides whether the proposal actually satisfies the contract, and
 refuses to execute anything it cannot prove.
 
-The probabilistic part proposes. The deterministic part verifies. Neither
-pretends to be the other. That separation is the entire design.
+The probabilistic part proposes and the deterministic part verifies, and neither is
+allowed to stand in for the other. That separation is the whole design.
 
-## The philosophy — the rules we will not break
+## The rules we will not break
 
-These are not features; they are load-bearing. Break one and the guarantee
-collapses.
+These are load-bearing rather than features. Break one and the guarantee collapses.
 
 - **Four-valued verdicts.** Every check is `satisfied`, `violated`, `unknown`,
   or `unverifiable` — never a boolean. `unknown` on a hard constraint **blocks
@@ -115,8 +108,9 @@ that claim: a hard constraint may not ship unproven, so the plan refuses. The
 resource is adopted; the audit alarms `unknown`; a doubly-consented restore test
 measures 35 minutes; the next audit rules `satisfied` and resolves the alarm.
 
-**A claim became a measurement.** That is the entire point, and it is a
-conformance case, not a slogan.
+**A claim became a measurement.** It is a conformance case
+(`probe-closes-the-thesis-loop`), which is why it can be repeated rather than
+believed.
 
 ## Where to go next
 

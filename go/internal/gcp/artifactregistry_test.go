@@ -5,6 +5,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func arAttrs() map[string]any {
@@ -262,4 +265,66 @@ func TestClassifyARChangeScanOnPushUnsupported(t *testing.T) {
 	if c, _ := classifyARChange("location.region"); c != "immutable" {
 		t.Fatalf("region change must be immutable (replacement), got %q", c)
 	}
+}
+
+func arRole(req *http.Request, _ []byte) certifynet.Role {
+	if req.Method == http.MethodGet || strings.HasSuffix(req.URL.Path, ":getIamPolicy") {
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// arExistingServer: the repository already exists at our deterministic id and carries our
+// labels, so the create is answered 409 and the driver must recognise and bind it.
+func arExistingServer(t *testing.T, tagCap string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/repositories"):
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(`{"error":{"code":409,"message":"already exists"}}`))
+			case strings.HasSuffix(r.URL.Path, ":enable"):
+				_, _ = w.Write([]byte(`{"name":"operations/su-op1"}`))
+			case r.Method == "GET" && strings.Contains(r.URL.Path, "/services/"):
+				_, _ = w.Write([]byte(`{"state":"ENABLED"}`))
+			case r.Method == "GET" && strings.Contains(r.URL.Path, "/operations/"):
+				_, _ = w.Write([]byte(`{"done":true}`))
+			case strings.HasSuffix(r.URL.Path, ":getIamPolicy"):
+				_, _ = w.Write([]byte(`{"bindings":[]}`))
+			case strings.HasSuffix(r.URL.Path, ":setIamPolicy"):
+				_, _ = w.Write([]byte(`{}`))
+			case r.Method == "GET":
+				_, _ = w.Write([]byte(`{"format":"DOCKER","kmsKeyName":"k","dockerConfig":{"immutableTags":true},` +
+					`"labels":{"groundhold-capability":"` + tagCap + `","groundhold-environment":"prod"}}`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+}
+
+// TestAdoptsExistingARRepo enrols artifactregistry as the FIRST GCP service in the D391
+// class gate (D413). GCP resources are name-addressed, so the failure this prevents is
+// not a duplicate but a converge that hard-fails against an estate already standing.
+func TestAdoptsExistingARRepo(t *testing.T) {
+	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
+	p := &certifynet.ExistingProbe{
+		Name:           "gcp/artifactregistry",
+		Classify:       arRole,
+		ExistingServer: func() *httptest.Server { return arExistingServer(t, "images") },
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("acme-prod")
+			d.HTTP = &http.Client{Transport: rt}
+			d.ARBaseURL = happyURL
+			d.PollInterval = 0
+			suBaseOverride = happyURL
+			t.Cleanup(func() { suBaseOverride = "" })
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("artifactregistry", "images", "prod", arAttrs(), arImpl(), "images", 1)
+		},
+		AllowedMutations: 2, // the refused create + re-asserting the exposure posture
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

@@ -179,12 +179,28 @@ func TestBuildActivityLogRegionCarriedNotSent(t *testing.T) {
 
 // activityLogArmFake serves the diagnostic-setting PUT/GET/DELETE + the LIST, asserting
 // the bearer header and the Insights path, and echoing an all-enabled setting on GET.
-func activityLogArmFake(t *testing.T, wantField, wantDest string) *httptest.Server {
+func activityLogArmFake(t *testing.T, wantField, wantDest string, seeded bool) *httptest.Server {
 	t.Helper()
+	// D804: the create READS before writing, and adoption means "what stands here is
+	// exactly what this contract describes". So the fake serves the canonical category
+	// set the plan writes, not a two-entry sketch of it — a fixture that serves less
+	// than the driver writes makes its own resource look like a stranger's.
 	settingDoc := func(name string) string {
+		logs := make([]string, 0, len(activityLogCategories))
+		for _, c := range activityLogCategories {
+			// ARM echoes a retentionPolicy inside every log entry that this driver
+			// never writes (D804) — the fake says so, because a comparison that cannot
+			// survive it would call our own setting foreign.
+			logs = append(logs, `{"category":"`+c+`","enabled":true,`+
+				`"retentionPolicy":{"days":0,"enabled":false}}`)
+		}
 		return `{"name":"` + name + `","properties":{"` + wantField + `":"` + wantDest + `",` +
-			`"logs":[{"category":"Administrative","enabled":true},{"category":"Security","enabled":true}]}}`
+			`"logs":[` + strings.Join(logs, ",") + `]}}`
 	}
+	// D804: ARM answers 404 until something is PUT there, and the create now READS
+	// before writing. A fake that serves the setting from the first GET makes every
+	// create look like an overwrite of a stranger's resource.
+	stored := seeded
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
@@ -202,6 +218,7 @@ func activityLogArmFake(t *testing.T, wantField, wantDest string) *httptest.Serv
 			name := parts[len(parts)-1]
 			switch r.Method {
 			case "PUT":
+				stored = true
 				var body struct {
 					Properties map[string]any `json:"properties"`
 				}
@@ -218,6 +235,10 @@ func activityLogArmFake(t *testing.T, wantField, wantDest string) *httptest.Serv
 				w.WriteHeader(200)
 				_, _ = w.Write([]byte(settingDoc(name)))
 			case "GET":
+				if !stored {
+					w.WriteHeader(404)
+					return
+				}
 				_, _ = w.Write([]byte(settingDoc(name)))
 			case "DELETE":
 				w.WriteHeader(200)
@@ -228,7 +249,7 @@ func activityLogArmFake(t *testing.T, wantField, wantDest string) *httptest.Serv
 }
 
 func TestCreateObserveDeleteActivityLog(t *testing.T) {
-	srv := activityLogArmFake(t, "workspaceId", testWorkspaceDest)
+	srv := activityLogArmFake(t, "workspaceId", testWorkspaceDest, false)
 	defer srv.Close()
 	d := vnetTestDriver(t, srv)
 
@@ -281,7 +302,7 @@ func TestCreateObserveDeleteActivityLog(t *testing.T) {
 
 // delivery.assured is the ONE in-place-mutable attribute; the updater is wired.
 func TestUpdateActivityLogDelivery(t *testing.T) {
-	srv := activityLogArmFake(t, "workspaceId", testWorkspaceDest)
+	srv := activityLogArmFake(t, "workspaceId", testWorkspaceDest, true)
 	defer srv.Close()
 	d := vnetTestDriver(t, srv)
 
@@ -322,7 +343,7 @@ func TestObserveActivityLogDeliveryFalse(t *testing.T) {
 }
 
 func TestDiscoverActivityLog(t *testing.T) {
-	srv := activityLogArmFake(t, "workspaceId", testWorkspaceDest)
+	srv := activityLogArmFake(t, "workspaceId", testWorkspaceDest, true)
 	defer srv.Close()
 	d := vnetTestDriver(t, srv)
 	found, _, err := d.discoverActivityLog("westeurope")
@@ -338,7 +359,7 @@ func TestDiscoverActivityLog(t *testing.T) {
 }
 
 func TestDeleteActivityLogForeignSubscriptionRefused(t *testing.T) {
-	srv := activityLogArmFake(t, "workspaceId", testWorkspaceDest)
+	srv := activityLogArmFake(t, "workspaceId", testWorkspaceDest, true)
 	defer srv.Close()
 	d := vnetTestDriver(t, srv)
 	foreign := activityLogProviderID("00000000-0000-0000-0000-0000000000ff", activityLogName("prod", "audit", 1))

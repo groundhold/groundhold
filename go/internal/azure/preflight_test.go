@@ -69,7 +69,7 @@ func TestAzureCheckResourcePermissions_Authoritative(t *testing.T) {
 	f := &permFake{json: `{"value":[{"actions":["Microsoft.Cache/*"],"notActions":["Microsoft.Cache/Redis/delete"]}]}`}
 	d := f.driver(t)
 	pid := redisAzureProviderID(testSub, "rg1", "cache-x")
-	denied, err := d.CheckResourcePermissions("rediscache", pid, []string{
+	denied, _, err := d.CheckResourcePermissions("rediscache", pid, []string{
 		"Microsoft.Cache/Redis/write",  // granted
 		"Microsoft.Cache/Redis/delete", // in notActions -> denied
 		"Microsoft.Cache/Redis/read",   // granted by wildcard
@@ -90,7 +90,7 @@ func TestAzureCheckResourcePermissions_Authoritative(t *testing.T) {
 func TestAzureCheckResource_NoSurface(t *testing.T) {
 	f := &permFake{json: `{"value":[]}`}
 	d := f.driver(t)
-	_, err := d.CheckResourcePermissions("metricalert", "azalert:"+testSub+":rg1:a1", []string{"Microsoft.Insights/metricAlerts/write"})
+	_, _, err := d.CheckResourcePermissions("metricalert", "azalert:"+testSub+":rg1:a1", []string{"Microsoft.Insights/metricAlerts/write"})
 	if err != provider.ErrNoResourceSurface {
 		t.Fatalf("unmapped service must return ErrNoResourceSurface, got %v", err)
 	}

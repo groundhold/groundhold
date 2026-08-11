@@ -130,20 +130,24 @@ func (d *Driver) listAOIDeployments(rg, account string) ([]aoiDeploymentDoc, err
 	if err != nil {
 		return nil, &armReadError{Op: op, Cause: "scope", Detail: err.Error()}
 	}
-	st, resp, e := d.doARM("GET", depsURL, nil)
-	if e != nil {
-		return nil, armTransport(op, e)
+	// D869: EVERY page. `Deployments_List` is pageable (ARM's own spec), and this list
+	// reduces to `inference.destinationRegions` — the attribute that turns a Global sku
+	// into a deterministic residency violation. A deployment on page two is a destination
+	// that silently leaves the surface, which is the failure this read exists to prevent.
+	var out []aoiDeploymentDoc
+	if err := d.listAllARMPages(op, depsURL, func(body []byte) error {
+		var page struct {
+			Value []aoiDeploymentDoc `json:"value"`
+		}
+		if json.Unmarshal(body, &page) != nil {
+			return armBody(op, http.StatusOK)
+		}
+		out = append(out, page.Value...)
+		return nil
+	}); err != nil {
+		return nil, err
 	}
-	if st != http.StatusOK {
-		return nil, armHTTP(op, st, resp)
-	}
-	var out struct {
-		Value []aoiDeploymentDoc `json:"value"`
-	}
-	if json.Unmarshal(resp, &out) != nil {
-		return nil, armBody(op, st)
-	}
-	return out.Value, nil
+	return out, nil
 }
 
 // observeAzureOpenAI reverse-maps a live Azure OpenAI account to
@@ -171,7 +175,11 @@ func (d *Driver) observeAzureOpenAI(capability, providerID string) ([]provider.O
 		return nil, nil, fmt.Errorf("accounts.get: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"account not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"account not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("accounts.get: HTTP %d", st)
@@ -202,7 +210,9 @@ func (d *Driver) observeAzureOpenAI(capability, providerID string) ([]provider.O
 	}
 	destRegions := destinationRegionsFromDeployments(scaleTypes, region)
 
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "inference.destinationRegions", Value: destRegions, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
@@ -276,23 +286,11 @@ func (d *Driver) deleteAzureOpenAI(capability, environment, providerID string) p
 		doc.Tags["groundhold-environment"] != sanitizeAzTag(environment) {
 		return provider.CreateResult{Status: "failed", Reason: "account tags do not match — refusing to delete a resource that is not ours"}
 	}
-	dst, dresp, de := d.doARM("DELETE", acctURL, nil)
-	if de != nil {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("delete outcome unknown: %v", de)}
-	}
-	if dst == http.StatusNotFound {
-		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
-	}
-	if dst >= 500 {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("delete HTTP %d (server error) — reconcile", dst)}
-	}
-	if dst < 200 || dst >= 300 {
-		if r := provider.MutationResult(dst, azErrCode(dresp), nil, providerID, "delete"); r != nil {
-			return *r
-		}
-		return provider.CreateResult{ProviderID: providerID, Status: "failed", Reason: fmt.Sprintf("delete HTTP %d: %s", dst, mutDetailAz(dresp))}
-	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// D984: route the delete through deleteAndConfirm (D971) — a Cognitive Services
+	// account DELETE returns 202 Accepted (async); concluding succeeded here tombstoned
+	// an account (with its deployments) still live. The helper polls to a confirmed
+	// 404, unknown on timeout.
+	return *d.deleteAndConfirm(acctURL, providerID, "azure openai account")
 }
 
 // discoverAzureOpenAI enumerates the region's Azure OpenAI accounts as
@@ -349,7 +347,7 @@ func (d *Driver) discoverAzureOpenAI(region string) ([]provider.Discovered, []st
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.ai.inference",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

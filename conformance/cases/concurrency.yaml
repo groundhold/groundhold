@@ -303,3 +303,78 @@ cases:
         - { status: ok }
         - { status: ok }
         - { status: stale }
+
+  - name: ownership-claim-is-not-a-mutation
+    description: >
+      D140 + D29: `ownership.claimed` stamps a takeover's AUTHORSHIP —
+      spec/state-model.md §1 calls it exactly that, and §2 enumerates the
+      mutation set as `apply.*` and `binding.updated`. An authorship stamp
+      takes no lease, so it must append without a fencing token, exactly as
+      `contract.published` does. The Go runtime classified it as a mutation
+      and refused the bare append, so a ledger the reference implementation
+      writes was unreadable to the runtime (D338's failure, one layer in:
+      the two agreed on the type REGISTRY and disagreed on the RULE).
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - append: { type: ownership.claimed, capabilities: [db], actor: alice }
+    expect:
+      results:
+        - { status: ok }
+
+  - name: ownership-claim-under-a-lease-still-carries-its-token
+    description: >
+      The field path: `apply` stamps the claim while holding the lease, so a
+      claim WITH a token must keep working. Relaxing the mutation rule must
+      not turn a legitimate token into an error.
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - append: { type: lease.acquired, capabilities: [db], actor: alice, body: { ttlSeconds: 5 } }
+        - append: { type: ownership.claimed, capabilities: [db], actor: alice, fencingToken: 1 }
+    expect:
+      results:
+        - { status: ok, token: 1 }
+        - { status: ok }
+
+  - name: a-mutation-must-be-covered-by-one-lease
+    description: >
+      D633: fencing tokens are per-capability counters, so two leases over
+      DISJOINT capability sets both receive token 1. The mutation rule asked only
+      "does the token match the active token on each affected capability" — never
+      "is this the same lease" — so a holder of {a,b} could mutate {b,c} with its
+      own token 1 the moment an unrelated worker acquired {c} and was handed 1 as
+      well, writing into a capability under someone else's exclusive lease. The
+      literal rule was satisfied; mutual exclusion was not.
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - append: { type: lease.acquired, capabilities: [a, b], actor: worker-a, body: { ttlSeconds: 100 } }
+        - append: { type: lease.acquired, capabilities: [c], actor: worker-b, body: { ttlSeconds: 100 } }
+        - append: { type: binding.updated, capabilities: [b, c], actor: worker-a, fencingToken: 1 }
+    expect:
+      results:
+        - { status: ok, token: 1 }
+        - { status: ok, token: 1 }
+        - { status: rejected }
+
+  - name: a-mutation-over-a-subset-of-its-own-lease-is-fine
+    description: >
+      The control for the case above, and the more important half: the cheap way
+      to satisfy a refusal test is to refuse more than asked. A holder of {a,b}
+      mutating only {b} is covered by its own lease and must still pass.
+    scenario:
+      apiVersion: scenario/v0
+      kind: ConcurrencyScenario
+      steps:
+        - append: { type: lease.acquired, capabilities: [a, b], actor: worker-a, body: { ttlSeconds: 100 } }
+        - append: { type: binding.updated, capabilities: [b], actor: worker-a, fencingToken: 1 }
+        - append: { type: apply.started, capabilities: [a, b], actor: worker-a, fencingToken: 1 }
+    expect:
+      results:
+        - { status: ok, token: 1 }
+        - { status: ok }
+        - { status: ok }

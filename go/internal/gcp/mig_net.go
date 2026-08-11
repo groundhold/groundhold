@@ -265,18 +265,32 @@ func (d *Driver) observeMIG(capability, providerID string) ([]provider.Observati
 	if err != nil {
 		return nil, nil, err
 	}
+	// D466 — the project boundary. 39 of 44 GCP deletes already guard it; these
+	// families did not, and the label check is not a substitute: our capability +
+	// environment labels are IDENTICAL in every project we manage, so a providerId
+	// naming another project passes it. sameProject is a no-op when nothing is
+	// pinned (observe/discover), a refusal when apply/converge pinned one.
+	if err := d.sameProject(project); err != nil {
+		return nil, nil, err
+	}
 	doc, found, rerr := d.getMIG(project, scope, name)
 	if rerr != nil {
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"managed instance group not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"managed instance group not found — bound resource is gone (will re-create)"}, nil
 	}
 	region, class := scope, "regional"
 	if !migScopeIsRegional(scope) {
 		region, class = gceRegionOfZone(scope), "zonal"
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		{Path: "availability.class", Value: class, Derivation: "measured"},
@@ -319,6 +333,14 @@ func (d *Driver) observeMIG(capability, providerID string) ([]provider.Observati
 func (d *Driver) deleteMIG(capability, environment, providerID string) provider.CreateResult {
 	project, scope, name, err := splitMIGProviderID(providerID)
 	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	// D466 — the project boundary. 39 of 44 GCP deletes already guard it; these
+	// families did not, and the label check is not a substitute: our capability +
+	// environment labels are IDENTICAL in every project we manage, so a providerId
+	// naming another project passes it. sameProject is a no-op when nothing is
+	// pinned (observe/discover), a refusal when apply/converge pinned one.
+	if err := d.sameProject(project); err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	doc, found, rerr := d.getMIG(project, scope, name)
@@ -416,7 +438,7 @@ func (d *Driver) discoverMIGs(region string) ([]provider.Discovered, []string, e
 			out = append(out, provider.Discovered{
 				ProviderID:   pid,
 				ResourceType: "capability.compute.autoscaling",
-				Observations: obs,
+				Observations: provider.WithoutAbsence(obs),
 			})
 		}
 	}

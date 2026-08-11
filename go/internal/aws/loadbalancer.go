@@ -240,10 +240,16 @@ func BuildLoadBalancer(environment, capability string,
 	} else {
 		p.Port = 80
 	}
-	if pv, ok := implInt(impl, "port"); ok {
+	// D674: an unreadable operand must not fall through to the default — that is
+	// how `port: "8443"` built a listener on 80.
+	if pv, ok, err := implIntOperand(impl, "port", "implementation"); err != nil {
+		return LoadBalancerPlan{}, err
+	} else if ok {
 		p.Port = pv
 	}
-	if tp, ok := implInt(impl, "targetPort"); ok {
+	if tp, ok, err := implIntOperand(impl, "targetPort", "implementation"); err != nil {
+		return LoadBalancerPlan{}, err
+	} else if ok {
 		p.TargetPort = tp
 	}
 	if p.Port < 1 || p.Port > 65535 {

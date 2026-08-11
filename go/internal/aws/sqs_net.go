@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"groundhold/internal/provider"
 )
@@ -226,6 +227,9 @@ func (d *Driver) observeSQS(capability, providerID string) ([]provider.Observati
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := d.sameAccount(account); err != nil {
+		return nil, nil, err
+	}
 	queueURL := sqsQueueURL(d.sqsBase(region), account, name)
 	st, resp, err := d.sqsPost(region, encodeForm(map[string]string{
 		"Action": "GetQueueAttributes", "Version": sqsVersion, "QueueUrl": queueURL,
@@ -234,7 +238,11 @@ func (d *Driver) observeSQS(capability, providerID string) ([]provider.Observati
 		return nil, nil, err
 	}
 	if st == http.StatusNotFound || strings.Contains(rdsErrCode(resp), "NonExistentQueue") {
-		return nil, []string{"queue not found — nothing to observe"}, nil
+		// F-LC3 (D521): a BOUND resource the API says is GONE. A diagnostic
+		// alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"queue not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("GetQueueAttributes: HTTP %d", st)
@@ -244,7 +252,10 @@ func (d *Driver) observeSQS(capability, providerID string) ([]provider.Observati
 		return nil, nil, fmt.Errorf("GetQueueAttributes: unparseable attributes")
 	}
 
-	var obs []provider.Observation
+	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
+	}
 	var diags []string
 	obs = append(obs,
 		provider.Observation{Path: "location.region", Value: region, Derivation: "measured"},
@@ -264,11 +275,30 @@ func (d *Driver) observeSQS(capability, providerID string) ([]provider.Observati
 	obs = append(obs, provider.Observation{Path: "delivery.guarantee",
 		Value: guarantee, Derivation: "measured"})
 
-	// reliability.deadLetter: a RedrivePolicy attribute means a DLQ is wired
-	// (failures are captured, not lost). Absent => no DLQ (measured false), so a
-	// "deadLetter equals true" constraint reads violated, never unknown.
-	obs = append(obs, provider.Observation{Path: "reliability.deadLetter",
-		Value: qattrs["RedrivePolicy"] != "", Derivation: "measured"})
+	// reliability.deadLetter — D745. A RedrivePolicy attribute means a dead-letter
+	// target is NAMED. It does not mean the target exists: delete the DLQ and the policy
+	// stays, over-limit messages are dropped instead of captured, and this reported
+	// `true` — a reliability control naming a queue that is not there. The policy
+	// carries the ARN, so the target can be asked about.
+	switch dl, target, readable := d.deadLetterTarget(region, qattrs["RedrivePolicy"]); {
+	case !dl:
+		obs = append(obs, provider.Observation{Path: "reliability.deadLetter",
+			Value: false, Derivation: "measured"})
+	case readable && target:
+		obs = append(obs, provider.Observation{Path: "reliability.deadLetter",
+			Value: true, Derivation: "measured"})
+	case readable:
+		obs = append(obs, provider.Observation{Path: "reliability.deadLetter",
+			Value: false, Derivation: "measured"})
+		diags = append(diags, "reliability.deadLetter=false: a redrive policy names a "+
+			"dead-letter queue that does not exist — over-limit messages are dropped, "+
+			"not captured")
+	default:
+		// The target could not be read. An unreadable target is not permission to
+		// claim either answer (D725, D743).
+		diags = append(diags, "reliability.deadLetter not observed: a redrive policy is "+
+			"set but its dead-letter target could not be read")
+	}
 
 	// retention: MessageRetentionPeriod is seconds.
 	if rp := qattrs["MessageRetentionPeriod"]; rp != "" {
@@ -285,10 +315,8 @@ func (d *Driver) observeSQS(capability, providerID string) ([]provider.Observati
 	sseManaged := qattrs["SqsManagedSseEnabled"] == "true"
 	obs = append(obs, provider.Observation{Path: "encryption.atRest",
 		Value: kms != "" || sseManaged, Derivation: "measured"})
-	if kms != "" && !isAWSManagedKMSKey(kms, "sqs") {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
-			Value: true, Derivation: "measured"})
-	}
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+		Value: kms != "" && !isAWSManagedKMSKey(kms, "sqs"), Derivation: "measured"})
 
 	// publicExposure: the queue resource Policy. No Policy at all means the
 	// default owner-only policy (not public). A present-but-unparseable policy is
@@ -380,6 +408,9 @@ func (d *Driver) updateSQS(capability, environment, providerID string,
 	if err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
+	if err := d.sameAccount(account); err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
 	queueURL := sqsQueueURL(d.sqsBase(region), account, name)
 	tags, found, terr := d.sqsListTags(region, queueURL)
 	if terr != nil {
@@ -468,6 +499,9 @@ func (d *Driver) deleteSQS(capability, environment, providerID string) provider.
 	if err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
+	if err := d.sameAccount(account); err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
 	queueURL := sqsQueueURL(d.sqsBase(region), account, name)
 	tags, found, terr := d.sqsListTags(region, queueURL)
 	if terr != nil {
@@ -502,5 +536,54 @@ func (d *Driver) deleteSQS(capability, environment, providerID string) provider.
 		return provider.CreateResult{Status: "failed",
 			Reason: fmt.Sprintf("delete: HTTP %d (%s)", st, rdsErrCode(resp))}
 	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// ---- poll to absence (D968 class, D982) ----
+	// DeleteQueue is async: AWS documents up to 60s during which the queue (and its
+	// in-flight messages) still answers. Reporting succeeded here tombstones a queue
+	// still live. Poll sqsListTags to a confirmed NonExistentQueue; unknown on timeout
+	// keeps the handle.
+	deadline := d.Now().Add(d.PollTimeout)
+	for {
+		if _, found, rerr := d.sqsListTags(region, queueURL); rerr == nil && !found {
+			return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // confirmed gone
+		}
+		if d.Now().After(deadline) {
+			return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+				Reason: "queue still deleting at poll timeout — reconcile via ListQueues"}
+		}
+		time.Sleep(d.PollInterval)
+	}
+}
+
+// deadLetterTarget answers whether a redrive policy names a dead-letter queue and
+// whether that queue EXISTS (D745). Returns (policyPresent, targetExists, readable);
+// readable=false means the target could not be asked about, which is not the same as
+// absent.
+func (d *Driver) deadLetterTarget(region, redrivePolicy string) (present, exists, readable bool) {
+	if redrivePolicy == "" {
+		return false, false, true
+	}
+	var pol struct {
+		DeadLetterTargetArn string `json:"deadLetterTargetArn"`
+	}
+	if json.Unmarshal([]byte(redrivePolicy), &pol) != nil || pol.DeadLetterTargetArn == "" {
+		return true, false, false
+	}
+	// arn:aws:sqs:<region>:<account>:<name>
+	parts := strings.Split(pol.DeadLetterTargetArn, ":")
+	if len(parts) < 6 {
+		return true, false, false
+	}
+	url := sqsQueueURL(d.sqsBase(parts[3]), parts[4], parts[5])
+	st, resp, err := d.sqsPost(parts[3], encodeForm(map[string]string{
+		"Action": "GetQueueAttributes", "Version": sqsVersion, "QueueUrl": url,
+		"AttributeName.1": "QueueArn"}))
+	switch {
+	case err != nil:
+		return true, false, false
+	case st == http.StatusNotFound || strings.Contains(rdsErrCode(resp), "NonExistentQueue"):
+		return true, false, true // authoritatively gone
+	case st != http.StatusOK:
+		return true, false, false
+	}
+	return true, true, true
 }

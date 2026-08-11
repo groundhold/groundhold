@@ -91,7 +91,7 @@ func TestReconcileMemorystore(t *testing.T) {
 	serveInstance = false
 	opBody = `{"done":true,"error":{"message":"quota exceeded"}}`
 	withOp := map[string]any{"target": "gcp.memorystore/cache", "operation": "create",
-		"targetProviderId": pid, "providerOperation": "operations/op1"}
+		"targetProviderId": pid, "providerOperation": "projects/acme-prod/locations/europe-west1/operations/op1"} // D718: the shape GCP actually returns
 	if r := d.Reconcile("cache", "prod", withOp); r.Status != "failed" {
 		t.Fatalf("DONE+error op must conclude failed: %+v", r)
 	}

@@ -38,9 +38,13 @@ attributes:
       guarantee (the role grants ONLY approved permissions), or `equals` for an exact
       set. The same treatment as capability.identity.oauth-client's scopes.granted.
     mappings:
-      gcp.iam: the custom role's includedPermissions
-      aws.iam: the Action list of a single Allow statement (Resource "*")
-      azure.authorization: the custom roleDefinition's permissions[].actions
+      gcp.customrole: the custom role's includedPermissions
+      aws.custompolicy: the Action list of a single Allow statement (Resource "*")
+      azure.customroledef: the custom roleDefinition's permissions[].actions
+      k8s.rbac-role / k8s.rbac-clusterrole: every rules[] entry flattened to the
+        cartesian product "<apiGroup>/<resource>:<verb>" (the core group spelled
+        `core`). resourceNames belong to the GRANT's scope, not the role, so a rule
+        carrying them is reported as a diagnostic and never folded into the flat set
 
   access.mutating:
     kind: bool
@@ -51,9 +55,11 @@ attributes:
       verbs — the driver refuses a candidate that declares access.mutating=false
       while role.permissions contains a mutating action (a false read-only claim).
     mappings:
-      gcp.iam: any permission not ending in .get/.list/.getIamPolicy
-      aws.iam: any action not matching Get*/List*/Describe*
-      azure.authorization: any action not ending in /read
+      gcp.customrole: any permission not ending in .get/.list/.getIamPolicy
+      aws.custompolicy: any action not matching Get*/List*/Describe*
+      azure.customroledef: any action not ending in /read
+      k8s.rbac-role / k8s.rbac-clusterrole: any permission whose verb is not one of
+        the read verbs (get/list/watch)
 
   access.privileged:
     kind: bool
@@ -65,9 +71,12 @@ attributes:
       driver refuses a false access.privileged=false claim, and leaves it UNVERIFIABLE
       for a set groundhold cannot classify (never guessed).
     mappings:
-      gcp.iam: any *.setIamPolicy / iam.* / resourcemanager.*.setIamPolicy, or a wildcard
-      aws.iam: any iam:* / sts:AssumeRole / a "*" action or "service:*" wildcard
-      azure.authorization: any Microsoft.Authorization/*/write or a "*" action
+      gcp.customrole: any *.setIamPolicy / iam.* / resourcemanager.*.setIamPolicy, or a wildcard
+      aws.custompolicy: any iam:* / sts:AssumeRole / a "*" action or "service:*" wildcard
+      azure.customroledef: any Microsoft.Authorization/*/write or a "*" action
+      k8s.rbac-role / k8s.rbac-clusterrole: a full wildcard (verb, resource and group
+        all `*` — cluster-admin-shaped), the verbs bind/escalate/impersonate, or any
+        WRITE on an rbac.authorization.k8s.io object, which is a re-grant vector
 
   service.managed:
     kind: bool

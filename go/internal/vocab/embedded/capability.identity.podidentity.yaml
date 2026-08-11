@@ -26,15 +26,27 @@ attributes:
     description: The Kubernetes namespace of the workload that assumes the role
     mappings:
       aws.eks-podidentity: PodIdentityAssociation namespace
+      # D542: read from each driver. The three clouds bind a pod identity by three
+      # unrelated mechanisms and all three carry the same two facts.
+      azure.aks-workloadidentity: >
+        parsed out of the federated identity credential's `subject`
+        (`system:serviceaccount:<ns>:<sa>`) — the binding IS the subject string
+      gcp.gke-workloadidentity: >
+        from the providerId, cross-checked against the IAM member
+        `serviceAccount:<pool>.svc.id.goog[<ns>/<sa>]` on the Google service account
 
   workload.serviceAccount:
     kind: string
     description: The Kubernetes serviceAccount that assumes the role — the least-privilege subject
     mappings:
       aws.eks-podidentity: PodIdentityAssociation serviceAccount
+      azure.aks-workloadidentity: the second half of the same FIC `subject`
+      gcp.gke-workloadidentity: the second half of the same workload-identity member
 
   service.managed:
     kind: bool
     description: Whether groundhold manages this association
     mappings:
       aws.eks-podidentity: const true when observed through the driver
+      azure.aks-workloadidentity: const true
+      gcp.gke-workloadidentity: const true

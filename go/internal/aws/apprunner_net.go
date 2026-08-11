@@ -101,28 +101,51 @@ type apprunnerService struct {
 // error (a real "gone/never-created").
 func (d *Driver) resolveServiceArn(region, name string) (arn string, found bool, err error) {
 	const op = "ListServices"
-	st, body, cerr := d.apprunnerCall(region, "ListServices", "{}")
-	if cerr != nil {
-		return "", false, readTransport(op, cerr)
-	}
-	if st != http.StatusOK {
-		return "", false, readHTTP(op, st, apprunnerErr(body))
-	}
-	var out struct {
-		ServiceSummaryList []struct {
-			ServiceName string `json:"ServiceName"`
-			ServiceArn  string `json:"ServiceArn"`
-		} `json:"ServiceSummaryList"`
-	}
-	if json.Unmarshal(body, &out) != nil {
-		return "", false, readBody(op, st)
-	}
-	for _, s := range out.ServiceSummaryList {
-		if s.ServiceName == name && s.ServiceArn != "" {
-			return s.ServiceArn, true, nil
+	// D860: App Runner caps a page at TWENTY services (the model's MaxResults max) and
+	// hands back a NextToken. This read one page and reported a name it had not seen as
+	// gone — and every caller treats that as a fact: create mints a SECOND service,
+	// delete reports gone while it stands, observe reports absent, claim cannot take it
+	// over. An absence is only honest once every page has been read.
+	token := ""
+	for page := 0; ; page++ {
+		if page >= maxAWSListPages {
+			return "", false, fmt.Errorf(
+				"%s: more than %d pages — refusing to call this name absent on a sweep "+
+					"that did not finish", op, maxAWSListPages)
 		}
+		req := "{}"
+		if token != "" {
+			b, _ := json.Marshal(map[string]string{"NextToken": token})
+			req = string(b)
+		}
+		st, body, cerr := d.apprunnerCall(region, "ListServices", req)
+		if cerr != nil {
+			return "", false, readTransport(op, cerr)
+		}
+		if st != http.StatusOK {
+			return "", false, readHTTP(op, st, apprunnerErr(body))
+		}
+		var out struct {
+			ServiceSummaryList []struct {
+				ServiceName string `json:"ServiceName"`
+				ServiceArn  string `json:"ServiceArn"`
+			} `json:"ServiceSummaryList"`
+			NextToken string `json:"NextToken"`
+		}
+		if json.Unmarshal(body, &out) != nil {
+			return "", false, readBody(op, st)
+		}
+		for _, s := range out.ServiceSummaryList {
+			if s.ServiceName == name && s.ServiceArn != "" {
+				return s.ServiceArn, true, nil
+			}
+		}
+		if out.NextToken == "" {
+			// Every page read, name on none of them: NOW an absence is a fact.
+			return "", false, nil
+		}
+		token = out.NextToken
 	}
-	return "", false, nil // readable list, name absent — a real "gone/never-created"
 }
 
 // describeService reads one service by ARN. (svc, found, err): a ResourceNotFound
@@ -291,22 +314,32 @@ func (d *Driver) observeAppRunner(capability, providerID string) ([]provider.Obs
 		return nil, nil, fmt.Errorf("apprunner %w", rerr)
 	}
 	if !found {
-		return nil, []string{"service not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"service not found — bound resource is gone (will re-create)"}, nil
 	}
 	svc, sfound, serr := d.describeAppRunnerService(region, arn)
 	if serr != nil {
 		return nil, nil, fmt.Errorf("apprunner %w", serr)
 	}
 	if !sfound {
-		return nil, []string{"service not found — nothing to observe"}, nil
+		return []provider.Observation{
+			// F-LC3 (D802): the bound subject is GONE; an empty return would leave the
+			// last good reading standing as the freshest word about it.
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"service not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
-		{Path: "availability.class", Value: "regional", Derivation: "config-intent"},
+		{Path: "availability.class", Value: "regional", Derivation: "platform-invariant"},
 		// App Runner's managed endpoint is HTTPS-only by construction; config-intent
 		// (a structural guarantee, like Cloud Run's regional), not a measured field.
-		{Path: "tls.enforced", Value: true, Derivation: "config-intent"},
+		{Path: "tls.enforced", Value: true, Derivation: "platform-invariant"},
 		{Path: "network.publicExposure",
 			Value:      svc.NetworkConfiguration.IngressConfiguration.IsPubliclyAccessible,
 			Derivation: "measured"},
@@ -526,7 +559,7 @@ func (d *Driver) discoverAppRunner(region string) ([]provider.Discovered, []stri
 		}
 		diags = append(diags, od...)
 		found = append(found, provider.Discovered{
-			ProviderID: pid, ResourceType: "capability.workload.container", Observations: obs})
+			ProviderID: pid, ResourceType: "capability.workload.container", Observations: provider.WithoutAbsence(obs)})
 	}
 	return found, diags, nil
 }

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"groundhold/internal/vocab"
 	"math"
 	"reflect"
 	"sort"
@@ -242,6 +243,13 @@ func scalarModel(s *scalars.Scalar) map[string]any {
 func constraintModel(c contract.Constraint) map[string]any {
 	m := map[string]any{
 		"id": c.ID, "severity": c.Severity, "verify": c.VerifyMethod}
+	// D728: the two-bar form is a DIFFERENT document and must hash differently — but a
+	// contract that never writes it is the same document it always was, so the scalar
+	// spelling is preserved when the bars agree. Adding a key unconditionally would
+	// have rewritten every pinned hash in the suite for contracts nobody changed.
+	if c.RuntimeMethod != "" && c.RuntimeMethod != c.VerifyMethod {
+		m["verify"] = map[string]any{"design": c.VerifyMethod, "runtime": c.RuntimeMethod}
+	}
 	if c.Subject != "" {
 		m["subject"] = c.Subject
 	}
@@ -369,10 +377,17 @@ func CandidateModel(cand *contract.Candidate) map[string]any {
 			}
 			attrModels = append(attrModels, am)
 		}
-		entry := map[string]any{"id": cid, "attributes": attrModels}
+		entry := map[string]any{"attributes": attrModels}
 		for k, v := range cand.Extras[cid] {
 			entry[k] = v
 		}
+		// D677: the capability's identity is the MAP KEY and is written last, so a
+		// body carrying `id:` cannot overwrite it. It could: two candidates
+		// implementing DIFFERENT capabilities hashed identically, and one verified
+		// PROVEN while the other was BLOCKED under a single sealed identity. The
+		// loader refuses that key outright now; this is the structural half, because
+		// an identity a document can rename is not an identity.
+		entry["id"] = cid
 		caps = append(caps, entry)
 	}
 	return map[string]any{
@@ -432,6 +447,26 @@ func HashPlan(doc map[string]any) (string, error) {
 
 // HashDiscovery (D52): a discovery document records what enumeration
 // SAW — raw tree, like events; drafts cite it as their provenance root.
+// HashVocabulary is the canonical identity of a vocabulary AS THE RUNTIME READS IT
+// (D634) — capability, version, attributes and the stateful flag, not the file's bytes.
+//
+// A plan pinned the version STRING and `apply` compared neither that nor anything else,
+// so an edited vocabulary with an untouched version silently changed what the compiler
+// and the executor believe: flipping one `stateful: true` to `false` turns a contract's
+// `forbidden: delete_stateful` from a refusal into an APPLIED delete, with both runs
+// byte-identical in everything the plan pins.
+//
+// Hashing the parsed model rather than the file means a comment or a reordering does
+// not invalidate a sealed plan, while any change the runtime can act on does.
+func HashVocabulary(v vocab.Vocabulary) (string, error) {
+	return hash("groundhold/canon/v1:vocabulary", map[string]any{
+		"capability": v.Capability,
+		"version":    v.Version,
+		"attributes": v.Attributes,
+		"stateful":   v.Stateful,
+	})
+}
+
 func HashDiscovery(doc map[string]any) (string, error) {
 	return hash(domainDiscovery, doc)
 }

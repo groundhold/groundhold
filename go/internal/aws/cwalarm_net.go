@@ -10,6 +10,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -61,6 +62,22 @@ type cwMetricAlarm struct {
 	Threshold          string   `xml:"Threshold"`
 	ComparisonOperator string   `xml:"ComparisonOperator"`
 	AlarmActions       []string `xml:"AlarmActions>member"`
+	// D726: the arming switch. The create sets ActionsEnabled=true and observe never
+	// read it back, so an alarm someone had switched off still reported alert.notify
+	// true — it enters ALARM and invokes nothing.
+	ActionsEnabled string `xml:"ActionsEnabled"`
+	// D695: the evaluation operands, so a change to any of them on an alarm that
+	// already exists is DRIFT rather than a silent no-op.
+	Statistic         string        `xml:"Statistic"`
+	Period            string        `xml:"Period"`
+	EvaluationPeriods string        `xml:"EvaluationPeriods"`
+	TreatMissingData  string        `xml:"TreatMissingData"`
+	Dimensions        []cwDimension `xml:"Dimensions>member"`
+}
+
+type cwDimension struct {
+	Name  string `xml:"Name"`
+	Value string `xml:"Value"`
 }
 
 // describeAlarm reads one alarm. found=false + readable=true is "does not exist".
@@ -68,8 +85,15 @@ func (d *Driver) describeAlarm(region, name string) (cwMetricAlarm, bool, error)
 	const op = "DescribeAlarms"
 	st, resp, err := d.cwPost(region, encodeForm(map[string]string{
 		"Action": "DescribeAlarms", "Version": cwVersion, "AlarmNames.member.1": name}))
-	if err != nil || st != http.StatusOK {
+	// D520: this said `err != nil || st != http.StatusOK` and handed BOTH cases to
+	// readTransport, which dereferences err.Error(). A non-200 with a nil error —
+	// every HTTP error response — panicked the process. Found by the absence probe,
+	// which is the first thing that ever pointed this driver at a 404.
+	if err != nil {
 		return cwMetricAlarm{}, false, readTransport(op, err)
+	}
+	if st != http.StatusOK {
+		return cwMetricAlarm{}, false, readHTTP(op, st, awsErrCode(resp))
 	}
 	var r struct {
 		Alarms []cwMetricAlarm `xml:"DescribeAlarmsResult>MetricAlarms>member"`
@@ -136,9 +160,9 @@ func (d *Driver) createCloudWatchAlarm(region, account, environment, capability 
 		"AlarmName":           plan.AlarmName,
 		"Namespace":           plan.Namespace,
 		"MetricName":          plan.MetricName,
-		"Statistic":           "Average",
-		"Period":              "300",
-		"EvaluationPeriods":   "1",
+		"Statistic":           plan.Statistic,
+		"Period":              strconv.Itoa(plan.PeriodSeconds),
+		"EvaluationPeriods":   strconv.Itoa(plan.EvaluationPeriods),
 		"Threshold":           strconv.FormatFloat(plan.Threshold, 'f', -1, 64),
 		"ComparisonOperator":  plan.ComparisonOperator,
 		"ActionsEnabled":      "true",
@@ -149,6 +173,16 @@ func (d *Driver) createCloudWatchAlarm(region, account, environment, capability 
 	}
 	if plan.Notify {
 		form["AlarmActions.member.1"] = plan.TopicArn
+	}
+	if plan.TreatMissingData != "" {
+		form["TreatMissingData"] = plan.TreatMissingData
+	}
+	// D694: the dimensions the alarm watches. Sorted by name in the plan, so the same
+	// candidate renders the same member indices every time.
+	for i, dim := range plan.Dimensions {
+		n := strconv.Itoa(i + 1)
+		form["Dimensions.member."+n+".Name"] = dim.Name
+		form["Dimensions.member."+n+".Value"] = dim.Value
 	}
 	st, resp, e := d.cwPost(region, encodeForm(form))
 	if e != nil {
@@ -176,11 +210,18 @@ func (d *Driver) observeCloudWatchAlarm(capability, providerID string) ([]provid
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"alarm not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"alarm not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "alert.metric", Value: alarm.Namespace + "/" + alarm.MetricName, Derivation: "measured"},
-		{Path: "alert.notify", Value: len(alarm.AlarmActions) > 0, Derivation: "measured"},
+		{Path: "alert.notify", Value: len(alarm.AlarmActions) > 0 &&
+			!strings.EqualFold(alarm.ActionsEnabled, "false"), Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
 	if f, err := strconv.ParseFloat(alarm.Threshold, 64); err == nil {
@@ -192,12 +233,31 @@ func (d *Driver) observeCloudWatchAlarm(capability, providerID string) ([]provid
 	case "LessThanThreshold":
 		obs = append(obs, provider.Observation{Path: "alert.comparison", Value: "less-than", Derivation: "measured"})
 	}
+	// D695: operand state (F-LC3), canonicalized EXACTLY as cloudWatchOperandTargets
+	// renders the declared side — both go through cwDimensionCanon, never one through
+	// it and one around it. CloudWatch returns dimensions in no particular order, so
+	// the live side is sorted here before it is rendered.
+	live := make([]CWDimension, 0, len(alarm.Dimensions))
+	for _, d := range alarm.Dimensions {
+		live = append(live, CWDimension(d))
+	}
+	sort.Slice(live, func(i, j int) bool { return live[i].Name < live[j].Name })
+	obs = append(obs,
+		provider.Observation{Path: cwDimensionsOperand, Value: cwDimensionCanon(live), Derivation: "measured"},
+		provider.Observation{Path: cwStatisticOperand, Value: alarm.Statistic, Derivation: "measured"},
+		provider.Observation{Path: cwPeriodOperand, Value: alarm.Period, Derivation: "measured"},
+		provider.Observation{Path: cwEvalPeriodsOperand, Value: alarm.EvaluationPeriods, Derivation: "measured"},
+		provider.Observation{Path: cwMissingDataOperand,
+			Value: cwMissingDataCanon(alarm.TreatMissingData), Derivation: "measured"})
 	return obs, nil, nil
 }
 
 func (d *Driver) deleteCloudWatchAlarm(capability, environment, providerID string) provider.CreateResult {
 	region, account, name, err := splitCWAlarmProviderID(providerID)
 	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if err := d.sameAccount(account); err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	arn := cwAlarmArn(region, account, name)

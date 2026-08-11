@@ -27,6 +27,10 @@ func metamorphicS3Server(t *testing.T) *httptest.Server {
 	tagged := false
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "HEAD" && r.URL.RawQuery == "" { // HeadBucket (D520)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			q := r.URL.RawQuery
 			body := make([]byte, r.ContentLength)
 			if r.Body != nil {

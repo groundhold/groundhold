@@ -316,9 +316,16 @@ func TestBuildPDCreateRegionalRefusals(t *testing.T) {
 // changing the class is a new disk and the data must be copied — which on a
 // stateful capability means it needs consent rather than happening quietly.
 func TestClassifyPDChange(t *testing.T) {
+	// D823: encryption.atRest was pinned "immutable" here. Compute Engine encrypts every
+	// persistent disk and the setting cannot be changed, so a replacement reaches the same
+	// state — the honest answer is that =false cannot be honoured, not that it needs a new
+	// disk. customerManagedKeys stays immutable: disks.updateKmsKey rotates the key's
+	// VERSION, which is not the same as attaching a key to a disk created without one.
+	if class, why := classifyPDChange("encryption.atRest"); class != "unsupported" || why == "" {
+		t.Errorf("encryption.atRest classified %q/%q, want unsupported with a reason", class, why)
+	}
 	for _, path := range []string{
-		"location.region", "availability.class",
-		"encryption.atRest", "encryption.customerManagedKeys",
+		"location.region", "availability.class", "encryption.customerManagedKeys",
 	} {
 		class, why := classifyPDChange(path)
 		if class != "immutable" {

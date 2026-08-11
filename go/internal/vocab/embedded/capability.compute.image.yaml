@@ -46,7 +46,7 @@ attributes:
     mappings:
       aws.ami: the region the AMI is registered in
       gcp.computeimage: images are global; the storage location is reported here
-      azure.image: the image resource's location
+      azure.azimage: the image resource's location
 
   network.publicExposure:
     kind: bool
@@ -54,7 +54,7 @@ attributes:
     mappings:
       aws.ami: launch permissions include `all` (public) or another account
       gcp.computeimage: the image IAM policy grants allAuthenticatedUsers or allUsers
-      azure.image: the image is shared through a gallery with public or cross-tenant scope
+      azure.azimage: the image is shared through a gallery with public or cross-tenant scope
 
   encryption.atRest:
     kind: bool
@@ -62,7 +62,7 @@ attributes:
     mappings:
       aws.ami: the backing snapshot's encryption state
       gcp.computeimage: platform encryption, always on; CMEK reported separately
-      azure.image: the source blob/disk encryption state
+      azure.azimage: the source blob/disk encryption state
 
   encryption.customerManagedKeys:
     kind: bool
@@ -70,7 +70,7 @@ attributes:
     mappings:
       aws.ami: the backing snapshot's KMS key is customer-managed
       gcp.computeimage: the image carries a customer-managed encryption key
-      azure.image: the image uses a disk-encryption set backed by a customer key
+      azure.azimage: the image uses a disk-encryption set backed by a customer key
 
   sourceProvenance:
     kind: bool
@@ -78,7 +78,7 @@ attributes:
     mappings:
       aws.ami: an attached attestation or signature the account trusts
       gcp.computeimage: an attestation the project's binary-authorization policy accepts
-      azure.image: a signed image definition version
+      azure.azimage: a signed image definition version
 
   service.managed:
     kind: bool
@@ -86,4 +86,4 @@ attributes:
     mappings:
       aws.ami: const true when observed through the driver
       gcp.computeimage: const true when observed through the driver
-      azure.image: const true when observed through the driver
+      azure.azimage: const true when observed through the driver

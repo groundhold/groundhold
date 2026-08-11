@@ -166,6 +166,38 @@ func BuildAnchor(led *Ledger) *Anchor {
 	return a
 }
 
+// AnchorState is the three-valued answer to "is there an anchor beside this ledger?"
+// (D709), the twin of SnapshotState (D708).
+//
+// LoadAnchorFile cannot answer it: a missing file and a corrupt one both come back as
+// an error, so `if a, err := LoadAnchorFile(p); err == nil && a != nil` reads them
+// identically. That is tolerable where an anchor is decoration. It was not tolerable
+// at the one call site where the anchor carries a TRUST POLICY: D135 exists so the
+// receiver's held artifact arms verification for every verb, and a corrupt anchor
+// silently armed nothing — no trusted keys, no `trustFrom` cutoff, events accepted
+// unsigned that the policy required to be signed. The downgrade D135 was written to
+// prevent, triggered by a damaged file instead of a forgotten flag.
+type AnchorState string
+
+const (
+	AnchorAbsent     AnchorState = "absent"
+	AnchorPresent    AnchorState = "present"
+	AnchorUnreadable AnchorState = "unreadable"
+)
+
+// AnchorStateOf reads the anchor beside a ledger and says which of the three it found.
+func AnchorStateOf(ledgerPath string) (*Anchor, AnchorState, error) {
+	path := AnchorPath(ledgerPath)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil, AnchorAbsent, nil
+	}
+	a, err := LoadAnchorFile(path)
+	if err != nil {
+		return nil, AnchorUnreadable, err
+	}
+	return a, AnchorPresent, nil
+}
+
 // LoadAnchorFile reads and shape-checks an anchor document.
 func LoadAnchorFile(path string) (*Anchor, error) {
 	raw, err := os.ReadFile(path)
@@ -235,6 +267,18 @@ func CheckAnchor(led *Ledger, a *Anchor) *AnchorCheck {
 		res.Reasons = []string{"anchor has a negative event count"}
 		return res
 	}
+	// D613: identity before arithmetic. An anchor says "this ledger, at this
+	// length, hashed to this" — so an anchor for a DIFFERENT ledger answers a
+	// question about a document nobody asked about. CheckAnchor never read
+	// LedgerId, though D312 had already built RequireIdentity and wired it into
+	// restore and capsule --verify. The same guard, one call site further out.
+	if a.LedgerId != "" && led.LedgerId() != "" && a.LedgerId != led.LedgerId() {
+		res.Status = "diverged"
+		res.Reasons = []string{fmt.Sprintf(
+			"the anchor manifests ledger %s but this ledger is %s — a FOREIGN "+
+				"anchor cannot witness this history", a.LedgerId, led.LedgerId())}
+		return res
+	}
 	if a.Events == 0 {
 		// an anchor of zero events pins nothing; it may only claim the
 		// genesis head, or it is a malformed/forged anchor asserting a
@@ -246,7 +290,23 @@ func CheckAnchor(led *Ledger, a *Anchor) *AnchorCheck {
 				"head — malformed or forged anchor"}
 			return res
 		}
-		res.Status = "verified" // an empty anchor is trivially extended
+		// D613: over a NON-EMPTY ledger this used to return "verified", and the
+		// word did the damage. A zero-event anchor witnesses nothing, so it cannot
+		// detect the rewriting the anchor exists to detect — an attacker who
+		// replaces the sidecar with `{"events":0,"head":"genesis"}` gets
+		// `{"status":"verified","anchorEvents":0,"ledgerEvents":19}` over a ledger
+		// whose tip they just tampered with, and `attest` republishes that word to
+		// the console. "I could not check" is not "I checked".
+		if led.TotalEvents() > 0 {
+			res.Status = "unverifiable"
+			res.Reasons = []string{fmt.Sprintf(
+				"the anchor pins 0 events while the ledger holds %d — it witnesses "+
+					"NOTHING about this history and cannot detect a rewrite; treat it "+
+					"as no anchor at all, not as a passed check",
+				led.TotalEvents())}
+			return res
+		}
+		res.Status = "verified" // an empty anchor over an empty ledger
 		return res
 	}
 	if led.TotalEvents() < a.Events {

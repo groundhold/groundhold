@@ -1,6 +1,8 @@
 package k8s
 
 import (
+	"groundhold/internal/provider"
+
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -54,7 +56,8 @@ func TestGenericObservesCRDWithNoHandCodedTwin(t *testing.T) {
 		got[o.Path] = o.Value
 		deriv[o.Path] = o.Derivation
 	}
-	want := map[string]any{"domain": "app.example.com", "auto.renew": true, "service.managed": true}
+	want := map[string]any{"domain": "app.example.com", "auto.renew": true, "service.managed": true,
+		provider.ResourceAbsentPath: false}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("CRD observations = %#v, want %#v", got, want)
 	}

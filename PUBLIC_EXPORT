@@ -1,0 +1,7 @@
+This tree was produced by scripts/export-public.sh from the private source
+repository. It is a whitelist COPY: scripts/, the cloud canaries and the private
+planning documents are deliberately absent.
+
+Gates that read those artefacts skip here, and they check for THIS FILE to know
+where they are — an export is a positive fact, not the absence of a .git directory
+(the publication target is a clone and has one).

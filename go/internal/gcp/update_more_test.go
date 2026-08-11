@@ -32,7 +32,7 @@ func TestClassifyChangeDispatchRemainingServices(t *testing.T) {
 		{"logbucket", "retention.days", 30, "mutable"},
 		{"auditlogs", "delivery.assured", true, "mutable"},
 		{"scc", "detection.enabled", true, "mutable"},
-		{"vertexai", "model.provider", "x", "immutable"},
+		{"vertexai", "model.provider", "x", "unsupported"},
 		{"artifactregistry", "location.region", "eu", "immutable"},
 		{"gke", "cluster.version", "1.30", "mutable"},
 		{"gke-addon", "addon.name", "x", "immutable"},
@@ -130,9 +130,9 @@ func TestClassifyChangeRemainingBranches(t *testing.T) {
 		want          string
 	}{
 		// GCS
-		{"gcs", "durability.class", "immutable"},
-		{"gcs", "replication.enabled", "immutable"},
-		{"gcs", "replication.destinationRegion", "immutable"},
+		{"gcs", "durability.class", "unsupported"},
+		{"gcs", "replication.enabled", "unsupported"},
+		{"gcs", "replication.destinationRegion", "unsupported"},
 		{"gcs", "retention.minimum", "unsupported"},
 		{"gcs", "retention.locked", "unsupported"},
 		{"gcs", "retention.maximum", "unsupported"},

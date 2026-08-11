@@ -35,10 +35,13 @@ func TestMalformedAtIsRefused(t *testing.T) {
 
 	for _, bad := range []string{"not-a-time", "2026-07-25", "yesterday", "1752600000"} {
 		code := run([]string{"posture", "--ledger", ledgerPath, "--at", bad})
-		if code == 0 {
-			t.Errorf("--at %q was accepted by the N1 gate — an unparseable clock "+
-				"becomes epoch downstream, and epoch makes every stale proof look "+
-				"fresh (nothing is ever decayed)", bad)
+		// a malformed --at must be REFUSED (exit 1). Since D958 a run that PROCEEDS returns
+		// posture's own code (0/2), so `!= 0` no longer proves refusal — assert exit 1:
+		// anything else means the clock sailed through and posture ran on the epoch.
+		if code != 1 {
+			t.Errorf("--at %q was accepted by the N1 gate (exit %d, not the refusal 1) — an "+
+				"unparseable clock becomes epoch downstream, and epoch makes every stale "+
+				"proof look fresh (nothing is ever decayed)", bad, code)
 		}
 	}
 }
@@ -55,9 +58,14 @@ func TestWellFormedAtStillPasses(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := captureStderr(t, func() {
+		// a well-formed --at must PARSE, not be refused as malformed (the refusal is
+		// exit 1 + the "RFC3339" message). posture then runs and returns its OWN verdict
+		// code — 2 here, because a no-crawl sweep swept nothing and cannot claim all-clear
+		// (D650/D958); that is a verdict, not a refusal. The parse-success assertion is
+		// exit != 1 (below) and the absence of the "RFC3339" refusal message.
 		if code := run([]string{"posture", "--ledger", ledgerPath,
-			"--at", "2026-07-25T10:00:00Z"}); code != 0 {
-			t.Errorf("a valid RFC3339 --at must not be refused (exit %d)", code)
+			"--at", "2026-07-25T10:00:00Z"}); code == 1 {
+			t.Errorf("a valid RFC3339 --at was refused (exit %d)", code)
 		}
 	})
 	if strings.Contains(out, "RFC3339") {

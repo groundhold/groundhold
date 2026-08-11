@@ -9,7 +9,14 @@
 # never does.
 
 cases:
-  - name: suggest-emits-sorted-cited-hardening
+  # D773 SUPERSEDES `suggest-emits-sorted-cited-hardening`, which pinned
+  # `verify: { method: provider-api }` in every emitted snippet. static is the bar the
+  # author's own DECLARATION meets, so the advisor's hardening advice produced a
+  # control that could go green from the assertion it told you to write. The bar is
+  # derived from the vocabulary's `evidence:` class now; the ORDER and CITATIONS this
+  # case exists for are unchanged, which is the point of superseding rather than
+  # rewriting.
+  - name: suggest-emits-sorted-cited-hardening-at-a-reachable-bar
     impl: go
     description: >
       A prod contract with a relational db (already enforcing TLS) and an object
@@ -34,7 +41,7 @@ cases:
               path: encryption.inTransit
               op: equals
               value: true
-              verify: { method: static }
+              verify: { method: provider-api }
     expect:
       exit: 0
       suggested: 6
@@ -63,7 +70,7 @@ cases:
               path: network.publicExposure
               op: equals
               value: false
-              verify: { method: static }
+              verify: { method: provider-api }
         - capability: db
           path: recovery.rpo
           op: lte
@@ -76,7 +83,7 @@ cases:
               path: recovery.rpo
               op: lte
               value: 24h
-              verify: { method: static }
+              verify: { method: provider-api }
         - capability: db
           path: encryption.customerManagedKeys
           op: equals
@@ -116,7 +123,7 @@ cases:
               path: encryption.inTransit
               op: equals
               value: true
-              verify: { method: static }
+              verify: { method: provider-api }
     expect:
       exit: 0
       suggested: 4
@@ -147,25 +154,25 @@ cases:
               path: network.publicExposure
               op: equals
               value: false
-              verify: { method: static }
+              verify: { method: provider-api }
             - id: c-tls
               subject: db
               path: encryption.inTransit
               op: equals
               value: true
-              verify: { method: static }
+              verify: { method: provider-api }
             - id: c-cmek
               subject: db
               path: encryption.customerManagedKeys
               op: equals
               value: true
-              verify: { method: static }
+              verify: { method: provider-api }
             - id: c-rpo
               subject: db
               path: recovery.rpo
               op: lte
               value: 24h
-              verify: { method: static }
+              verify: { method: provider-api }
     expect:
       exit: 0
       suggested: 0

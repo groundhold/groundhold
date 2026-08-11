@@ -386,7 +386,9 @@ func TestObservePubSubQueueSubscriptionNotFound(t *testing.T) {
 	defer srv.Close()
 	d := queueDriver(t, srv)
 	obs, diags, err := d.observePubSubQueue("orders", "pubsub:acme-prod:the-q")
-	if err != nil || len(obs) != 0 || len(diags) == 0 {
+	// Corrected with D521: this asserted SILENCE for an absent bound resource,
+	// which is the defect F-LC3 exists to prevent.
+	if err != nil || !absentMarked(obs) || len(diags) == 0 {
 		t.Fatalf("a gone subscription must be nothing-to-observe, got obs=%v diags=%v err=%v", obs, diags, err)
 	}
 }

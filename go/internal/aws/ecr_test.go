@@ -1,10 +1,14 @@
 package aws
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func ecrAttrs() map[string]any {
@@ -149,8 +153,19 @@ func ecrServer(t *testing.T, tagCap string) *httptest.Server {
 			case "CreateRepository":
 				_, _ = w.Write([]byte(`{"repository":{"repositoryName":"x"}}`))
 			case "DescribeRepositories":
+				// a customer CMK repo (D954: observe traces the key to KMS, not the type)
 				_, _ = w.Write([]byte(`{"repositories":[{"imageTagMutability":"IMMUTABLE",` +
-					`"encryptionConfiguration":{"encryptionType":"KMS"}}]}`))
+					`"encryptionConfiguration":{"encryptionType":"KMS",` +
+					`"kmsKey":"arn:aws:kms:eu-central-1:000000000000:key/customer-cmk-1"}}]}`))
+			case "DescribeKey":
+				// KeyManager by key id: an "aws-managed" arn is AWS-managed, else CUSTOMER.
+				body := make([]byte, r.ContentLength)
+				_, _ = io.ReadFull(r.Body, body)
+				mgr := "CUSTOMER"
+				if strings.Contains(string(body), "aws-managed") {
+					mgr = "AWS"
+				}
+				_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"` + mgr + `"}}`))
 			case "ListTagsForResource":
 				_, _ = w.Write([]byte(`{"tags":[{"Key":"groundhold-capability","Value":"` + tagCap + `"},` +
 					`{"Key":"groundhold-environment","Value":"prod"}]}`))
@@ -168,6 +183,7 @@ func ecrDriver(t *testing.T, srv *httptest.Server) *Driver {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 	d := NewDriver("eu-central-1")
 	d.ECRBaseURL = srv.URL
+	d.KMSBaseURL = srv.URL // D954: observe traces the repo's kmsKey to KMS DescribeKey
 	d.Account = "000000000000"
 	return d
 }
@@ -197,6 +213,42 @@ func TestCreateObserveDeleteECR(t *testing.T) {
 	}
 }
 
+// D954: encryptionType=KMS with the AWS-managed aws/ecr key (KeyManager=AWS) is NOT a
+// customer key. observe must trace the key and report customerManagedKeys=false, not read
+// it true off the type — else a hard BYOK constraint reads satisfied against an
+// AWS-managed repo. This is the regression guard the old type-only test lacked.
+func TestObserveECRAWSManagedKeyIsNotCustomer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		action := ""
+		if tg := r.Header.Get("X-Amz-Target"); tg != "" {
+			action = tg[strings.LastIndex(tg, ".")+1:]
+		}
+		switch action {
+		case "DescribeRepositories":
+			_, _ = w.Write([]byte(`{"repositories":[{"imageTagMutability":"MUTABLE",` +
+				`"encryptionConfiguration":{"encryptionType":"KMS",` +
+				`"kmsKey":"arn:aws:kms:eu-central-1:000000000000:key/aws-managed-ecr"}}]}`))
+		case "DescribeKey":
+			_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"AWS"}}`))
+		default:
+			w.WriteHeader(400)
+		}
+	}))
+	defer srv.Close()
+	d := ecrDriver(t, srv)
+	obs, _, err := d.observeECR("images", "ecr:eu-central-1:000000000000:pv-images-prod-abcd1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]any{}
+	for _, o := range obs {
+		got[o.Path] = o.Value
+	}
+	if got["encryption.customerManagedKeys"] != false {
+		t.Fatalf("an AWS-managed KMS key must read customerManagedKeys=false, got %v", got["encryption.customerManagedKeys"])
+	}
+}
+
 func TestDeleteECRForeignRefused(t *testing.T) {
 	srv := ecrServer(t, "someone-else")
 	defer srv.Close()
@@ -205,4 +257,64 @@ func TestDeleteECRForeignRefused(t *testing.T) {
 	if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
 		t.Fatalf("foreign registry must refuse delete, got %+v", res)
 	}
+}
+
+// ecrExistingServer: the repository already exists at our deterministic name and
+// carries our tags, so CreateRepository is answered RepositoryAlreadyExists and the
+// driver must recognise and bind it.
+func ecrExistingServer(t *testing.T, tagCap string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			target := r.Header.Get("X-Amz-Target")
+			switch target[strings.LastIndex(target, ".")+1:] {
+			case "CreateRepository":
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`{"__type":"RepositoryAlreadyExistsException",` +
+					`"message":"RepositoryAlreadyExists"}`))
+			case "DescribeRepositories":
+				_, _ = w.Write([]byte(`{"repositories":[{"imageTagMutability":"IMMUTABLE",` +
+					`"encryptionConfiguration":{"encryptionType":"KMS"}}]}`))
+			case "ListTagsForResource":
+				_, _ = w.Write([]byte(`{"tags":[{"Key":"groundhold-capability","Value":"` + tagCap + `"},` +
+					`{"Key":"groundhold-environment","Value":"prod"}]}`))
+			case "PutImageScanningConfiguration", "PutImageTagMutability", "TagResource":
+				_, _ = w.Write([]byte(`{}`))
+			default:
+				w.WriteHeader(400)
+			}
+		}))
+}
+
+func ecrTargetRole(req *http.Request, _ []byte) certifynet.Role {
+	tgt := req.Header.Get("X-Amz-Target")
+	switch tgt[strings.LastIndex(tgt, ".")+1:] {
+	case "DescribeRepositories", "ListTagsForResource":
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingECR enrols ecr in the D391 gate. A repository is name-addressed and
+// the create is answered RepositoryAlreadyExists; only an OURS-tagged repo may be bound.
+func TestAdoptsExistingECR(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:           "aws/ecr",
+		Classify:       ecrTargetRole,
+		ExistingServer: func() *httptest.Server { return ecrExistingServer(t, "images") },
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.ECRBaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("ecr", "images", "prod", ecrAttrs(), ecrImpl(), "images", 1)
+		},
+		AllowedMutations: 2, // the refused CreateRepository + convergence
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

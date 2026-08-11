@@ -81,7 +81,7 @@ func TestTwoStepApply(t *testing.T) {
 		}
 		return 1, "", "unexpected"
 	}
-	call := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"groundhold_apply","arguments":{"contract":"c","candidate":"k","plan":"p","ledger":"l"}}}
+	call := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"groundhold_apply","arguments":{"provider":"fake","at":"2026-01-01T00:00:00Z","contract":"c","candidate":"k","plan":"p","ledger":"l"}}}
 `
 	msgs := testServer(t, call, true, runner)
 	step1 := toolText(t, msgs[0])
@@ -94,8 +94,8 @@ func TestTwoStepApply(t *testing.T) {
 	}
 
 	// step 2 with the token, then reuse — must refuse
-	in2 := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"groundhold_apply","arguments":{"contract":"c","candidate":"k","plan":"p","ledger":"l","confirm_token":"TOK"}}}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"groundhold_apply","arguments":{"contract":"c","candidate":"k","plan":"p","ledger":"l","confirm_token":"TOK"}}}
+	in2 := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"groundhold_apply","arguments":{"provider":"fake","at":"2026-01-01T00:00:00Z","contract":"c","candidate":"k","plan":"p","ledger":"l","confirm_token":"TOK"}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"groundhold_apply","arguments":{"provider":"fake","at":"2026-01-01T00:00:00Z","contract":"c","candidate":"k","plan":"p","ledger":"l","confirm_token":"TOK"}}}
 `
 	var out strings.Builder
 	s := &Server{in: strings.NewReader(in2), out: &out, run: runner,
@@ -105,7 +105,11 @@ func TestTwoStepApply(t *testing.T) {
 		// the fixture cannot drift from the implementation.
 		tokens: map[string]token{"TOK": {planHash: "sha256:planhash",
 			target: applyTarget(map[string]any{
-				"contract": "c", "candidate": "k", "ledger": "l"}),
+				"contract": "c", "candidate": "k", "ledger": "l",
+				// D614: provider and at are part of the decision the token pins, and
+				// are now required rather than defaulted — the fixture must present
+				// the same target the calls do.
+				"provider": "fake", "at": "2026-01-01T00:00:00Z"}),
 			expires: time.Unix(2000, 0)}},
 		now: func() time.Time { return time.Unix(1000, 0) }}
 	if err := s.Serve(); err != nil {
@@ -116,7 +120,10 @@ func TestTwoStepApply(t *testing.T) {
 	json.Unmarshal([]byte(lines[0]), &m1)
 	json.Unmarshal([]byte(lines[1]), &m2)
 	p1, p2 := toolText(t, m1), toolText(t, m2)
-	if p1["status"] != "ok" {
+	// D704: the status is the VERB'S own — `applied` here — not "ok" re-derived from
+	// an exit code. The apply result already said what happened; the server used to
+	// answer over the top of it.
+	if p1["status"] != "applied" {
 		t.Errorf("valid token must execute, got %v", p1)
 	}
 	if p2["status"] != "refused" {
@@ -154,14 +161,17 @@ func TestTokenConsumedOnHashFailure(t *testing.T) {
 	// call 2: token now hashes to the pinned value — if the token had SURVIVED the
 	// hash failure it would EXECUTE; it must instead refuse (unknown), proving the
 	// first attempt consumed it.
-	in := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"groundhold_apply","arguments":{"plan":"p","confirm_token":"TOK"}}}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"groundhold_apply","arguments":{"plan":"p","confirm_token":"TOK"}}}
+	in := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"groundhold_apply","arguments":{"provider":"fake","at":"2026-01-01T00:00:00Z","contract":"c","candidate":"k","ledger":"l","plan":"p","confirm_token":"TOK"}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"groundhold_apply","arguments":{"provider":"fake","at":"2026-01-01T00:00:00Z","contract":"c","candidate":"k","ledger":"l","plan":"p","confirm_token":"TOK"}}}
 `
 	var out strings.Builder
 	s := &Server{in: strings.NewReader(in), out: &out, run: runner,
 		allowApply: true,
-		tokens:     map[string]token{"TOK": {planHash: "sha256:x", expires: time.Unix(2000, 0)}},
-		now:        func() time.Time { return time.Unix(1000, 0) }}
+		tokens: map[string]token{"TOK": {planHash: "sha256:x",
+			target: applyTarget(map[string]any{"contract": "c", "candidate": "k",
+				"ledger": "l", "provider": "fake", "at": "2026-01-01T00:00:00Z"}),
+			expires: time.Unix(2000, 0)}},
+		now: func() time.Time { return time.Unix(1000, 0) }}
 	if err := s.Serve(); err != nil {
 		t.Fatal(err)
 	}

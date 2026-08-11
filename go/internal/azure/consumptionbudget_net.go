@@ -107,6 +107,12 @@ func (d *Driver) createConsumptionBudget(environment, capability string,
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	pid := consBudgetProviderID(d.Subscription, plan.ResourceGroup, plan.Name)
+	// D804: read before writing at a name anyone can compute. An ARM PUT is an
+	// unconditional upsert and a budget carries no tags, so ownership is read from the
+	// budget itself — against the contract terms only, never the period window.
+	if r := d.refuseForeignByContentOrAdopt(rURL, plan.contractBody(), pid, "consumption budget"); r != nil {
+		return *r
+	}
 	body, _ := json.Marshal(plan.createBody(consBudgetPeriodStart(d.Now())))
 	st, resp, e := d.doARM("PUT", rURL, body)
 	if e != nil {
@@ -191,7 +197,13 @@ func (d *Driver) observeConsumptionBudget(capability, providerID string) ([]prov
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"consumption budget not found — nothing to observe"}, nil
+		return []provider.Observation{
+			// F-LC3 (D802): a BOUND resource the API authoritatively 404s is GONE. An
+			// empty return leaves the last good observations standing as the freshest
+			// word, so posture reads managed-ok and audit stays satisfied about a
+			// resource that does not exist (D513/D518, fixed here last).
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"consumption budget not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs, diags := consBudgetObservations(doc)
 	return obs, diags, nil
@@ -338,7 +350,7 @@ func (d *Driver) discoverConsumptionBudget(region string) ([]provider.Discovered
 			// subscription-scope discovery -> empty rg segment in the providerId.
 			ProviderID:   consBudgetProviderID(d.Subscription, "", b.Name),
 			ResourceType: "capability.cost.budget",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

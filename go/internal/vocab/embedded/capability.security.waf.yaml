@@ -15,6 +15,12 @@
 capability: capability.security.waf
 version: 0.1
 stateful: false   # a WAF policy is configuration, not data — retirement removes
+
+# D698: PROTECTION — see capability.security.threatdetection for the full reasoning.
+# A WAF is the guard in front of an application; retiring it removes the guard while
+# the application stays up and reachable. `stateful: false` is about data, not about
+# what a delete exposes.
+protection: true
                   # protection but loses no stored records (no D47 data-loss friction).
 
 attributes:
@@ -27,9 +33,12 @@ attributes:
       detection = matches are only logged/counted (the policy runs in observe-only
       mode, useful for tuning before enforcement).
     mappings:
-      aws.wafv2: managed rule group OverrideAction None (prevention) vs Count (detection)
+      aws.waf: managed rule group OverrideAction None (prevention) vs Count (detection)
       azure.frontdoorwaf: policySettings.mode = Prevention | Detection
       gcp.cloudarmor: rule preview=false (prevention) vs preview=true (detection)
+      cloudflare.rulesets: the executed managed ruleset's override action "log" (detection)
+        vs the default block/challenge (prevention), in the http_request_firewall_managed
+        phase entrypoint. SCHEMA-DERIVED, field-validation pending a WAF-scoped token (D874)
 
   managed.ruleset:
     kind: bool
@@ -38,9 +47,11 @@ attributes:
       etc.) is enabled. The exact rules are the provider's, opaque here; the flag is
       "am I protected by the managed baseline".
     mappings:
-      aws.wafv2: AWSManagedRulesCommonRuleSet managed rule group
+      aws.waf: AWSManagedRulesCommonRuleSet managed rule group
       azure.frontdoorwaf: managedRuleSets = Microsoft_DefaultRuleSet
       gcp.cloudarmor: a preconfigured WAF rule (e.g. sqli/xss expression sets)
+      cloudflare.rulesets: an enabled rule executing a Cloudflare managed ruleset (the
+        Cloudflare Managed Ruleset or OWASP Core Ruleset) in the firewall_managed phase (D874)
 
   bot.protection:
     kind: bool
@@ -49,9 +60,11 @@ attributes:
       (automated-traffic and L7-DDoS heuristics). The heuristics are the provider's;
       the flag is "is managed bot mitigation on".
     mappings:
-      aws.wafv2: AWSManagedRulesBotControlRuleSet managed rule group
+      aws.waf: AWSManagedRulesBotControlRuleSet managed rule group
       azure.frontdoorwaf: Microsoft_BotManagerRuleSet
       gcp.cloudarmor: adaptiveProtectionConfig.layer7DdosDefenseConfig.enable
+      cloudflare.botmanagement: fight_mode, any Super Bot Fight Mode action != allow, or
+        Enterprise enable_js — zone bot_management config (D874)
 
   service.managed:
     kind: bool

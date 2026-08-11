@@ -15,9 +15,18 @@
 #   401/403  -> unknown   (an ANONYMOUS denial is AMBIGUOUS — a missing grant, an
 #                          auth-gated path, or an org guardrail — so it BLOCKS with
 #                          a multi-cause remediation, never a confident accusation)
-#   refused/dns/tls/timeout/other status -> unknown (unreachable/unconfirmed)
+#   5xx      -> failing   (D696: the edge answered and what it answered is a
+#                          failure — a MEASUREMENT, disjoint from unknown)
+#   tls      -> failing   (a certificate that does not verify is not a policy)
+#   refused/dns/timeout/other status -> unknown (unreachable/unconfirmed: each has a
+#                          live second reading minutes after a create)
 #   no public output        -> nothing measured, nothing emitted
 suite: reachability
+# D605: every case in this suite must say something about `reachability` — the field
+# the whole file exists to defend. `reachability: null` asserts the field is ABSENT,
+# which is the correct claim when nothing was measured.
+requireExpect: [reachability]
+
 cases:
   - name: reachable-edge-is-confirmed-success
     impl: go
@@ -160,12 +169,19 @@ cases:
             reachability: unknown
             banner: BLOCKED
 
-  - name: server-error-is-unknown-not-success
+  # D696 SUPERSEDES the case `server-error-is-unknown-not-success`, which pinned
+  # `reachability: unknown` for a 5xx. That was not a code defect — it was the
+  # two-state model, and the field asked for the third state with the incident that
+  # motivated it: a gate that collapses "I could not confirm" into "confirmed
+  # failure" changes its mind between runs and ships. The old case is replaced
+  # rather than edited, and named here so the record shows what was superseded.
+  - name: server-error-is-a-confirmed-failure-not-unknown
     impl: go
     description: >
-      A 5xx means the edge answered but did not confirm the public path — neither
-      a proven success nor an org-boundary denial. Classified unknown, so a 500
-      can never be reported as clean success.
+      A 5xx is the edge answering that it failed. No policy reads that way and no
+      vantage point produces it, so it is `failing` — a MEASUREMENT — and it must be
+      distinguishable from `unknown`, which is the absence of one. The banner is
+      VIOLATED, not BLOCKED: a proven falsehood outranks missing knowledge.
     converge:
       contract: *edge-contract
       candidate: *edge-candidate
@@ -176,8 +192,29 @@ cases:
           expect:
             exit: 2
             status: applied
-            reachability: unknown
-            banner: BLOCKED
+            reachability: failing
+            banner: VIOLATED
+
+  - name: tls-failure-is-a-confirmed-failure
+    impl: go
+    description: >
+      A certificate that does not verify is not a policy and not a propagation delay:
+      the edge is there and the connection to it is broken. `failing`, like a 5xx —
+      while a refused connection, NXDOMAIN and a timeout stay `unknown` (the cases
+      above), because minutes after a create each of those has a live second reading
+      and a confident accusation is the same error wearing the opposite sign.
+    converge:
+      contract: *edge-contract
+      candidate: *edge-candidate
+      runs:
+        - at: "2026-07-25T10:00:00Z"
+          approve: true
+          reachabilityFake: "tls"
+          expect:
+            exit: 2
+            status: applied
+            reachability: failing
+            banner: VIOLATED
 
   - name: no-reachability-skips-loudly
     impl: go
@@ -238,6 +275,12 @@ cases:
           expect:
             exit: 0
             status: applied
+            # D605: the ABSENCE is the assertion. `reachability: null` means the
+            # field must not be emitted at all — nothing was measured, so nothing
+            # may be claimed. Without it these three cases asserted only 'exit 0,
+            # status applied', and a probe that reported 'reachable' over ZERO
+            # derived targets passed all of them.
+            reachability: null
             # no reachability field: a non-edge capability yields no probe target
 
   - name: gcp-public-cloud-run-is-probed-on-its-uri
@@ -315,6 +358,12 @@ cases:
           expect:
             exit: 0
             status: applied
+            # D605: the ABSENCE is the assertion. `reachability: null` means the
+            # field must not be emitted at all — nothing was measured, so nothing
+            # may be claimed. Without it these three cases asserted only 'exit 0,
+            # status applied', and a probe that reported 'reachable' over ZERO
+            # derived targets passed all of them.
+            reachability: null
             # no reachability field: an internal container yields no probe target
 
   - name: azure-external-containerapp-is-probed-on-its-fqdn
@@ -380,4 +429,10 @@ cases:
           expect:
             exit: 0
             status: applied
+            # D605: the ABSENCE is the assertion. `reachability: null` means the
+            # field must not be emitted at all — nothing was measured, so nothing
+            # may be claimed. Without it these three cases asserted only 'exit 0,
+            # status applied', and a probe that reported 'reachable' over ZERO
+            # derived targets passed all of them.
+            reachability: null
             # no reachability field: an internal container yields no probe target

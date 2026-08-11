@@ -81,8 +81,12 @@ func (d *Driver) createCloudScheduler(capability, environment string,
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	pid := schedProviderID(d.Project, plan.Location, plan.JobID)
-	url := fmt.Sprintf("%s/projects/%s/locations/%s/jobs?jobId=%s",
-		d.schedBase(), d.Project, plan.Location, plan.JobID)
+	// D881: jobs.create takes ONLY {parent} — the job id lives in the body's `name`
+	// field, never a ?jobId= query parameter (unlike Pub/Sub). Sending one made the real
+	// API 400 "Unknown name 'jobId': Cannot bind query parameter" for every input; the
+	// golden fake matched the POST by path and ignored the query, so it never saw it.
+	url := fmt.Sprintf("%s/projects/%s/locations/%s/jobs",
+		d.schedBase(), d.Project, plan.Location)
 	st, body, err := d.call("POST", url, plan.createBody(d.Project))
 	switch {
 	case err != nil:
@@ -158,9 +162,15 @@ func (d *Driver) observeCloudScheduler(capability, providerID string) ([]provide
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"job not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"job not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: location, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		// ENABLED is armed; PAUSED/DISABLED is not. UPDATE_FAILED is not armed either.

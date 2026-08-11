@@ -133,7 +133,10 @@ func TestObserveAzureImageMissingIsNotAnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an absent image produced an error: %v", err)
 	}
-	if len(obs) != 0 || len(unread) == 0 {
+	// Corrected with D518: this asserted SILENCE for an absent bound resource,
+	// which is the defect F-LC3 exists to prevent — the compile sees an empty set,
+	// plans nothing, and converge reports a world that no longer contains it.
+	if len(unread) == 0 || !absentMarked(obs) {
 		t.Errorf("obs = %v, unread = %v", obs, unread)
 	}
 }
@@ -239,4 +242,16 @@ func TestSplitAzureImageProviderID(t *testing.T) {
 			t.Errorf("%q was accepted", bad)
 		}
 	}
+}
+
+// absentMarked reports whether an observation set carries the F-LC3 marker set
+// true — the one way a driver says a BOUND resource is authoritatively gone.
+func absentMarked(obs []provider.Observation) bool {
+	for _, o := range obs {
+		if o.Path == provider.ResourceAbsentPath {
+			gone, _ := o.Value.(bool)
+			return gone
+		}
+	}
+	return false
 }

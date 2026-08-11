@@ -21,6 +21,14 @@ attributes:
     description: The spend ceiling for the period (a money value, e.g. "700 EUR") — governed for cost control
     mappings:
       aws.budgets: BudgetLimit Amount + Unit
+      # D543: read from each driver.
+      azure.consumptionbudget: >
+        properties.amount + the scope's billing currency. Azure does not return a
+        currency on the budget itself, so an unresolved currency is stated in a
+        diagnostic rather than assumed
+      gcp.billingbudget: >
+        amount.specifiedAmount units + currencyCode, both required — a partial
+        amount is not observed at all
 
   budget.period:
     kind: string
@@ -28,15 +36,23 @@ attributes:
     description: The recurrence the limit applies over
     mappings:
       aws.budgets: TimeUnit
+      azure.consumptionbudget: >
+        properties.timeGrain mapped to the vocabulary's recurring periods; a
+        timeGrain with no equivalent is named in a diagnostic, never coerced
+      gcp.billingbudget: budgetFilter.calendarPeriod mapped the same way
 
   alert.threshold:
     kind: number
     description: Percent of the limit (0-100) at which a notification fires
     mappings:
       aws.budgets: Notification Threshold (PERCENTAGE)
+      azure.consumptionbudget: the notifications' threshold percentages
+      gcp.billingbudget: the thresholdRules' thresholdPercent
 
   service.managed:
     kind: bool
     description: Whether groundhold manages this budget
     mappings:
       aws.budgets: const true when observed through the driver
+      azure.consumptionbudget: const true
+      gcp.billingbudget: const true

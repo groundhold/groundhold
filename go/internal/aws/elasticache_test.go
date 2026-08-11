@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func ecAttrs() map[string]any {
@@ -77,14 +80,27 @@ func TestBuildElastiCacheRefusals(t *testing.T) {
 
 func ecServer(t *testing.T, tagCap, atRest, transit, failover, kms string) *httptest.Server {
 	t.Helper()
+	deleted := false
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			// D800: the driver asks KMS who manages the key, so the fixture answers.
+			if strings.HasSuffix(r.Header.Get("X-Amz-Target"), ".DescribeKey") {
+				_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"CUSTOMER"}}`))
+				return
+			}
 			body, _ := io.ReadAll(r.Body)
 			form, _ := url.ParseQuery(string(body))
 			switch form.Get("Action") {
 			case "CreateReplicationGroup":
 				_, _ = w.Write([]byte(`<CreateReplicationGroupResponse></CreateReplicationGroupResponse>`))
 			case "DescribeReplicationGroups":
+				// once deleted, the group is GONE — the delete's poll-to-absence
+				// (D970) must be able to confirm the not-found fault.
+				if deleted {
+					w.WriteHeader(400)
+					_, _ = w.Write([]byte(`<ErrorResponse><Error><Code>ReplicationGroupNotFoundFault</Code></Error></ErrorResponse>`))
+					return
+				}
 				kmsX := ""
 				if kms != "" {
 					kmsX = "<KmsKeyId>" + kms + "</KmsKeyId>"
@@ -93,7 +109,11 @@ func ecServer(t *testing.T, tagCap, atRest, transit, failover, kms string) *http
 					`<ReplicationGroups><ReplicationGroup><Status>available</Status>` +
 					`<AtRestEncryptionEnabled>` + atRest + `</AtRestEncryptionEnabled>` +
 					`<TransitEncryptionEnabled>` + transit + `</TransitEncryptionEnabled>` +
-					`<AutomaticFailover>` + failover + `</AutomaticFailover>` + kmsX +
+					`<AutomaticFailover>` + failover + `</AutomaticFailover>` +
+					// D955: observe now reads MultiAZ (the zone-survival field); here it
+					// agrees with failover (regional sets both), the divergent case has its
+					// own test.
+					`<MultiAZ>` + failover + `</MultiAZ>` + kmsX +
 					`</ReplicationGroup></ReplicationGroups>` +
 					`</DescribeReplicationGroupsResult></DescribeReplicationGroupsResponse>`))
 			case "ListTagsForResource":
@@ -106,6 +126,7 @@ func ecServer(t *testing.T, tagCap, atRest, transit, failover, kms string) *http
 					`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag>` +
 					`</TagList></ListTagsForResourceResult></ListTagsForResourceResponse>`))
 			case "DeleteReplicationGroup":
+				deleted = true
 				_, _ = w.Write([]byte(`<DeleteReplicationGroupResponse></DeleteReplicationGroupResponse>`))
 			default:
 				w.WriteHeader(404)
@@ -119,6 +140,7 @@ func ecDriver(t *testing.T, srv *httptest.Server) *Driver {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 	d := NewDriver("eu-central-1")
 	d.ElastiCacheBaseURL = srv.URL
+	d.KMSBaseURL = srv.URL // D800: the key is traced to KMS
 	d.Account = "000000000000"
 	d.Now = time.Now
 	d.PollInterval = time.Millisecond
@@ -150,6 +172,77 @@ func TestCreateObserveDeleteElastiCache(t *testing.T) {
 	}
 	if del := d.deleteElastiCache("sessions", "prod", res.ProviderID); del.Status != "succeeded" {
 		t.Fatalf("delete: %+v", del)
+	}
+}
+
+// D955: a replication group with AutomaticFailover=enabled but MultiAZ=disabled keeps its
+// replica in the primary's own AZ — single-zone. observe must read MultiAZ (the field that
+// carries zone survival) and report availability.class=zonal, not regional off the
+// AutomaticFailover proxy. Field-confirmed 2026-08-08 that AWS accepts exactly this combo.
+func TestObserveElastiCacheFailoverWithoutMultiAZIsZonal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		form, _ := url.ParseQuery(string(body))
+		switch form.Get("Action") {
+		case "DescribeReplicationGroups":
+			_, _ = w.Write([]byte(`<DescribeReplicationGroupsResponse><DescribeReplicationGroupsResult>` +
+				`<ReplicationGroups><ReplicationGroup><Status>available</Status>` +
+				`<AutomaticFailover>enabled</AutomaticFailover><MultiAZ>disabled</MultiAZ>` +
+				`</ReplicationGroup></ReplicationGroups>` +
+				`</DescribeReplicationGroupsResult></DescribeReplicationGroupsResponse>`))
+		case "ListTagsForResource":
+			_, _ = w.Write([]byte(`<ListTagsForResourceResponse><ListTagsForResourceResult><TagList>` +
+				`</TagList></ListTagsForResourceResult></ListTagsForResourceResponse>`))
+		default:
+			w.WriteHeader(400)
+		}
+	}))
+	defer srv.Close()
+	d := ecDriver(t, srv)
+	obs, _, err := d.observeElastiCache("sessions", "ecredis:eu-central-1:000000000000:pv-sessions-prod-abcd1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]any{}
+	for _, o := range obs {
+		got[o.Path] = o.Value
+	}
+	if got["availability.class"] != "zonal" {
+		t.Fatalf("AutomaticFailover without MultiAZ must be zonal (single-zone), got %v", got["availability.class"])
+	}
+}
+
+// TestDeleteElastiCacheAsyncNotGoneIsUnknown pins D970: a delete the provider
+// ACCEPTS but that leaves the replication group "deleting" (not gone) must report
+// unknown — never a terminal "succeeded" that tombstones a group still live.
+func TestDeleteElastiCacheAsyncNotGoneIsUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			form, _ := url.ParseQuery(string(body))
+			switch form.Get("Action") {
+			case "DescribeReplicationGroups": // never gone — stays deleting
+				_, _ = w.Write([]byte(`<DescribeReplicationGroupsResponse><DescribeReplicationGroupsResult>` +
+					`<ReplicationGroups><ReplicationGroup><Status>deleting</Status></ReplicationGroup></ReplicationGroups>` +
+					`</DescribeReplicationGroupsResult></DescribeReplicationGroupsResponse>`))
+			case "ListTagsForResource":
+				_, _ = w.Write([]byte(`<ListTagsForResourceResponse><ListTagsForResourceResult><TagList>` +
+					`<Tag><Key>groundhold-capability</Key><Value>sessions</Value></Tag>` +
+					`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag>` +
+					`</TagList></ListTagsForResourceResult></ListTagsForResourceResponse>`))
+			case "DeleteReplicationGroup":
+				_, _ = w.Write([]byte(`<DeleteReplicationGroupResponse></DeleteReplicationGroupResponse>`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	defer srv.Close()
+	d := ecDriver(t, srv)
+	d.PollTimeout = 5 * time.Millisecond // the group never leaves "deleting" → times out fast
+	res := d.deleteElastiCache("sessions", "prod", "ecredis:eu-central-1:000000000000:pv-sessions-prod-1a2b")
+	if res.Status != "unknown" {
+		t.Fatalf("an accepted-but-still-deleting replication group must be unknown (keep the handle), "+
+			"got %+v — reporting succeeded tombstones a group still live and billing", res)
 	}
 }
 
@@ -204,6 +297,7 @@ func TestEcacheTagsParsesTagElement(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 	d := NewDriver("eu-central-1")
 	d.ElastiCacheBaseURL = srv.URL
+	d.KMSBaseURL = srv.URL // D800: the key is traced to KMS
 
 	tags, terr := d.ecacheTags("eu-central-1", "000000000000", "red-x")
 	if terr != nil {
@@ -264,6 +358,7 @@ func TestEnsureCacheSubnetGroupContentCheck(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 	d := NewDriver("eu-central-1")
 	d.ElastiCacheBaseURL = srv.URL
+	d.KMSBaseURL = srv.URL // D800: the key is traced to KMS
 
 	if r := d.ensureCacheSubnetGroup("eu-central-1", "pv-x-sng-abc",
 		[]string{"subnet-a", "subnet-b"}, "sessions", "prod"); r != nil {
@@ -278,4 +373,63 @@ func TestEnsureCacheSubnetGroupContentCheck(t *testing.T) {
 	if r == nil || r.Status != "failed" || !strings.Contains(r.Reason, "DIFFERENT subnets") {
 		t.Fatalf("already-exists with a different set must refuse: %+v", r)
 	}
+}
+
+// TestAdoptsExistingElastiCache enrols elasticache in the D391 gate. The replication
+// group id is deterministic and client-assigned, so a second create is answered
+// ReplicationGroupAlreadyExists and the tags decide. This driver carries the F28 scar:
+// the parser and the fake had AGREED on the wrong tag element, so "not ours" passed
+// green against real AWS — which makes the ours-path worth asserting through the public
+// dispatch rather than trusting the fake's shape.
+func TestAdoptsExistingElastiCache(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/elasticache",
+		Classify: rdsQueryRole,
+		ExistingServer: func() *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					body, _ := io.ReadAll(r.Body)
+					form, _ := url.ParseQuery(string(body))
+					switch form.Get("Action") {
+					case "CreateReplicationGroup":
+						w.WriteHeader(400)
+						_, _ = w.Write([]byte(`<ErrorResponse><Error>` +
+							`<Code>ReplicationGroupAlreadyExists</Code></Error></ErrorResponse>`))
+					case "DescribeReplicationGroups":
+						_, _ = w.Write([]byte(`<DescribeReplicationGroupsResponse><DescribeReplicationGroupsResult>` +
+							`<ReplicationGroups><ReplicationGroup><Status>available</Status>` +
+							`<AtRestEncryptionEnabled>true</AtRestEncryptionEnabled>` +
+							`<TransitEncryptionEnabled>true</TransitEncryptionEnabled>` +
+							`<AutomaticFailover>enabled</AutomaticFailover>` +
+							`</ReplicationGroup></ReplicationGroups>` +
+							`</DescribeReplicationGroupsResult></DescribeReplicationGroupsResponse>`))
+					case "ListTagsForResource":
+						_, _ = w.Write([]byte(`<ListTagsForResourceResponse><ListTagsForResourceResult><TagList>` +
+							`<Tag><Key>groundhold-capability</Key><Value>sessions</Value></Tag>` +
+							`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag>` +
+							`</TagList></ListTagsForResourceResult></ListTagsForResourceResponse>`))
+					default:
+						w.WriteHeader(404)
+					}
+				}))
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.ElastiCacheBaseURL = happyURL
+			d.KMSBaseURL = happyURL    // D800: the key is traced to KMS
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.Now = time.Now
+			d.PollInterval = time.Millisecond
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("elasticache", "sessions", "prod", ecAttrs(), ecImpl(), "sessions", 1)
+		},
+		AllowedMutations: 1, // the refused CreateReplicationGroup
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

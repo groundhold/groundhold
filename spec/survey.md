@@ -63,6 +63,16 @@ evidence of absence — another repo may be the consumer). Only under
 `--complete` ("these surveys are the whole system") does unwitnessed
 harden into **orphaned** — drift.
 
+A finding names a capability TYPE, not a capability. Where a contract holds
+SEVERAL capabilities of one type and a finding witnesses that type, every one of
+them counts as witnessed — the evidence cannot say which — and each is reported
+**witnessed-by-type** (D707). Information, never drift: the finding is real
+evidence that something of that type is used, and calling it drift would accuse
+every contract with two capabilities of one type and a single witnessing repo.
+It is reported because `--complete` is the mode an operator runs to find a
+capability nobody uses, and this is the one case the evidence cannot settle —
+previously the report said nothing about it at all.
+
 Exit 0 clean; exit 2 with `code: survey-drift` when any finding is
 uncovered or (under `--complete`) any capability orphaned. Exit 1 on a
 structurally invalid document. The report (stdout, JSON) carries

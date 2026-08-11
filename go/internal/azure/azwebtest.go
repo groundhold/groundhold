@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strings"
 
 	"groundhold/internal/scalars"
 )
@@ -18,6 +19,11 @@ import (
 const webtestAPIVersion = "2022-06-15"
 
 var webtestHostOK = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// xmlEscaper escapes the values interpolated into the WebTest XML blob (D902b);
+// xmlUnescaper reverses it when observe reads the URL back out.
+var xmlEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&apos;")
+var xmlUnescaper = strings.NewReplacer("&amp;", "&", "&lt;", "<", "&gt;", ">", "&quot;", `"`, "&apos;", "'")
 
 // azWebtestFrequencies is the closed set of frequencies (seconds) Azure permits.
 var azWebtestFrequencies = map[int]bool{300: true, 600: true, 900: true}
@@ -28,6 +34,7 @@ type AzureWebtestPlan struct {
 	URL           string
 	FrequencySec  int
 	AppInsightsID string
+	Location      string // D902: a web test is REGIONAL — "global" is rejected by Azure
 }
 
 // BuildAzureWebtest maps capability.monitoring.uptime attributes + impl to a plan.
@@ -101,26 +108,63 @@ func BuildAzureWebtest(environment, capability string,
 		return AzureWebtestPlan{}, fmt.Errorf(
 			"azure availability test requires implementation.app_insights_id (the App Insights component it links to)")
 	}
+	// D902: an Application Insights web test is REGIONAL — Azure rejects location
+	// "global" ("Unsupported location: global"). The region must be supplied (it must
+	// match the linked component's region), never defaulted to a location the platform
+	// refuses. Refuse rather than hardcode a value that cannot be created.
+	p.Location, _ = impl["location"].(string)
+	if p.Location == "" {
+		return AzureWebtestPlan{}, fmt.Errorf(
+			"azure availability test requires implementation.location (the region it lives in — a web test is " +
+				"regional, and Azure refuses the location \"global\"); it must match the App Insights component's region")
+	}
 	return p, nil
+}
+
+// webtestConfigXML builds the WebTest XML blob Azure requires under
+// properties.Configuration.WebTest (D902b). A ping test is not fully specified by the
+// structured Request/Locations fields alone — Azure rejects a create whose Configuration
+// is absent ("'properties.Configuration.WebTest' must be specified"). The GUIDs are
+// DETERMINISTIC (derived from the plan) so a re-created test is byte-identical rather than
+// churning on every apply.
+func (p AzureWebtestPlan) webtestConfigXML() string {
+	esc := func(s string) string {
+		return xmlEscaper.Replace(s)
+	}
+	testGUID := azAssignmentGUID(p.Name, p.URL, "webtest")
+	reqGUID := azAssignmentGUID(p.URL, p.Name, "webtest-request")
+	return `<WebTest Name="` + esc(p.Name) + `" Id="` + testGUID + `" Enabled="True" CssProjectStructure="" ` +
+		`CssIteration="" Timeout="30" WorkItemIds="" xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010" ` +
+		`Description="" CredentialUserName="" CredentialPassword="" PreAuthenticate="True" Proxy="default" ` +
+		`StopOnError="False" RecordedResultFile="" ResultsLocale=""><Items>` +
+		`<Request Method="GET" Guid="` + reqGUID + `" Version="1.1" Url="` + esc(p.URL) + `" ThinkTime="0" ` +
+		`Timeout="30" ParseDependentRequests="False" FollowRedirects="True" RecordResult="True" Cache="False" ` +
+		`ResponseTimeGoal="0" Encoding="utf-8" ExpectedHttpStatusCode="200" ExpectedResponseUrl="" ` +
+		`ReportingName="" IgnoreHttpStatusCode="False" /></Items></WebTest>`
 }
 
 func (p AzureWebtestPlan) createBody(tags map[string]any) map[string]any {
 	// link the test to its App Insights component (hidden-link tag).
 	tags["hidden-link:"+p.AppInsightsID] = "Resource"
 	return map[string]any{
-		"location": "global",
+		"location": p.Location,
 		"kind":     "ping",
 		"tags":     tags,
 		"properties": map[string]any{
 			"SyntheticMonitorId": p.Name,
 			"Name":               p.Name,
+			"Description":        "",
 			"Enabled":            true,
 			"Frequency":          p.FrequencySec,
 			"Timeout":            30,
 			"Kind":               "ping",
+			"RetryEnabled":       true,
 			"Locations":          []any{map[string]any{"Id": "us-tx-sn1-azr"}},
-			"Request":            map[string]any{"RequestUrl": p.URL},
-			"ValidationRules":    map[string]any{"ExpectedHttpStatusCode": 200},
+			// D902b: the request URL, status expectation and verb live in the WebTest XML
+			// blob Azure requires here — a structured "Request"/"ValidationRules" pair is
+			// rejected ("Value cannot be null. Parameter name: format"); the XML is the
+			// authority the ping test is created from.
+			"Configuration": map[string]any{"WebTest": p.webtestConfigXML()},
 		},
 	}
 }

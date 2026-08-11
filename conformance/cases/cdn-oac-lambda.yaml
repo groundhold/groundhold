@@ -16,7 +16,14 @@
 # verifier is untouched: the operands live in the implementation block (D26).
 suite: cdn-oac-lambda
 cases:
-  - name: cloudfront-oac-fronts-iam-lambda-url
+  # D749 SUPERSEDES the case `cloudfront-oac-fronts-iam-lambda-url`, which declared
+  # `network.publicExposure: true` for the edge function. That was the definition
+  # defect written into the suite: the vocabulary defines the attribute as "invokable
+  # over public HTTPS by ANYONE", and an AWS_IAM Function URL carries no anonymous
+  # grant, so observe measured false and the capability could never converge. The
+  # EXPECTATIONS below are unchanged, which is the point — only the declaration was
+  # wrong, and the plan the edge pattern produces is the same one.
+  - name: cloudfront-oac-fronts-a-lambda-url-that-is-not-public
     impl: go
     description: >
       A function.serverless (url_auth=iam) and a cdn.distribution whose origin is
@@ -60,7 +67,7 @@ cases:
             attributes:
               service.managed: true
               location.region: eu-central-1
-              network.publicExposure: true
+              network.publicExposure: false   # D749: signed callers only, not anyone
               tls.enforced: true
             implementation:
               image_uri: 123456789012.dkr.ecr.eu-central-1.amazonaws.com/fn:sha
@@ -143,7 +150,14 @@ cases:
         a-create-cdn:
           operation: create
 
-  - name: cdn-oac-operands-not-unknown
+  # D749 SUPERSEDES the case `cdn-oac-operands-not-unknown`, which declared
+  # `network.publicExposure: true` for the edge function. That was the definition
+  # defect written into the suite: the vocabulary defines the attribute as "invokable
+  # over public HTTPS by ANYONE", and an AWS_IAM Function URL carries no anonymous
+  # grant, so observe measured false and the capability could never converge. The
+  # EXPECTATIONS below are unchanged, which is the point — only the declaration was
+  # wrong, and the plan the edge pattern produces is the same one.
+  - name: cdn-oac-operands-not-unknown-on-a-private-function
     impl: go
     description: >
       Regression (D307): a lambda with url_auth and a cloudfront with
@@ -186,7 +200,7 @@ cases:
             attributes:
               service.managed: true
               location.region: eu-central-1
-              network.publicExposure: true
+              network.publicExposure: false   # D749: signed callers only, not anyone
             implementation:
               image_uri: 123456789012.dkr.ecr.eu-central-1.amazonaws.com/fn:sha
               role_arn: arn:aws:iam::123456789012:role/fn-exec

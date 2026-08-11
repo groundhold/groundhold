@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func readJSON6(r *http.Request) map[string]any {
@@ -34,8 +37,21 @@ func TestBuildApiGWv2Honors(t *testing.T) {
 		t.Fatalf("plan = %+v", p)
 	}
 	body := p.createBody("front", "prod")
-	if body["ProtocolType"] != "HTTP" || body["RouteSelectionExpression"] != nil {
+	if body["protocolType"] != "HTTP" || body["routeSelectionExpression"] != nil {
 		t.Fatalf("http body must have no route-selection expr: %+v", body)
+	}
+	// D878: the wire is restJson1 camelCase. A PascalCase key is dropped by AWS and
+	// the create 400s "Invalid protocol specified" — pin the exact key set so a
+	// mutation back to Name/ProtocolType/Tags is caught at the desk, not on a real run.
+	for _, k := range []string{"name", "protocolType", "tags"} {
+		if _, ok := body[k]; !ok {
+			t.Fatalf("createBody missing camelCase key %q (real AWS locationName): %+v", k, body)
+		}
+	}
+	for _, k := range []string{"Name", "ProtocolType", "Tags"} {
+		if _, ok := body[k]; ok {
+			t.Fatalf("createBody emits PascalCase %q — AWS ignores it (D878): %+v", k, body)
+		}
 	}
 }
 
@@ -47,7 +63,7 @@ func TestBuildApiGWv2WebSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := p.createBody("front", "prod")
-	if body["ProtocolType"] != "WEBSOCKET" || body["RouteSelectionExpression"] == nil {
+	if body["protocolType"] != "WEBSOCKET" || body["routeSelectionExpression"] == nil {
 		t.Fatalf("websocket body must carry a route-selection expr: %+v", body)
 	}
 }
@@ -81,10 +97,10 @@ func apigwServer(t *testing.T, capLabel, protocol string) *httptest.Server {
 			switch {
 			case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/v2/apis"):
 				w.WriteHeader(201)
-				_, _ = w.Write([]byte(`{"ApiId":"a1b2c3d4e5","Name":"pv","ProtocolType":"` + protocol + `","ApiEndpoint":"https://a1b2c3d4e5.execute-api.eu-central-1.amazonaws.com"}`))
+				_, _ = w.Write([]byte(`{"apiId":"a1b2c3d4e5","name":"pv","protocolType":"` + protocol + `","apiEndpoint":"https://a1b2c3d4e5.execute-api.eu-central-1.amazonaws.com"}`))
 			case r.Method == "GET" && strings.Contains(r.URL.Path, "/v2/apis/"):
-				_, _ = w.Write([]byte(`{"ApiId":"a1b2c3d4e5","Name":"pv","ProtocolType":"` + protocol + `",` +
-					`"Tags":{"groundhold-capability":"` + capLabel + `","groundhold-environment":"prod"}}`))
+				_, _ = w.Write([]byte(`{"apiId":"a1b2c3d4e5","name":"pv","protocolType":"` + protocol + `",` +
+					`"tags":{"groundhold-capability":"` + capLabel + `","groundhold-environment":"prod"}}`))
 			case r.Method == "DELETE":
 				w.WriteHeader(200)
 			default:
@@ -161,12 +177,12 @@ func TestMetamorphicApiGWv2RoundTrip(t *testing.T) {
 				func(w http.ResponseWriter, r *http.Request) {
 					switch {
 					case r.Method == "POST":
-						proto = readJSON6(r)["ProtocolType"].(string)
+						proto = readJSON6(r)["protocolType"].(string)
 						w.WriteHeader(201)
-						_, _ = w.Write([]byte(`{"ApiId":"a1b2c3d4e5","ProtocolType":"` + proto + `"}`))
+						_, _ = w.Write([]byte(`{"apiId":"a1b2c3d4e5","protocolType":"` + proto + `"}`))
 					case r.Method == "GET":
-						_, _ = w.Write([]byte(`{"ApiId":"a1b2c3d4e5","ProtocolType":"` + proto + `",` +
-							`"Tags":{"groundhold-capability":"front","groundhold-environment":"prod"}}`))
+						_, _ = w.Write([]byte(`{"apiId":"a1b2c3d4e5","protocolType":"` + proto + `",` +
+							`"tags":{"groundhold-capability":"front","groundhold-environment":"prod"}}`))
 					default:
 						w.WriteHeader(200)
 					}
@@ -195,4 +211,90 @@ func TestMetamorphicApiGWv2RoundTrip(t *testing.T) {
 			}
 		})
 	}
+}
+
+// apigwExistingServer: our API is already standing at our deterministic name, so the
+// list-by-name scan finds it. Any mutation is the duplicate this fixture exists to catch.
+func apigwExistingServer(t *testing.T, name, capLabel string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/v2/apis"):
+				_, _ = w.Write([]byte(`{"items":[{"apiId":"a1b2c3d4e5","name":"` + name +
+					`","protocolType":"HTTP","apiEndpoint":"https://a1b2c3d4e5.execute-api.eu-central-1.amazonaws.com",` +
+					`"tags":{"groundhold-capability":"` + capLabel + `","groundhold-environment":"prod"}}]}`))
+			case r.Method == "GET" && strings.Contains(r.URL.Path, "/v2/apis/"):
+				_, _ = w.Write([]byte(`{"apiId":"a1b2c3d4e5","name":"` + name + `","protocolType":"HTTP",` +
+					`"tags":{"groundhold-capability":"` + capLabel + `","groundhold-environment":"prod"}}`))
+			default:
+				t.Errorf("create-adoption must not %s %s — bind the existing api, never create",
+					r.Method, r.URL.Path)
+				w.WriteHeader(400)
+			}
+		}))
+}
+
+// TestCreateApiGWv2_AdoptsExistingOwned (D410): the bug this fixes. An ApiId is
+// server-assigned and CreateApi carries no idempotency token, so before the by-name scan
+// a converge against a lost ledger either minted a SECOND live endpoint or hard-failed
+// on an estate that was already correct.
+func TestCreateApiGWv2_AdoptsExistingOwned(t *testing.T) {
+	name := ApiGWName("prod", "front", 1)
+	srv := apigwExistingServer(t, name, sanitizeTag("front"))
+	defer srv.Close()
+	d := apigwDriver(t, srv)
+	res := d.createApiGWv2("eu-central-1", "000000000000", "prod", "front", apigwAttrs(), nil, 1)
+	if res.Status != "succeeded" ||
+		res.ProviderID != apigwProviderID("eu-central-1", "000000000000", "a1b2c3d4e5") {
+		t.Fatalf("must adopt the existing owned api (no CreateApi), got %+v", res)
+	}
+}
+
+// TestCreateApiGWv2_ForeignAtOurNameRefused (D410): an api at our deterministic name
+// whose tags are not ours must be refused, never adopted and never overwritten.
+func TestCreateApiGWv2_ForeignAtOurNameRefused(t *testing.T) {
+	name := ApiGWName("prod", "front", 1)
+	srv := apigwExistingServer(t, name, "someone-else")
+	defer srv.Close()
+	d := apigwDriver(t, srv)
+	res := d.createApiGWv2("eu-central-1", "000000000000", "prod", "front", apigwAttrs(), nil, 1)
+	if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
+		t.Fatalf("a foreign api at our name must refuse, got %+v", res)
+	}
+}
+
+func apigwRESTRole(req *http.Request, _ []byte) certifynet.Role {
+	if req.Method == http.MethodGet {
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingApiGWv2 enrols apigateway in the D391 class gate — the enrolment
+// that found the bug.
+func TestAdoptsExistingApiGWv2(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	name := ApiGWName("prod", "front", 1)
+	p := &certifynet.ExistingProbe{
+		Name:           "aws/apigateway",
+		Classify:       apigwRESTRole,
+		ExistingServer: func() *httptest.Server { return apigwExistingServer(t, name, sanitizeTag("front")) },
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.APIGatewayBaseURL = happyURL
+			d.Now = time.Now
+			d.PollInterval = time.Millisecond
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("apigateway", "front", "prod", apigwAttrs(), nil, "api", 1)
+		},
+		PID: apigwProviderID("eu-central-1", "000000000000", "a1b2c3d4e5"),
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

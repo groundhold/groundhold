@@ -1,6 +1,8 @@
 package k8s
 
 import (
+	"groundhold/internal/provider"
+
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -32,7 +34,7 @@ func roleServer(t *testing.T, ns, name string, rules []map[string]any) *httptest
 
 func observeMap(t *testing.T, d *Driver, pid string) (map[string]any, []string) {
 	t.Helper()
-	mp := d.genericMapping("rbac-role")
+	mp, _ := d.serviceMapping("rbac-role", forWrite)
 	if mp == nil {
 		t.Fatal("rbac-role must route through the schema-driven engine")
 	}
@@ -101,6 +103,9 @@ func TestObserveRolePrivilegedSignals(t *testing.T) {
 		rules []map[string]any
 	}{
 		{"wildcard", []map[string]any{{"apiGroups": []any{"*"}, "resources": []any{"*"}, "verbs": []any{"*"}}}},
+		// D988: full control of all resources of a NAMED group (apps/*:*) is admin-shaped
+		// over that group — schedule an arbitrary privileged pod — and must read privileged.
+		{"apps-wildcard", []map[string]any{{"apiGroups": []any{"apps"}, "resources": []any{"*"}, "verbs": []any{"*"}}}},
 		{"rbac-write", []map[string]any{{"apiGroups": []any{"rbac.authorization.k8s.io"}, "resources": []any{"rolebindings"}, "verbs": []any{"create"}}}},
 		{"escalate", []map[string]any{{"apiGroups": []any{"rbac.authorization.k8s.io"}, "resources": []any{"roles"}, "verbs": []any{"escalate"}}}},
 	}
@@ -138,8 +143,16 @@ func TestObserveRoleNotFound(t *testing.T) {
 	d := NewDriver(srv.URL, "tok")
 	pid := rbacProviderID("rbac.authorization.k8s.io", "v1", "Role", "ns", "absent")
 	obs, diags := observeMap(t, d, pid)
-	if len(obs) != 0 || len(diags) == 0 {
-		t.Fatalf("not-found: want no observations + a diagnostic, got obs=%v diags=%v", obs, diags)
+	// This test used to demand the OPPOSITE — "want no observations + a
+	// diagnostic" — and that expectation was the defect, written down and
+	// guarded. A bound resource the server 404s is authoritatively gone, and
+	// silence about it is what let converge report a world it had just been told
+	// was empty (D513). The absence marker is the contract's one way to say it.
+	if len(diags) == 0 {
+		t.Errorf("not-found: the diagnostic is gone too")
+	}
+	if got, ok := obs[provider.ResourceAbsentPath]; !ok || got != true {
+		t.Fatalf("not-found: want %s=true, got obs=%v", provider.ResourceAbsentPath, obs)
 	}
 }
 

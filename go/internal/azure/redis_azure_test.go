@@ -15,7 +15,7 @@ func redisAzAttrs() map[string]any {
 		"network.publicExposure": false,
 		"encryption.atRest":      true,
 		"encryption.inTransit":   true,
-		"availability.class":     "regional",
+		"availability.class":     "zonal", // zonal path (Basic); regional maps to Standard but observe honestly reads it as zonal (D946)
 		"service.managed":        true,
 	}
 }
@@ -29,7 +29,7 @@ func TestBuildRedisAzureHonors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.RedisVersion != "6" || p.SkuName != "Standard" || !p.InTransit || p.Public {
+	if p.RedisVersion != "6" || p.SkuName != "Basic" || !p.InTransit || p.Public {
 		t.Fatalf("plan = %+v", p)
 	}
 	body := p.createBody(map[string]any{})
@@ -135,7 +135,7 @@ func TestCreateObserveDeleteRedisAzure(t *testing.T) {
 	for _, o := range obs {
 		got[o.Path] = o.Value
 	}
-	if got["engine.protocol"] != "redis/6" || got["availability.class"] != "regional" ||
+	if got["engine.protocol"] != "redis/6" || got["availability.class"] != "zonal" ||
 		got["encryption.inTransit"] != true || got["network.publicExposure"] != false ||
 		got["location.region"] != "eastus" {
 		t.Fatalf("observe: %+v", got)
@@ -153,5 +153,99 @@ func TestDeleteRedisAzureForeignRefused(t *testing.T) {
 	res := d.deleteRedisAzure("sessions", "prod", pid)
 	if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
 		t.Fatalf("foreign cache must refuse delete, got %+v", res)
+	}
+}
+
+// D946: availability.class must be derived from the ACTUAL zone-redundancy (the top-level
+// `zones` array), not the SKU tier. A Standard cache with no zones reads `zonal`
+// (covered by TestCreateObserveDeleteRedisAzure); a cache WITH zones reads `regional`.
+func TestObserveRedisAzureDerivesRegionalFromZonesNotTier(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			// a Standard cache — the OLD code would call this "regional" off the tier —
+			// but it carries a populated zones array, so it genuinely IS zone-redundant.
+			_, _ = w.Write([]byte(`{"location":"eastus","zones":["1","2","3"],` +
+				`"tags":{"groundhold-capability":"sessions","groundhold-environment":"prod"},` +
+				`"properties":{"provisioningState":"Succeeded","redisVersion":"6.0",` +
+				`"publicNetworkAccess":"Disabled","enableNonSslPort":false,"sku":{"name":"Premium"}}}`))
+			return
+		}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	d := redisAzDriver(t, srv)
+	pid := redisAzureProviderID(testSub, "rg1", azResourceName("pv-cache", "prod", "sessions", 1))
+	obs, _, err := d.observeRedisAzure("sessions", pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got any
+	for _, o := range obs {
+		if o.Path == "availability.class" {
+			got = o.Value
+		}
+	}
+	if got != "regional" {
+		t.Errorf("a cache with a populated zones array must read availability.class=regional, got %v", got)
+	}
+}
+
+// D948: regional maps to Premium + a top-level zones array (genuine zone redundancy),
+// and the create refuses a region that cannot span at least two availability zones.
+func TestBuildRedisAzureRegionalIsPremiumZoneRedundant(t *testing.T) {
+	a := redisAzAttrs()
+	a["availability.class"] = "regional"
+	p, err := BuildRedisAzure("prod", "sessions", a, redisAzImpl(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.SkuName != "Premium" || !p.ZoneRedundant {
+		t.Fatalf("regional must map to Premium + ZoneRedundant, got %+v", p)
+	}
+	p.Zones = []string{"1", "2", "3"}
+	body := p.createBody(nil)
+	if body["zones"] == nil {
+		t.Error("a zone-redundant create body must carry a top-level zones array")
+	}
+	if body["properties"].(map[string]any)["sku"].(map[string]any)["family"] != "P" {
+		t.Errorf("the Premium tier must use sku family P, got %+v", body["properties"])
+	}
+}
+
+func TestCreateRedisAzureRefusesRegionWithoutAvailabilityZones(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		azm        string
+		wantRefuse bool
+	}{
+		{"single-AZ region refuses regional", `{"logicalZone":"1"}`, true},
+		{"multi-AZ region proceeds", `{"logicalZone":"1"},{"logicalZone":"2"},{"logicalZone":"3"}`, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.Contains(r.URL.Path, "/locations") {
+					_, _ = w.Write([]byte(`{"value":[{"name":"eastus","availabilityZoneMappings":[` + c.azm + `]}]}`))
+					return
+				}
+				if r.Method == "PUT" {
+					w.WriteHeader(202)
+					_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded"}}`))
+					return
+				}
+				w.WriteHeader(404)
+			}))
+			defer srv.Close()
+			d := redisAzDriver(t, srv)
+			a := redisAzAttrs()
+			a["availability.class"] = "regional"
+			res := d.createRedisAzure("prod", "sessions", a, redisAzImpl(), 1)
+			refusedForAZ := res.Status == "failed" && strings.Contains(res.Reason, "at least two")
+			if c.wantRefuse && !refusedForAZ {
+				t.Errorf("a single-AZ region must refuse regional up front, got %+v", res)
+			}
+			if !c.wantRefuse && refusedForAZ {
+				t.Errorf("a multi-AZ region must NOT be preflight-refused: %+v", res)
+			}
+		})
 	}
 }

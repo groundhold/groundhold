@@ -29,10 +29,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"regexp"
 	"sort"
 
 	"groundhold/internal/ledger"
+	"groundhold/internal/secretshape"
 )
 
 // Load reads a capsule document from a file for certification. JSON decodes every
@@ -92,21 +92,22 @@ type Report struct {
 
 // allowed observation derivations (D3/D45): a measured read of live state, or a
 // config-intent value the resource stores but does not itself enforce.
-var okDerivation = map[string]bool{"measured": true, "config-intent": true}
+// D759: three kinds of fact, three labels. `platform-invariant` is a claim about the
+// SERVICE ("every ElastiCache Serverless cache encrypts at rest"), established from the
+// provider's contract and read from nothing on this resource — 65 of 72 config-intent
+// observations were that, wearing a label whose published definition says the resource
+// STORES the value.
+var okDerivation = map[string]bool{
+	"measured": true, "config-intent": true, "platform-invariant": true}
 
 // secretKey flags an object KEY whose name signals a secret payload.
-var secretKey = regexp.MustCompile(`(?i)(password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|credential|access[_-]?key|session[_-]?token|client[_-]?secret)`)
+// D648: shared with the redactor and the publish-time scan (internal/secretshape).
+func secretKeyName(k string) bool { return secretshape.KeyLooksLikeCredential(k) }
 
-// secretValue flags a STRING VALUE that carries an unambiguous secret signature.
-// Deliberately conservative — a legitimate observation value (a region, a class, a
-// protocol, a boolean) never matches, so certification does not false-reject.
-var secretValue = []*regexp.Regexp{
-	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`), // PEM private key
-	regexp.MustCompile(`-----BEGIN [A-Z ]*KEY-----`),
-	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),               // AWS access key id
-	regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._-]{16,}`), // bearer token
-	regexp.MustCompile(`\beyJ[A-Za-z0-9._-]{20,}`),           // JWT (base64url header)
-}
+// A STRING VALUE carrying an unambiguous secret signature is refused the same way,
+// through the same shared alphabet (D648) — this list used to know bearer tokens
+// and JWTs while the publish-time scan knew connection strings, and a capsule
+// carrying a plaintext DSN was certified.
 
 // Certify verifies a collector's capsule and enforces the honesty shape. On any
 // violation Status is "rejected" and Findings names each; the core imports nothing
@@ -164,13 +165,14 @@ func Certify(c *ledger.Capsule) *Report {
 				continue
 			}
 			path, _ := om["path"].(string)
-			if secretKey.MatchString(path) {
+			if secretKeyName(path) {
 				rep.Findings = append(rep.Findings, Finding{Event: i + 1, Path: path, Kind: "secret",
 					Detail: "observation path is secret-named — a capability attribute is never a secret (D53)"})
 			}
 			if d, _ := om["derivation"].(string); !okDerivation[d] {
 				rep.Findings = append(rep.Findings, Finding{Event: i + 1, Path: path, Kind: "derivation",
-					Detail: fmt.Sprintf("derivation %q is not measured|config-intent", d)})
+					Detail: fmt.Sprintf("derivation %q is not measured|config-intent|"+
+						"platform-invariant", d)})
 			}
 			if oa, _ := om["observedAt"].(string); oa == "" {
 				rep.Findings = append(rep.Findings, Finding{Event: i + 1, Path: path, Kind: "observedAt",
@@ -226,7 +228,7 @@ func scanSecrets(v any, path string, event int, rep *Report) {
 			if path != "" {
 				p = path + "." + k
 			}
-			if secretKey.MatchString(k) {
+			if secretKeyName(k) {
 				rep.Findings = append(rep.Findings, Finding{Event: event, Path: p, Kind: "secret",
 					Detail: fmt.Sprintf("field %q is secret-named — secrets are structurally excluded (D53)", k)})
 			}
@@ -237,12 +239,12 @@ func scanSecrets(v any, path string, event int, rep *Report) {
 			scanSecrets(it, fmt.Sprintf("%s[%d]", path, i), event, rep)
 		}
 	case string:
-		for _, re := range secretValue {
-			if re.MatchString(x) {
-				rep.Findings = append(rep.Findings, Finding{Event: event, Path: path, Kind: "secret",
-					Detail: "value carries a secret signature — secrets are structurally excluded (D53)"})
-				return
-			}
+		if kind, ok := secretshape.ValueLooksLikeCredential(x); ok {
+			rep.Findings = append(rep.Findings, Finding{Event: event, Path: path,
+				Kind: "secret",
+				Detail: fmt.Sprintf("value carries a secret signature (%s) — secrets "+
+					"are structurally excluded (D53)", kind)})
+			return
 		}
 	}
 }

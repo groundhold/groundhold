@@ -35,6 +35,28 @@ unreduced reports `pending-conformance` and reduce them before
 fixing) — but a report that arrives as a failing case gets fixed
 fastest, because it arrives already true.
 
+## What to expect from a maintainer
+
+Maintainer-led and best-effort. There is **no SLA** on issues, pull
+requests or discussions — the single exception is security, where
+`SECURITY.md` commits to acknowledging a private advisory within 72
+hours.
+
+This is not a disclaimer, it is the mechanism: the project is
+maintained by one person, and the only thing that scales one person
+across an issue tracker is that **a failing conformance case is the
+currency**. A report reduced to a case states the bug precisely, proves
+it exists, and proves it is gone — so it can be fixed in the time it
+takes to read it. An unreduced report has to be reproduced, guessed at,
+and argued about first. Both are welcome and neither is turned away;
+they simply move at very different speeds, and it is fairer to say so
+than to let a queue explain it silently.
+
+The same rule points the other way. If a behaviour change arrives
+without a case, a maintainer cannot merge it however plainly correct it
+looks, because there would be nothing to stop the next change from
+undoing it.
+
 ## Sending a change
 
 1. Behavior changes MUST carry a conformance case. Case first,
@@ -104,7 +126,12 @@ git commit -s -m "your message"      # appends: Signed-off-by: Name <email>
 ```
 
 The sign-off name and email must be real (no pseudonyms, no anonymous). A PR
-whose commits are not signed off cannot be merged.
+whose commits are not signed off cannot be merged — checked on every pull
+request by `.github/workflows/dco.yml`, which also refuses a sign-off in
+someone else's name: the DCO is a statement about who wrote the change.
+
+Maintainers: [`docs/REVIEWING.md`](docs/REVIEWING.md) says what a review looks
+at once the gates are green, and what it deliberately does not re-check.
 
 ## Licensing
 

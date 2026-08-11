@@ -25,6 +25,7 @@ type AzureSQPlan struct {
 	IsGauge       bool
 	MeasureColumn string
 	Scope         string
+	Location      string // the rule's region — Azure rejects "global" for this type (D890)
 }
 
 // BuildAzureScheduledQuery maps capability.monitoring.logmetric attributes + impl to a
@@ -92,6 +93,17 @@ func BuildAzureScheduledQuery(environment, capability string,
 		return AzureSQPlan{}, fmt.Errorf(
 			"azure scheduled query rule requires implementation.scope (the Log Analytics workspace / resource id it queries)")
 	}
+	// D890: Microsoft.Insights/scheduledQueryRules is a REGIONAL resource — Azure 400s
+	// "location 'global' is not available for resource type scheduledqueryrules". The
+	// driver used to hard-code "global", so the rule was uncreatable. The region is
+	// substrate the operator provides (like AWS cwlogfilter's impl.region), typically the
+	// scope workspace's region; refuse rather than guess a region the rule cannot live in.
+	p.Location, _ = impl["location"].(string)
+	if p.Location == "" {
+		return AzureSQPlan{}, fmt.Errorf(
+			"azure scheduled query rule requires implementation.location (the region the rule lives in, " +
+				"typically the scope workspace's region — the resource type does not support 'global')")
+	}
 	return p, nil
 }
 
@@ -108,7 +120,7 @@ func (p AzureSQPlan) createBody(tags map[string]any) map[string]any {
 		criterion["metricMeasureColumn"] = p.MeasureColumn
 	}
 	return map[string]any{
-		"location": "global",
+		"location": p.Location,
 		"tags":     tags,
 		"properties": map[string]any{
 			"displayName":         p.DisplayName,

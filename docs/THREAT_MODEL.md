@@ -57,6 +57,37 @@ The adversarial-hardening series (D182–D195) is, in effect, this table's test
 suite: each round hunted one threat class and pinned the fix with a
 fails-without-fix case.
 
+## The build pipeline (supply chain)
+
+The runtime executes against production clouds, so what builds and ships it is
+part of the attack surface. This section names the class the document had left
+implicit, and states what is enforced BY A GATE rather than by intention (D474).
+
+- **Actions are pinned to commit SHAs**, and the same action carries the same pin
+  in every workflow. Gated at `make check` — a tag is mutable, and the gate was
+  added after finding two credentialed workflows still on `@v6`/`@v3` (D474).
+- **Cloud credentials are OIDC/WIF only.** The three canary workflows assume a
+  role or federate; no long-lived cloud secret exists in the repository. Every
+  workflow declares least-privilege `permissions:` — `contents: read` everywhere
+  except the release, which needs `contents: write` to create the release.
+- **The dependency surface is one Go module and PyYAML**, gated in both
+  implementations (D475). A verifier with no third-party surface is a verifier
+  nobody has to audit transitively.
+- **Third-party binaries fetched at build time carry a pinned version AND a
+  SHA-256 check** (the `gh` CLI in the release job).
+- **Scanning**: govulncheck (pinned), gitleaks and golangci-lint run on every push
+  and pull request, each as its own job so a finding is legible rather than buried.
+  **CodeQL is wired and DORMANT**: code scanning needs GitHub Advanced Security on a
+  private repository, so the job is conditioned on `repository.visibility == 'public'`
+  and skips green. It starts running at the public flip and has never run. (This entry
+  listed CodeQL among the active scanners for about an hour after D477 was written,
+  which is what happens when a defence is described from the workflow file rather than
+  from the condition on the job — corrected in D491.)
+- **Release artifacts** ship `SHA256SUMS`, a CycloneDX SBOM, a `BUILDINFO.txt`
+  recording the exact toolchain and build command so a third party can rebuild
+  bit-identically, a verified version stamp, and a keyless SLSA build-provenance
+  attestation.
+
 ## Accepted risks (NOT defended — by design, in v0.x)
 
 - **Actor identity is self-asserted.** `publish --actor` and `actor.id` record
@@ -74,6 +105,28 @@ fails-without-fix case.
   question the design log tracks, surfaced here rather than left implicit.
 - **No external security audit yet** (see `docs/MATURITY.md`); all adversarial
   review to date is internal.
+- **Build provenance is not yet enforceable.** The attestation step runs on every
+  release, but GitHub does not retrieve attestations for a private repository, so
+  it is best-effort until the public flip and the release notes must not promise
+  a `gh attestation verify` that returns 404 (D354). It becomes authoritative when
+  the repo is public.
+- **A pin is checked against its tag, not against the code.** Every pin carries a
+  `# vX.Y.Z` comment (enforced at `make check`) and a scheduled job re-resolves each
+  tag and compares it to the hash (D479), so a hash written down wrongly, or an
+  upstream tag that moves, surfaces. Nothing verifies that the tag pointed at code
+  worth trusting — that is a reviewer's judgement and is not automated here.
+- **The build estate is trusted.** Gates run on self-hosted runners; a compromised
+  runner can produce a green gate. The pools are private and unnamed in public
+  trees (D384), which is confidentiality, not integrity.
+- **Reproducibility is verified in ONE environment, and cannot yet be verified
+  across them.** Every release rebuilds each artifact a second time and fails if the
+  bytes differ (D478), which catches an embedded timestamp or a non-deterministic
+  link. It does NOT prove that a different host or Go version produces the same
+  bytes. That half is not merely unmeasured, it is currently unmeasurable HERE: the
+  only non-Linux runner in CI is gated on `github.repository_owner == 'groundhold'`
+  and does not execute before the public flip (D480). `BUILDINFO.txt` records the
+  exact toolchain and command so a third party can check it meanwhile; at the flip
+  the macOS job starts running and the comparison becomes available in CI.
 
 ## Reporting
 

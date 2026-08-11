@@ -46,8 +46,13 @@ in-tree driver is, the rules are also **checked at the boundary** (§4).
 ## 3. The honesty rules (what a collector MUST do)
 
 - **Four-valued, never collapsed.** An observation is `measured` (read from live
-  state) or `config-intent` (a value the resource stores but does not itself
-  enforce). Nothing else is a valid derivation. Absence of a fact is an omission
+  state), `config-intent` (a value the resource stores but does not itself
+  enforce), or `platform-invariant` (D759: true of EVERY instance of the service
+  by the provider's own guarantee, read from nothing on this resource — e.g.
+  "an ElastiCache Serverless cache encrypts at rest"). Nothing else is a valid
+  derivation. A platform guarantee is not a measurement and it is not the
+  resource's configuration: it is a claim about the SERVICE, and it carries the
+  evidence weight of a claim (the `static` bar), never that of a reading. Absence of a fact is an omission
   (leave it out, note it in diagnostics), never a fabricated value.
 - **Secrets are structurally excluded (D53).** A collector NEVER puts a password,
   token, key, or credential into an observation value, path, diagnostic, or any
@@ -82,7 +87,7 @@ not trusted to have satisfied on its own:
   carrying an unambiguous secret signature (a PEM private key, an AWS access-key id,
   a bearer token, a JWT) — is rejected.
 - **Derivation vocabulary**: every observation's derivation is `measured` or
-  `config-intent`; an unlabeled or invented basis is rejected.
+  `config-intent` or `platform-invariant`; an unlabeled or invented basis is rejected.
 - **Freshness discipline**: every observation carries an `observedAt`; nothing is
   dated past the capsule's `asOf`.
 
@@ -105,7 +110,7 @@ A third-party collector is ready when ALL hold:
 
 1. Gathers state with its OWN scoped credentials — never groundhold's paired creds.
 2. Emits one `capsule/v0.1` per capability, events signed (D102).
-3. Every observation is `measured` or `config-intent`, on a `spec/vocab/` path.
+3. Every observation is `measured`, `config-intent` or `platform-invariant`, on a `spec/vocab/` path.
 4. No secret in any field — value, path, diagnostic (D53).
 5. Every observation carries `observedAt`; nothing dated past `asOf`.
 6. `groundhold certify-capsule` returns `certified` on its output.

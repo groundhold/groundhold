@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func readJSON(r *http.Request) map[string]any {
@@ -72,12 +75,20 @@ func kinesisTarget2(r *http.Request) string {
 
 func kinesisServer(t *testing.T, capLabel string, retentionHours int, cmek bool) *httptest.Server {
 	t.Helper()
+	deleted := false
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			switch kinesisTarget2(r) {
 			case "CreateStream":
 				w.WriteHeader(200)
 			case "DescribeStreamSummary":
+				if deleted {
+					// the stream has finished deleting — the delete's poll-to-absence (D979)
+					// confirms gone.
+					w.WriteHeader(400)
+					_, _ = w.Write([]byte(`{"__type":"ResourceNotFoundException","message":"gone"}`))
+					return
+				}
 				enc := `"NONE"`
 				kid := ""
 				if cmek {
@@ -88,7 +99,10 @@ func kinesisServer(t *testing.T, capLabel string, retentionHours int, cmek bool)
 					`"RetentionPeriodHours":` + itoaK(retentionHours) + `,"EncryptionType":` + enc + kid + `}}`))
 			case "ListTagsForStream":
 				_, _ = w.Write([]byte(`{"Tags":[{"Key":"groundhold-capability","Value":"` + capLabel + `"},{"Key":"groundhold-environment","Value":"prod"}]}`))
-			case "AddTagsToStream", "IncreaseStreamRetentionPeriod", "StartStreamEncryption", "DeleteStream":
+			case "AddTagsToStream", "IncreaseStreamRetentionPeriod", "StartStreamEncryption":
+				w.WriteHeader(200)
+			case "DeleteStream":
+				deleted = true
 				w.WriteHeader(200)
 			default:
 				w.WriteHeader(400)
@@ -154,6 +168,36 @@ func TestDeleteKinesisForeignRefused(t *testing.T) {
 	res := d.deleteKinesis("events", "prod", pid)
 	if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
 		t.Fatalf("foreign stream must refuse delete, got %+v", res)
+	}
+}
+
+// TestDeleteKinesisAsyncNotGoneIsUnknown pins D979: a stream delete the provider
+// ACCEPTS but that stays present (DELETING, not gone) must report unknown — never a
+// terminal "succeeded" that tombstones a data-bearing stream still live.
+func TestDeleteKinesisAsyncNotGoneIsUnknown(t *testing.T) {
+	// a server that owns the stream, accepts DeleteStream, but never lets the stream
+	// leave ACTIVE (the async delete stalls).
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			switch kinesisTarget2(r) {
+			case "DescribeStreamSummary": // never gone
+				_, _ = w.Write([]byte(`{"StreamDescriptionSummary":{"StreamStatus":"ACTIVE",` +
+					`"StreamARN":"arn:aws:kinesis:eu-central-1:000000000000:stream/s","RetentionPeriodHours":24,"EncryptionType":"NONE"}}`))
+			case "ListTagsForStream":
+				_, _ = w.Write([]byte(`{"Tags":[{"Key":"groundhold-capability","Value":"events"},{"Key":"groundhold-environment","Value":"prod"}]}`))
+			case "DeleteStream":
+				w.WriteHeader(200)
+			default:
+				w.WriteHeader(400)
+			}
+		}))
+	defer srv.Close()
+	d := kinesisDriver(t, srv)
+	d.PollTimeout = 5 * time.Millisecond // the stream never leaves ACTIVE → times out fast
+	pid := kinesisProviderID("eu-central-1", "000000000000", KinesisStreamName("prod", "events", 1))
+	res := d.deleteKinesis("events", "prod", pid)
+	if res.Status != "unknown" {
+		t.Fatalf("an accepted-but-still-deleting stream must be unknown (keep the handle), got %+v", res)
 	}
 }
 
@@ -228,9 +272,65 @@ func TestMetamorphicKinesisRoundTrip(t *testing.T) {
 			if got["retention.window"] != wantWindow {
 				t.Errorf("retention round-trip: want %q got %v", wantWindow, got["retention.window"])
 			}
-			if _, has := got["encryption.customerManagedKeys"]; has != c.cmek {
-				t.Errorf("cmek round-trip: want present=%v got %v", c.cmek, got["encryption.customerManagedKeys"])
+			if got["encryption.customerManagedKeys"] != c.cmek {
+				t.Errorf("cmek round-trip: want %v got %v", c.cmek, got["encryption.customerManagedKeys"])
 			}
 		})
 	}
+}
+
+func kinesisRole(req *http.Request, _ []byte) certifynet.Role {
+	switch kinesisTarget2(req) {
+	case "DescribeStreamSummary", "ListTagsForStream", "ListStreams":
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingKinesis enrols kinesis in the D391 gate. The stream name is
+// deterministic, a second CreateStream is answered ResourceInUseException, and the tags
+// decide whether it is ours to bind.
+func TestAdoptsExistingKinesis(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/kinesis",
+		Classify: kinesisRole,
+		ExistingServer: func() *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					switch kinesisTarget2(r) {
+					case "CreateStream":
+						w.WriteHeader(400)
+						_, _ = w.Write([]byte(`{"__type":"ResourceInUseException","message":"exists"}`))
+					case "DescribeStreamSummary":
+						_, _ = w.Write([]byte(`{"StreamDescriptionSummary":{"StreamStatus":"ACTIVE",` +
+							`"StreamARN":"arn:aws:kinesis:eu-central-1:000000000000:stream/s",` +
+							`"RetentionPeriodHours":24,"EncryptionType":"KMS",` +
+							`"KeyId":"arn:aws:kms:eu-central-1:000000000000:key/abc"}}`))
+					case "ListTagsForStream":
+						_, _ = w.Write([]byte(`{"Tags":[{"Key":"groundhold-capability","Value":"events"},` +
+							`{"Key":"groundhold-environment","Value":"prod"}]}`))
+					case "AddTagsToStream", "IncreaseStreamRetentionPeriod", "StartStreamEncryption":
+						w.WriteHeader(200)
+					default:
+						w.WriteHeader(400)
+					}
+				}))
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.KinesisBaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.PollInterval = time.Millisecond
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("kinesis", "events", "prod", kinesisAttrs(), kinesisImpl(), "events", 1)
+		},
+		AllowedMutations: 4, // the refused create + retention/encryption/tag convergence
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

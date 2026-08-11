@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func osAttrs() map[string]any {
@@ -80,8 +83,21 @@ func TestBuildOpenSearchRefusals(t *testing.T) {
 
 func osServer(t *testing.T, capLabel string, zoneAware, cmek bool) *httptest.Server {
 	t.Helper()
+	deleted := false
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			// D800: the driver asks KMS who manages the key, so the fixture answers.
+			if strings.HasSuffix(r.Header.Get("X-Amz-Target"), ".DescribeKey") {
+				_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"CUSTOMER"}}`))
+				return
+			}
+			// once deleted, the domain is GONE — the delete's poll-to-absence (D973)
+			// must be able to confirm a ResourceNotFound.
+			if deleted && r.Method == "GET" && strings.Contains(r.URL.Path, "/domain/") {
+				w.WriteHeader(404)
+				_, _ = w.Write([]byte(`{"__type":"ResourceNotFoundException"}`))
+				return
+			}
 			switch {
 			case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/domain"):
 				_, _ = w.Write([]byte(`{"DomainStatus":{"DomainName":"d","Processing":false,"Created":true}}`))
@@ -102,6 +118,7 @@ func osServer(t *testing.T, capLabel string, zoneAware, cmek bool) *httptest.Ser
 					`"DomainEndpointOptions":{"EnforceHTTPS":true},` +
 					`"ClusterConfig":{"ZoneAwarenessEnabled":` + za + `}}}`))
 			case r.Method == "DELETE":
+				deleted = true
 				_, _ = w.Write([]byte(`{"DomainStatus":{"Deleted":true}}`))
 			default:
 				w.WriteHeader(404)
@@ -116,6 +133,7 @@ func osDriver(t *testing.T, srv *httptest.Server) *Driver {
 	d := NewDriver("eu-central-1")
 	d.Account = "000000000000"
 	d.OpenSearchBaseURL = srv.URL
+	d.KMSBaseURL = srv.URL // D800: the key is traced to KMS
 	d.Now = time.Now
 	d.PollInterval = time.Millisecond
 	d.PollTimeout = 2 * time.Second
@@ -144,6 +162,34 @@ func TestCreateObserveDeleteOpenSearch(t *testing.T) {
 	}
 	if del := d.deleteOpenSearch("catalog", "prod", res.ProviderID); del.Status != "succeeded" {
 		t.Fatalf("delete: %+v", del)
+	}
+}
+
+// TestDeleteOpenSearchAsyncNotGoneIsUnknown pins D973: a domain delete the provider
+// ACCEPTS but that stays present (still deleting) must report unknown — never a
+// terminal "succeeded" that tombstones a data-bearing search domain still live.
+func TestDeleteOpenSearchAsyncNotGoneIsUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && strings.Contains(r.URL.Path, "/tags"):
+				_, _ = w.Write([]byte(`{"TagList":[{"Key":"groundhold-capability","Value":"catalog"},` +
+					`{"Key":"groundhold-environment","Value":"prod"}]}`))
+			case r.Method == "GET" && strings.Contains(r.URL.Path, "/domain/"): // never gone
+				_, _ = w.Write([]byte(`{"DomainStatus":{"DomainName":"d","Processing":true,"Created":true}}`))
+			case r.Method == "DELETE":
+				_, _ = w.Write([]byte(`{"DomainStatus":{"Deleted":true}}`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	defer srv.Close()
+	d := osDriver(t, srv)
+	d.PollTimeout = 5 * time.Millisecond // the domain never leaves "deleting" → times out fast
+	res := d.deleteOpenSearch("catalog", "prod", "opensearch:eu-central-1:000000000000:pv-catalog-prod-1")
+	if res.Status != "unknown" {
+		t.Fatalf("an accepted-but-still-deleting domain must be unknown (keep the handle), "+
+			"got %+v — reporting succeeded tombstones a data-bearing domain still live", res)
 	}
 }
 
@@ -177,6 +223,11 @@ func TestMetamorphicOpenSearchRoundTrip(t *testing.T) {
 			var kms string
 			srv := httptest.NewServer(http.HandlerFunc(
 				func(w http.ResponseWriter, r *http.Request) {
+					// D800: the driver asks KMS who manages the key, so the fixture answers.
+					if strings.HasSuffix(r.Header.Get("X-Amz-Target"), ".DescribeKey") {
+						_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"CUSTOMER"}}`))
+						return
+					}
 					switch {
 					case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/domain"):
 						body, _ := io.ReadAll(r.Body)
@@ -241,4 +292,59 @@ func TestMetamorphicOpenSearchRoundTrip(t *testing.T) {
 			}
 		})
 	}
+}
+
+func osRESTRole(req *http.Request, _ []byte) certifynet.Role {
+	if req.Method == http.MethodGet {
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingOpenSearch enrols opensearch in the D391 gate. The domain name is
+// deterministic, a second create is answered ResourceAlreadyExists, and the tags decide.
+func TestAdoptsExistingOpenSearch(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/opensearch",
+		Classify: osRESTRole,
+		ExistingServer: func() *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/domain"):
+						w.WriteHeader(409)
+						_, _ = w.Write([]byte(`{"__type":"ResourceAlreadyExistsException",` +
+							`"message":"ResourceAlreadyExists"}`))
+					case r.Method == "GET" && strings.Contains(r.URL.Path, "/tags"):
+						_, _ = w.Write([]byte(`{"TagList":[{"Key":"groundhold-capability","Value":"search"},` +
+							`{"Key":"groundhold-environment","Value":"prod"}]}`))
+					case r.Method == "GET" && strings.Contains(r.URL.Path, "/domain/"):
+						_, _ = w.Write([]byte(`{"DomainStatus":{"DomainName":"d","Processing":false,"Created":true,` +
+							`"EncryptionAtRestOptions":{"Enabled":true},` +
+							`"DomainEndpointOptions":{"EnforceHTTPS":true},` +
+							`"ClusterConfig":{"ZoneAwarenessEnabled":true}}}`))
+					default:
+						w.WriteHeader(404)
+					}
+				}))
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.OpenSearchBaseURL = happyURL
+			d.KMSBaseURL = happyURL // D800: the key is traced to KMS
+			d.Now = time.Now
+			d.PollInterval = time.Millisecond
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("opensearch", "search", "prod", osAttrs(), osImpl(), "search", 1)
+		},
+		AllowedMutations: 1, // the refused create
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

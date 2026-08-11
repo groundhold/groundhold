@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"groundhold/internal/provider"
 )
@@ -18,8 +19,12 @@ type backupVaultDoc struct {
 				State string `json:"state"` // Disabled | Unlocked | Locked
 			} `json:"immutabilitySettings"`
 			SoftDelete struct {
-				State           string `json:"state"`
-				RetentionInDays int    `json:"retentionDurationInDays"`
+				State string `json:"state"`
+				// D908: Azure returns this as a JSON number WITH a fraction (14.0), which
+				// cannot decode into an int — the whole vault document then failed to
+				// parse, so the pre-delete read returned "unparseable" and every retire
+				// died as unknown (the vault was never deleted). float64 accepts 14.0.
+				RetentionInDays float64 `json:"retentionDurationInDays"`
 			} `json:"softDeleteSettings"`
 			Encryption struct {
 				State string `json:"state"` // Enabled when CMK
@@ -71,6 +76,13 @@ func (d *Driver) observeBackupVault(capability, providerID string) ([]provider.O
 	if err != nil {
 		return nil, nil, err
 	}
+	if st == http.StatusNotFound {
+		// F-LC3 (D522): a readable absence, not a failure to read. Folded into the
+		// generic error it blocked the binding on unknown instead of re-creating.
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"backup vault not found — bound resource is gone (will re-create)"}, nil
+	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("backupVaults GET: HTTP %d", st)
 	}
@@ -78,7 +90,10 @@ func (d *Driver) observeBackupVault(capability, providerID string) ([]provider.O
 	if json.Unmarshal(resp, &doc) != nil {
 		return nil, nil, fmt.Errorf("backupVaults GET: unparseable vault document")
 	}
-	var obs []provider.Observation
+	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3).
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
+	}
 	var diags []string
 	if doc.Location != "" {
 		obs = append(obs, provider.Observation{Path: "location.region", Value: doc.Location, Derivation: "measured"})
@@ -86,7 +101,7 @@ func (d *Driver) observeBackupVault(capability, providerID string) ([]provider.O
 	obs = append(obs, provider.Observation{Path: "service.managed", Value: true, Derivation: "measured"})
 	if doc.Props.Security.SoftDelete.RetentionInDays > 0 {
 		obs = append(obs, provider.Observation{Path: "retention.minimum",
-			Value: fmt.Sprintf("%dh", doc.Props.Security.SoftDelete.RetentionInDays*24), Derivation: "measured"})
+			Value: fmt.Sprintf("%dh", int(doc.Props.Security.SoftDelete.RetentionInDays)*24), Derivation: "measured"})
 	}
 	switch doc.Props.Security.Immutability.State {
 	case "Locked":
@@ -94,9 +109,7 @@ func (d *Driver) observeBackupVault(capability, providerID string) ([]provider.O
 	case "Unlocked":
 		obs = append(obs, provider.Observation{Path: "retention.lockMode", Value: "governance", Derivation: "measured"})
 	}
-	if doc.Props.Security.Encryption.State == "Enabled" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: true, Derivation: "measured"})
-	}
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: doc.Props.Security.Encryption.State == "Enabled", Derivation: "measured"})
 	return obs, diags, nil
 }
 
@@ -143,10 +156,29 @@ func (d *Driver) deleteBackupVault(capability, environment, providerID string) p
 	}
 	r := d.deleteAndConfirm(url, providerID, "backup vault")
 	if r != nil && r.Status == "failed" {
-		// a still-populated vault refuses delete with a 4xx — surface the honest
-		// stateful reason (D47), not the raw provider error.
-		r.Reason = "vault still holds backup instances — recovery points are data; " +
-			"they must age out or be deleted first (never forced): " + r.Reason
+		// D741: this rewrote EVERY failed delete to "vault still holds backup
+		// instances" — a specific data-safety claim, asserted whatever the cause. A
+		// missing `backupVaults/delete` permission, a throttle, a wrong subscription
+		// and a policy denial all came back telling the operator to wait for recovery
+		// points to age out. That is a cause we never established, and the action it
+		// implies is wrong for every case but one.
+		//
+		// So ask. The vault's own backupInstances list is one call on a path that has
+		// already failed, and it turns an invented reason into a measured one — or into
+		// an honest "we could not tell".
+		n, readable := d.countBackupInstances(url)
+		switch {
+		case readable && n > 0:
+			r.Reason = fmt.Sprintf("vault still holds %d backup instance(s) — recovery "+
+				"points are data; they must age out or be deleted first (never forced): %s",
+				n, r.Reason)
+		case readable:
+			r.Reason = "the vault holds no backup instances, so this refusal is NOT about " +
+				"stored data — the provider's own reason follows: " + r.Reason
+		default:
+			r.Reason = "the cause was not established (the vault's backup instances could " +
+				"not be read) — the provider's own reason follows: " + r.Reason
+		}
 	}
 	return *r
 }
@@ -198,7 +230,7 @@ func (d *Driver) discoverBackupVault(region string) ([]provider.Discovered, []st
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.backup.vault",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -213,4 +245,30 @@ func (d *Driver) reconcileBackupVault(capability, environment, pid string) provi
 	}
 	return d.reconcileStdARM(pid, sub, rg, "Microsoft.DataProtection/backupVaults/"+vault,
 		dataProtectionAPIVersion, "backup vault "+vault, capability, environment)
+}
+
+// countBackupInstances reads how many backup instances a vault holds (D741). The second
+// return is whether the answer was READ at all — an unreadable list must never become
+// "empty", which is how a refusal starts asserting a cause nobody measured.
+func (d *Driver) countBackupInstances(vaultURL string) (int, bool) {
+	// The vault URL already carries ?api-version=...; the instances collection hangs
+	// off the same resource path.
+	base, query, _ := strings.Cut(vaultURL, "?")
+	u := base + "/backupInstances"
+	if query != "" {
+		u += "?" + query
+	}
+	st, body, err := d.armGet(u)
+	if err != nil || st != http.StatusOK {
+		return 0, false
+	}
+	var doc struct {
+		Value []struct {
+			Name string `json:"name"`
+		} `json:"value"`
+	}
+	if json.Unmarshal(body, &doc) != nil {
+		return 0, false
+	}
+	return len(doc.Value), true
 }

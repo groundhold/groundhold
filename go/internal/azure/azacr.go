@@ -49,7 +49,12 @@ type ACRPlan struct {
 // is a preflight refusal, never a silent drop.
 func BuildACR(environment, capability string,
 	attrs, impl map[string]any, generation int) (ACRPlan, error) {
-	p := ACRPlan{Name: acrName(environment, capability, generation), Sku: "Standard"}
+	// D877: a registry is PUBLIC unless the contract asks otherwise. The old default was
+	// the zero value (Public:false), which sent publicNetworkAccess=Disabled on the default
+	// Standard SKU — and Azure 400s that ("Disabling public network access is not supported
+	// for the SKU Standard"), so the driver could not create an ACR on a real account with
+	// no exposure declared. Public-by-default + emit-only-on-Premium (createBody) fixes it.
+	p := ACRPlan{Name: acrName(environment, capability, generation), Sku: "Standard", Public: true}
 	paths := make([]string, 0, len(attrs))
 	for k := range attrs {
 		paths = append(paths, k)
@@ -63,6 +68,12 @@ func BuildACR(environment, capability string,
 			p.Region, _ = raw.(string)
 		case "network.publicExposure":
 			p.Public, _ = raw.(bool)
+			if !p.Public {
+				// D877: disabling public network access is a Premium-only control on ACR
+				// (Basic/Standard are always public), so a private registry needs Premium —
+				// the same SKU upgrade CMK already forces.
+				p.Sku = "Premium"
+			}
 		case "encryption.customerManagedKeys":
 			if raw == true {
 				p.CMEK = true
@@ -119,13 +130,18 @@ func acrName(environment, capability string, generation int) string {
 }
 
 func (p ACRPlan) createBody(tags map[string]any) map[string]any {
-	access := "Disabled"
-	if p.Public {
-		access = "Enabled"
-	}
 	props := map[string]any{
-		"adminUserEnabled":    false,
-		"publicNetworkAccess": access,
+		"adminUserEnabled": false,
+	}
+	// D877: publicNetworkAccess is a PREMIUM-only property on ACR — Basic/Standard registries
+	// are always public and REJECT the field (Azure 400). Emit it only where it is
+	// configurable; a private registry has already forced Premium above.
+	if p.Sku == "Premium" {
+		access := "Enabled"
+		if !p.Public {
+			access = "Disabled"
+		}
+		props["publicNetworkAccess"] = access
 	}
 	if p.CMEK {
 		props["encryption"] = map[string]any{

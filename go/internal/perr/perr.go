@@ -5,6 +5,21 @@ package perr
 
 import "sort"
 
+// AtNow is the `--at` operand every published remediation carries when it names a
+// time-sensitive verb (D693). N1 refuses a defaulted clock, so advice that names
+// `observe`, `discover`, `crawl`, `resume` — any of the twenty — without one cannot
+// be followed as written: the reader pastes it and gets a refusal instead of the
+// help they were promised at the moment they most needed it.
+//
+// A shell substitution rather than a `<placeholder>`: the reader pastes it verbatim
+// and it resolves. Shared from here, the package with no dependencies, so the twenty
+// verbs' advice cannot drift into twenty spellings of the same operand.
+//
+// Pass it as an ARGUMENT (`… %s`), never concatenated into a format string: it holds
+// `%F` and `%T`, which Sprintf reads as verbs. `go vet` refuses that — it caught all
+// six call sites on the first draft, which is the gate this constant relies on.
+const AtNow = `--at "$(date -u +%FT%TZ)"`
+
 type Code string
 
 const (
@@ -64,6 +79,127 @@ const (
 type Explanation struct {
 	Summary     string `json:"summary"`
 	Remediation string `json:"remediation"`
+}
+
+// ExitFor is the process exit each code carries, and it is now stated ONCE (D619).
+//
+// It used to live only in `spec/errors.md` and, separately, at every call site as a
+// literal beside the code. They drifted, which a caller cannot survive: the SAME
+// condition — a plan whose decision heads moved — was refused as `structural-error`
+// exit 3 on one path and `stale-decision` exit 3 on another, `structural-error` was
+// emitted at exits 1, 2 AND 3, and `stale-decision` at 2 and 3. A machine reading the
+// code cannot map it to an exit in either direction, which is the whole point of
+// publishing both.
+//
+// D330's gate reconciles the code NAMES across four artefacts. The exit column had no
+// gate at all, which is exactly where the drift lived.
+// Markers are nouns the runtime emits that are NOT process-exit codes: per-capability
+// verdicts inside a report, and compiler advisories. `explain` is published as "the
+// single place to ask about any noun the runtime emits", and four of these were
+// emitted as bare string literals, registered nowhere, so asking about them exited 1
+// with "not an error code and not a vocabulary attribute" (D623).
+//
+// They are deliberately separate from Explain: those carry an exit and appear in
+// spec/errors.md's table, and a marker has neither. Same lookup surface, honest
+// distinction — and a gate requires every code string the runtime emits to be in one
+// registry or the other.
+var Markers = map[Code]Explanation{
+	"capsule-coupled": {
+		"A capability shares an event with one that could not be proven, so its tail " +
+			"cannot be restored without fabricating that history.",
+		"Supply the capsule for the coupled capability and restore again; `--partial` " +
+			"marks it unknown rather than inventing the shared events.",
+	},
+	"capsule-trust-refused": {
+		"A capsule's signatures did not verify against the trusted keys in force.",
+		"Check `--trust`/`--trust-from` against the keys that signed the capsule; a " +
+			"capsule that cannot be trusted is not restored from.",
+	},
+	"existence-not-witnessed": {
+		"The plan asserts a resource exists without an observation that witnessed it.",
+		"Run `observe --record` for the capability, then re-plan; existence claimed " +
+			"from a declaration is not evidence.",
+	},
+	"hard-constraint-on-a-projection": {
+		"A hard constraint's runtime bar is `static` on an attribute the vocabulary marks " +
+			"as a PROJECTION, so the only evidence it can ever have is the value declared " +
+			"in the candidate.",
+		"Keep it if a stated assumption is what you want; raise the bar to `probe` to " +
+			"demand a measurement (and be refused until one exists, which is the point); " +
+			"or make it `soft`, which is what an unprovable assertion already is.",
+	},
+	"chargeable-component-outside-the-declared-cost": {
+		"A declared attribute makes this build a component the provider bills SEPARATELY " +
+			"from the resource, while cost.monthly on the same capability is the author's " +
+			"own figure.",
+		"Check the declared cost against the provider's rate card for the named " +
+			"component. This tool prices nothing it builds and does not pretend to.",
+	},
+	"logs-group-has-no-producer": {
+		"A log group is declared with nothing in the contract writing to it.",
+		"Bind a producer to the group, or drop the group; a sink with no source " +
+			"collects nothing and reads as coverage.",
+	},
+}
+
+// ExitsFor is the set of process exits each code may carry, stated ONCE (D619).
+//
+// Most codes carry one. Three carry two by design, and `spec/errors.md` publishes them
+// as "3/4" — a fact my first version of this map silently dropped, because the parser
+// only matched a cell of pure digits. The gate compared the dropped map against a
+// `published` map parsed the SAME WRONG WAY, so both agreed by being wrong together,
+// and the missing entries surfaced only when a lookup returned the zero value and a
+// refusal exited 0. Two artefacts derived by one broken parser are one artefact.
+var ExitsFor = map[Code][]int{}
+
+// ExitFor is the PRIMARY exit for a code — what a refusal uses when it has no reason
+// to pick the alternate. Unknown codes give 2, the historical default; the gate
+// asserts every code the source refuses with has an entry, so that is unreachable.
+func ExitFor(code Code) int {
+	if e := ExitsFor[code]; len(e) > 0 {
+		return e[0]
+	}
+	return 2
+}
+
+func init() {
+	for code, exits := range map[Code][]int{
+		AdoptionMismatch:         {2},
+		ApplyFailed:              {4},
+		BindingConflict:          {2},
+		ClockRegress:             {2, 3},
+		ConfirmationRequired:     {2},
+		ConsentRequired:          {2},
+		LeaseConflict:            {3},
+		LedgerCorrupted:          {5},
+		MappingSchemaDrift:       {2},
+		NotExecutable:            {2},
+		NothingToChange:          {2},
+		ObservationRequired:      {2},
+		PreflightInconclusive:    {2},
+		ProviderAgainLater:       {4},
+		ProviderPermissionDenied: {2},
+		ProviderRefused:          {2},
+		ReadSetMismatch:          {2},
+		ReconcilePending:         {3},
+		ReconcileRequired:        {3, 4},
+		ReferenceInvalid:         {2},
+		ReferenceUnresolved:      {3, 4},
+		RunDone:                  {0},
+		RunFailed:                {4},
+		RunNeedsReconcile:        {3},
+		RunRunning:               {3},
+		RunStalled:               {3},
+		RunUnknown:               {3},
+		StaleDecision:            {3},
+		StructuralError:          {1},
+		SurveyDrift:              {2},
+		UnknownOperand:           {2},
+		UnsupportedOperation:     {2},
+		WaitTimeout:              {3},
+	} {
+		ExitsFor[code] = exits
+	}
 }
 
 // RegistryEntry is one code's machine-readable remediation (D233): the exact
@@ -131,7 +267,15 @@ var Explain = map[Code]Explanation{
 		"Fix the clock; the ledger refuses backdated appends (D56)."},
 	BindingConflict: {
 		"The capability or providerId is already bound.",
-		"Unadopt or retire the existing binding first."},
+		// D730: this used to say "Unadopt or retire the existing binding first" and
+		// there is no `retire` VERB. A pilot spent a quarter of an hour searching a
+		// fifty-item verb list, assuming they had missed it rather than that the tool
+		// was pointing at nothing. Retirement is a CONTRACT state (D47), and naming it
+		// is the difference between advice and a wild-goose chase.
+		"For a resource groundhold adopted, `unadopt` it. For one groundhold created, " +
+			"set `state: retired` on the capability in the contract and re-plan — that " +
+			"compiles a pinned delete. Removing the capability from the contract does " +
+			"NOT delete anything, deliberately."},
 	AdoptionMismatch: {
 		"The candidate disagrees with observed reality.",
 		"Fix the candidate or the resource — adoption must not lie."},
@@ -169,8 +313,8 @@ var Explain = map[Code]Explanation{
 		"Inspect the reason and receipts; re-plan."},
 	LedgerCorrupted: {
 		"The ledger file is corrupted.",
-		"Run `groundhold repair` — diagnose, then quarantine on fingerprint " +
-			"consent; nothing proceeds over corruption."},
+		"Run `groundhold repair --ledger <file>` — diagnose, then quarantine on " +
+			"fingerprint consent; nothing proceeds over corruption."},
 	ProviderPermissionDenied: {
 		"The acting identity lacks permissions the plan requires.",
 		"Grant the listed permissions to the identity, or apply as one that " +
@@ -181,7 +325,7 @@ var Explain = map[Code]Explanation{
 		"Fix what blocks the check (enable the provider's IAM API, repair the " +
 			"token/scope, restore connectivity), then retry — or skip it " +
 			"deliberately where strictness is not required."},
-	// D330: the run codes are emitted by `runstatus`/`wait`/`runs` and travel to
+	// D330: the run codes are emitted by `status`/`wait`/`runs` and travel to
 	// notification hooks, so they need the same static remediation every other
 	// routed code has. The context-specific prose (which receipt, whose lease)
 	// stays where the invocation knows it — this is the generic answer `explain`
@@ -192,7 +336,10 @@ var Explain = map[Code]Explanation{
 			"it may have died before its first event; read its log."},
 	RunRunning: {
 		"A writer holds a live lease and the run has not concluded.",
-		"Nothing — wait. `wait --handle` blocks until it concludes."},
+		// D764: this said `wait --handle`, and there is no such flag — wait takes the
+		// handle POSITIONALLY. A remediation that routes at a flag the binary does not
+		// parse is the same failure as one routing at a verb it does not dispatch (D730).
+		"Nothing — wait. `wait <handle> --ledger <l>` blocks until it concludes."},
 	RunStalled: {
 		"The writer's lease lapsed without concluding the run.",
 		"Run `resume` — it asks the provider what actually happened."},
@@ -208,6 +355,6 @@ var Explain = map[Code]Explanation{
 			"code says why."},
 	WaitTimeout: {
 		"`wait` gave up before the run concluded. The run is unaffected.",
-		"Re-run `wait` with a longer --timeout, or poll `runstatus` — nothing " +
+		"Re-run `wait` with a longer --timeout, or poll `status` — nothing " +
 			"was cancelled and no state changed."},
 }

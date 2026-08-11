@@ -5,6 +5,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 // ECS resume message-match (review #2, self-introduced regression the second pass
@@ -130,4 +134,68 @@ func TestValidateRefusesMissingRegion(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "location.region") {
 		t.Fatalf("Validate must refuse a missing region, got %v", err)
 	}
+}
+
+func ecsTargetRole(req *http.Request, _ []byte) certifynet.Role {
+	tgt := req.Header.Get("X-Amz-Target")
+	switch tgt[strings.LastIndex(tgt, ".")+1:] {
+	case "DescribeServices", "DescribeClusters", "ListTagsForResource", "DescribeTaskDefinition":
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingECS enrols ecs in the D391 gate. ECS resumes onto an existing OURS
+// service via the API's own non-idempotent-creation message; the tags on the standing
+// service are what make the resume legitimate. The mutations are the mechanism
+// (CreateCluster/RegisterTaskDefinition/CreateService are all issued and the last is
+// refused), so the proof here is that it ends bound to the standing service.
+func TestAdoptsExistingECS(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	describes := 0
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/ecs",
+		Classify: ecsTargetRole,
+		ExistingServer: func() *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					target := r.Header.Get("X-Amz-Target")
+					switch target[strings.LastIndex(target, ".")+1:] {
+					case "CreateCluster":
+						_, _ = w.Write([]byte(`{"cluster":{"status":"ACTIVE"}}`))
+					case "RegisterTaskDefinition":
+						_, _ = w.Write([]byte(`{"taskDefinition":{"taskDefinitionArn":"arn:aws:ecs:eu-central-1:000000000000:task-definition/app:1"}}`))
+					case "CreateService":
+						w.WriteHeader(400)
+						_, _ = w.Write([]byte(`{"__type":"InvalidParameterException","message":"Creation of service was not idempotent."}`))
+					case "DescribeServices":
+						describes++
+						running, roll := 0, "IN_PROGRESS"
+						if describes >= 2 {
+							running, roll = 1, "COMPLETED"
+						}
+						_, _ = w.Write([]byte(`{"services":[{"status":"ACTIVE","runningCount":` + itoa(running) +
+							`,"desiredCount":1,"launchType":"FARGATE","deployments":[{"rolloutState":"` + roll + `"}],` +
+							`"tags":[{"key":"groundhold-capability","value":"app"},{"key":"groundhold-environment","value":"prod"}]}]}`))
+					default:
+						w.WriteHeader(400)
+					}
+				}))
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.ECSBaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.PollInterval = time.Millisecond
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("ecs", "app", "prod", ecsAttrs(), ecsImpl(), "app", 1)
+		},
+		AllowedMutations: 3, // CreateCluster, RegisterTaskDefinition, the refused CreateService
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

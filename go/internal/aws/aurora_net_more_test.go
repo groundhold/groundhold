@@ -3,6 +3,7 @@ package aws
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // This file rounds out aurora_net.go coverage: updateAurora, auroraPatchOutcome,
@@ -110,6 +111,18 @@ func TestUpdateAurora_RecoveryRPOPatchesRetention(t *testing.T) {
 	}
 	if len(f.modifyClusterBodies) != 1 || !strings.Contains(f.modifyClusterBodies[0], "BackupRetentionPeriod=7") {
 		t.Fatalf("ModifyDBCluster body missing BackupRetentionPeriod=7: %v", f.modifyClusterBodies)
+	}
+}
+
+// D953: a cluster modify still applying (PendingModifiedValues present) at the poll
+// timeout is unknown — updateAurora must poll to applied, not report succeeded on accept.
+func TestUpdateAuroraStillApplyingIsUnknown(t *testing.T) {
+	f, d, pid := auroraUpdateSetup(t)
+	f.clusterPending = true
+	d.PollTimeout = 5 * time.Millisecond
+	res := d.updateAurora("db", "prod", pid, auroraAttrs(), auroraImpl(), []string{"recovery.rpo"})
+	if res.Status != "unknown" || res.ProviderID != pid {
+		t.Fatalf("a cluster modify still applying at timeout must be unknown WITH pid, got %+v", res)
 	}
 }
 

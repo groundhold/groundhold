@@ -50,6 +50,12 @@ func TestBuildCloudFunctionGolden(t *testing.T) {
 	if req.Body["environment"] != "GEN_2" {
 		t.Fatalf("must be GEN_2, got %v", req.Body["environment"])
 	}
+	// D925: the body's name must be the FULL resource path — Cloud Functions v2 rejects a
+	// bare deterministic name ("Invalid resource name ... for pattern projects/.../functions/{function}").
+	nm, _ := req.Body["name"].(string)
+	if !strings.HasPrefix(nm, "projects/acme-prod/locations/europe-central2/functions/") {
+		t.Fatalf("body name must be the full resource path, got %q", nm)
+	}
 	sc := req.Body["serviceConfig"].(map[string]any)
 	if sc["ingressSettings"] != "ALLOW_ALL" {
 		t.Fatalf("public exposure must be ALLOW_ALL, got %v", sc["ingressSettings"])

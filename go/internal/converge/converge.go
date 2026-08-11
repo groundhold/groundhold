@@ -31,13 +31,27 @@ import (
 // before it forks, and it must equal what Converge writes as convergeRunId. It is
 // domain-prefixed so it can never collide with an applyRunId of the same inputs,
 // and it embeds the explicit --at, so a handle cannot exist for a defaulted clock.
-func RunID(contractPath, at string) (runID, env string, caps []string, err error) {
+// D656: the CANDIDATE and the PROJECT are part of a run's identity. They were not
+// in the handle, so editing the candidate — the file an operator edits to fix an
+// implementation — and re-running at the same --at reused it. The ledger then held
+// converge.finished{exitCode:0} and converge.failed{exitCode:2} under one id, and
+// `status`/`wait` reported the first: exit 0 for a deploy that was refused.
+func RunID(contractPath, candidatePath, at, project string) (runID, env string, caps []string, err error) {
 	raw, err := os.ReadFile(contractPath)
 	if err != nil {
 		return "", "", nil, err
 	}
 	ch := sha256.Sum256(raw)
-	sum := sha256.Sum256([]byte("converge:" + hex.EncodeToString(ch[:]) + "|" + at))
+	kh := [32]byte{} // an absent candidate path stays distinguishable from an empty one
+	if candidatePath != "" {
+		kraw, kerr := os.ReadFile(candidatePath)
+		if kerr != nil {
+			return "", "", nil, kerr
+		}
+		kh = sha256.Sum256(kraw)
+	}
+	sum := sha256.Sum256([]byte("converge:" + hex.EncodeToString(ch[:]) +
+		"|" + hex.EncodeToString(kh[:]) + "|" + at + "|" + project))
 	runID = hex.EncodeToString(sum[:])[:12]
 	// the contract's capabilities scope the lifecycle events (the ledger requires
 	// non-empty caps); status derives from the body's convergeRunId, not caps.
@@ -51,9 +65,55 @@ func RunID(contractPath, at string) (runID, env string, caps []string, err error
 	return runID, env, caps, nil
 }
 
+// planPathFor names the plan file for ONE run. D656: it was a fixed
+// `.groundhold/converge-plan.yaml`, so two converges in one directory clobbered it
+// and each applied whichever plan was written last — measured 8 times in 8, with
+// one run creating resources in the other's project at exit 0. The two plans
+// differed only in `project`, which is not in the read-set, so apply's own
+// mismatch check could not see it.
+func planPathFor(runID string) string {
+	name := "converge-plan.yaml"
+	if runID != "" {
+		name = "converge-plan-" + runID + ".yaml"
+	}
+	return filepath.Join(".groundhold", name)
+}
+
 type Options struct {
-	Contract, Candidate   string
-	Ledger, Vocab         string
+	Contract, Candidate string
+	Ledger, Vocab       string
+	// D612: the SECURITY policy of the run. converge executes plan/observe/apply as
+	// child PROCESSES, so an in-process trust set does not reach them — the flags
+	// have to travel on argv. They did not, and the consequences ran both ways:
+	// `converge --trust <key>` read AND WROTE a ledger whose events were signed by a
+	// foreign key while `plan`, `export` and `audit` all refused it (exit 5), and
+	// `converge --sign-key` produced a history where the child observe's events are
+	// UNSIGNED — which, because history is append-only, permanently breaks
+	// `--trust` verification of that ledger.
+	AllowExposure bool // D630: consent for a provable increase in exposure
+	// D638: the CLUSTER SELECTOR. Same shape as D612's security policy: converge runs
+	// its children as separate processes, so a flag that names WHICH cluster has to
+	// travel on argv. It did not — so `converge --kubeconfig <other> --context <other>`
+	// created objects on the DEFAULT cluster while the operator named another, at exit
+	// 0 and with a CONVERGED banner. Every other verb refuses an unknown context.
+	Kubeconfig  string
+	KubeContext string
+	// D638: the rest of what a child needs to see the same world and do the same
+	// work. Each was classified "forwarded" by the flag-forwarding gate and was not
+	// travelling; the injection keys are why converge's own partial-apply path (D379,
+	// D387, D241) could not be exercised from the command line at all.
+	Region                string
+	Bindings              string
+	Observations          string
+	TTL                   string
+	Budget                string
+	RequirePreflight      bool
+	FailKey               string
+	UnknownKey            string
+	RetryableKey          string
+	Trust                 []string
+	TrustFrom             string
+	SignKey               string
 	NoVocab               bool   // force the empty vocabulary in sub-commands
 	Currency              string // reporting currency for the cost estimate (D202)
 	Project, Provider, At string
@@ -158,7 +218,51 @@ func (o Options) planArgs() []string {
 	if o.Ledger != "" {
 		args = append(args, "--ledger", o.Ledger)
 	}
-	return args
+	return append(args, o.policyArgs()...)
+}
+
+// policyArgs are the trust/signing flags every child must carry (D612). A child that
+// does not carry them enforces nothing and signs nothing, which is worse than a child
+// that was never run: the run reports success and the ledger records it.
+// targetArgs are the flags that name WHAT the run acts on — the cluster selector today.
+// They travel with policyArgs for the same reason (D638): a child process inherits
+// neither, and a child pointed at the wrong world is worse than a child with no policy.
+func (o Options) targetArgs() []string {
+	var a []string
+	if o.Kubeconfig != "" {
+		a = append(a, "--kubeconfig", o.Kubeconfig)
+	}
+	if o.KubeContext != "" {
+		a = append(a, "--context", o.KubeContext)
+	}
+	for _, kv := range [][2]string{
+		{"--region", o.Region}, {"--bindings", o.Bindings},
+		{"--observations", o.Observations}, {"--ttl", o.TTL},
+		{"--budget", o.Budget}, {"--fail-key", o.FailKey},
+		{"--unknown-key", o.UnknownKey}, {"--retryable-key", o.RetryableKey},
+	} {
+		if kv[1] != "" {
+			a = append(a, kv[0], kv[1])
+		}
+	}
+	if o.RequirePreflight {
+		a = append(a, "--require-preflight")
+	}
+	return a
+}
+
+func (o Options) policyArgs() []string {
+	var a []string
+	for _, t := range o.Trust {
+		a = append(a, "--trust", t)
+	}
+	if o.TrustFrom != "" {
+		a = append(a, "--trust-from", o.TrustFrom)
+	}
+	if o.SignKey != "" {
+		a = append(a, "--sign-key", o.SignKey)
+	}
+	return append(a, o.targetArgs()...)
 }
 
 // ledgerPhase maps a checklist row id to the stable ledger phase name (the two
@@ -196,6 +300,50 @@ func (o *Options) convergeBody(extra map[string]any) map[string]any {
 		b[k] = v
 	}
 	return b
+}
+
+// pendingBlocker names the first in-scope capability that still carries an
+// unresolved (unknown-outcome) receipt, if any.
+//
+// D935: apply refuses while a capability has pending receipts (apply.go, "must be
+// reconciled first (D29)"), but that loop iterates ONLY the plan's write set —
+// capabilities that carry an action. A converge whose plan carries NO actions
+// (e.g. a retire over a create that stayed `unknown`: the create wrote no binding,
+// so the retire diffs to nothing) never enters apply, so the guard never runs, and
+// converge would declare "converged" — the world clean — while the resource the
+// pending receipt names may be live and billing. That is the fail-open the freeze
+// admits: a person acting on "converged" is worse off than if the tool said
+// nothing. The deterministic providerId sits in the pending receipt the whole time
+// (recoverable via `resume`); the fix is to refuse the converged verdict until it
+// concludes.
+func (o *Options) pendingBlocker() (string, bool) {
+	if o.Ledger == "" {
+		return "", false
+	}
+	led, err := ledger.ReplayFile(o.Ledger)
+	if err != nil {
+		return "", false
+	}
+	for _, cap := range o.Caps {
+		if led.PendingCount(cap) > 0 {
+			return cap, true
+		}
+	}
+	return "", false
+}
+
+// refuseIfPending turns a would-be "converged" verdict into a ReconcileRequired
+// refusal when any in-scope capability has an outstanding unknown receipt (D935).
+func (o *Options) refuseIfPending(phases []string) (result, bool) {
+	cap, pending := o.pendingBlocker()
+	if !pending {
+		return result{}, false
+	}
+	return result{Status: "refused", Code: perr.ReconcileRequired, Exit: 3,
+		Phases: phases, Reasons: []string{fmt.Sprintf(
+			"cannot report converged: capability %q has an in-flight operation whose "+
+				"outcome is still unknown — the resource it names may exist. Run `resume` "+
+				"to conclude it before trusting this result (D935)", cap)}}, true
 }
 
 // vocabArgs mirrors the CLI's vocabulary selection into a child invocation:
@@ -396,6 +544,10 @@ func Converge(o Options) int {
 				Constraint string `json:"constraint"`
 				Severity   string `json:"severity"`
 				Verdict    string `json:"verdict"`
+				// D566: the two fields that tell an evidence GAP from a contract
+				// that can never be satisfied at create time.
+				Subject      string `json:"subject"`
+				VerifyMethod string `json:"verifyMethod"`
 			} `json:"verdicts"`
 		}
 		_ = json.Unmarshal([]byte(stdout), &rep)
@@ -417,6 +569,20 @@ func Converge(o Options) int {
 				roll.Unverifiable = append(roll.Unverifiable, v.Constraint)
 			}
 		}
+		// D566: a hard provider-api constraint over a capability that is NOT BOUND
+		// can never resolve — no observation can exist before the resource does
+		// (D290 named this "the natural mistake a first-time author makes with a
+		// four-valued verifier"). verify's sentence covers that and "bound but not
+		// yet observed" alike, and their remedies are opposite: one is fixed by
+		// `observe --record`, the other by a different contract. verify cannot tell
+		// them apart — it is a pure function of the two documents, which is why it
+		// is dual-implemented and conformance-pinned. Converge HAS the ledger.
+		for _, c := range unresolvableAtCreate(rep.Verdicts, o.Ledger) {
+			o.say("  %s cannot resolve by observing: no observation can exist before "+
+				"the resource does, and %q is not bound. A create-time contract states "+
+				"what the candidate declares (method: static) and lets the convergence "+
+				"check supply the measured half.", c.constraint, c.subject)
+		}
 		return o.finish(result{Status: "refused", Code: perr.NotExecutable,
 			Exit: 2, Phases: phases, Rollup: roll,
 			Reasons: append([]string{"not executable:"}, rep.BlockingReasons...)})
@@ -424,7 +590,7 @@ func Converge(o Options) int {
 	o.say("  executable: true")
 
 	// ---- 2. plan (with one auto-observe retry on staleness) ----
-	planPath := filepath.Join(".groundhold", "converge-plan.yaml")
+	planPath := planPathFor(o.ConvergeRunID)
 	observed := false
 	var planBody string
 	for {
@@ -439,7 +605,12 @@ func Converge(o Options) int {
 		rcode := childCode(stdout)
 		switch {
 		case rcode == perr.NothingToChange:
-			// for converge, a converged world is the GOAL, not a refusal
+			// for converge, a converged world is the GOAL, not a refusal —
+			// unless a pending unknown receipt means the world is NOT known clean (D935)
+			if r, blocked := o.refuseIfPending(phases); blocked {
+				o.say("  ✗ cannot claim converged — an in-flight operation is unresolved")
+				return o.finish(r)
+			}
 			o.say("  ✓ converged — the world already matches the candidate")
 			return o.finish(result{Status: "converged", Exit: 0,
 				Phases: phases})
@@ -449,11 +620,22 @@ func Converge(o Options) int {
 			observed = true
 			phase("observe-refresh")
 			o.say("→ observe (stale knowledge — refreshing, read-only)")
-			c2, _, e2 := o.Run("observe", "--ledger", o.Ledger,
-				"--provider", o.Provider, "--at", o.At, "--record")
+			obsArgs := append([]string{"observe", "--ledger", o.Ledger,
+				"--provider", o.Provider, "--at", o.At, "--record"},
+				o.policyArgs()...)
+			c2, obsOut, e2 := o.Run(obsArgs...)
 			if c2 != 0 {
 				return o.finish(result{Status: "refused", Exit: 2,
 					Phases: phases, Reasons: append(lines(reason), lines(e2)...)})
+			}
+			// D558: the child's account of what it could NOT measure went to `_`,
+			// and its stderr was read only on failure — so the case that matters
+			// most was the one dropped: observe SUCCEEDED and, while succeeding,
+			// said it could not read something. Same relay D202 does for the plan
+			// child's cost estimate: a child's report is not noise because it
+			// exited 0.
+			for _, d := range observeDiagnostics(obsOut) {
+				o.say("  note: %s", d)
 			}
 			continue
 		}
@@ -520,8 +702,9 @@ func Converge(o Options) int {
 	// ---- 3. forecast + the decision, never hidden (D49) ----
 	phase("forecast")
 	o.say("→ forecast")
-	fcode, fout, ferr := o.Run("forecast", planPath, o.Candidate,
-		"--ledger", o.Ledger, "--at", o.At)
+	fArgs := append([]string{"forecast", planPath, o.Candidate,
+		"--ledger", o.Ledger, "--at", o.At}, o.policyArgs()...)
+	fcode, fout, ferr := o.Run(fArgs...)
 	if fcode != 0 {
 		// D291: the forecast is ADVISORY — apply independently re-checks the
 		// read-set, the clock and the ledger, so a preview that cannot be
@@ -539,13 +722,35 @@ func Converge(o Options) int {
 			o.say("   forecast said: %s", line)
 		}
 	}
-	destructive := describePlan(o, planBody, fout)
+	destructive, exposing := describePlan(o, planBody, fout)
 
 	// ---- 4. confirm: --yes skips prompts for already-permitted actions
 	// only; destructive plans need their own explicit consent.
 	// --json is non-interactive by definition — flags, never prompts ----
 	phase("confirm")
 	interactive := !o.JSON && o.In != nil
+	// D630: a plan that provably OPENS something up needs its own consent. D628 made
+	// `securityExposure: certain` derivable — a boolean security attribute weakened,
+	// or public exposure switched on — and nothing consumed it, so an update that
+	// exposes a database to the internet rode on plain `--yes` exactly as before.
+	// It is a separate flag rather than a fold into --allow-data-loss: the two are
+	// different harms, and a consent flag whose name does not describe what it
+	// permits is not consent.
+	if exposing && !o.AllowExposure {
+		if o.Yes || !interactive {
+			return o.finish(result{Status: "refused",
+				Code: perr.ConsentRequired, Exit: 2, Phases: phases,
+				Reasons: []string{"plan contains actions that provably increase " +
+					"security exposure (a security attribute weakened, or public " +
+					"access switched on) — --yes does not cover exposure; add " +
+					"--allow-exposure or confirm interactively"}})
+		}
+		if !prompt(o, "type 'expose' to accept increased exposure: ", "expose") {
+			return o.finish(result{Status: "refused", Code: perr.ConsentRequired,
+				Exit: 2, Phases: phases,
+				Reasons: []string{"exposure not confirmed"}})
+		}
+	}
 	if destructive && !o.AllowDataLoss {
 		if o.Yes || !interactive {
 			return o.finish(result{Status: "refused",
@@ -583,6 +788,7 @@ func Converge(o Options) int {
 	// child's probe so its denied/unknown exit is not misread as an apply failure
 	// — one probe per converge, folded into finish().
 	applyArgs = append(applyArgs, "--no-reachability")
+	applyArgs = append(applyArgs, o.policyArgs()...)
 	// D241: a throttled apply (provider-again-later) provably did not land — the
 	// receipt concludes as `retryable` (clears pending), so a re-apply is clean.
 	// Back off (bounded exponential) and retry rather than surfacing a transient
@@ -611,6 +817,9 @@ func Converge(o Options) int {
 			if pcode != 0 {
 				prc := childCode(pout)
 				if prc == perr.NothingToChange {
+					if r, blocked := o.refuseIfPending(phases); blocked {
+						return o.finish(r)
+					}
 					o.say("  ✓ converged during backoff")
 					return o.finish(result{Status: "converged", Exit: 0, Phases: phases})
 				}
@@ -623,6 +832,20 @@ func Converge(o Options) int {
 					Phases: phases, Reasons: []string{err.Error()}})
 			}
 			continue
+		}
+		// D665: apply refuses a plan with no actions, and for converge a converged
+		// world is the GOAL, not a refusal — the same reading the plan phase above
+		// already gives this code. A plan can carry zero actions and still be a real
+		// plan: the compiler seals one when a capability converged on everything it
+		// can compare and left an unobservable attribute unverified (D249).
+		if childCode(stdout) == perr.NothingToChange {
+			if r, blocked := o.refuseIfPending(phases); blocked {
+				return o.finish(r)
+			}
+			o.say("  ✓ converged — nothing to apply; the world already matches on " +
+				"every attribute this run can compare")
+			return o.finish(result{Status: "converged", Exit: 0, Phases: phases,
+				Reasons: applyReasons(stdout)})
 		}
 		status, exit := exitStatus(code)
 		// D379: what APPLIED goes first. A run that stopped part-way has already
@@ -641,12 +864,14 @@ func Converge(o Options) int {
 	convergence := ""
 	phase("observe-evidence")
 	o.say("→ observe (recording reality)")
-	if c2, _, _ := o.Run("observe", "--ledger", o.Ledger,
-		"--provider", o.Provider, "--at", o.At, "--record"); c2 == 0 {
+	postArgs := append([]string{"observe", "--ledger", o.Ledger,
+		"--provider", o.Provider, "--at", o.At, "--record"}, o.policyArgs()...)
+	if c2, _, _ := o.Run(postArgs...); c2 == 0 {
 		phase("convergence-check")
 		ccArgs := append([]string{"plan", o.Contract, o.Candidate},
 			o.vocabArgs()...)
 		ccArgs = append(ccArgs, "--ledger", o.Ledger, "--at", o.At)
+		ccArgs = append(ccArgs, o.policyArgs()...)
 		pcode, pout, _ := o.Run(ccArgs...)
 		pRcode := childCode(pout)
 		switch {
@@ -695,6 +920,21 @@ func Converge(o Options) int {
 	// URL from it, GET it, and classify. Only 2xx/3xx is clean; a 401/403 or a
 	// transport failure is unknown (BLOCKED) — it does NOT retroactively fail the
 	// apply (the resources DID apply), and it does NOT accuse a cause. ----
+	// D939: the D935 fail-open has a fourth emitter here — the post-apply exit-0
+	// "applied / verified" path, which finish() paints CONVERGED. A MIXED plan
+	// reaches it while a receipt is still unknown: one capability carries a real
+	// action, a second is retired-unbound with a pending `unknown` receipt. The
+	// compiler drops the retired-unbound capability from the plan (compiler.go: the
+	// `Bindings[capID] == "" → continue`), so apply's write-set-gated pending guard
+	// never sees it, and the plan is NON-empty, so the three whole-empty-plan guards
+	// cannot fire either. Gate the post-apply success the same way: refuse
+	// (reconcile-required) if any in-scope capability still holds an unresolved
+	// receipt — reporting the world converged while that resource may be live is the
+	// same fail-open D935 closed for the empty-plan case.
+	if r, blocked := o.refuseIfPending(phases); blocked {
+		o.say("  ✗ applied, but cannot report converged — an in-flight operation is unresolved")
+		return o.finish(r)
+	}
 	final := result{Status: "applied", Exit: 0, Phases: phases, Convergence: convergence}
 	o.reachability(&final)
 	return o.finish(final)
@@ -712,7 +952,7 @@ func (o *Options) reachability(r *result) {
 		o.say("→ reachability")
 		o.say("  reachability skipped (--no-reachability) — the public edge was " +
 			"NOT probed; an APPLIED edge that 403s will read as clean success")
-		r.Reachability = "skipped"
+		r.Reachability = string(reach.Skipped)
 		return
 	}
 	// derive edge targets from the ledger Outputs projection + contract types
@@ -777,20 +1017,33 @@ func (o *Options) foldReach(r *result, results []reach.CapResult) {
 		switch {
 		case cr.Verdict == reach.Reachable:
 			o.say("  ✓ %s reachable: GET %s — %s", cr.Capability, cr.URL, cr.Cause)
+		case cr.Verdict == reach.Failing:
+			// D696: not folded into unknown. This edge was measured and it failed;
+			// a reader must not have to tell that apart from "we could not tell".
+			o.say("  ✗ %s reachability FAILING: GET %s — %s", cr.Capability, cr.URL, cr.Cause)
 		case reach.IsAnonymousDenied(cr):
 			o.say("  ? %s reachability unknown: GET %s — %s", cr.Capability, cr.URL, cr.Cause)
 			o.say("    %s", reach.AnonymousRemediation)
-			r.Rollup.Unknown = append(r.Rollup.Unknown, cr.Capability+" public edge not anonymously reachable")
 		default: // unknown: transport failure or an unexpected status
 			o.say("  ? %s reachability unknown (from here): GET %s — %s",
 				cr.Capability, cr.URL, cr.Cause)
-			r.Rollup.Unknown = append(r.Rollup.Unknown, cr.Capability+" public edge unreachable-from-here")
 		}
 	}
-	if reach.Overall(results) == reach.Unknown {
-		r.Reachability, r.Exit = "unknown", 2
-	} else {
-		r.Reachability = "reachable"
+	if len(results) > 0 {
+		// The scope of what was measured, once, next to the verdicts (D696): a
+		// reader keying on "reachable" must be able to see what it did not cover.
+		o.say("  checked: %s", reach.Checked)
+	}
+	violated, unknown, verdict := reach.Fold(results)
+	r.Rollup.Violated = append(r.Rollup.Violated, violated...)
+	r.Rollup.Unknown = append(r.Rollup.Unknown, unknown...)
+	switch verdict {
+	case reach.Failing:
+		r.Reachability, r.Exit = string(reach.Failing), 2
+	case reach.Unknown:
+		r.Reachability, r.Exit = string(reach.Unknown), 2
+	default:
+		r.Reachability = string(reach.Reachable)
 	}
 }
 
@@ -882,8 +1135,9 @@ func planNoOpCaps(planBody string) []string {
 
 // describePlan surfaces the decision: actions, risk vectors, delete
 // targets, drift. Returns whether the plan is destructive.
-func describePlan(o Options, planBody, forecastOut string) bool {
+func describePlan(o Options, planBody, forecastOut string) (bool, bool) {
 	destructive := false
+	exposing := false
 	var plan struct {
 		Plan struct {
 			Actions []struct {
@@ -894,6 +1148,7 @@ func describePlan(o Options, planBody, forecastOut string) bool {
 					Reversibility       string `json:"reversibility"`
 					DataLoss            string `json:"dataLoss"`
 					Downtime            string `json:"downtime"`
+					SecurityExposure    string `json:"securityExposure"`
 					IdentityReplacement bool   `json:"identityReplacement"`
 				} `json:"risk"`
 			} `json:"actions"`
@@ -908,19 +1163,25 @@ func describePlan(o Options, planBody, forecastOut string) bool {
 		// gate must not depend on that contract holding forever (D51).
 		o.say("  plan output could not be parsed for risk — treating as " +
 			"destructive (fail-closed)")
-		return true
+		return true, true
 	}
 	o.say("  plan:")
 	for _, a := range plan.Plan.Actions {
-		line := fmt.Sprintf("    %s %s [%s dataLoss=%s downtime=%s]",
+		// D630: securityExposure is printed too. It became derivable in D628 and
+		// nothing showed it, so the line a human reads before consenting omitted the
+		// one field that says "this action opens something up".
+		line := fmt.Sprintf("    %s %s [%s dataLoss=%s downtime=%s exposure=%s]",
 			a.Operation, a.ID, a.Risk.Reversibility, a.Risk.DataLoss,
-			a.Risk.Downtime)
+			a.Risk.Downtime, a.Risk.SecurityExposure)
 		if a.TargetProviderID != "" {
 			line += " target=" + a.TargetProviderID
 		}
 		o.say("%s", line)
 		if a.Risk.DataLoss == "certain" || a.Risk.IdentityReplacement {
 			destructive = true
+		}
+		if a.Risk.SecurityExposure == "certain" {
+			exposing = true
 		}
 	}
 	var fc struct {
@@ -947,7 +1208,7 @@ func describePlan(o Options, planBody, forecastOut string) bool {
 		}
 		o.say("  forecast rollup: %s", strings.Join(parts, ", "))
 	}
-	return destructive
+	return destructive, exposing
 }
 
 // firstLine lifts the first non-empty line of a child's stderr for the human
@@ -1034,16 +1295,39 @@ func appliedSummary(stdout string) []string {
 	succeeded := byOutcome["succeeded"]
 	sort.Strings(succeeded)
 
+	// An UNKNOWN outcome is not a "did not apply" (D529, from the field). If the
+	// run does not know how an action ended, it does not know how many actions
+	// applied either, and "nothing was changed" reads as a confirmation that the
+	// world is untouched — a partner met exactly that line while the Lambda it
+	// described had been created. Three states, not two: applied / not applied /
+	// NOT KNOWN, and the third may not be dressed as the second. This is D29's rule
+	// (a transient outcome is `unknown`, never a terminal answer) in the sentence a
+	// human reads, which had been saying the opposite of the machine contract.
+	unknown := byOutcome["unknown"]
+	sort.Strings(unknown)
+
 	// The line leads with what CHANGED, because that is the fact an operator
 	// needs first when a run did not finish cleanly.
 	var out []string
-	if len(succeeded) > 0 {
+	switch {
+	case len(succeeded) > 0:
 		out = append(out, fmt.Sprintf(
 			"%d of %d actions applied before the run stopped — the world HAS changed: %s",
 			len(succeeded), total, strings.Join(succeeded, ", ")))
-	} else {
+	case len(unknown) > 0:
+		out = append(out, fmt.Sprintf(
+			"0 of %d actions confirmed applied, %d UNKNOWN — the world MAY have changed; "+
+				"run `resume` before retrying, or a retry may duplicate: %s",
+			total, len(unknown), strings.Join(unknown, ", ")))
+	default:
 		out = append(out, fmt.Sprintf(
 			"0 of %d actions applied — nothing was changed", total))
+	}
+	// A confirmed change leads, but the uncertainty behind it must survive.
+	if len(succeeded) > 0 && len(unknown) > 0 {
+		out = append(out, fmt.Sprintf(
+			"%d further action(s) UNKNOWN — the world MAY have changed beyond that; "+
+				"run `resume` before retrying: %s", len(unknown), strings.Join(unknown, ", ")))
 	}
 	for _, oc := range []string{"failed", "unknown", "throttled", "skipped"} {
 		ids := byOutcome[oc]
@@ -1085,4 +1369,53 @@ func lines(s string) []string {
 		return nil
 	}
 	return strings.Split(s, "\n")
+}
+
+// observeDiagnostics pulls the diagnostics out of an observe child's JSON. A body
+// that does not parse yields none rather than an error: converge is mid-run and a
+// malformed child report must not turn a successful refresh into a failure. The
+// child's exit code already governs whether the refresh worked.
+func observeDiagnostics(stdout string) []string {
+	var doc struct {
+		Diagnostics []string `json:"diagnostics"`
+	}
+	if json.Unmarshal([]byte(stdout), &doc) != nil {
+		return nil
+	}
+	return doc.Diagnostics
+}
+
+// unresolvableAtCreate returns the hard, unknown, provider-api constraints whose
+// subject has no binding — the ones observing can never settle. A ledger that
+// cannot be read yields NOTHING rather than everything: claiming a capability is
+// unbound because the ledger was unreadable would tell an author to rewrite a
+// correct contract, and a wrong remedy is worse than none (D75 skip-loudly applies
+// to advice too).
+func unresolvableAtCreate(verdicts []struct {
+	Constraint   string `json:"constraint"`
+	Severity     string `json:"severity"`
+	Verdict      string `json:"verdict"`
+	Subject      string `json:"subject"`
+	VerifyMethod string `json:"verifyMethod"`
+}, ledgerPath string) []struct{ constraint, subject string } {
+	var out []struct{ constraint, subject string }
+	if ledgerPath == "" {
+		return out
+	}
+	led, err := ledger.ReplayFile(ledgerPath)
+	if err != nil {
+		return out
+	}
+	bound := led.BoundProviderIDs()
+	for _, v := range verdicts {
+		if v.Severity != "hard" || v.Verdict != "unknown" ||
+			v.VerifyMethod != "provider-api" || v.Subject == "" {
+			continue
+		}
+		if _, ok := bound[v.Subject]; ok {
+			continue // observing WILL resolve this one
+		}
+		out = append(out, struct{ constraint, subject string }{v.Constraint, v.Subject})
+	}
+	return out
 }

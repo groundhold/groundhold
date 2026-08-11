@@ -264,9 +264,23 @@ func classifyAzureDiskChange(path string) (string, string) {
 	case "availability.class":
 		return "immutable", "zone redundancy is a property of the SKU at creation, and Azure does not convert between _LRS and _ZRS in place — changing the class means a new disk"
 	case "encryption.atRest":
-		return "immutable", "a managed disk is always encrypted at rest and the setting cannot be turned off — there is nothing to patch"
+		// D823: this returned "immutable", which makes the plan destroy the disk — and the
+		// replacement is encrypted too, so the request is not honoured and the data is gone
+		// anyway. When an attribute cannot differ, the honest answer is that it cannot be
+		// honoured, not that it needs a new resource.
+		return "unsupported", "a managed disk is always encrypted at rest and the setting " +
+			"cannot be turned off — nothing to patch (=false cannot be honored)"
 	case "encryption.customerManagedKeys":
-		return "immutable", "the disk-encryption set is bound when the disk is created — re-keying is a new disk"
+		// D823: this said the disk-encryption set is "bound when the disk is created".
+		// Microsoft's own procedure is the opposite — stop the VM, open the disk, pick the
+		// key vault and key under Customer-managed key, save, and "your disks finish
+		// switching over to customer-managed keys". Rotating WHICH key is done on the
+		// encryption set and reaches every disk referencing it, without touching a disk at
+		// all. Destroying a managed disk to change this loses the data on it.
+		return "unsupported", "in-place customer-managed-key change is not wired for managed " +
+			"disks in this slice — Azure does support it (attach a disk encryption set to an " +
+			"existing disk with the VM stopped; rotating the key itself is done on the " +
+			"encryption set), so this is a gap in groundhold, not a reason to destroy a disk"
 	case "service.managed":
 		return "unsupported", "platform/projection property — nothing to patch"
 	}

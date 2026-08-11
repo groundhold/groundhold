@@ -298,7 +298,10 @@ func TestListDiscoversAcrossServices(t *testing.T) {
 		t.Fatalf("vpc observations = %+v", vpc)
 	}
 	ecr := obsMap(byType["capability.registry.image"])
-	if ecr["immutable.tags"] != true || ecr["encryption.customerManagedKeys"] != true {
+	// D954: the fixture repo is encryptionType=KMS with no customer key — the AWS-managed
+	// aws/ecr key, NOT customer-managed. observe now reports customerManagedKeys=false
+	// (traced) rather than reading true off the type alone.
+	if ecr["immutable.tags"] != true || ecr["encryption.customerManagedKeys"] != false {
 		t.Fatalf("ecr observations = %+v", ecr)
 	}
 	sec := obsMap(byType["capability.secret"])

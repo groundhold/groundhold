@@ -356,10 +356,17 @@ func (d *Driver) observeVPC(capability, providerID string) ([]provider.Observati
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"network not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"network not found — bound resource is gone (will re-create)"}, nil
 	}
 
-	var obs []provider.Observation
+	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
+	}
 	var diags []string
 	obs = append(obs, provider.Observation{Path: "service.managed",
 		Value: true, Derivation: "measured"})
@@ -437,13 +444,26 @@ func (d *Driver) findOwnedSubnet(doc networkDoc, project, region, capability str
 			PrivateIpGoogleAccess bool   `json:"privateIpGoogleAccess"`
 			LogConfig             struct {
 				Enable bool `json:"enable"`
+				// D742: `enable` alone is the switch, not the outcome. A subnet with
+				// logConfig.enable=true and flowSampling 0 records NO flows — the same
+				// "the control exists and collects nothing" shape D725 fixed on AWS,
+				// one cloud over. Both fields arrive in this same subnetworks.get body.
+				FlowSampling float64 `json:"flowSampling"`
 			} `json:"logConfig"`
 		}
 		if json.Unmarshal(body, &sub) != nil {
 			return "", false, false, false, readBody(op, status)
 		}
 		if cap, _, ok := parseVPCMarker(sub.Description); ok && cap == sanitizeLabel(capability) {
-			return sub.Description, sub.LogConfig.Enable, sub.PrivateIpGoogleAccess, true, nil
+			// D742: enabled AND actually sampling. GCP omits flowSampling when logging
+			// is off; when logging is ON it carries the rate, and 0 means nothing is
+			// recorded. An omitted rate on an enabled config is GCP's default (0.5),
+			// so only an explicit zero disables collection.
+			flowing := sub.LogConfig.Enable && sub.LogConfig.FlowSampling != 0
+			if sub.LogConfig.Enable && sub.LogConfig.FlowSampling == 0 && !flowSamplingPresent(body) {
+				flowing = true // no rate stated: the platform default applies
+			}
+			return sub.Description, flowing, sub.PrivateIpGoogleAccess, true, nil
 		}
 	}
 	return "", false, false, false, nil // read, but none ours
@@ -455,26 +475,34 @@ func (d *Driver) findOwnedSubnet(doc networkDoc, project, region, capability str
 // confident "none".
 func (d *Driver) observeEgressRoad(project, region, network, capability string) (road string, err error) {
 	const op = "routers.list"
-	status, body, cerr := d.call("GET", fmt.Sprintf(
-		"%s/projects/%s/regions/%s/routers", d.computeBase(), project, region), nil)
-	if cerr != nil {
-		return "", readTransport(op, cerr)
+	// D870: EVERY page. Compute lists 500 per page and hands back a nextPageToken, and
+	// the question here is "does ANY router in this region carry a Cloud NAT" — the one
+	// question a single page cannot answer NO to (D863). A NO becomes
+	// `egress.internet = "none"`, derivation measured, which the vocabulary defines as
+	// "no road (isolated by construction)": the tool asserting isolation for a network
+	// that reaches the internet.
+	type routerItem struct {
+		Description string           `json:"description"`
+		Network     string           `json:"network"`
+		Nats        []map[string]any `json:"nats"`
 	}
-	if status != http.StatusOK {
-		return "", readHTTP(op, status, gcpErrCode(body))
-	}
-	var list struct {
-		Items []struct {
-			Description string           `json:"description"`
-			Network     string           `json:"network"`
-			Nats        []map[string]any `json:"nats"`
-		} `json:"items"`
-	}
-	if json.Unmarshal(body, &list) != nil {
-		return "", readBody(op, status)
+	var routers []routerItem
+	if perr := d.listAllPages(op, fmt.Sprintf(
+		"%s/projects/%s/regions/%s/routers", d.computeBase(), project, region),
+		func(body []byte) error {
+			var page struct {
+				Items []routerItem `json:"items"`
+			}
+			if json.Unmarshal(body, &page) != nil {
+				return readBody(op, http.StatusOK)
+			}
+			routers = append(routers, page.Items...)
+			return nil
+		}); perr != nil {
+		return "", perr
 	}
 	netSuffix := "/networks/" + network
-	for _, r := range list.Items {
+	for _, r := range routers {
 		// observe gates ownership by capability only (symmetric with findOwnedSubnet
 		// and the firewall observers) — the environment tail is not in scope here.
 		if cap, _, ok := parseVPCMarker(r.Description); !ok || cap != sanitizeLabel(capability) {
@@ -505,21 +533,27 @@ func (d *Driver) listNetworkFirewalls(project, network string) ([]fwRule, error)
 	const op = "firewalls.list"
 	netLink := fmt.Sprintf("%s/projects/%s/global/networks/%s", d.computeBase(), project, network)
 	q := url.QueryEscape(fmt.Sprintf("network=%q", netLink))
-	status, body, cerr := d.call("GET", fmt.Sprintf(
-		"%s/projects/%s/global/firewalls?filter=%s", d.computeBase(), project, q), nil)
-	if cerr != nil {
-		return nil, readTransport(op, cerr)
+	// D870: EVERY page. The server-side filter narrows this to ONE network's rules, and
+	// that is not a bound — Compute still pages at 500, and the two reductions below both
+	// ask "does ANY rule ...". `ingress.public` is the dangerous one: a NO becomes
+	// "not publicly exposed", derivation measured, while a rule allowing 0.0.0.0/0 sits
+	// on page two. That is a reachable network reported private (the D694 shape).
+	var rules []fwRule
+	if perr := d.listAllPages(op, fmt.Sprintf(
+		"%s/projects/%s/global/firewalls?filter=%s", d.computeBase(), project, q),
+		func(body []byte) error {
+			var page struct {
+				Items []fwRule `json:"items"`
+			}
+			if json.Unmarshal(body, &page) != nil {
+				return readBody(op, http.StatusOK)
+			}
+			rules = append(rules, page.Items...)
+			return nil
+		}); perr != nil {
+		return nil, perr
 	}
-	if status != http.StatusOK {
-		return nil, readHTTP(op, status, gcpErrCode(body))
-	}
-	var list struct {
-		Items []fwRule `json:"items"`
-	}
-	if json.Unmarshal(body, &list) != nil {
-		return nil, readBody(op, status)
-	}
-	return list.Items, nil
+	return rules, nil
 }
 
 func firewallsDenyEgress(fws []fwRule, capability string) bool {
@@ -738,4 +772,18 @@ func (d *Driver) computeDelete(url, scope string) provider.CreateResult {
 			Reason: "delete response carried no operation — reconcile"}
 	}
 	return d.pollComputeOperation(scope, op.Name)
+}
+
+// flowSamplingPresent reports whether the subnet document STATED a sampling rate, so an
+// absent field (GCP's default applies) is told apart from an explicit zero (nothing is
+// recorded). Absent and zero are two answers (D742).
+func flowSamplingPresent(body []byte) bool {
+	var raw struct {
+		LogConfig map[string]json.RawMessage `json:"logConfig"`
+	}
+	if json.Unmarshal(body, &raw) != nil {
+		return false
+	}
+	_, ok := raw.LogConfig["flowSampling"]
+	return ok
 }

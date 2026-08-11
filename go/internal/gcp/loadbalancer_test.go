@@ -251,6 +251,14 @@ func (f *lbFake) server() *httptest.Server {
 				Name string `json:"name"`
 			}
 			_ = json.Unmarshal(body, &doc)
+			// D429: GCP answers 409 when the name is taken. The fake used to overwrite
+			// silently, so it could not describe an estate where the composite already
+			// stands — and the create-adoption path had nothing to be tested against.
+			if _, taken := f.store[r.URL.Path+"/"+doc.Name]; taken {
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(`{"error":{"code":409,"message":"already exists"}}`))
+				return
+			}
 			f.store[r.URL.Path+"/"+doc.Name] = body
 			f.order = append(f.order, coll)
 			f.opN++

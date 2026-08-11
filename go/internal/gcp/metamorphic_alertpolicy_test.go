@@ -32,7 +32,7 @@ func TestMetamorphicAlertPolicyRoundTrip(t *testing.T) {
 				"alert.notify":     c.notify,
 				"service.managed":  true,
 			}
-			impl := map[string]any(nil)
+			impl := map[string]any{"resource_type": "gce_instance"} // D897: filter needs resource.type
 			if c.notify {
 				impl = alertImpl()
 			}

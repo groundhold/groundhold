@@ -132,6 +132,10 @@ func TestHonestyHarnessMemorystore(t *testing.T) {
 		Classify:        gcpOpRole, // LRO create/delete parse the operation name
 		OwnerTagValue:   "sessions",
 		DeterministicID: true, // the instance id is a chosen slug+hash
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("memorystore", "sessions", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -168,6 +172,10 @@ func TestHonestyHarnessCloudArmor(t *testing.T) {
 		Classify:        gcpOpRole,
 		OwnerTagValue:   "edge", // appears in the description marker
 		DeterministicID: true,   // the policy name is a chosen slug+hash
+		// F-LC3 (D521): protocol-aware gone estate.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("cloudarmor", "edge", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -200,6 +208,10 @@ func TestHonestyHarnessGCPSecret(t *testing.T) {
 		Classify:        secretRole,
 		OwnerTagValue:   "dbcreds",
 		DeterministicID: true,
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("secretmanager", "dbcreds", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -231,6 +243,10 @@ func TestHonestyHarnessGCPCloudSQL(t *testing.T) {
 		Classify:        gcpOpRole,
 		OwnerTagValue:   "db",
 		DeterministicID: true, // instance name is a deterministic slug+hash
+		// F-LC3 (D523): hand-wired — the providerId comes from the delete op.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("cloudsql", "db", delPID)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -272,6 +288,10 @@ func TestHonestyHarnessGCS(t *testing.T) {
 		Classify:        gcsRole,
 		OwnerTagValue:   "assets",
 		DeterministicID: true, // bucket name is a deterministic slug+hash
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("gcs", "assets", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -307,6 +327,10 @@ func TestHonestyHarnessCloudRun(t *testing.T) {
 		Classify:        gcpOpRole,
 		OwnerTagValue:   "app-be",
 		DeterministicID: true, // service name is a deterministic slug+hash
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("cloudrun", "app-be", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -342,6 +366,10 @@ func TestHonestyHarnessFunctions(t *testing.T) {
 		Classify:        gcpOpRole,
 		OwnerTagValue:   "api",
 		DeterministicID: true, // function name is a deterministic slug+hash
+		// F-LC3 (D522): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("cloudfunctions", "api", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -400,6 +428,10 @@ func TestHonestyHarnessPubSub(t *testing.T) {
 		Classify:        pubsubRole,
 		OwnerTagValue:   "events",
 		DeterministicID: true, // topic name is a deterministic slug+hash
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("pubsub-topic", "events", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -446,6 +478,10 @@ func TestHonestyHarnessPubSubQueue(t *testing.T) {
 		Classify:        pubsubRole,
 		OwnerTagValue:   queueLabel,
 		DeterministicID: true, // subscription id is a deterministic slug+hash
+		// F-LC3 (D521): protocol-aware gone estate.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("pubsub-queue", "orders", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -480,6 +516,10 @@ func TestHonestyHarnessGCPVPC(t *testing.T) {
 		Classify:        gcpOpRole,
 		OwnerTagValue:   "app-net",
 		DeterministicID: true, // network name is a deterministic slug+hash
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("vpc", "app-net", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -512,6 +552,10 @@ func TestHonestyHarnessCloudDNS(t *testing.T) {
 		Classify:        secretRole, // GET read; POST create / DELETE opaque (name deterministic)
 		OwnerTagValue:   "apex",
 		DeterministicID: true, // the managed-zone name is a chosen slug+hash
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("clouddns", "apex", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -557,6 +601,10 @@ func TestHonestyHarnessIAMBinding(t *testing.T) {
 		Classify:        iamBindingRole,
 		OwnerTagValue:   "reader", // content-addressed: no tag to poison (foreign-tag n/a)
 		DeterministicID: true,     // the pid is (project, role, member)
+		// F-LC3 (D522): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("iambinding", "reader", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -589,6 +637,10 @@ func TestHonestyHarnessCustomRole(t *testing.T) {
 		Classify:        secretRole, // GET read; POST create / DELETE opaque (roleId deterministic)
 		OwnerTagValue:   "viewer",   // content-addressed by deterministic roleId (foreign-tag n/a)
 		DeterministicID: true,
+		// F-LC3 (D521): protocol-aware gone estate.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("customrole", "viewer", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -621,6 +673,10 @@ func TestHonestyHarnessAlertPolicy(t *testing.T) {
 		Classify:        gcsRole, // POST parses the server-assigned id; GET read; DELETE opaque
 		OwnerTagValue:   "cpu",
 		DeterministicID: false, // the alertPolicy id is server-assigned
+		// F-LC3 (D521): protocol-aware gone estate.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("monitoring", "cpu", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -653,6 +709,10 @@ func TestHonestyHarnessDashboard(t *testing.T) {
 		Classify:        gcsRole, // POST parses the server-assigned id; GET read; DELETE opaque
 		OwnerTagValue:   "golden",
 		DeterministicID: false, // the dashboard id is server-assigned
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("dashboard", "golden", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -685,6 +745,10 @@ func TestHonestyHarnessUptimeCheck(t *testing.T) {
 		Classify:        gcsRole, // POST parses the server-assigned id; GET read; DELETE opaque
 		OwnerTagValue:   "api",
 		DeterministicID: false, // the config id is server-assigned
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("uptime", "api", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -717,6 +781,10 @@ func TestHonestyHarnessLogMetric(t *testing.T) {
 		Classify:        secretRole, // GET read; POST create / DELETE opaque (name is the id)
 		OwnerTagValue:   "errors",
 		DeterministicID: true, // the metric name is the id
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("logmetric", "errors", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -749,6 +817,10 @@ func TestHonestyHarnessARRepo(t *testing.T) {
 		Classify:        gcpOpRole, // LRO create/delete parse the operation name
 		OwnerTagValue:   "images",
 		DeterministicID: true, // the repo id is a chosen slug+hash
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("artifactregistry", "images", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := newGcpHonestyDriver(happyURL, rt)
 			d.PollInterval = 0
@@ -783,6 +855,10 @@ func TestHonestyHarnessFilestore(t *testing.T) {
 		Classify:        gcpOpRole,
 		OwnerTagValue:   "shared",
 		DeterministicID: true, // the instance id is a chosen slug+hash
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("filestore", "shared", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -819,6 +895,10 @@ func TestHonestyHarnessFirestore(t *testing.T) {
 		Classify:        gcpOpRole,
 		OwnerTagValue:   "sessions", // tagless: never appears in a response, so foreign-tag is n/a
 		DeterministicID: true,       // the databaseId is a chosen slug+hash
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("firestore", "sessions", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -854,6 +934,10 @@ func TestHonestyHarnessManagedKafka(t *testing.T) {
 		Classify:        gcpOpRole,
 		OwnerTagValue:   "bus",
 		DeterministicID: true, // the clusterId is a chosen slug+hash
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("managedkafka", "bus", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -889,6 +973,10 @@ func TestHonestyHarnessCertManager(t *testing.T) {
 		Classify:        gcpOpRole,
 		OwnerTagValue:   "web",
 		DeterministicID: true, // the certificateId is a chosen slug+hash
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("certmanager", "web", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -924,6 +1012,10 @@ func TestHonestyHarnessCloudRunJob(t *testing.T) {
 		Classify:        gcpOpRole,
 		OwnerTagValue:   "worker",
 		DeterministicID: true, // the jobId is a chosen slug+hash
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("cloudrunjobs", "worker", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -960,6 +1052,10 @@ func TestHonestyHarnessGServiceAccount(t *testing.T) {
 		Classify:        secretRole,
 		OwnerTagValue:   "runner", // appears in the description marker
 		DeterministicID: true,     // the accountId is a chosen slug+hash
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("serviceaccount", "runner", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -992,6 +1088,10 @@ func TestHonestyHarnessBigQuery(t *testing.T) {
 		Classify:        secretRole, // sync REST: GET read, POST/DELETE opaque (id deterministic)
 		OwnerTagValue:   "lake",
 		DeterministicID: true, // the dataset id is a chosen slug+hash
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("bigquery", "lake", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -1024,6 +1124,10 @@ func TestHonestyHarnessCloudKMS(t *testing.T) {
 		Classify:        secretRole, // GET read; keyRing/cryptoKey POST + destroy opaque
 		OwnerTagValue:   "datakey",
 		DeterministicID: true, // ring + key names are chosen
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("cloudkms", "datakey", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -1073,6 +1177,10 @@ func TestReadStormGKE(t *testing.T) {
 	p := &certifynet.Probe{
 		Name:     "gcp/gke",
 		Classify: gkeRole,
+		// F-LC3 (D523): hand-wired.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("gke", gkeCap, gkeProviderID("acme-prod", "europe-west1", "pv-"+gkeCap+"-prod-1"))
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver("test-proj")
 			d.HTTP = &http.Client{Transport: rt}
@@ -1194,6 +1302,10 @@ func TestHonestyHarnessPD(t *testing.T) {
 		Classify:        gcpOpRole, // LRO create/delete parse the operation name
 		OwnerTagValue:   "orders-data",
 		DeterministicID: true, // the disk name is a chosen slug+hash
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("pd", "orders-data", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},
@@ -1250,6 +1362,10 @@ func TestHonestyHarnessMIG(t *testing.T) {
 		Classify:        gcpOpRole, // LRO create/delete parse the operation name
 		OwnerTagValue:   "web-fleet",
 		DeterministicID: true, // the group name is a chosen slug+hash
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("mig", "web-fleet", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},

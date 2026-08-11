@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "groundhold/outputs/v0",
   "title": "Groundhold CLI output shapes (D64)",
-  "description": "One $def per verb. The `code` field is the machine contract (spec/errors.md); `reasons` and `explain` are prose and MUST NOT be parsed for control flow. Additive-only: consumers must tolerate unknown fields.",
+  "description": "A $def for each verb whose document a consumer parses TODAY; the set is listed under $defs and is NOT yet every verb — `posture`, `parity` and `apiver` publish documents with no def here, and are registered as debt in TestVerbsPublishingWithoutASchemaDef (D845). The `code` field is the machine contract (spec/errors.md); `reasons` and `explain` are prose and MUST NOT be parsed for control flow. Additive-only: consumers must tolerate unknown fields.",
   "$defs": {
     "code": {
       "type": "string",
@@ -43,8 +43,12 @@
       ]
     },
     "explain": {
+      "description": "stdout of `groundhold explain <code>`. `code` echoes the code asked about, and it is the field this project tells agents to route on (spec/errors.md) — it was emitted from the start and described here only from D867, which is the wrong order for a published contract.",
       "type": "object",
       "properties": {
+        "code": {
+          "$ref": "#/$defs/code"
+        },
         "summary": {
           "type": "string"
         },
@@ -202,6 +206,22 @@
         },
         "summary": {
           "type": "object"
+        },
+        "contract": {
+          "type": "string",
+          "description": "The contract's id, as the contract document declares it."
+        },
+        "contractVersion": {
+          "type": "integer",
+          "description": "The contract version this report was produced against."
+        },
+        "candidateFor": {
+          "type": "string",
+          "description": "The contract id the candidate declares it implements; a mismatch with `contract` is what the load refuses on."
+        },
+        "code": {
+          "$ref": "#/$defs/code",
+          "description": "`not-executable` when a blocking verdict stops the plan (D64/D65); absent otherwise."
         }
       }
     },
@@ -279,6 +299,34 @@
         },
         "explain": {
           "$ref": "#/$defs/explain"
+        },
+        "retryAfterSeconds": {
+          "type": "integer",
+          "description": "The provider's Retry-After hint on a throttle (provider-again-later) when a driver captured it; converge honours it as the backoff delay. Absent or 0 means no hint (D243)."
+        },
+        "outputs": {
+          "type": "object",
+          "description": "Each succeeded create's declared typed outputs, keyed capability -> output name -> value. A projection of results already computed for the receipts, never a new provider read (D283/D316).",
+          "additionalProperties": {
+            "type": "object"
+          }
+        },
+        "outcomes": {
+          "type": "object",
+          "description": "Per-action outcome for a fail-isolated run (succeeded|failed|unknown|throttled|skipped), keyed by action id. Present only when at least one action did not succeed — a clean run stays quiet (D379).",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "reachability": {
+          "type": "string",
+          "description": "Post-apply edge verdict set by the apply verb, never the executor: reachable (2xx/3xx) | failing (the edge answered 5xx, or TLS did not complete — a failure with no second reading) | unknown (nothing was established: an ambiguous 401/403, DNS, a refused connection, a timeout) | skipped (--no-reachability). Absent when there is no public edge. `failing` and `unknown` are disjoint on purpose (D696): \"this is broken\" is a measurement, \"I could not tell\" is the absence of one, and folding them made a probe that measured nothing read like one that measured success.",
+          "enum": [
+            "failing",
+            "reachable",
+            "skipped",
+            "unknown"
+          ]
         }
       }
     },
@@ -321,6 +369,13 @@
         },
         "explain": {
           "$ref": "#/$defs/explain"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Facts the adoption observed but did not refuse on: an `assumed` declaration the live reading contradicts (D322), an attribute recorded as declared intent because the provider emitted no value for it, and the driver's own account of what it could not read (D555/D556)."
         }
       }
     },
@@ -416,9 +471,12 @@
       "properties": {
         "status": {
           "enum": [
+            "partial",
             "probed",
-            "refused"
-          ]
+            "refused",
+            "unmeasured"
+          ],
+          "description": "probed (every attempted measurement produced a reading) | partial (some measured, some failed — the failed paths stay unknown and no observation was written for them) | unmeasured (nothing was measured: every attempt failed, or the driver returned none) | refused (the run did not start). D697: `partial` and `unmeasured` exit 2, because a probe is run in order to LEARN something and a run that learned nothing is not a success — they were `probed` with exit 0, which read like one."
         },
         "code": {
           "$ref": "#/$defs/code"
@@ -540,6 +598,10 @@
           "items": {
             "type": "string"
           }
+        },
+        "code": {
+          "type": "string",
+          "description": "the machine error code for a refusal or a blocking verdict — the fine layer spec/errors.md publishes; absent on a clean run (D624)"
         }
       }
     },
@@ -577,6 +639,25 @@
         },
         "explain": {
           "$ref": "#/$defs/explain"
+        },
+        "convergence": {
+          "type": "string",
+          "enum": [
+            "verified",
+            "inconclusive",
+            "unverified"
+          ],
+          "description": "What the post-apply check actually established. Only `verified` (or a no-op converged status) earns the CONVERGED banner — an applied run whose re-observation could not confirm the world says so instead of claiming it (D136)."
+        },
+        "reachability": {
+          "type": "string",
+          "enum": [
+            "failing",
+            "reachable",
+            "skipped",
+            "unknown"
+          ],
+          "description": "Post-apply edge verdict, absent when there is no public edge to probe. A machine field so a script can tell \"up and serving\" from \"up but the edge 403s\" — and, since D696, both of those from \"the edge answered and it is broken\" (failing). The scope of the measurement is stated with the verdict: reachability and HTTP status class only, the response body is not read."
         }
       }
     },
@@ -746,7 +827,9 @@
       "type": "object",
       "required": [
         "status",
-        "events",
+        "totalEvents",
+        "tailEvents",
+        "tailLines",
         "validPrefixLines",
         "findings",
         "fingerprint"
@@ -758,8 +841,21 @@
             "corrupt"
           ]
         },
-        "events": {
-          "type": "integer"
+        "totalEvents": {
+          "type": "integer",
+          "description": "events in the whole history, compacted base included — the same number attest reports (D654)"
+        },
+        "tailEvents": {
+          "type": "integer",
+          "description": "events in the live file; blank lines are not events"
+        },
+        "baseEvents": {
+          "type": "integer",
+          "description": "events a compaction moved into the archive"
+        },
+        "tailLines": {
+          "type": "integer",
+          "description": "physical lines of the live file — a DIFFERENT unit from the event counts, and the one --quarantine truncates to"
         },
         "validPrefixLines": {
           "type": "integer"
@@ -802,6 +898,10 @@
               }
             }
           }
+        },
+        "code": {
+          "type": "string",
+          "description": "the machine error code for a refusal or a blocking verdict — the fine layer spec/errors.md publishes; absent on a clean run (D624)"
         }
       }
     },
@@ -841,6 +941,13 @@
         },
         "explain": {
           "$ref": "#/$defs/explain"
+        },
+        "findings": {
+          "type": "array",
+          "description": "What the diagnosis found, in order — the per-event detail behind the status.",
+          "items": {
+            "type": "object"
+          }
         }
       }
     },
@@ -878,6 +985,26 @@
           "additionalProperties": {
             "type": "string"
           }
+        },
+        "manifest": {
+          "type": "string",
+          "description": "Domain-separated hash over the ORDERED list of every live event hash, seeded by the anchored base — the complete forest guard. The positional `head` witnesses only the sub-chain owning the last line (the log is a per-capability forest), so a count-preserving rewrite of any interior event moves the manifest and diverges (D184)."
+        },
+        "baseEvents": {
+          "type": "integer",
+          "description": "The compaction position the manifest was seeded at. The manifest is verified only while the ledger's compaction has not advanced past it; beyond that the positional and snapshot checks take over (D137)."
+        },
+        "ledgerId": {
+          "type": "string",
+          "description": "The genesis event's canonical hash — the identity signatures bind. A LINEAGE id: forks grown from one genesis share it, and the positional `head` is what tells branches apart (D134)."
+        },
+        "snapshotHash": {
+          "type": "string",
+          "description": "When an anchor is cut at a compaction it pins the snapshot document too, so a receiver holding this anchor detects a swapped fold and not only a rewritten tail (D137)."
+        },
+        "trust": {
+          "type": "object",
+          "description": "The trust policy the EMITTING process actually verified this ledger under, so any path that loads the anchor arms it and a receiver cannot forget `--trust`. Never emitted unverified — an armed emit refuses at replay first (D135)."
         }
       }
     },

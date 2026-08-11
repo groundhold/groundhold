@@ -235,7 +235,11 @@ func (d *Driver) observeAzureVMSS(capability, providerID string) ([]provider.Obs
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"scale set not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"scale set not found — bound resource is gone (will re-create)"}, nil
 	}
 	class := "zonal"
 	if len(doc.Zones) > 1 {
@@ -249,7 +253,9 @@ func (d *Driver) observeAzureVMSS(capability, providerID string) ([]provider.Obs
 			}
 		}
 	}
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: doc.Location, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		{Path: "availability.class", Value: class, Derivation: "measured"},
@@ -312,46 +318,27 @@ func (d *Driver) deleteAzureVMSS(capability, environment, providerID string) pro
 	// report a clean retirement while leaving an orphan behind — exactly the
 	// "we did not find out" treated as "we found out no" that D29 exists to
 	// prevent. A 404 is resolved: the setting is already gone.
+	// D944: the autoscale setting is a SEPARATE top-level resource deleted by derived
+	// name (`<name>-cpu`). Without an ownership check, a brownfield-adopted fleet
+	// (arbitrary name) would DELETE a FOREIGN autoscale setting at that name (the same
+	// class as D943's vnet/containerapps companions; vmss is brownfield-adoptable). Read
+	// its tags first: foreign => LEAVE it and proceed (not ours); absent (404) => nothing
+	// to do; ours but the delete did not RESOLVE (transient/failed/read-error) => return
+	// that outcome and leave the FLEET in place (D29 — the setting must conclude before
+	// the fleet, else an orphaned setting keeps evaluating against a gone target). The
+	// create tags the setting, so ours is confirmable.
 	aurl, _ := d.armURL(rg, d.azureAutoscalePath(name), azureAutoscaleAPIVersion)
-	ast, aresp, aerr := d.doARM("DELETE", aurl, nil)
-	switch {
-	case aerr != nil || ast >= 500:
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
-			Reason: "the autoscale setting's delete did not resolve, so the fleet was left " +
-				"in place rather than orphaning a setting that would keep evaluating against " +
-				"a target that no longer exists — reconcile"}
-	case ast == http.StatusNotFound || (ast >= 200 && ast < 300):
-		// resolved: gone, or now gone
-	default:
-		if r := provider.MutationResult(ast, azErrCode(aresp), nil, providerID, "delete"); r != nil {
-			r.Reason = "the autoscale setting's delete did not resolve (" + r.Reason +
-				") — the fleet was left in place; reconcile"
-			return *r
-		}
-		return provider.CreateResult{ProviderID: providerID, Status: "failed",
-			Reason: fmt.Sprintf("the autoscale setting could not be deleted (HTTP %d: %s) — "+
-				"the fleet was left in place rather than orphaning it", ast, mutDetailAz(aresp))}
+	if r, foreign := d.deleteCompanionIfOurs(aurl, capability, environment, providerID, "autoscale setting"); !foreign && r != nil && r.Status != "succeeded" {
+		r.Reason = "the autoscale setting's delete did not resolve (" + r.Reason +
+			") — the fleet was left in place rather than orphaning it; reconcile"
+		return *r
 	}
 
 	url, _ := d.armURL(rg, d.azureVMSSPath(name), azureVMSSAPIVersion)
-	dst, dresp, de := d.doARM("DELETE", url, nil)
-	switch {
-	case de != nil:
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
-			Reason: fmt.Sprintf("delete outcome unknown: %v", de)}
-	case dst == http.StatusNotFound:
-		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // idempotent
-	case dst >= 500:
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
-			Reason: fmt.Sprintf("delete HTTP %d (server error — may have landed) — reconcile", dst)}
-	case dst < 200 || dst >= 300:
-		if r := provider.MutationResult(dst, azErrCode(dresp), nil, providerID, "delete"); r != nil {
-			return *r
-		}
-		return provider.CreateResult{ProviderID: providerID, Status: "failed",
-			Reason: fmt.Sprintf("delete HTTP %d: %s", dst, mutDetailAz(dresp))}
-	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// D984: route the delete through deleteAndConfirm (D971) — a VMSS DELETE returns
+	// 202 Accepted (async); concluding succeeded here tombstoned a billable fleet
+	// still live. The helper polls to a confirmed 404, unknown on timeout.
+	return *d.deleteAndConfirm(url, providerID, "vm scale set")
 }
 
 // discoverAzureVMSS enumerates the scale sets in the subscription. A fleet that
@@ -399,7 +386,7 @@ func (d *Driver) discoverAzureVMSS(region string) ([]provider.Discovered, []stri
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.compute.autoscaling",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

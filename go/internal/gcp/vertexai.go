@@ -263,7 +263,15 @@ func classifyVertexChange(path string) (string, string) {
 	case "location.region":
 		return "immutable", "a Vertex endpoint is region-bound — a region change is a new endpoint, not a patch"
 	case "model.provider":
-		return "immutable", "the model provider/family is fixed by the model deployed on the endpoint — a change is a new endpoint, not an in-place patch"
+		// D828: "a change is a new endpoint" is a claim about Vertex, and Vertex's own
+		// discovery document contradicts it: endpoints.deployModel "deploys a Model into
+		// this Endpoint, creating a DeployedModel within it" and endpoints.undeployModel
+		// removes one. Swapping the model happens ON the endpoint, which keeps its id —
+		// and the id is what every caller holds. Replacing it breaks them all.
+		return "unsupported", "in-place model swap is not wired for Vertex endpoints in " +
+			"this slice — Vertex does support it (endpoints.undeployModel then deployModel, " +
+			"on the same endpoint), so this is a gap in groundhold rather than a reason to " +
+			"replace an endpoint every caller addresses by id"
 	case "model.access":
 		return "unsupported", "model access is a manual-gate — granted by accepting terms in the Vertex Model Garden console, never an API patch; groundhold observes it, does not provision it"
 	case "service.managed":

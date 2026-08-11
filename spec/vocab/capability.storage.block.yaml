@@ -40,7 +40,7 @@ attributes:
     mappings:
       aws.ebs: the volume's region (derived from its availability zone)
       gcp.pd: the disk's region (derived from its zone, or the region for a regional disk)
-      azure.manageddisk: the managed disk's location
+      azure.azdisk: the managed disk's location
 
   availability.class:
     kind: string
@@ -49,7 +49,7 @@ attributes:
     mappings:
       aws.ebs: always zonal — an EBS volume lives in one availability zone
       gcp.pd: regional when the disk is a regional persistent disk, zonal otherwise
-      azure.manageddisk: regional when the SKU is zone-redundant (ZRS), zonal otherwise
+      azure.azdisk: regional when the SKU is zone-redundant (ZRS), zonal otherwise
 
   encryption.atRest:
     kind: bool
@@ -57,7 +57,7 @@ attributes:
     mappings:
       aws.ebs: the volume's encryption state
       gcp.pd: platform encryption, always on; CMEK reported separately
-      azure.manageddisk: managed-disk encryption state
+      azure.azdisk: managed-disk encryption state
 
   encryption.customerManagedKeys:
     kind: bool
@@ -65,7 +65,7 @@ attributes:
     mappings:
       aws.ebs: the volume's KMS key is customer-managed, not the aws/ebs default
       gcp.pd: the disk carries a customer-managed encryption key
-      azure.manageddisk: the disk uses a disk-encryption set backed by a customer key
+      azure.azdisk: the disk uses a disk-encryption set backed by a customer key
 
   cost.monthly:
     kind: money
@@ -74,7 +74,7 @@ attributes:
     mappings:
       aws.ebs: provisioned capacity and type at the region's published rate
       gcp.pd: provisioned capacity and type at the region's published rate
-      azure.manageddisk: the disk SKU at the region's published rate
+      azure.azdisk: the disk SKU at the region's published rate
 
   service.managed:
     kind: bool
@@ -82,4 +82,4 @@ attributes:
     mappings:
       aws.ebs: const true when observed through the driver
       gcp.pd: const true when observed through the driver
-      azure.manageddisk: const true when observed through the driver
+      azure.azdisk: const true when observed through the driver

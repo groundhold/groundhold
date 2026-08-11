@@ -80,7 +80,13 @@ func (d *Driver) observeL4LoadBalancer(rg, name string) ([]provider.Observation,
 		return nil, nil, fmt.Errorf("loadBalancers.get: %v", err)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"load balancer not found — nothing to observe"}, nil
+		return []provider.Observation{
+			// F-LC3 (D802): a BOUND resource the API authoritatively 404s is GONE. An
+			// empty return leaves the last good observations standing as the freshest
+			// word, so posture reads managed-ok and audit stays satisfied about a
+			// resource that does not exist (D513/D518, fixed here last).
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"load balancer not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("loadBalancers.get: HTTP %d", st)
@@ -106,7 +112,13 @@ func (d *Driver) observeAppGateway(rg, name string) ([]provider.Observation, []s
 		return nil, nil, fmt.Errorf("applicationGateways.get: %v", err)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"application gateway not found — nothing to observe"}, nil
+		return []provider.Observation{
+			// F-LC3 (D802): a BOUND resource the API authoritatively 404s is GONE. An
+			// empty return leaves the last good observations standing as the freshest
+			// word, so posture reads managed-ok and audit stays satisfied about a
+			// resource that does not exist (D513/D518, fixed here last).
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"application gateway not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("applicationGateways.get: HTTP %d", st)
@@ -123,25 +135,27 @@ func (d *Driver) observeAppGateway(rg, name string) ([]provider.Observation, []s
 // and each type's kind-tagged providerId. An error in one sub-sweep is a diagnostic,
 // never a failure that hides the other's resources (four-valued discipline).
 func (d *Driver) discoverLoadBalancers(region string) ([]provider.Discovered, []string, error) {
-	var out []provider.Discovered
-	var diags []string
-	for _, s := range []struct {
+	kinds := []struct {
 		path, label string
 		pid         func(sub, rg, name string) string
 	}{
 		{"Microsoft.Network/loadBalancers", "loadBalancers", lbProviderID},
 		{"Microsoft.Network/applicationGateways", "applicationGateways", agwProviderID},
-	} {
-		found, ds, err := d.discoverRegional(s.path, networkAPIVersion, region,
-			"capability.network.loadbalancer", s.label, s.pid, d.observeLoadBalancer)
-		if err != nil {
-			diags = append(diags, err.Error())
-			continue
-		}
-		out = append(out, found...)
-		diags = append(diags, ds...)
 	}
-	return out, diags, nil
+	labels := make([]string, len(kinds))
+	byLabel := map[string]int{}
+	for i, k := range kinds {
+		labels[i], byLabel[k.label] = k.label, i
+	}
+	// D642: one of the two ARM kinds failing is a diagnostic — the other's load
+	// balancers are still real. BOTH failing means the sweep read nothing, and this
+	// loop used to hand that back as "no load balancers" with a nil error, which
+	// List then counted as a successful service sweep.
+	return provider.SweepAll(labels, func(label string) ([]provider.Discovered, []string, error) {
+		k := kinds[byLabel[label]]
+		return d.discoverRegional(k.path, networkAPIVersion, region,
+			"capability.network.loadbalancer", k.label, k.pid, d.observeLoadBalancer)
+	}, d.trunc)
 }
 
 // createLoadBalancer provisions the HONEST composite — an L7 Application Gateway

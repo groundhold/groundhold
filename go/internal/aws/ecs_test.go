@@ -1,6 +1,7 @@
 package aws
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -178,12 +179,38 @@ func TestObserveECSTLSEnforced(t *testing.T) {
 // ecsServer routes JSON actions by the X-Amz-Target header. describeState
 // controls the service rollout: the first describe returns IN_PROGRESS, then
 // COMPLETED with runningCount==desiredCount.
+// ecsSubnets is the subnet list the fake's DescribeServices reports, and ecsSubnetZones
+// the zones EC2 puts them in. The fake served NEITHER — so the field that decides the
+// service's failure domain could not appear in any test (D754). Default: two subnets in
+// two zones, which is what the vocabulary calls regional.
+var (
+	ecsSubnets     = `,"subnets":["subnet-a","subnet-b"]`
+	ecsSubnetZones = []string{"eu-central-1a", "eu-central-1b"}
+)
+
 func ecsServer(t *testing.T, tagCap string) *httptest.Server {
 	t.Helper()
 	describes := 0
 	deleted := false
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			// EC2 is form-encoded on "/" with no X-Amz-Target — the ECS driver reaches
+			// it to resolve subnets to zones.
+			if r.Header.Get("X-Amz-Target") == "" {
+				b, _ := io.ReadAll(r.Body)
+				if strings.Contains(string(b), "DescribeSubnets") {
+					items := ""
+					for i, z := range ecsSubnetZones {
+						items += `<item><subnetId>subnet-` + string(rune('a'+i)) +
+							`</subnetId><availabilityZone>` + z + `</availabilityZone></item>`
+					}
+					_, _ = w.Write([]byte(`<DescribeSubnetsResponse><subnetSet>` + items +
+						`</subnetSet></DescribeSubnetsResponse>`))
+					return
+				}
+				w.WriteHeader(400)
+				return
+			}
 			target := r.Header.Get("X-Amz-Target")
 			action := target[strings.LastIndex(target, ".")+1:]
 			switch action {
@@ -206,7 +233,8 @@ func ecsServer(t *testing.T, tagCap string) *httptest.Server {
 				}
 				_, _ = w.Write([]byte(`{"services":[{"status":"ACTIVE","runningCount":` +
 					itoa(running) + `,"desiredCount":1,"launchType":"FARGATE",` +
-					`"networkConfiguration":{"awsvpcConfiguration":{"assignPublicIp":"ENABLED"}},` +
+					`"networkConfiguration":{"awsvpcConfiguration":{"assignPublicIp":"ENABLED"` +
+					ecsSubnets + `}},` +
 					`"deployments":[{"rolloutState":"` + roll + `"}],` +
 					`"tags":[{"key":"groundhold-capability","value":"` + tagCap + `"},` +
 					`{"key":"groundhold-environment","value":"prod"}]}]}`))
@@ -234,6 +262,7 @@ func ecsTestDriver(t *testing.T, srv *httptest.Server) *Driver {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 	d := NewDriver("eu-central-1")
 	d.ECSBaseURL = srv.URL
+	d.EC2BaseURL = srv.URL // the same fake answers DescribeSubnets (D754)
 	d.Account = "000000000000"
 	d.PollInterval = time.Millisecond
 	d.PollTimeout = 2 * time.Second // bound the drain poll in tests
@@ -298,5 +327,64 @@ func TestSplitECSProviderID(t *testing.T) {
 		if _, _, err := splitECSProviderID(bad); err == nil {
 			t.Errorf("accepted malformed ecs id %q", bad)
 		}
+	}
+}
+
+// D754. availability.class was the constant "regional" with derivation config-intent —
+// a hedge that gates NOTHING: the verifier bars on the observation's SOURCE, never on
+// its derivation, so this satisfied a hard constraint exactly like a measurement. A
+// Fargate service placed in subnets of ONE zone does not survive that zone, and the
+// service names its subnets in the same response the driver already parsed.
+func TestECSFailureDomainComesFromItsSubnets(t *testing.T) {
+	cases := []struct {
+		name    string
+		subnets string
+		zones   []string
+		want    any
+		diag    string
+	}{
+		{"two zones", `,"subnets":["subnet-a","subnet-b"]`,
+			[]string{"eu-central-1a", "eu-central-1b"}, "regional", ""},
+		{"both subnets in one zone", `,"subnets":["subnet-a","subnet-b"]`,
+			[]string{"eu-central-1a", "eu-central-1a"}, "zonal", ""},
+		{"one subnet", `,"subnets":["subnet-a"]`, []string{"eu-central-1a"}, "zonal", ""},
+		{"no subnets reported", ``, nil, nil, "reports no subnets"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			os, oz := ecsSubnets, ecsSubnetZones
+			ecsSubnets, ecsSubnetZones = c.subnets, c.zones
+			defer func() { ecsSubnets, ecsSubnetZones = os, oz }()
+
+			srv := ecsServer(t, "app")
+			defer srv.Close()
+			d := ecsTestDriver(t, srv)
+
+			obs, diags, err := d.observeECS("app", "ecs:eu-central-1:app-prod-x")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got any
+			for _, o := range obs {
+				if o.Path == "availability.class" {
+					got = o.Value
+				}
+			}
+			if got != c.want {
+				t.Fatalf("availability.class = %v, want %v — tasks run only where their "+
+					"subnets are, so a single-zone service is not regional (D754)", got, c.want)
+			}
+			if c.diag != "" {
+				found := false
+				for _, dg := range diags {
+					if strings.Contains(dg, c.diag) {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("withheld the value and said nothing: %v", diags)
+				}
+			}
+		})
 	}
 }

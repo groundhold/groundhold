@@ -224,7 +224,13 @@ func TestClassifyVMSSChange(t *testing.T) {
 		!strings.Contains(why, "already running") {
 		t.Errorf("network.publicExposure classified %q/%q, want caveated with the live-fleet reason", class, why)
 	}
-	for _, path := range []string{"location.region", "availability.class"} {
+	// D822: availability.class was pinned "immutable" here. Microsoft documents in-place
+	// zone EXPANSION on a live scale set ("only add zones"), so the safe direction is an
+	// update and the old expectation pinned a claim Azure contradicts.
+	if class, why := classifyVMSSChange("availability.class"); class != "unsupported" || why == "" {
+		t.Errorf("availability.class classified %q/%q, want unsupported with a reason", class, why)
+	}
+	for _, path := range []string{"location.region"} {
 		if class, why := classifyVMSSChange(path); class != "immutable" || why == "" {
 			t.Errorf("%s classified %q/%q, want immutable", path, class, why)
 		}
@@ -302,7 +308,9 @@ func vmssDoc(cap string, zones int, public bool) string {
 "networkInterfaceConfigurations":[{"properties":{"ipConfigurations":[` + ip + `]}}]}}}}`
 }
 
-const vmssAutoscaleDoc = `{"properties":{"enabled":true,"profiles":[{"capacity":{"minimum":"2","maximum":"10"}}]}}`
+// D944: the create tags the autoscale setting, and retire now reads those tags to
+// confirm ownership before deleting it — so the fake must carry them (the real shape).
+const vmssAutoscaleDoc = `{"tags":{"groundhold-capability":"web-fleet","groundhold-environment":"production"},"properties":{"enabled":true,"profiles":[{"capacity":{"minimum":"2","maximum":"10"}}]}}`
 
 func vmssHappyServer() *vmssServer {
 	return &vmssServer{getStatus: 200, getBody: vmssDoc("web-fleet", 2, false),
@@ -439,6 +447,23 @@ func TestDeleteAzureVMSS(t *testing.T) {
 		}
 		if !settingFirst {
 			t.Error("the autoscale setting was never deleted")
+		}
+	})
+	// D944: a brownfield-adopted fleet has an arbitrary name, so `<name>-cpu` could be a
+	// FOREIGN autoscale setting. Retire must read its tags and never delete one not ours.
+	t.Run("leaves a foreign autoscale setting untouched", func(t *testing.T) {
+		s := vmssHappyServer()
+		s.autoBody = `{"tags":{"owner":"someone-else"},"properties":{"enabled":true,` +
+			`"profiles":[{"capacity":{"minimum":"2","maximum":"10"}}]}}`
+		d, done := vmssDriver(t, s)
+		defer done()
+		if res := d.deleteAzureVMSS("web-fleet", "production", pid); res.Status != "succeeded" {
+			t.Fatalf("status = %q (%s)", res.Status, res.Reason)
+		}
+		for i, p := range s.paths {
+			if s.methods[i] == http.MethodDelete && strings.Contains(p, "autoscalesettings") {
+				t.Errorf("D944 FOREIGN-DELETE: a foreign autoscale setting was deleted — paths=%v", s.paths)
+			}
 		}
 	})
 	t.Run("refuses a fleet that is not ours", func(t *testing.T) {

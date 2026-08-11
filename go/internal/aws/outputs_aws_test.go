@@ -83,7 +83,10 @@ func TestEveryDeclaredServiceDerives(t *testing.T) {
 		"iam":         "iamrole:000000000000:role",
 		"ecr":         "ecr:eu-central-1:000000000000:pv-app-prod-1a2b3c4d",
 		"backupvault": "bkv:eu-central-1:000000000000:pv-backup-prod",
-		"vpc":         "", // network-reading derivation, covered by TestClassifyVpcSubnets
+		// D778: both are entirely in the providerId — no read, like sns.topicArn.
+		"sqs":    "sqs:eu-central-1:000000000000:pv-jobs-prod-1a2b",
+		"cwlogs": "cwlogs:eu-central-1:/pv/prod/api",
+		"vpc":    "", // network-reading derivation, covered by TestClassifyVpcSubnets
 		// network-reading derivation (the endpoint address is server-assigned, read
 		// live), covered by TestElastiCacheServerlessEndpointOutput
 		"elasticache-serverless": "",
@@ -121,9 +124,11 @@ func TestAttachOutputsUnderivableDemotesToUnknown(t *testing.T) {
 	if cr.Status != "unknown" {
 		t.Fatalf("underivable outputs must demote to unknown, got %+v", cr)
 	}
-	// a service with no declared outputs is untouched
-	cr = provider.CreateResult{ProviderID: "sqs:eu-central-1:000000000000:q", Status: "succeeded"}
-	d.attachOutputs("sqs", &cr)
+	// a service with no declared outputs is untouched. D778: this used `sqs` as its
+	// example and sqs now DECLARES outputs — the example was a fixture choice, not the
+	// property under test, so it moves to a service that still declares none.
+	cr = provider.CreateResult{ProviderID: "budgets:000000000000:pv-budget", Status: "succeeded"}
+	d.attachOutputs("budgets", &cr)
 	if cr.Status != "succeeded" || cr.Outputs != nil {
 		t.Fatalf("a non-declaring service must pass through untouched, got %+v", cr)
 	}
@@ -226,5 +231,42 @@ func TestClassifyVpcSubnets(t *testing.T) {
 	}
 	if pub != "[subnet-pub-1]" {
 		t.Fatalf("publicSubnetIds = %s", pub)
+	}
+}
+
+// D778, from the field: a `$ref` to a queue or a log group was refused because neither
+// declared ANY output, so a legal wiring — a scheduler targeting a queue, a trail naming
+// its group — had to be written as a LITERAL ARN. The reporter named the cost themselves:
+// a candidate bound to one deployment, which a re-create silently invalidates.
+//
+// Both are fully derivable from the providerId, exactly as sns.topicArn is, so declaring
+// them costs no API call. Withholding them was the accident, not a design.
+func TestQueueAndLogGroupProduceTheOutputsAReferenceNeeds(t *testing.T) {
+	d := NewDriver("eu-central-1")
+	d.Account = "000000000000"
+
+	got, err := d.ReadOutputs("sqs", "sqs:eu-central-1:000000000000:pv-jobs-prod-1a2b")
+	if err != nil {
+		t.Fatalf("sqs outputs: %v", err)
+	}
+	if got["queueArn"] != "arn:aws:sqs:eu-central-1:000000000000:pv-jobs-prod-1a2b" {
+		t.Errorf("queueArn = %v — this is the target a scheduler references, and it is "+
+			"entirely in the providerId (D778)", got["queueArn"])
+	}
+	if u, _ := got["queueUrl"].(string); !strings.Contains(u, "/000000000000/pv-jobs-prod-1a2b") {
+		t.Errorf("queueUrl = %v", got["queueUrl"])
+	}
+
+	got, err = d.ReadOutputs("cwlogs", "cwlogs:eu-central-1:/pv/prod/api")
+	if err != nil {
+		t.Fatalf("cwlogs outputs: %v", err)
+	}
+	if got["logGroupName"] != "/pv/prod/api" {
+		t.Errorf("logGroupName = %v", got["logGroupName"])
+	}
+	arn, _ := got["logGroupArn"].(string)
+	if !strings.HasSuffix(arn, ":*") {
+		t.Errorf("logGroupArn = %q — every AWS policy and subscription names a group's "+
+			"STREAMS, so a bare group ARN is not what a consumer needs", arn)
 	}
 }

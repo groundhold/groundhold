@@ -10,10 +10,13 @@ A verdict based on an inferred/assumed value is still satisfied/violated,
 but carries basis + confidence so downstream policy can gate on it.
 """
 from __future__ import annotations
+
+import copy
+import dataclasses
 from dataclasses import dataclass, asdict
 
 from . import canonical, scalars
-from .contract import Contract, Candidate, Constraint
+from .contract import Contract, Candidate, Constraint, _sort_scalar_list
 
 SATISFIED, VIOLATED, UNKNOWN, UNVERIFIABLE = (
     "satisfied", "violated", "unknown", "unverifiable")
@@ -109,9 +112,42 @@ def verify(contract: Contract, cand: Candidate,
             return None
         return c.path in voc.attributes
 
+    def _set_canonical(c: Constraint) -> Constraint:
+        """D660: canonicalize the constraint's own list operand the same way the
+        candidate's value was canonicalized at load. `unordered: true` means the
+        attribute is a SET, list equality is POSITIONAL, and only one side was
+        sorted — so a `not-equals` constraint PASSED against the very set it
+        forbids, decided by the order the contract author happened to type.
+
+        Copies rather than mutating: the contract's identity is hashed from these
+        values, and a contract must not have one hash with a vocabulary and
+        another without."""
+        exp = getattr(c, "expected", None)
+        if exp is None or exp.kind != "list" or not vocabs:
+            return c
+        cap = contract.capabilities.get(c.subject)
+        voc = vocabs.get(cap["type"]) if cap else None
+        if voc is None:
+            return c
+        spec = voc.attributes.get(c.path or "")
+        if not spec or not spec.get("unordered"):
+            return c
+        # Scalar is frozen on purpose — a parsed value is not edited after the
+        # fact — so the copy is CONSTRUCTED with fresh lists rather than assigned
+        # into. The conformance suite caught the assignment version, which is the
+        # dual implementation doing its job.
+        dup = dataclasses.replace(
+            exp,
+            value=list(exp.value) if isinstance(exp.value, list) else exp.value,
+            raw=list(exp.raw) if isinstance(exp.raw, list) else exp.raw)
+        _sort_scalar_list(dup)
+        c2 = copy.copy(c)
+        c2.expected = dup
+        return c2
+
     verdicts = []
     for c in contract.constraints:
-        v = _eval(c, cand)
+        v = _eval(_set_canonical(c), cand)
         v.subject = c.subject
         v.path = c.path or ""
         v.verifyMethod = c.verify_method or ""
@@ -124,8 +160,22 @@ def verify(contract: Contract, cand: Candidate,
     assumed = [v for v in verdicts
                if v.verdict in (SATISFIED, VIOLATED) and v.basis in ("assumed", "inferred")]
 
-    # D17: a candidate must name the contract it implements
+    # D635: a capability the CONTRACT declares and the candidate does not implement
+    # used to vanish — verify iterates constraints and the compiler iterates the
+    # candidate's capabilities, so a declared capability with no hard constraint and no
+    # requirements produced no verdict, no action and no entry anywhere. Silence about
+    # a declared capability reads as success. A RETIRED capability is exempt:
+    # retirement is how a contract says it should not exist (D47).
     binding_errors = []
+    for cap_id in sorted(contract.capabilities):
+        raw = contract.capabilities[cap_id]
+        if isinstance(raw, dict) and raw.get("state") == "retired":
+            continue
+        if cap_id not in cand.capabilities:
+            binding_errors.append(
+                f"contract declares capability {cap_id!r} and the candidate does not "
+                "implement it — a capability with no implementation cannot converge, "
+                "and silence about it reads as success")
     if cand.contract_id != contract.id:
         binding_errors.append(
             f"candidate targets contract {cand.contract_id!r}, "

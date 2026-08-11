@@ -228,10 +228,12 @@ func TestObservePD(t *testing.T) {
 		}
 	}
 	// atRest is a fact about the PLATFORM, not a reading of this disk, and saying
-	// so is what keeps `measured` meaning something.
+	// so is what keeps `measured` meaning something. D759 gave that sentence its own
+	// label — it was written here long before the set had a value for it, which is as
+	// good an argument for the third value as the count of 65 was.
 	for _, o := range obs {
-		if o.Path == "encryption.atRest" && o.Derivation != "config-intent" {
-			t.Errorf("encryption.atRest derivation = %q, want config-intent", o.Derivation)
+		if o.Path == "encryption.atRest" && o.Derivation != "platform-invariant" {
+			t.Errorf("encryption.atRest derivation = %q, want platform-invariant", o.Derivation)
 		}
 	}
 }

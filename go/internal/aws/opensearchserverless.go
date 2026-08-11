@@ -243,7 +243,15 @@ func classifyOpenSearchServerlessChange(path string) (string, string) {
 	case "location.region":
 		return "immutable", "the region is the collection's home — a change is a new collection (replacement; stateful, consent-gated)"
 	case "network.publicExposure":
-		return "immutable", "the network policy is set at create — reconciling an exposure drift replaces the (stateful) collection, consent-gated"
+		// D821: the exposure is not a property of the collection at all — observe reads it
+		// from the network POLICY document (GetSecurityPolicy), and UpdateSecurityPolicy
+		// replaces that document without touching the collection. Replacing a stateful
+		// search collection to change a policy is a heavy answer to a question AWS answers
+		// with one call.
+		return "unsupported", "in-place exposure change is not wired for OpenSearch " +
+			"Serverless in this slice — the exposure lives in the network policy document, " +
+			"which UpdateSecurityPolicy replaces without touching the collection, so this is " +
+			"a gap in groundhold rather than a reason to replace the data"
 	case "encryption.customerManagedKeys":
 		return "immutable", "the encryption policy (AWS-owned vs CMK) is set at create — reconciling a drift is a replacement (stateful, consent-gated)"
 	case "encryption.atRest", "encryption.inTransit":

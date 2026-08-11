@@ -11,6 +11,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 // ---- candidate under test ----
@@ -42,10 +45,21 @@ func auroraImpl() map[string]any {
 // ---- Query-protocol fake (rds.<region>.amazonaws.com, the SAME API Aurora uses) ----
 
 type fakeAurora struct {
-	mu             sync.Mutex
-	order          []string
-	clusterExists  bool
+	mu            sync.Mutex
+	order         []string
+	clusterExists bool
+	// deleteKeepsCluster: DeleteDBCluster leaves the cluster present (still
+	// "deleting") — the async-not-gone case the poll-to-absence (D972) must not
+	// conclude as succeeded.
+	deleteKeepsCluster bool
+	// endpoints: a standing cluster HAS them. Omitting them made every create-path
+	// test stop short of output derivation (D396) — the create fixture and the
+	// outputs fixture were different fakes that never met.
+	endpoint       string
+	readerEndpoint string
+	port           int
 	clusterStatus  string
+	clusterPending bool // D953: inject PendingModifiedValues (modify still applying)
 	clusterBody    string
 	instances      map[string]bool
 	instanceBodies map[string]string
@@ -125,6 +139,26 @@ func (f *fakeAurora) sortedInstances() []string {
 	return out
 }
 
+// endpointXML emits the endpoint trio only when the fake was given them, so every
+// existing test keeps its exact wire shape.
+func endpointXML(writer, reader string, port int) string {
+	if writer == "" {
+		return ""
+	}
+	return `<Endpoint>` + writer + `</Endpoint>` +
+		`<ReaderEndpoint>` + reader + `</ReaderEndpoint>` +
+		`<Port>` + strconv.Itoa(port) + `</Port>`
+}
+
+// pendingXML injects a PendingModifiedValues element (D953): non-empty means an accepted
+// modify is still applying, empty means it has landed.
+func pendingXML(pending bool) string {
+	if pending {
+		return `<PendingModifiedValues><BackupRetentionPeriod>1</BackupRetentionPeriod></PendingModifiedValues>`
+	}
+	return `<PendingModifiedValues></PendingModifiedValues>`
+}
+
 func (f *fakeAurora) clusterXML(id string) string {
 	var members string
 	for _, m := range f.sortedInstances() {
@@ -151,12 +185,14 @@ func (f *fakeAurora) clusterXML(id string) string {
 	return `<DescribeDBClustersResponse><DescribeDBClustersResult><DBClusters><DBCluster>` +
 		`<DBClusterIdentifier>` + id + `</DBClusterIdentifier>` +
 		`<Status>` + f.clusterStatus + `</Status>` +
+		endpointXML(f.endpoint, f.readerEndpoint, f.port) +
 		`<Engine>` + f.engine + `</Engine><EngineVersion>` + f.engineVersion + `</EngineVersion>` +
 		`<StorageEncrypted>` + boolStr(f.storageEncrypted) + `</StorageEncrypted>` +
 		`<KmsKeyId>` + f.kmsKeyId + `</KmsKeyId>` +
 		`<DBClusterParameterGroup>` + f.clusterParamGroup + `</DBClusterParameterGroup>` +
 		`<BackupRetentionPeriod>` + strconv.Itoa(f.backupRetention) + `</BackupRetentionPeriod>` +
 		`<DeletionProtection>` + boolStr(f.deletionProtection) + `</DeletionProtection>` +
+		pendingXML(f.clusterPending) +
 		`<DBClusterMembers>` + members + `</DBClusterMembers>` + taglist +
 		`</DBCluster></DBClusters></DescribeDBClustersResult></DescribeDBClustersResponse>`
 }
@@ -318,7 +354,9 @@ func (f *fakeAurora) handler(t *testing.T, rec *capture) *httptest.Server {
 			_, _ = w.Write([]byte(`<DeleteDBInstanceResponse></DeleteDBInstanceResponse>`))
 		case "DeleteDBCluster":
 			f.order = append(f.order, "DeleteDBCluster")
-			f.clusterExists = false
+			if !f.deleteKeepsCluster {
+				f.clusterExists = false
+			}
 			_, _ = w.Write([]byte(`<DeleteDBClusterResponse></DeleteDBClusterResponse>`))
 		default:
 			w.WriteHeader(404)
@@ -378,7 +416,9 @@ func TestAuroraFullCreateSucceeds(t *testing.T) {
 		"StorageEncrypted=true", "DBSubnetGroupName=db-subnets",
 		"MasterUsername=admin", "MasterUserPassword=secret123",
 		"BackupRetentionPeriod=7", "DeletionProtection=true",
-		"groundhold-capability", "VpcSecurityGroupIds.VpcSecurityGroupId.member.1=sg-123",
+		// D884: the real query wire is VpcSecurityGroupIds.VpcSecurityGroupId.N — no extra
+		// .member. level. The old expectation pinned the malformed form AWS 400s.
+		"groundhold-capability", "VpcSecurityGroupIds.VpcSecurityGroupId.1=sg-123",
 	} {
 		if !strings.Contains(f.clusterBody, want) {
 			t.Errorf("CreateDBCluster body missing %q\nbody: %s", want, f.clusterBody)
@@ -494,6 +534,28 @@ func TestAuroraCreateForeignRefuses(t *testing.T) {
 		if o == "CreateDBCluster" || o == "CreateDBInstance" {
 			t.Fatalf("refusal must not mutate; order = %v", f.order)
 		}
+	}
+}
+
+// TestAuroraDeleteAsyncNotGoneIsUnknown pins D972: a cluster delete the provider
+// ACCEPTS but that leaves the cluster "deleting" (not gone) must report unknown —
+// never a terminal "succeeded" that tombstones a data-bearing cluster still live.
+func TestAuroraDeleteAsyncNotGoneIsUnknown(t *testing.T) {
+	f := newFakeAurora()
+	f.clusterExists = true
+	f.deleteKeepsCluster = true // the cluster never leaves "deleting"
+	f.tags = map[string]string{
+		"groundhold-capability": sanitizeTag("db"), "groundhold-environment": sanitizeTag("prod")}
+	clusterID := DBIdentifier("000000000000", "prod", "db", 1)
+	f.instances[clusterID+"-writer"] = true
+	srv := f.handler(t, nil)
+	defer srv.Close()
+	d := auroraTestDriver(t, srv)
+	d.PollTimeout = 5 * time.Millisecond // times out fast; the cluster never leaves "deleting"
+	res := d.deleteAurora("db", "prod", auroraProviderID("eu-central-1", clusterID))
+	if res.Status != "unknown" {
+		t.Fatalf("an accepted-but-still-deleting cluster must be unknown (keep the handle), "+
+			"got %+v — reporting succeeded tombstones a data-bearing cluster still live", res)
 	}
 }
 
@@ -1011,4 +1073,56 @@ func TestAuroraServerlessAutoPause(t *testing.T) {
 	if _, err = build(func(i map[string]any) { i["serverlessMaxACU"] = float64(0) }); err == nil {
 		t.Fatal("serverlessMaxACU=0 must refuse")
 	}
+}
+
+func rdsQueryRole(_ *http.Request, body []byte) certifynet.Role {
+	if v, err := url.ParseQuery(string(body)); err == nil {
+		a := v.Get("Action")
+		if strings.HasPrefix(a, "Describe") || strings.HasPrefix(a, "List") {
+			return certifynet.RoleRead
+		}
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingAurora enrols aurora in the D391 gate. Aurora is a COMPOSITE
+// (cluster plus member instances) whose foreign case already had a test; the OURS case —
+// our own cluster already standing, which is what every re-converge meets — did not.
+func TestAdoptsExistingAurora(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	clusterID := DBIdentifier("000000000000", "prod", "db", 1)
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/aurora",
+		Classify: rdsQueryRole,
+		ExistingServer: func() *httptest.Server {
+			f := newFakeAurora()
+			f.clusterExists = true
+			f.tags = map[string]string{
+				"groundhold-capability":  sanitizeTag("db"),
+				"groundhold-environment": sanitizeTag("prod"),
+			}
+			f.instances[clusterID+"-writer"] = true
+			f.endpoint = clusterID + ".cluster-abc123.eu-central-1.rds.amazonaws.com"
+			f.readerEndpoint = clusterID + ".cluster-ro-abc123.eu-central-1.rds.amazonaws.com"
+			f.port = 5432
+			return f.handler(t, nil)
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.RDSBaseURL = happyURL
+			d.KMSBaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.PollInterval = 0
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("aurora", "db", "prod", auroraAttrs(), auroraImpl(), "db", 1)
+		},
+		PID:              auroraProviderID("eu-central-1", clusterID),
+		AllowedMutations: 4, // parameter-group + tag convergence onto the standing cluster
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

@@ -8,6 +8,7 @@ package contract
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -101,15 +102,19 @@ var capabilityTypesV01 = map[string]bool{
 }
 
 type Constraint struct {
-	ID           string
-	Subject      string
-	Path         string
-	Op           string
-	Value        any
-	Severity     string
-	VerifyMethod string
-	Objective    string
-	Expected     *scalars.Scalar // D19: value parsed at load
+	ID       string
+	Subject  string
+	Path     string
+	Op       string
+	Value    any
+	Severity string
+	// VerifyMethod is the DESIGN bar: what `verify` demands before a plan may seal.
+	// RuntimeMethod is the RUNTIME bar: what `audit` demands of recorded reality.
+	// They are equal unless the contract writes the two-bar form (D728).
+	VerifyMethod  string
+	RuntimeMethod string
+	Objective     string
+	Expected      *scalars.Scalar // D19: value parsed at load
 }
 
 type Contract struct {
@@ -175,6 +180,84 @@ func idIsClean(id string) bool {
 	return true
 }
 
+// D627: a field of the WRONG SHAPE must refuse, not read as empty.
+//
+// Every one of these sites was `x, _ := doc["k"].(T)`. A wrong type yields the zero
+// value, so the content DISAPPEARS and the loader carries on. Measured on the most
+// natural YAML slip there is — keying constraints by id instead of listing them:
+//
+//	constraints:
+//	  hard:
+//	    encryption:            # a MAPPING where the schema says array
+//	      subject: db
+//	      path: encryption.atRest
+//	      op: equals
+//	      value: true
+//
+//	$ groundhold verify c.yaml k.yaml     # candidate declares encryption.atRest: false
+//	  0 satisfied, 0 violated, 0 unknown, 0 unverifiable
+//	  PROVEN                               exit 0
+//	$ groundhold plan … ; groundhold apply …    exit 0 — the resource is created
+//
+// A contract that plainly requires encryption proved a candidate that plainly refuses
+// it, because the requirement was never loaded. `validate` said "0 constraints (0
+// hard)" and exited 0. spec/contract.schema.json says `array`; nothing enforced it.
+//
+// The rule: if a key is PRESENT, its shape is part of the document's meaning.
+// wantString reads a string-typed field. D681: every one of these sites was
+// `x, _ := raw["k"].(string)`, so a NON-STRING value became "" and the field was
+// omitted from the canonical model — while the reference implementation
+// canonicalized the raw value instead. One document therefore had TWO identities,
+// and each was a DIFFERENT valid document's identity:
+//
+//	A: `path: 7`   ref sha256:0707a8e8…   go sha256:147f3436…
+//	B: `path: "7"` ref sha256:0707a8e8…   go sha256:0707a8e8…
+//	C: no `path`   ref sha256:147f3436…   go sha256:147f3436…
+//
+// A plan sealed on B's contractHash is satisfied by A under the reference; a plan
+// sealed on C's is satisfied by A under the runtime. `spec/contract.schema.json`
+// types these as strings and neither implementation refused.
+func wantString(m map[string]any, key, where string) (string, error) {
+	raw, present := m[key]
+	if !present || raw == nil {
+		return "", nil
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("%s must be a string, got %T (%v) — a value of the "+
+			"wrong type is not an absent one, and dropping it silently gives this "+
+			"document the identity of a DIFFERENT one", where, raw, raw)
+	}
+	return s, nil
+}
+
+func wantList(doc map[string]any, key, where string) ([]any, error) {
+	raw, present := doc[key]
+	if !present || raw == nil {
+		return nil, nil
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be a list, got %T — a block of the wrong shape "+
+			"is not an empty block, and reading it as one would silently drop "+
+			"everything in it", where, raw)
+	}
+	return list, nil
+}
+
+func wantMap(doc map[string]any, key, where string) (map[string]any, error) {
+	raw, present := doc[key]
+	if !present || raw == nil {
+		return nil, nil
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be a mapping, got %T — a block of the wrong "+
+			"shape is not an empty block", where, raw)
+	}
+	return m, nil
+}
+
 func LoadContract(path string) (*Contract, error) {
 	doc, err := loadMapping(path, "contract")
 	if err != nil {
@@ -186,6 +269,53 @@ func LoadContract(path string) (*Contract, error) {
 // LoadContractDoc runs the full contract validation on an already-parsed
 // mapping — the same checks LoadContract applies after reading a file.
 // `groundhold compose` uses it to refuse emitting an invalid merged contract.
+
+// knownTopLevel is what a document of each kind MEANS. D673: nothing checked this,
+// so a misspelled block was silently dropped — `constraint:` (singular) made a
+// contract requiring encryption PROVE a candidate that refuses it, at exit 0, and
+// the contract then hashed IDENTICALLY to one with no constraints at all. The
+// package doc has claimed since D19 that "anything the loader does not recognize is
+// refused, never silently non-gating"; that was true of VALUES and false of KEYS.
+//
+// An `x-` prefix is the escape hatch: a YAML anchor block or a tool's own metadata
+// lives under `x-defaults`, `x-notes` and so on, and says by its name that the
+// runtime does not read it. Every shipped contract and candidate in this repository
+// was checked before this landed: zero used an unknown key.
+var knownTopLevel = map[string]map[string]bool{
+	"InfrastructureContract": {
+		"apiVersion": true, "kind": true, "meta": true, "capabilities": true,
+		"constraints": true, "assumptions": true, "outcomes": true,
+		"autonomy": true, "budget": true, "requirements": true,
+	},
+	"ImplementationCandidate": {
+		"apiVersion": true, "kind": true, "contract": true, "capabilities": true,
+		"meta": true,
+	},
+}
+
+func checkTopLevelKeys(doc map[string]any, kind string) error {
+	known := knownTopLevel[kind]
+	if known == nil {
+		return nil
+	}
+	unknown := make([]string, 0, 2)
+	for k := range doc {
+		if known[k] || strings.HasPrefix(k, "x-") {
+			continue
+		}
+		unknown = append(unknown, k)
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	return fmt.Errorf("%s declares unknown top-level key(s) %s — a block this "+
+		"loader does not read is silently non-gating, and a misspelling of "+
+		"`constraints` proves a candidate that violates them. Rename it, or prefix "+
+		"it with `x-` if it is deliberately not runtime data",
+		kind, strings.Join(unknown, ", "))
+}
+
 func LoadContractDoc(doc map[string]any) (*Contract, error) {
 	if s, _ := doc["kind"].(string); s != "InfrastructureContract" {
 		return nil, fmt.Errorf("kind must be InfrastructureContract")
@@ -193,8 +323,14 @@ func LoadContractDoc(doc map[string]any) (*Contract, error) {
 	if s, _ := doc["apiVersion"].(string); s != "contract/v0.1" {
 		return nil, fmt.Errorf("apiVersion must be contract/v0.1")
 	}
+	if err := checkTopLevelKeys(doc, "InfrastructureContract"); err != nil {
+		return nil, err
+	}
 	meta, _ := doc["meta"].(map[string]any)
-	id, _ := meta["id"].(string)
+	id, iderr := wantString(meta, "id", "meta.id")
+	if iderr != nil {
+		return nil, iderr
+	}
 	if id == "" {
 		return nil, fmt.Errorf("meta.id is required")
 	}
@@ -202,10 +338,17 @@ func LoadContractDoc(doc map[string]any) (*Contract, error) {
 	caps := map[string]map[string]any{}
 	retired := map[string]bool{}
 	var capOrder []string
-	capList, _ := doc["capabilities"].([]any)
+	capList, err := wantList(doc, "capabilities", "capabilities")
+	if err != nil {
+		return nil, err
+	}
+	var unknownTypes []string
 	for _, it := range capList {
 		cap, _ := it.(map[string]any)
-		cid, _ := cap["id"].(string)
+		cid, cerr := wantString(cap, "id", "capability id")
+		if cerr != nil {
+			return nil, cerr
+		}
 		if cid == "" {
 			return nil, fmt.Errorf("capability missing id")
 		}
@@ -215,9 +358,17 @@ func LoadContractDoc(doc map[string]any) (*Contract, error) {
 		if _, dup := caps[cid]; dup {
 			return nil, fmt.Errorf("duplicate capability id: %s", cid)
 		}
-		ct, _ := cap["type"].(string)
+		ct, terr := wantString(cap, "type", "capability "+cid+" type")
+		if terr != nil {
+			return nil, terr
+		}
 		if !capabilityTypesV01[ct] {
-			return nil, fmt.Errorf("unknown capability type: %v", cap["type"])
+			// D719: collect, do not return. A contract carrying two unknown types used
+			// to cost two runs to discover, because this refused at the first one — and
+			// the reader was told what was wrong without being told what is right, over
+			// a CLOSED vocabulary the loader is holding in its hand.
+			unknownTypes = append(unknownTypes, ct)
+			continue
 		}
 		state := "active"
 		if s, has := cap["state"]; has {
@@ -238,6 +389,9 @@ func LoadContractDoc(doc map[string]any) (*Contract, error) {
 		}
 		caps[cid] = cap
 		capOrder = append(capOrder, cid)
+	}
+	if len(unknownTypes) > 0 {
+		return nil, unknownTypeError(unknownTypes)
 	}
 
 	constraints, err := collectConstraints(doc, caps, capOrder)
@@ -268,14 +422,44 @@ func LoadContractDoc(doc map[string]any) (*Contract, error) {
 		return nil, err
 	}
 
-	env, _ := meta["environment"].(string)
+	// D683: D610 refused a non-integer `meta.version`; this sibling was left, so a
+	// non-string environment was dropped and the contract hashed IDENTICALLY to one
+	// with no environment at all — while `environment` reaches resource tags and
+	// names, stamping the estate with an empty one.
+	env, eerr := wantString(meta, "environment", "meta.environment")
+	if eerr != nil {
+		return nil, eerr
+	}
+	// D610: a version that is present but not an integer used to fall back to 1, so a
+	// contract declaring `version: "7"` validated OK and reported v1 — the declared
+	// input dropped, in silence, exactly the shape D530 refuses in a candidate operand.
+	// The reference coerced instead, so the two also disagreed about the document hash.
 	version := 1
-	if v, ok := meta["version"].(int); ok {
+	if raw, present := meta["version"]; present {
+		v, ok := raw.(int)
+		if !ok {
+			return nil, fmt.Errorf("meta.version must be an integer, got %T", raw)
+		}
 		version = v
 	}
 	assumptions, _ := doc["assumptions"].([]any)
-	outcomes, _ := doc["outcomes"].([]any)
-	autonomy, _ := doc["autonomy"].(map[string]any)
+	// D683: `assumptions` beside it is shape-gated and this was not.
+	outcomes, oerr := wantList(doc, "outcomes", "outcomes")
+	if oerr != nil {
+		return nil, oerr
+	}
+	// D658: `autonomy` holds the CONSENT GATES, and it was the one major block D627
+	// left ungated. Written as a list or a scalar it was dropped whole — and the
+	// contract then hashed identically to one with no autonomy block at all, so the
+	// identity every sealed plan pins could not tell "I disarmed the gates" from "I
+	// never had any".
+	autonomy, aerr := wantMap(doc, "autonomy", "autonomy")
+	if aerr != nil {
+		return nil, aerr
+	}
+	if err := checkAutonomyShape(autonomy); err != nil {
+		return nil, err
+	}
 	return &Contract{
 		ID: id, Environment: env, Version: version,
 		Capabilities: caps, Constraints: constraints,
@@ -286,9 +470,15 @@ func LoadContractDoc(doc map[string]any) (*Contract, error) {
 func collectConstraints(doc map[string]any, caps map[string]map[string]any,
 	capOrder []string) ([]Constraint, error) {
 	var out []Constraint
-	cblock, _ := doc["constraints"].(map[string]any)
+	cblock, err := wantMap(doc, "constraints", "constraints")
+	if err != nil {
+		return nil, err
+	}
 	for _, sev := range []string{"hard", "soft"} {
-		items, _ := cblock[sev].([]any)
+		items, err := wantList(cblock, sev, "constraints."+sev)
+		if err != nil {
+			return nil, err
+		}
 		for i, it := range items {
 			raw, ok := it.(map[string]any)
 			if !ok {
@@ -301,13 +491,19 @@ func collectConstraints(doc map[string]any, caps map[string]map[string]any,
 			out = append(out, c)
 		}
 	}
-	budget, _ := doc["budget"].([]any)
+	budget, err := wantList(doc, "budget", "budget")
+	if err != nil {
+		return nil, err
+	}
 	for i, it := range budget {
 		raw, ok := it.(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("budget constraint #%d is not a mapping", i)
 		}
-		sev, _ := raw["severity"].(string)
+		sev, sverr := wantString(raw, "severity", "constraint severity")
+		if sverr != nil {
+			return nil, sverr
+		}
 		if _, has := raw["severity"]; !has {
 			sev = "hard"
 		}
@@ -320,7 +516,11 @@ func collectConstraints(doc map[string]any, caps map[string]map[string]any,
 	// capability.requirements are sugar for hard constraints (D8);
 	// capOrder keeps constraint order deterministic
 	for _, capID := range capOrder {
-		reqs, _ := caps[capID]["requirements"].(map[string]any)
+		reqs, rerr := wantMap(caps[capID], "requirements",
+			"capabilities."+capID+".requirements")
+		if rerr != nil {
+			return nil, rerr
+		}
 		var rpaths []string
 		for rpath := range reqs {
 			rpaths = append(rpaths, rpath)
@@ -347,7 +547,10 @@ func collectConstraints(doc map[string]any, caps map[string]map[string]any,
 }
 
 func newConstraint(raw map[string]any, severity string) (Constraint, error) {
-	id, _ := raw["id"].(string)
+	id, ierr := wantString(raw, "id", "constraint id")
+	if ierr != nil {
+		return Constraint{}, ierr
+	}
 	if id == "" {
 		return Constraint{}, fmt.Errorf("constraint missing id")
 	}
@@ -359,8 +562,14 @@ func newConstraint(raw map[string]any, severity string) (Constraint, error) {
 	if severity != "hard" && severity != "soft" {
 		return Constraint{}, fmt.Errorf("%s: invalid severity %q", id, severity)
 	}
-	op, _ := raw["op"].(string)
-	objective, _ := raw["objective"].(string)
+	op, operr := wantString(raw, "op", "constraint op")
+	if operr != nil {
+		return Constraint{}, operr
+	}
+	objective, objerr := wantString(raw, "objective", "constraint objective")
+	if objerr != nil {
+		return Constraint{}, objerr
+	}
 	_, hasValue := raw["value"]
 	if obj, has := raw["objective"]; has {
 		if objective != "minimize" && objective != "maximize" {
@@ -383,13 +592,80 @@ func newConstraint(raw map[string]any, severity string) (Constraint, error) {
 		}
 	}
 	method := "static"
-	if vb, ok := raw["verify"].(map[string]any); ok {
-		if m, ok := vb["method"].(string); ok {
-			method = m
+	runtime := ""
+	// D627: both assertions used to fail OPEN to the initialised "static". A bogus
+	// STRING was refused ("unknown verify method"); a bogus TYPE was not — so
+	// `verify: {method: null}` turned a constraint the contract says must be proven
+	// against the provider into one proven by reading the candidate's own claim, and
+	// reported `satisfied`.
+	if vraw, present := raw["verify"]; present && vraw != nil {
+		vb, ok := vraw.(map[string]any)
+		if !ok {
+			return Constraint{}, fmt.Errorf(
+				"%s: verify must be a mapping, got %T", id, vraw)
 		}
+		if mraw, has := vb["method"]; has {
+			// An explicit `method: null` is a written key, not an absent one: the
+			// author said something about the method, and it is unreadable.
+			m, ok := mraw.(string)
+			if !ok {
+				return Constraint{}, fmt.Errorf(
+					"%s: verify.method must be a string, got %T — a method the loader "+
+						"cannot read must not fall back to `static`, which is the "+
+						"weakest evidence there is", id, mraw)
+			}
+			method = m
+			runtime = m // one bar: it governs both commands (the pre-D728 form)
+		}
+		// D728, the two-bar form. `verify` compares the contract with the CANDIDATE,
+		// before anything exists, so it can never hold provider evidence; `audit`
+		// judges recorded reality, where provider evidence is the whole point. One
+		// field served both, so a field report measured the corner: demanding
+		// measurement made `verify` unpassable — 130 unknown out of 146 — and
+		// accepting `static` let a hard security constraint be satisfied by the
+		// document's own word. 127 of their 131 hard constraints want to say
+		// "declaration before, measurement after", and there was no way to say it.
+		design, hasDesign := vb["design"]
+		rt, hasRuntime := vb["runtime"]
+		if hasDesign || hasRuntime {
+			if _, hasMethod := vb["method"]; hasMethod {
+				return Constraint{}, fmt.Errorf(
+					"%s: verify carries both `method` and `design`/`runtime` — one bar "+
+						"or two, never both spellings of the same thing", id)
+			}
+			if !hasDesign || !hasRuntime {
+				return Constraint{}, fmt.Errorf(
+					"%s: the two-bar verify form needs BOTH `design` and `runtime` — "+
+						"half of it would leave the other bar to a default nobody wrote", id)
+			}
+			ds, dok := design.(string)
+			rs, rok := rt.(string)
+			if !dok || !rok {
+				return Constraint{}, fmt.Errorf(
+					"%s: verify.design and verify.runtime must be strings — a bar the "+
+						"loader cannot read must not fall back to the weakest evidence "+
+						"there is", id)
+			}
+			method, runtime = ds, rs
+		}
+	}
+	if runtime == "" {
+		runtime = method
 	}
 	if !validMethods[method] {
 		return Constraint{}, fmt.Errorf("%s: unknown verify method %q", id, method)
+	}
+	if !validMethods[runtime] {
+		return Constraint{}, fmt.Errorf("%s: unknown verify.runtime %q", id, runtime)
+	}
+	// D728: the design bar may not exceed the runtime bar. A constraint that demands
+	// probe evidence before shipping and accepts a config read forever after abandons
+	// the guarantee at the moment it starts mattering — the same principle the two
+	// bars exist to serve, applied to their relationship.
+	if methodRank(method) > methodRank(runtime) {
+		return Constraint{}, fmt.Errorf(
+			"%s: verify.design %q is stronger than verify.runtime %q — a constraint "+
+				"cannot demand more evidence before it ships than after", id, method, runtime)
 	}
 	// D19: parse the value now — an ill-typed value in the contract itself
 	// is a load error, never a runtime unverifiable
@@ -413,21 +689,34 @@ func newConstraint(raw map[string]any, severity string) (Constraint, error) {
 		}
 		expected = exp
 	}
-	subject, _ := raw["subject"].(string)
-	path, _ := raw["path"].(string)
+	subject, serr := wantString(raw, "subject", "constraint "+id+" subject")
+	if serr != nil {
+		return Constraint{}, serr
+	}
+	path, perr := wantString(raw, "path", "constraint "+id+" path")
+	if perr != nil {
+		return Constraint{}, perr
+	}
 	return Constraint{
 		ID: id, Subject: subject, Path: path, Op: op, Value: raw["value"],
-		Severity: severity, VerifyMethod: method, Objective: objective,
-		Expected: expected,
+		Severity: severity, VerifyMethod: method, RuntimeMethod: runtime,
+		Objective: objective,
+		Expected:  expected,
 	}, nil
 }
 
 // checkReferences: D11 + D19 — every reference between stable ids must
 // resolve at load.
 func checkReferences(doc map[string]any, cids map[string]bool) error {
-	assumptions, _ := doc["assumptions"].([]any)
-	for _, it := range assumptions {
-		a, _ := it.(map[string]any)
+	assumptions, aerr := wantList(doc, "assumptions", "assumptions")
+	if aerr != nil {
+		return aerr
+	}
+	for i, it := range assumptions {
+		a, ok := it.(map[string]any)
+		if !ok {
+			return fmt.Errorf("assumptions[%d] must be a mapping, got %T", i, it)
+		}
 		aid, _ := a["id"].(string)
 		if aid == "" {
 			return fmt.Errorf("assumption missing id")
@@ -443,7 +732,10 @@ func checkReferences(doc map[string]any, cids map[string]bool) error {
 					"assumption %s: confidence must be a number in [0,1]", aid)
 			}
 		}
-		affects, _ := a["affects"].([]any)
+		affects, ferr := wantList(a, "affects", "assumptions."+aid+".affects")
+		if ferr != nil {
+			return ferr
+		}
 		for _, r := range affects {
 			rs, _ := r.(string)
 			if !cids[rs] {
@@ -452,7 +744,7 @@ func checkReferences(doc map[string]any, cids map[string]bool) error {
 			}
 		}
 	}
-	autonomy, _ := doc["autonomy"].(map[string]any)
+	autonomy, _ := doc["autonomy"].(map[string]any) // shape checked at load (D658)
 	forbidden, _ := autonomy["forbidden"].([]any)
 	for _, it := range forbidden {
 		entry, ok := it.(map[string]any)
@@ -470,15 +762,53 @@ func checkReferences(doc map[string]any, cids map[string]bool) error {
 	return nil
 }
 
+// checkAutonomyShape refuses an autonomy block whose sub-blocks are the wrong
+// shape (D658). Every one of these is a consent gate: `forbidden` written as a
+// mapping loses `delete_stateful`, and a bound stateful database is then destroyed
+// at exit 0 with `validate` reporting OK. The list of keys is one place, so a knob
+// added later is covered without anyone remembering to add a branch (D597's lesson,
+// applied to shape rather than to reference-checking).
+func checkAutonomyShape(autonomy map[string]any) error {
+	if autonomy == nil {
+		return nil
+	}
+	// The shapes are not uniform, and the shipped spec example is the authority:
+	// `auto_execute` is a MAPPING of thresholds (max_reversibility, max_cost_delta),
+	// while the consent lists are LISTS. Writing this as one loop over one shape
+	// would have refused `spec/examples/orders-production.contract.yaml` — which is
+	// how I learned it, and why the example is a better specification of the block
+	// than my reading of the code that ignores it.
+	for _, key := range []string{"forbidden",
+		"allow_replace_stateful", "allow_intrusive_probes", "allow_protection_lift",
+		"allow_field_reclaim"} {
+		if _, err := wantList(autonomy, key, "autonomy."+key); err != nil {
+			return err
+		}
+	}
+	if _, err := wantMap(autonomy, "auto_execute", "autonomy.auto_execute"); err != nil {
+		return err
+	}
+	return nil
+}
+
 func checkAutonomyCapabilities(doc map[string]any,
 	caps map[string]map[string]any) error {
 	autonomy, _ := doc["autonomy"].(map[string]any)
-	allowed, _ := autonomy["allow_replace_stateful"].([]any)
-	for _, it := range allowed {
-		s, _ := it.(string)
-		if caps[s] == nil {
-			return fmt.Errorf("autonomy.allow_replace_stateful references "+
-				"unknown capability %q", s)
+	// D597: every consent list that names capabilities, from ONE list of keys rather
+	// than an `if` per key. `allow_replace_stateful` was checked and
+	// `allow_intrusive_probes` was not — and the unchecked one is the one that
+	// SPENDS (D59's restore-test restores a backup into a scratch instance). A typo
+	// there loaded clean, granted nothing, and would surface as a refusal later,
+	// quite possibly during the incident the probe was meant to measure. A third
+	// list added here is covered without anyone remembering to add a branch.
+	for _, key := range []string{"allow_replace_stateful", "allow_intrusive_probes",
+		"allow_protection_lift", "allow_field_reclaim"} {
+		allowed, _ := autonomy[key].([]any)
+		for _, it := range allowed {
+			s, _ := it.(string)
+			if caps[s] == nil {
+				return fmt.Errorf("autonomy.%s references unknown capability %q", key, s)
+			}
 		}
 	}
 	// D195: a malformed knob must not silently disarm the gate — refuse a
@@ -503,16 +833,31 @@ func LoadCandidate(path string, c *Contract,
 	if s, _ := doc["apiVersion"].(string); s != "candidate/v0.1" {
 		return nil, fmt.Errorf("apiVersion must be candidate/v0.1")
 	}
+	if err := checkTopLevelKeys(doc, "ImplementationCandidate"); err != nil {
+		return nil, err
+	}
 	if s, _ := doc["contract"].(string); s == "" {
 		return nil, fmt.Errorf("candidate must name its contract")
 	}
 	caps := map[string]map[string]Provenanced{}
 	extras := map[string]map[string]any{}
-	capsRaw, _ := doc["capabilities"].(map[string]any)
+	capsRaw, err := wantMap(doc, "capabilities", "capabilities")
+	if err != nil {
+		return nil, err
+	}
 	for capID, bodyRaw := range capsRaw {
-		body, _ := bodyRaw.(map[string]any)
+		body, ok := bodyRaw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf(
+				"capabilities.%s must be a mapping, got %T — a capability body the "+
+					"loader cannot read declares nothing, and nothing is what it "+
+					"would then be verified against", capID, bodyRaw)
+		}
 		attrs := map[string]Provenanced{}
-		attrsRaw, _ := body["attributes"].(map[string]any)
+		attrsRaw, aerr := wantMap(body, "attributes", "capabilities."+capID+".attributes")
+		if aerr != nil {
+			return nil, aerr
+		}
 		for p, v := range attrsRaw {
 			pv, err := provenanced(v)
 			if err != nil {
@@ -521,6 +866,16 @@ func LoadCandidate(path string, c *Contract,
 			attrs[p] = pv
 		}
 		caps[capID] = attrs
+		// D677: a capability body may not carry `id:`. The identity is the map key,
+		// and this field flowed into the canonical model where it OVERWROTE it — two
+		// candidates implementing different capabilities shared one hash, one
+		// verifying PROVEN and the other BLOCKED. Silently ignoring it would be the
+		// D673 shape (a declared field the loader does not read); it is refused.
+		if _, has := body["id"]; has {
+			return nil, fmt.Errorf("capabilities.%s carries an `id:` field — the "+
+				"capability's identity is the key it is written under, and a second "+
+				"one can only disagree with it", capID)
+		}
 		extra := map[string]any{}
 		for k, v := range body {
 			if k != "attributes" {
@@ -568,6 +923,19 @@ func vocabCheck(cand *Candidate, c *Contract,
 				return fmt.Errorf(
 					"%s.%s: vocabulary defines kind %s, got %s (%v)",
 					capID, p, want, pv.Scalar.Kind, pv.Scalar.Raw)
+			}
+			// D532: a list the vocabulary marks `unordered: true` is a SET, and a
+			// set has no order. Canonicalize it (sort) here, where the vocabulary is
+			// known, so DECLARED and OBSERVED compare equal everywhere — verifier,
+			// adopt, reconcile — without a second meaning of equality and without a
+			// new operator (invariant #4 untouched). A plain `kind: list` is an
+			// ordered sequence and is left exactly as written (D21).
+			//
+			// From the field: an attribute documented as "the full set of regions"
+			// refused adoption because the cloud returned the same six regions in a
+			// different order, with the message "adoption must not lie".
+			if unordered, _ := spec["unordered"].(bool); unordered {
+				scalars.SortList(pv.Scalar)
 			}
 			if enum, ok := spec["enum"].([]any); ok {
 				found := false
@@ -624,7 +992,10 @@ func provenanced(v any) (Provenanced, error) {
 				}
 				conf = &f
 			}
-			src, _ := m["source"].(string)
+			src, serr := wantString(m, "source", "attribute source")
+			if serr != nil {
+				return Provenanced{}, serr
+			}
 			return Provenanced{
 				Scalar: sc, Status: status, Source: src, Confidence: conf,
 			}, nil
@@ -664,4 +1035,100 @@ func toFloat(v any) (float64, bool) {
 		return x, true
 	}
 	return 0, false
+}
+
+// unknownTypeError names EVERY unknown capability type in one refusal, each with the
+// known types nearest to it (D719). The vocabulary is closed and the loader is holding
+// it, so refusing with "unknown capability type: X" and nothing else made the reader
+// go and find a list the tool already had — and refusing at the FIRST one made a
+// contract with two mistakes cost two runs to discover.
+func unknownTypeError(unknown []string) error {
+	known := make([]string, 0, len(capabilityTypesV01))
+	for t := range capabilityTypesV01 {
+		known = append(known, t)
+	}
+	sort.Strings(known)
+
+	var b strings.Builder
+	if len(unknown) == 1 {
+		fmt.Fprintf(&b, "unknown capability type: %s", unknown[0])
+	} else {
+		fmt.Fprintf(&b, "%d unknown capability types", len(unknown))
+	}
+	for _, u := range unknown {
+		near := nearestTypes(u, known, 3)
+		if len(unknown) > 1 {
+			fmt.Fprintf(&b, "\n  %s", u)
+		}
+		if len(near) > 0 {
+			fmt.Fprintf(&b, "\n    closest known types: %s", strings.Join(near, ", "))
+		}
+	}
+	fmt.Fprintf(&b, "\n  the vocabulary is closed and has %d types; `groundhold explain "+
+		"<capability.type>` describes one", len(known))
+	return fmt.Errorf("%s", b.String())
+}
+
+// nearestTypes returns up to n known types closest to want by edit distance, ties
+// broken lexicographically. Deterministic, and identical in the Python reference —
+// two implementations that suggest different things are two tools.
+func nearestTypes(want string, known []string, n int) []string {
+	type scored struct {
+		d int
+		t string
+	}
+	all := make([]scored, 0, len(known))
+	for _, k := range known {
+		all = append(all, scored{editDistance(want, k), k})
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].d != all[j].d {
+			return all[i].d < all[j].d
+		}
+		return all[i].t < all[j].t
+	})
+	out := []string{}
+	for _, s := range all {
+		if len(out) == n {
+			break
+		}
+		out = append(out, s.t)
+	}
+	return out
+}
+
+// editDistance is Levenshtein over runes.
+func editDistance(a, b string) int {
+	ar, br := []rune(a), []rune(b)
+	prev := make([]int, len(br)+1)
+	cur := make([]int, len(br)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ar); i++ {
+		cur[0] = i
+		for j := 1; j <= len(br); j++ {
+			cost := 1
+			if ar[i-1] == br[j-1] {
+				cost = 0
+			}
+			cur[j] = min(min(cur[j-1]+1, prev[j]+1), prev[j-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(br)]
+}
+
+// methodRank orders the evidence bars (D728). It is the same ladder the audit uses;
+// kept here so the loader can refuse an incoherent pair at load time rather than
+// letting it surface as a verdict.
+func methodRank(method string) int {
+	switch method {
+	case "probe":
+		return 2
+	case "provider-api":
+		return 1
+	default: // static
+		return 0
+	}
 }

@@ -267,7 +267,17 @@ func classifyAuditLogsChange(path string) (string, string) {
 	case "delivery.assured":
 		return "mutable", "in-place via sinks.patch (disabled)"
 	case "location.region", "encryption.customerManagedKeys":
-		return "immutable", "residency/CMEK live on the destination operand (a separate capability); a change is a replacement of the destination, not an in-place sink patch"
+		// D825: the reason says these are not properties of the SINK at all — they belong to
+		// the destination, which is a separate capability. That is the same thing the two
+		// cases below say, and they answer `unsupported`. `immutable` said instead that no
+		// in-place change exists, which is not true of the destination either: a log
+		// bucket's cmekSettings is updated by buckets.patch (logging/v2). A sink carries no
+		// data, so the cost here is small — but the sentence and the verdict still
+		// disagreed, and the neighbours already had it right.
+		return "unsupported", "residency and CMEK are properties of the sink's DESTINATION, " +
+			"a separate capability — there is nothing on the sink to patch, and the " +
+			"destination's own driver governs the change (a log bucket's cmekSettings, for " +
+			"one, is updated in place by buckets.patch)"
 	case "scope.multiRegion":
 		return "unsupported", "GCP audit logs are project-global — scope is structural, nothing to patch"
 	case "integrity.logValidation":

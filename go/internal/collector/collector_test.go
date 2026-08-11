@@ -142,3 +142,33 @@ func TestFutureDatedNumericCompare(t *testing.T) {
 		t.Errorf("an unparseable occurredAt must report unparseable (fail closed)")
 	}
 }
+
+// D759: the boundary check is the other home of the closed set (spec/state.schema.json
+// is the first). A collector emitting a platform guarantee must be able to SAY so, and an
+// invented basis must still be rejected — the point of a closed set.
+//
+// The first version of this test asked the MAP directly, so the mutant that disarmed the
+// boundary survived it: it measured the data, not the enforcement. Same trap as D726,
+// caught by the meter rather than by me.
+func TestBoundaryAcceptsPlatformInvariantAndStillRejectsInventedBases(t *testing.T) {
+	for _, c := range []struct {
+		derivation string
+		wantReject bool
+	}{
+		{"measured", false},
+		{"config-intent", false},
+		{"platform-invariant", false},
+		{"", true},
+		{"inferred", true},
+		{"platform", true}, // near-miss: a closed set is closed
+	} {
+		o := measured()
+		o["derivation"] = c.derivation
+		rep := Certify(capsuleWith(t, o))
+		rejected := hasKind(rep, "derivation")
+		if rejected != c.wantReject {
+			t.Errorf("derivation %q: boundary rejected=%v, want %v — this drives Certify, "+
+				"which is what actually closes the set (D759)", c.derivation, rejected, c.wantReject)
+		}
+	}
+}

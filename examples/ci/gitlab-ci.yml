@@ -10,9 +10,12 @@ verify:
   <<: *build
   stage: verify
   script:
+    # D659: NOT `| tee` — a pipeline's status is its last command, and GitLab's
+    # shell does not set pipefail either, so the gate could never fail.
     - bin/groundhold-go verify contracts/prod.contract.yaml
         candidates/prod.candidate.yaml --vocab spec/vocab --json
-        | tee verify-report.json
+        > verify-report.json
+    - cat verify-report.json
   artifacts:
     paths: [verify-report.json]
     when: always

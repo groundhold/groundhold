@@ -3,6 +3,7 @@ package verify
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"groundhold/internal/contract"
@@ -65,5 +66,40 @@ capabilities:
 	report, err := Verify(c, cand, nil)
 	if err == nil {
 		t.Fatalf("Verify must refuse an un-canonicalizable candidate, got: %+v", report)
+	}
+}
+
+// D766, from the field. A budget constraint compared a number the AUTHOR wrote against a
+// threshold the author wrote and reported it as `observed 6 EUR`; the bill was 14.6. The
+// reporter's sentence is the finding: **"Ograniczenie oparte na liczbie, którą sam
+// wpisałem, nie jest ograniczeniem. Jest powtórzeniem mojego założenia."**
+//
+// What is fixed here is the WORD, not the semantics: a declared value still satisfies a
+// static-bar constraint, and whether it should is a decision about verify.method defaults
+// that belongs to the owner (recorded, flagged, not taken here). What must not stand is
+// the sentence claiming a measurement nobody made.
+func TestTheVerdictVerbFollowsTheProvenance(t *testing.T) {
+	for _, c := range []struct {
+		status string
+		want   string
+		absent string
+	}{
+		{"declared", "declared 6", "observed"},
+		{"inferred", "inferred 6", "observed"},
+		{"assumed", "assumed 6", "observed"},
+		{"", "observed 6", "declared"},
+	} {
+		t.Run(c.status, func(t *testing.T) {
+			got := basisVerb(c.status)
+			line := "cost.monthly lte 15: " + got + " 6"
+			if !strings.Contains(line, c.want) {
+				t.Fatalf("basis %q rendered %q, want it to say %q — the word in the sentence "+
+					"a person acts on must match how the value was come by (D766)",
+					c.status, line, c.want)
+			}
+			if c.absent != "" && strings.Contains(line, c.absent) {
+				t.Fatalf("basis %q rendered %q, which still says %q", c.status, line, c.absent)
+			}
+		})
 	}
 }

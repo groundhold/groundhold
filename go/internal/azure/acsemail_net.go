@@ -279,9 +279,15 @@ func (d *Driver) observeACSEmail(capability, providerID string) ([]provider.Obse
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"emailService not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"emailService not found — bound resource is gone (will re-create)"}, nil
 	}
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
 	if doc.Properties.DataLocation != "" {
@@ -472,7 +478,7 @@ func (d *Driver) discoverACSEmail(region string) ([]provider.Discovered, []strin
 			diags = append(diags, s.Name+": "+dg)
 		}
 		found = append(found, provider.Discovered{
-			ProviderID: pid, ResourceType: "capability.email.sending", Observations: obs})
+			ProviderID: pid, ResourceType: "capability.email.sending", Observations: provider.WithoutAbsence(obs)})
 	}
 	return found, diags, nil
 }

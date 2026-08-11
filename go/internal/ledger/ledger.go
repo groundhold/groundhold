@@ -22,7 +22,6 @@ import (
 var MutationTypes = map[string]bool{
 	"binding.updated": true, "apply.started": true,
 	"apply.finished": true, "apply.failed": true,
-	"ownership.claimed": true,
 }
 
 // NonMutatingTypes is the EXPLICIT other half of MutationTypes (D338). The
@@ -44,6 +43,12 @@ var NonMutatingTypes = map[string]bool{
 	"lease.released":       true, // coordination
 	"lease.broken":         true, // coordination
 	"operation.receipt":    true, // outcome of a mutation already fenced by apply.started
+	// D599: an AUTHORSHIP stamp, not a world change — spec/state-model.md §1 says so
+	// in those words, and §2 enumerates the mutation set as apply.* + binding.updated.
+	// It was in MutationTypes, so the runtime refused a bare claim that the reference
+	// implementation accepts. `apply` stamps it while holding a lease and MAY carry a
+	// token; the token is simply no longer demanded.
+	"ownership.claimed": true,
 	// D229: converge lifecycle markers — run-scoped, lease-free by design.
 	"converge.started":       true,
 	"converge.phase.entered": true,
@@ -60,6 +65,23 @@ var DecisionTypes = map[string]bool{
 	"plan.sealed": true,
 }
 
+// ReceiptStatuses is the closed set of operation-receipt statuses, in a stable
+// order. Exported because the run-state derivation folds the SAME event
+// (internal/runstatus) and must be checkable against this fold rather than
+// carrying its own copy of the rule — D641.
+func ReceiptStatuses() []string {
+	return []string{"pending", "succeeded", "failed", "unknown", "retryable"}
+}
+
+// ReceiptLeavesIntentPending is the single answer to "does a receipt with this
+// status leave the operation unsettled?" — the rule the fold below applies, so
+// that every other reader applies the same one. `unknown` MAY have landed and
+// stays pending until adopted (D29/D180); `retryable` provably did not land and
+// concludes (D241).
+func ReceiptLeavesIntentPending(status string) bool {
+	return status == "pending" || status == "unknown"
+}
+
 var receiptStatuses = map[string]bool{
 	"pending": true, "succeeded": true, "failed": true, "unknown": true,
 	// D241: a throttled mutation that provably did not land — concludes the
@@ -73,6 +95,19 @@ type lease struct {
 	expiry int
 	ttl    int
 	ended  bool
+	// seq identifies the LEASE, not the capability (D633). Tokens are per-capability
+	// counters — `max(previous tokens for the affected caps) + 1` — so two leases over
+	// disjoint capability sets both receive token 1, and the mutation rule ("does the
+	// token equal the active token on each affected capability") was satisfied by a
+	// writer mutating INTO someone else's lease. seq is a fold-time counter: it is
+	// recomputed identically on every replay, never appears on the wire, and does not
+	// touch token arithmetic — so no existing ledger reads differently because of it.
+	seq int
+	// seqUnknown marks a lease seeded from a snapshot written before lease
+	// identity existed (D644). Its seq is synthetic and distinct, so the covering
+	// check refuses a multi-capability mutation over it — the snapshot cannot
+	// establish that one lease held them, and silence is not agreement.
+	seqUnknown bool
 }
 
 type Ledger struct {
@@ -127,6 +162,7 @@ type Ledger struct {
 	maxOccurred int
 	leases      map[string]*lease
 	maxToken    map[string]int
+	leaseSeq    int // D633: identifies a lease across its capabilities
 	pending     map[string]map[string]bool
 	// pendingBody keeps the LAST receipt body per pending operation —
 	// resume (D57) needs the intent details, not just the id
@@ -377,6 +413,27 @@ func (l *Ledger) BoundServices() map[string]string {
 		}
 	}
 	return out
+}
+
+// ObservationExpired is THE freshness predicate: at evaluation time T an
+// observation is usable iff `observedAt + ttlSeconds >= T`, so it is expired iff
+// its age EXCEEDS the ttl. spec/state-model.md states it in those words.
+//
+// D666: six places decided this and two of them used `>=` where the spec and the
+// other four use `>`. `posture` and `refresh` therefore called a proof decayed one
+// second before `audit`, `plan`, `apply` and `forecast` did — and `posture`'s own
+// printed remediation chains exactly those three verbs, so the operator was told to
+// refresh a proof the auditor still accepted, and posture kept reporting decayed
+// after refresh had renewed nothing.
+//
+// An unreadable observedAt is EXPIRED, never fresh: a freshness decision must not
+// be made against a clock nobody could read (N1).
+func ObservationExpired(observedAt string, ttlSeconds, evalClock int) bool {
+	obsClock, err := ParseTs(observedAt)
+	if err != nil {
+		return true
+	}
+	return evalClock-obsClock > ttlSeconds
 }
 
 // PendingCount returns the number of unresolved operation receipts on a
@@ -678,6 +735,18 @@ func (l *Ledger) projectViolation(cap, etype string, ev map[string]any) {
 // obsNewer compares observation recency NUMERICALLY — RFC3339 with a
 // non-UTC offset string-compares wrong (review fix). On a tie,
 // measured beats config-intent (D45).
+//
+// D667: at an equal clock with EQUAL derivations the incumbent used to win, so a
+// re-observation recorded in the same second as the previous one was silently
+// dropped from the projection. Reachable by construction and reproduced with the
+// product: `converge` runs two observe phases under one `--at`, and any scheduler
+// that pins a single `--at` per tick re-observes into the same second. The ledger
+// then held the fresher reading — a different VALUE, or a shorter TTL — while every
+// freshness and verdict decision used the older one.
+//
+// The ledger is an ordered log, so among equally-timestamped records of equal
+// derivation the LATER LINE is the later fact. That is the same reading D656 gave
+// two terminal events for one run.
 func obsNewer(candidate, incumbent ObsRecord) bool {
 	ct, cerr := ParseTs(candidate.ObservedAt)
 	it, ierr := ParseTs(incumbent.ObservedAt)
@@ -687,8 +756,11 @@ func obsNewer(candidate, incumbent ObsRecord) bool {
 	if ct != it {
 		return ct > it
 	}
-	return candidate.Derivation == "measured" &&
-		incumbent.Derivation != "measured"
+	if candidate.Derivation != incumbent.Derivation {
+		// D45: a measurement outranks a declaration whatever the order.
+		return candidate.Derivation == "measured"
+	}
+	return true // same instant, same basis: the later line is the later fact
 }
 
 func (l *Ledger) projectObservations(cap string, ev map[string]any) {
@@ -773,9 +845,10 @@ func (l *Ledger) checkRules(ev map[string]any,
 		}
 		token++
 		return "", token, func() {
+			l.leaseSeq++
 			for _, c := range caps {
 				l.leases[c] = &lease{token: token, expiry: l.Clock + ttl,
-					ttl: ttl, ended: false}
+					ttl: ttl, ended: false, seq: l.leaseSeq}
 				l.maxToken[c] = token
 			}
 		}
@@ -831,11 +904,36 @@ func (l *Ledger) checkRules(ev map[string]any,
 		if !ok {
 			return "mutation requires a fencing token (D29)", 0, noop
 		}
+		// D633: ONE lease must cover the whole affected set. Checking the token per
+		// capability let a writer hold {a,b} and mutate {b,c} the moment an unrelated
+		// worker acquired {c} and was handed the same token number.
+		// D644: `covering := 0` was both the sentinel and a legal seq, so the
+		// comparison was skipped for a seq-0 lease and the verdict depended on the
+		// ORDER of the affected list. Seq 0 arrives from a pre-D633 snapshot, where
+		// every seeded lease read back as 0 — the rule went vacuous for any ledger
+		// an older binary had compacted.
+		covering, haveCovering := 0, false
 		for _, c := range caps {
 			le := l.activeLease(c)
 			if le == nil || le.token != tok {
 				return fmt.Sprintf(
 					"stale or missing fencing token on %s", c), 0, noop
+			}
+			if le.seqUnknown && len(caps) > 1 {
+				return fmt.Sprintf(
+					"%s is held by a lease restored from a snapshot that predates "+
+						"lease identity, so nothing here can establish that ONE lease "+
+						"covers this mutation — release and re-acquire the lease "+
+						"before mutating more than one capability (D29)", c), 0, noop
+			}
+			if !haveCovering {
+				covering, haveCovering = le.seq, true
+			} else if le.seq != covering {
+				return fmt.Sprintf(
+					"the affected capabilities are held by DIFFERENT leases — %s is "+
+						"under another lease that happens to carry the same token "+
+						"number; one mutation must be covered by ONE lease (D29)",
+					c), 0, noop
 			}
 		}
 		return "", 0, noop
@@ -848,8 +946,8 @@ func (l *Ledger) checkRules(ev map[string]any,
 		}
 		return "", 0, func() {
 			for _, c := range caps {
-				switch status {
-				case "pending", "unknown":
+				switch {
+				case ReceiptLeavesIntentPending(status):
 					// unknown keeps the receipt pending AND refreshes
 					// the stored body — the terminal-unknown receipt
 					// carries providerOperation, which resume's
@@ -865,7 +963,7 @@ func (l *Ledger) checkRules(ev map[string]any,
 						l.pendingBody[c] = map[string]map[string]any{}
 					}
 					l.pendingBody[c][op] = body
-				case "succeeded", "failed", "retryable":
+				default: // succeeded, failed, retryable
 					// D241: retryable concludes the intent (throttled, did not
 					// land) — clears pending so a re-apply is not blocked.
 					delete(l.pending[c], op)

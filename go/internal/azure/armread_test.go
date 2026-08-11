@@ -133,3 +133,25 @@ func TestAzReadWhyNamesTheCause(t *testing.T) {
 		t.Fatal("the bare word must not survive")
 	}
 }
+
+// TestAzErrDetailParsesTopLevelShape (D929): not every ARM error wraps itself in "error".
+// A managedClusters (AKS) 400 carries {"code","message"} at the top level, and the
+// wrapped-only read used to swallow it entirely ("no error code or message"), leaving an
+// operator debugging a failed create with nothing. Both shapes must be read.
+func TestAzErrDetailParsesTopLevelShape(t *testing.T) {
+	topLevel := []byte(`{"code":"K8sVersionNotSupported","message":"version 1.29.15 which is not supported in this region","subcode":""}`)
+	if got := azErrCode(topLevel); got != "K8sVersionNotSupported" {
+		t.Errorf("top-level code = %q, want K8sVersionNotSupported", got)
+	}
+	if got := azErrMessage(topLevel); got == "" || !strings.Contains(got, "not supported in this region") {
+		t.Errorf("top-level message = %q", got)
+	}
+	if got := mutDetailAz(topLevel); got == "" || strings.Contains(got, "no error code or message") {
+		t.Errorf("mutDetailAz swallowed a top-level ARM error: %q", got)
+	}
+	// the wrapped shape still works
+	wrapped := []byte(`{"error":{"code":"BadRequest","message":"wrapped msg"}}`)
+	if azErrCode(wrapped) != "BadRequest" || azErrMessage(wrapped) != "wrapped msg" {
+		t.Errorf("wrapped shape regressed: code=%q msg=%q", azErrCode(wrapped), azErrMessage(wrapped))
+	}
+}

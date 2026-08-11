@@ -81,19 +81,23 @@ func BuildApiGWv2(environment, capability string,
 	return p, nil
 }
 
-// createBody is the CreateApi request body. Ownership is tags.
+// createBody is the CreateApi request body. Ownership is tags. The apigatewayv2
+// wire protocol is restJson1 and the members carry camelCase locationNames
+// (name, protocolType, tags, routeSelectionExpression) — a PascalCase body is
+// silently ignored by AWS, which then reports protocolType empty as "Invalid
+// protocol specified" (D878: the real-account defect the PascalCase golden hid).
 func (p ApiGWPlan) createBody(capability, environment string) map[string]any {
 	body := map[string]any{
-		"Name":         p.Name,
-		"ProtocolType": p.ProtocolType,
-		"Tags": map[string]any{
+		"name":         p.Name,
+		"protocolType": p.ProtocolType,
+		"tags": map[string]any{
 			"groundhold-capability":  sanitizeTag(capability),
 			"groundhold-environment": sanitizeTag(environment),
 		},
 	}
 	if p.ProtocolType == "WEBSOCKET" {
 		// a WebSocket API requires a route-selection expression.
-		body["RouteSelectionExpression"] = "$request.body.action"
+		body["routeSelectionExpression"] = "$request.body.action"
 	}
 	return body
 }

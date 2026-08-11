@@ -1,10 +1,10 @@
 # What is Groundhold
 
-**AI should not write Terraform.** Not because Terraform is bad —
-because a probabilistic author needs a medium built for verification,
-not for authoring implementations. The AI should emit verifiable
-contracts, and a deterministic runtime should validate, gate, execute
-and prove them.
+**AI should not write Terraform.** The problem is not Terraform; it is
+that a probabilistic author needs a medium built for verification
+rather than for authoring implementations. An agent should emit
+verifiable contracts, and a deterministic runtime should validate,
+gate, execute and prove them.
 
 Groundhold splits infrastructure into three layers with three authors:
 
@@ -57,10 +57,10 @@ Everything downstream keeps that discipline:
   provider you configure. The ledger is the observability surface;
   `export` streams it as CloudEvents to whatever you already run.
 
-The whole lifecycle is one verb when you want it —
-`groundhold converge` — and a couple dozen plumbing verbs when you need them.
-The promises above are not aspirations; they are mechanisms — see
-[the honesty rules](honesty.md).
+The whole lifecycle is one verb when you want it (`groundhold converge`),
+and a couple of dozen plumbing verbs when you need them. Each promise
+above is a mechanism with a gate behind it, which
+[the honesty rules](honesty.md) set out one at a time.
 
 ## The thesis, as a conformance case
 
@@ -69,4 +69,4 @@ as a **hard constraint** with `verify.method: probe`. Nothing can
 *deploy* that claim — a hard constraint may not ship unproven. The capability is adopted, the audit
 alarms (`unknown`), a doubly-consented restore test measures 35
 minutes, and the next audit rules `satisfied` and resolves the alarm.
-**A claim became a measurement.** That is the entire point.
+**A claim became a measurement.**

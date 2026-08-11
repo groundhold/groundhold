@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"groundhold/internal/perr"
 	"groundhold/internal/provider"
 )
 
@@ -155,7 +156,11 @@ func (d *Driver) observeEKS(capability, providerID string) ([]provider.Observati
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"cluster not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"cluster not found — bound resource is gone (will re-create)"}, nil
 	}
 
 	var exposure string
@@ -178,6 +183,8 @@ func (d *Driver) observeEKS(capability, providerID string) ([]provider.Observati
 	}
 
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "cluster.version", Value: c.Version, Derivation: "measured"},
 		{Path: "network.apiExposure", Value: exposure, Derivation: "measured"},
@@ -340,9 +347,10 @@ func (d *Driver) createEKS(region, environment, capability string,
 	if found {
 		if !groundholdTagsMatch(c.Tags, capability, environment) {
 			return provider.CreateResult{Status: "failed",
-				Reason: "a cluster with this name exists and is not ours (tags do not match) — refusing to " +
-					"adopt it; to take over a foreign cluster run `groundhold discover` then `adopt` (which " +
-					"claims it through the gated adoption flow), never a bare converge"}
+				Reason: fmt.Sprintf("a cluster with this name exists and is not ours (tags do not match) — "+
+					"refusing to adopt it; to take over a foreign cluster run `groundhold discover "+
+					"--provider aws --region %s %s` then `adopt` (which claims it through the "+
+					"gated adoption flow), never a bare converge", region, perr.AtNow)}
 		}
 		return d.ensureEKSNodeGroup(region, pid, plan, capability, environment)
 	}
@@ -355,7 +363,8 @@ func (d *Driver) createEKS(region, environment, capability string,
 		return provider.CreateResult{Status: "failed",
 			Reason: fmt.Sprintf("implementation.clusterName=%q names a cluster to adopt, but no such cluster "+
 				"exists in %s — refusing to create one at an adoption name (check the name/region, or run "+
-				"`groundhold discover` then `adopt` first)", plan.Name, region)}
+				"`groundhold discover --provider aws --region %[2]s %[3]s` then `adopt` first)",
+				plan.Name, region, perr.AtNow)}
 	}
 
 	// CreateCluster (POST /clusters). The pid is knowable before the response
@@ -699,7 +708,7 @@ func (d *Driver) discoverEKS(region string) ([]provider.Discovered, []string, er
 		}
 		diags = append(diags, od...)
 		found = append(found, provider.Discovered{
-			ProviderID: pid, ResourceType: "capability.cluster.kubernetes", Observations: obs})
+			ProviderID: pid, ResourceType: "capability.cluster.kubernetes", Observations: provider.WithoutAbsence(obs)})
 	}
 	return found, diags, nil
 }

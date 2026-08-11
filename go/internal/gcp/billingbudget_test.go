@@ -360,3 +360,85 @@ func TestSplitBillingBudgetProviderIDRejectsUnsafe(t *testing.T) {
 		t.Fatalf("valid providerId parse: %q %q %v", acct, id, err)
 	}
 }
+
+// D798. A threshold rule fires on what has been SPENT or on what is FORECAST, and the
+// two are different promises. The driver used to take rule zero whatever it watched, so
+// a budget with a forecast rule first reported a spend alert nobody had configured — the
+// distinction both other clouds already drew on this same attribute.
+func TestBudgetThresholdIgnoresForecastRules(t *testing.T) {
+	var doc billingBudgetDoc
+	if err := json.Unmarshal([]byte(`{"thresholdRules":[
+	  {"thresholdPercent":0.5,"spendBasis":"FORECASTED_SPEND"},
+	  {"thresholdPercent":0.9,"spendBasis":"CURRENT_SPEND"}]}`), &doc); err != nil {
+		t.Fatal(err)
+	}
+	obs, _ := budgetObservations(doc)
+	var got any
+	for _, o := range obs {
+		if o.Path == "alert.threshold" {
+			got = o.Value
+		}
+	}
+	if got != float64(90) {
+		t.Fatalf("alert.threshold = %v — a FORECAST rule was reported as the spend threshold", got)
+	}
+}
+
+func TestBudgetWithOnlyForecastRulesWithholdsTheThreshold(t *testing.T) {
+	var doc billingBudgetDoc
+	if err := json.Unmarshal([]byte(
+		`{"thresholdRules":[{"thresholdPercent":0.8,"spendBasis":"FORECASTED_SPEND"}]}`), &doc); err != nil {
+		t.Fatal(err)
+	}
+	obs, diags := budgetObservations(doc)
+	for _, o := range obs {
+		if o.Path == "alert.threshold" {
+			t.Fatalf("a forecast-only budget reported a spend threshold: %v", o.Value)
+		}
+	}
+	if len(diags) == 0 || !strings.Contains(strings.Join(diags, " "), "FORECASTED") {
+		t.Fatalf("the withheld threshold was not explained: %v", diags)
+	}
+}
+
+// An absent spendBasis IS a current-spend rule — the API says so ("Behavior defaults to
+// CURRENT_SPEND if not set"), and reading absence as a forecast would withhold a real
+// threshold.
+func TestBudgetThresholdTreatsAnAbsentBasisAsCurrentSpend(t *testing.T) {
+	var doc billingBudgetDoc
+	if err := json.Unmarshal([]byte(`{"thresholdRules":[{"thresholdPercent":0.75}]}`), &doc); err != nil {
+		t.Fatal(err)
+	}
+	obs, _ := budgetObservations(doc)
+	for _, o := range obs {
+		if o.Path == "alert.threshold" && o.Value == float64(75) {
+			return
+		}
+	}
+	t.Fatalf("a rule with no spendBasis was not read as current spend: %+v", obs)
+}
+
+// TestGCPSetsQuotaProjectHeader pins D993: user Application-Default-Credentials have no
+// quota project of their own, so quota-metered GCP APIs (billingbudgets, serviceusage)
+// 403 without an explicit x-goog-user-project. The driver must name the project it acts
+// on as the quota project. Field-found 2026-08-10 (a real billingbudgets create 403'd on
+// a user-ADC token until the header was added).
+func TestGCPSetsQuotaProjectHeader(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h := r.Header.Get("x-goog-user-project"); h != "" {
+			got = h
+		}
+		if strings.HasSuffix(r.URL.Path, "/billingInfo") {
+			_, _ = w.Write([]byte(`{"billingAccountName":"billingAccounts/` + testBillingAccount + `","billingEnabled":true}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"name":"billingAccounts/` + testBillingAccount + `/budgets/b1"}`))
+	}))
+	defer srv.Close()
+	d := budgetDriver(t, srv) // NewDriver("acme-prod")
+	d.createBillingBudget("bud", "prod", budgetAttrs(), budgetImpl(), 1)
+	if got != "acme-prod" {
+		t.Fatalf("x-goog-user-project = %q, want acme-prod — a user-ADC token 403s on quota-metered APIs without it (D993)", got)
+	}
+}

@@ -106,7 +106,11 @@ func (d *Driver) observeAzFiles(capability, providerID string) ([]provider.Obser
 		return nil, nil, fmt.Errorf("storageAccounts.get: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"storage account not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"storage account not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("storageAccounts.get: HTTP %d", st)
@@ -115,9 +119,11 @@ func (d *Driver) observeAzFiles(capability, providerID string) ([]provider.Obser
 	if json.Unmarshal(resp, &doc) != nil {
 		return nil, nil, &armReadError{Op: "storageAccounts.get", Cause: "body", Status: st}
 	}
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
-		{Path: "encryption.atRest", Value: true, Derivation: "config-intent"},
+		{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"},
 		{Path: "protocol", Value: azFilesProtocolForKind(doc.Kind), Derivation: "config-intent"},
 	}
 	if doc.Location != "" {
@@ -129,9 +135,7 @@ func (d *Driver) observeAzFiles(capability, providerID string) ([]provider.Obser
 	case "Standard_ZRS", "Premium_ZRS":
 		obs = append(obs, provider.Observation{Path: "availability.class", Value: "regional", Derivation: "measured"})
 	}
-	if doc.Properties.Encryption.KeySource == "Microsoft.Keyvault" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: true, Derivation: "measured"})
-	}
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: doc.Properties.Encryption.KeySource == "Microsoft.Keyvault", Derivation: "measured"})
 	return obs, nil, nil
 }
 

@@ -78,11 +78,34 @@ func arnAccount(arn string) string {
 //     died — cannot conclude, so a retryable FAILURE, never a fabricated value.
 func (d *Driver) probeExposure(address string, port int,
 	publiclyAccessible bool, engine string, out *provider.ProbeOutcome) {
-	if address == "" || !publiclyAccessible {
+	// D775. This branch folded two different states into one measured `false`, and
+	// stamped `tcp-connect` on a value obtained without connecting to anything.
+	//
+	// The provider saying the resource has NO public endpoint is a real answer, and it
+	// stays a measurement — but the method now says how it was come by, because a probe
+	// exists precisely to distinguish an OUTCOME from a config read, and a method field
+	// that names a handshake nobody attempted is the same lie one layer down as a
+	// verdict printing "observed" over a declaration (D766).
+	//
+	// An EMPTY ADDRESS on a resource the provider calls publicly accessible is not that
+	// answer at all: the endpoint may exist and simply not be readable yet (an instance
+	// still coming up). Reporting it as "measured: not exposed" is a proven negative
+	// invented out of missing data — absent is not no (D306/D513).
+	if publiclyAccessible && address == "" {
+		out.Failures = append(out.Failures, provider.ProbeFailure{
+			Path: "network.publicExposure", Method: "tcp-connect",
+			Reason: "the provider reports this resource as publicly accessible but " +
+				"returned no endpoint address — there is nothing to dial yet, and an " +
+				"unknown address is not a proven absence of exposure",
+			Retryable: true})
+		return
+	}
+	if !publiclyAccessible {
 		out.Measurements = append(out.Measurements, provider.ProbeMeasurement{
 			Path: "network.publicExposure", Value: false,
-			Method:   "tcp-connect",
-			Evidence: "not publicly accessible — no public endpoint to reach"})
+			Method: "provider-config",
+			Evidence: "the provider reports no public endpoint for this resource; " +
+				"nothing was dialled"})
 		return
 	}
 	if port == 0 {
@@ -297,8 +320,12 @@ func (d *Driver) probeAuroraExposure(region string, cl dbCluster,
 	writer := cl.writerID()
 	if writer == "" {
 		out.Measurements = append(out.Measurements, provider.ProbeMeasurement{
+			// D990: this concludes not-exposed from the CONFIG (no member instance, so no
+			// endpoint) — nothing dialed. Naming a tcp-connect a handshake nobody attempted
+			// is the D775 lie left behind in this branch; the value is honest, the method
+			// must say provider-config like every other config-derived path.
 			Path: "network.publicExposure", Value: false,
-			Method:   "tcp-connect",
+			Method:   "provider-config",
 			Evidence: "cluster has no instance — no public endpoint to reach"})
 		return
 	}

@@ -7,7 +7,6 @@ the RAW canonical tree — no semantic normalization (D35).
 from __future__ import annotations
 from typing import Any
 
-import yaml
 
 from .yamlcompat import safe_load as _core12_load
 

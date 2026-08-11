@@ -55,7 +55,10 @@ func metamorphicSecretServer(t *testing.T) *httptest.Server {
 				}
 				_, _ = w.Write([]byte(`{"etag":"e"}`))
 			// ---- getIamPolicy: reflect the recorded public state ----
-			case r.Method == "POST" && strings.HasSuffix(r.URL.Path, ":getIamPolicy"):
+			// D718: GET, the method Google routes. This case read POST, so the fixture
+			// was a double for a cloud that does not exist: measured against the real
+			// endpoint, POST on this path is a 404 and only GET is a route.
+			case r.Method == "GET" && strings.HasSuffix(r.URL.Path, ":getIamPolicy"):
 				if public {
 					_, _ = w.Write([]byte(`{"etag":"e","bindings":[{"role":"roles/secretmanager.secretAccessor","members":["allUsers"]}]}`))
 				} else {
@@ -72,6 +75,8 @@ func metamorphicSecretServer(t *testing.T) *httptest.Server {
 					`"labels":{"groundhold-capability":"dbcreds","groundhold-environment":"prod"},` +
 					`"replication":{"userManaged":{"replicas":[` + replica + `]}}}`))
 			default:
+				t.Errorf("fixture asked for %s %s — Secret Manager has no such route, or "+
+					"the test has outgrown the fixture", r.Method, r.URL.EscapedPath())
 				w.WriteHeader(404)
 			}
 		}))
@@ -122,14 +127,10 @@ func TestMetamorphicSecretRoundTrip(t *testing.T) {
 			if got["network.publicExposure"] != c.public {
 				t.Errorf("public exposure %v not reflected: %+v", c.public, got)
 			}
-			// CMEK is observed only when present (absent-key emits no false claim).
-			if c.cmek && got["encryption.customerManagedKeys"] != true {
-				t.Errorf("CMEK true not reflected: %+v", got)
-			}
-			if !c.cmek {
-				if _, claimed := got["encryption.customerManagedKeys"]; claimed {
-					t.Errorf("CMEK false must not be claimed: %+v", got)
-				}
+			// D1003: on a single-replica user-managed secret CMK is measured, so no
+			// key is a measured false (not an absence).
+			if got["encryption.customerManagedKeys"] != c.cmek {
+				t.Errorf("CMEK %v not reflected: %+v", c.cmek, got)
 			}
 		})
 	}

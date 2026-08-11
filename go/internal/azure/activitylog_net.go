@@ -94,7 +94,8 @@ func (d *Driver) getActivityLog(sub, name string) (activityLogDoc, bool, error) 
 // createActivityLog provisions the Activity Log export diagnostic setting. Four-valued
 // and honest per D29: the pid is knowable before the response (deterministic name), so a
 // lost/5xx PUT carries it. A PUT is create-or-update by name; the content-addressed name
-// is the ownership marker (a setting at our name is ours by construction).
+// is the ownership marker (a setting at our name is ours by convention —
+// see D526: another deployment computes the same name, so this is weaker than it reads).
 func (d *Driver) createActivityLog(environment, capability string,
 	attrs, impl map[string]any, generation int) provider.CreateResult {
 	plan, err := BuildActivityLog(d.Subscription, environment, capability, attrs, impl, generation)
@@ -106,7 +107,14 @@ func (d *Driver) createActivityLog(environment, capability string,
 	if err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
-	body, _ := json.Marshal(plan.createBody())
+	// D804: read before writing at a name anyone can compute. An ARM PUT is an
+	// unconditional upsert and a diagnostic setting carries no tags, so ownership is
+	// read from the setting itself.
+	want := plan.createBody()
+	if r := d.refuseForeignByContentOrAdopt(url, want, pid, "diagnostic setting"); r != nil {
+		return *r
+	}
+	body, _ := json.Marshal(want)
 	st, resp, e := d.doARM("PUT", url, body)
 	switch {
 	case e != nil:
@@ -142,7 +150,11 @@ func (d *Driver) observeActivityLog(capability, providerID string) ([]provider.O
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"diagnostic setting not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"diagnostic setting not found — bound resource is gone (will re-create)"}, nil
 	}
 	// delivery.assured is measured from the live category enabled flags: the export is
 	// delivering iff at least one Activity Log category is enabled.
@@ -153,7 +165,9 @@ func (d *Driver) observeActivityLog(capability, providerID string) ([]provider.O
 			break
 		}
 	}
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		// a subscription diagnostic setting captures the Activity Log across every region
 		// (it is subscription-global) — measured structurally, not fabricated.
 		{Path: "scope.multiRegion", Value: true, Derivation: "measured"},
@@ -230,7 +244,7 @@ func (d *Driver) updateActivityLog(capability, environment, providerID string,
 
 // deleteActivityLog removes a bound setting, refusing across a subscription boundary
 // (the only cross-tenant safety a tagless proxy resource affords — the name is
-// content-addressed and ours by construction). Deleting the setting ENDS the export; the
+// derived from OUR naming inputs, not the resource's content — D526). Deleting the setting ENDS the export; the
 // Activity Log itself is always-on and untouched, and the log OBJECTS already delivered
 // to the destination (a separate capability) remain — deleting the setting does not
 // erase the past record. A transport/5xx is unknown WITH the pid (reconcile).
@@ -242,6 +256,16 @@ func (d *Driver) deleteActivityLog(capability, environment, providerID string) p
 	if sub != d.Subscription && d.Subscription != "" {
 		return provider.CreateResult{Status: "failed",
 			Reason: "providerId subscription is not the driver's — refusing to delete across subscriptions"}
+	}
+	// ownership: a subscription-scope diagnostic setting carries NO tags, so the
+	// deterministic name is the only evidence there is — and discover deliberately
+	// surfaces FOREIGN settings for brownfield onboarding, so a providerId naming
+	// someone else's Activity Log export is a reachable state, not a hypothetical.
+	// The update path already refuses on a name mismatch; the delete did not (D458).
+	if !azNameLooksOurs(name, "pv-al", environment, capability) {
+		return provider.CreateResult{Status: "failed",
+			Reason: "diagnostic setting name does not carry our ownership marker — " +
+				"refusing to delete a resource that is not ours"}
 	}
 	url, err := d.activityLogURL(sub, name)
 	if err != nil {
@@ -309,7 +333,7 @@ func (d *Driver) discoverActivityLog(region string) ([]provider.Discovered, []st
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.audit.trail",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

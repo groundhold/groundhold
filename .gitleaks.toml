@@ -21,4 +21,9 @@ paths = [
   # Deterministic example plans/candidates in the spec — an idempotencyKey
   # or sample value, never a credential.
   '''spec/examples/.*''',
+  # The credential-shape DETECTOR carries the very markers it hunts for — the
+  # "-----BEGIN OPENSSH PRIVATE KEY-----" header is a regexp to MATCH a leaked
+  # key, not a key. It is the code that redacts secrets, so by nature it names
+  # them. (secretshape.go is new since the last sync, hence a new false positive.)
+  '''go/internal/secretshape/secretshape\.go$''',
 ]

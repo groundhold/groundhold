@@ -36,8 +36,14 @@ jobs:
 
       # Seeded cross-implementation fuzzing (D38): random docs through both
       # CLIs must agree. A robustness gate on top of the fixed conformance set.
+      #
+      # D598: the seed VARIES per run. With the Makefile default (SEED=1) every CI
+      # run fuzzed the same 200 pairs, so the fuzzer could never find anything it had
+      # not found the first time — a regression test wearing a fuzzer's name. The
+      # local default stays 1 so a run is reproducible; a divergence here prints its
+      # own seed, which is how you replay it: make differential SEED=<printed> N=60.
       - name: Differential (cross-impl fuzz)
-        run: make differential
+        run: make differential SEED=${{ github.run_id }} N=60
 
       # Coverage of the Go runtime — reported, not yet gated on a threshold.
       - name: Coverage
@@ -45,6 +51,73 @@ jobs:
         run: |
           go test -coverprofile=cover.out ./... >/dev/null
           go tool cover -func=cover.out | tail -1
+
+  # The public export, proven rather than believed (D474). The export is the last step
+  # of the roadmap and was the only one nothing checked: it broke once and a manual
+  # audit found it. This runs the real script to a temp directory — whitelist copy,
+  # sanitizers, negative-space audit, and the STANDALONE `make check` that proves the
+  # public tree has no hidden dependency on the private one. Its own job, because
+  # "publishable" is a distinct claim from "the gate is green".
+  export:
+    # export-check runs scripts/export-public.sh, which is private tooling and does
+    # NOT cross the export boundary — so on the public mirror there is nothing to run.
+    # Skip there (honestly absent), rather than pass a gate that checked nothing (D328).
+    if: github.repository_owner != 'groundhold'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: go/go.sum
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install the one Python dependency (PyYAML)
+        run: python -m pip install --disable-pip-version-check pyyaml
+      - name: Export to a temp tree and run its standalone gate
+        run: make export-check
+
+  # D490: the docs site, built STRICT on every push and PR.
+  #
+  # `pages.yml` already builds it strict — a broken link or a nav entry pointing at a
+  # file that moved fails the build — but that workflow is `workflow_dispatch` only and
+  # has never run automatically. So the check existed and the answer was unknown until
+  # somebody deployed, which is the third instance of that shape this week (the export,
+  # D474; the pre-ship gate, D484). The site builds clean today; this keeps it that way
+  # while the docs are edited, which is constantly.
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install the pinned docs toolchain
+        run: python -m pip install --disable-pip-version-check -r website/requirements.txt
+      - name: Build (strict — a broken link or nav entry fails)
+        working-directory: website
+        run: mkdocs build --strict
+
+  # THE METER (docs/TESTING_STRATEGY.md): re-inject every bug this repository has
+  # actually shipped and require the named test to CATCH it. `make check` was green
+  # the whole time each of those bugs existed, which is what a low mutation score IS.
+  #
+  # It existed and nothing ran it (D482) — a meter nobody reads. Its own job, because
+  # "the tests have teeth" is a different claim from "the tests pass".
+  mutation:
+    # The mutation gate runs scripts/mutation-gate.sh — private tooling that does not
+    # cross the export boundary. Skip on the public mirror rather than pass vacuously (D328).
+    if: github.repository_owner != 'groundhold'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: go/go.sum
+      - name: Mutation gate
+        run: make mutation
 
   # The race detector: the runtime is concurrency-heavy (lease acquisition, the
   # ledger, the scenario engine). Kept as its own job so a data race is a distinct,

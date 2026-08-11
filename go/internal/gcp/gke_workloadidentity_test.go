@@ -2,6 +2,7 @@ package gcp
 
 import (
 	"encoding/json"
+	"groundhold/internal/provider"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -194,10 +195,22 @@ func TestGKEWorkloadIdentityCreateObserveDelete(t *testing.T) {
 	if del.Status != "succeeded" {
 		t.Fatalf("delete: %+v", del)
 	}
-	// after delete the binding is gone — observe finds nothing.
+	// After delete the binding is gone, and D802 changed how that is SAID rather than
+	// what is true: an empty return left the last good observations standing as the
+	// freshest word, so posture read managed-ok about a binding that no longer existed.
+	// The marker is the statement; the diagnostic explains it.
 	obs2, diags, err := d.observeGKEWorkloadIdentity("runner", res.ProviderID)
-	if err != nil || len(obs2) != 0 || len(diags) == 0 {
+	if err != nil || len(diags) == 0 {
 		t.Fatalf("post-delete observe: obs=%v diags=%v err=%v", obs2, diags, err)
+	}
+	gone := false
+	for _, o := range obs2 {
+		if o.Path == provider.ResourceAbsentPath && o.Value == true {
+			gone = true
+		}
+	}
+	if !gone {
+		t.Fatalf("post-delete observe did not mark the resource absent: %v", obs2)
 	}
 }
 

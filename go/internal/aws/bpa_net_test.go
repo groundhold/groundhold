@@ -42,6 +42,12 @@ func bpaServer(t *testing.T, isPublic bool, bucketBPA, accountBPA string, accoun
 		q := r.URL.RawQuery
 		p := r.URL.Path
 		switch {
+		// HeadBucket: real S3 answers it, and observe now asks before reporting
+		// anything about a bucket (D520 — it used to describe a DELETED bucket as
+		// a healthy one). A fixture that 404s every unmodelled request would make
+		// the bucket read as gone.
+		case r.Method == "HEAD" && q == "":
+			w.WriteHeader(http.StatusOK)
 		case strings.HasPrefix(p, "/v20180820/configuration/publicAccessBlock"):
 			if accountHits != nil {
 				*accountHits++

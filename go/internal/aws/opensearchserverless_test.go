@@ -149,11 +149,14 @@ func TestSplitOpenSearchServerlessProviderID(t *testing.T) {
 // on the OBSERVABLE collection Status (BatchGetCollection) and NEVER hit an
 // operation-by-id call (D273).
 type aossFake struct {
-	tagCap  string
-	stuck   string // if set, BatchGetCollection always returns this Status
-	public  bool
-	seen    []string
-	deleted bool
+	// conflict: CreateCollection answers ConflictException — the estate a re-converge
+	// meets when the collection is already standing (D411).
+	conflict bool
+	tagCap   string
+	stuck    string // if set, BatchGetCollection always returns this Status
+	public   bool
+	seen     []string
+	deleted  bool
 }
 
 func (f *aossFake) handler(t *testing.T) *httptest.Server {
@@ -174,6 +177,11 @@ func (f *aossFake) handler(t *testing.T) *httptest.Server {
 		case "CreateSecurityPolicy":
 			_, _ = w.Write([]byte(`{"securityPolicyDetail":{"name":"p","type":"encryption","policyVersion":"v1"}}`))
 		case "CreateCollection":
+			if f.conflict {
+				w.WriteHeader(409)
+				_, _ = w.Write([]byte(`{"__type":"ConflictException","message":"already exists"}`))
+				return
+			}
 			_, _ = w.Write([]byte(`{"createCollectionDetail":{"id":"col-x","name":"col-x","status":"CREATING","arn":"` + arn + `"}}`))
 		case "BatchGetCollection":
 			if f.deleted {
@@ -343,4 +351,45 @@ func TestBoundedPollOpenSearchServerless(t *testing.T) {
 			OpenSearchDomainName("prod", "capability.search.index", 1)),
 	}
 	certifynet.CertifyBoundedPoll(t, p)
+}
+
+func aossRole(req *http.Request, _ []byte) certifynet.Role {
+	tgt := req.Header.Get("X-Amz-Target")
+	a := tgt[strings.LastIndex(tgt, ".")+1:]
+	if strings.HasPrefix(a, "Get") || strings.HasPrefix(a, "List") || strings.HasPrefix(a, "BatchGet") {
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingOpenSearchServerless enrols opensearch-serverless in the D391 gate.
+// It is a COMPOSITE (encryption policy, network policy, collection) where the policies
+// already tolerate a ConflictException at their deterministic names and the collection
+// adopts on the same signal after a tag check — so a re-converge over a standing estate
+// binds rather than failing part-way.
+func TestAdoptsExistingOpenSearchServerless(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/opensearch-serverless",
+		Classify: aossRole,
+		ExistingServer: func() *httptest.Server {
+			f := &aossFake{public: true, conflict: true}
+			return f.handler(t)
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.OpenSearchServerlessBaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.PollInterval = time.Millisecond
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("opensearch-serverless", "catalog", "prod", aossAttrs(), aossImpl(), "catalog", 1)
+		},
+		AllowedMutations: 3, // the two policy creates + the refused CreateCollection
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

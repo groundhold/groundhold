@@ -99,6 +99,15 @@ func (f *lambdaFake) handler() http.HandlerFunc {
 			f.created = true
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"FunctionName":"fn","State":"Pending"}`))
+		case r.Method == "GET" && strings.HasSuffix(p, "/policy"):
+			// D534: the fake accepted the POST that CREATES the anonymous invoke
+			// grant and modelled no GET, because the driver never read it back. It
+			// does now, so the fake must answer with what the create put there —
+			// otherwise the fixture reports a private function the create just made
+			// public (the D520 class: a fixture that mirrors the driver's blind spot).
+			_, _ = w.Write([]byte(`{"Policy":"{\"Version\":\"2012-10-17\",\"Statement\":` +
+				`[{\"Effect\":\"Allow\",\"Principal\":\"*\",` +
+				`\"Action\":\"lambda:InvokeFunctionUrl\"}]}"}`))
 		case r.Method == "GET" && strings.HasSuffix(p, "/url"):
 			_, _ = w.Write([]byte(`{"AuthType":"NONE","FunctionUrl":"https://abc.lambda-url.eu-central-1.on.aws/"}`))
 		case r.Method == "GET" && strings.Contains(p, "/functions/"):
@@ -127,6 +136,55 @@ func lambdaDriver(t *testing.T, srv *httptest.Server) *Driver {
 	d.PollInterval = time.Millisecond
 	d.PollTimeout = 2 * time.Second
 	return d
+}
+
+// TestBuildLambdaArchitecture (D1001): the architectures operand sets Architectures on
+// the create body (so an arm64 image gets an arm64 function), is emitted as a drift
+// target ONLY when declared, and refuses an unknown value rather than silently
+// defaulting to a wrong architecture — the field case where an arm64 image on a silent
+// x86_64 function created "Active" yet died on first invoke.
+func TestBuildLambdaArchitecture(t *testing.T) {
+	// absent: no Architectures in the body (AWS default x86_64), no drift target.
+	p, err := BuildLambda("000000000000", "prod", "api", lambdaAttrs(), lambdaImpl(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ArchitectureSet {
+		t.Fatal("absent operand must not set the architecture")
+	}
+	if _, has := p.createBody("api", "prod")["Architectures"]; has {
+		t.Fatal("absent operand must not send Architectures (AWS default stands)")
+	}
+
+	// arm64 declared: create body carries ["arm64"].
+	impl := lambdaImpl()
+	impl["architectures"] = "arm64"
+	p, err = BuildLambda("000000000000", "prod", "api", lambdaAttrs(), impl, 1)
+	if err != nil || p.Architecture != "arm64" || !p.ArchitectureSet {
+		t.Fatalf("arm64 plan = %+v err=%v", p, err)
+	}
+	got := p.createBody("api", "prod")["Architectures"]
+	arr, ok := got.([]any)
+	if !ok || len(arr) != 1 || arr[0] != "arm64" {
+		t.Fatalf("create body Architectures = %v, want [arm64]", got)
+	}
+
+	// single-element list accepted; amd64 alias normalises to x86_64.
+	impl["architectures"] = []any{"amd64"}
+	if p, err = BuildLambda("000000000000", "prod", "api", lambdaAttrs(), impl, 1); err != nil || p.Architecture != "x86_64" {
+		t.Fatalf("amd64 list should normalise to x86_64: %+v err=%v", p, err)
+	}
+
+	// unknown / multi refuse.
+	for name, v := range map[string]any{
+		"unknown": "risc-v",
+		"two":     []any{"arm64", "x86_64"},
+	} {
+		impl["architectures"] = v
+		if _, err := BuildLambda("000000000000", "prod", "api", lambdaAttrs(), impl, 1); err == nil {
+			t.Errorf("%s architecture must refuse", name)
+		}
+	}
 }
 
 func TestLambdaCreateObserveDelete(t *testing.T) {
@@ -225,6 +283,10 @@ func TestReadStormLambda(t *testing.T) {
 		Classify:        lambdaRole,
 		OwnerTagValue:   "api",
 		DeterministicID: true,
+		// F-LC3 (D523): hand-wired.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("lambda", "api", lambdaProviderID("eu-central-1", "000000000000", "api-abcdefgh"))
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newLambdaHonestyDriver(happyURL, rt)
 		},
@@ -263,4 +325,44 @@ func TestBoundedPollLambda(t *testing.T) {
 		PID: lambdaProviderID("eu-central-1", "000000000000", name),
 	}
 	certifynet.CertifyBoundedPoll(t, p)
+}
+
+func lambdaRESTRole(req *http.Request, _ []byte) certifynet.Role {
+	if req.Method == http.MethodGet {
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingLambda enrols lambda in the D391 gate. Lambda uses the strongest
+// form of the property: an ownership PRE-READ before any mutation, so a function of ours
+// already standing is bound with no CreateFunction issued at all — the same shape as
+// KMS and VPC, and the one where zero mutations is the whole proof.
+func TestAdoptsExistingLambda(t *testing.T) {
+	name := ECSName("000000000000", "prod", "api", 1) // lambda shares the deterministic namer
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/lambda",
+		Classify: lambdaRESTRole,
+		ExistingServer: func() *httptest.Server {
+			f := &lambdaFake{t: t, readyState: "Active", created: true}
+			return httptest.NewServer(f.handler())
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.creds = Credentials{AccessKeyID: "AKID", SecretAccessKey: "secret"}
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.LambdaBaseURL = happyURL
+			d.Now = time.Now
+			d.PollInterval = time.Millisecond
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("lambda", "api", "prod", lambdaAttrs(), lambdaImpl(), "api", 1)
+		},
+		PID:              lambdaProviderID("eu-central-1", "000000000000", name),
+		AllowedMutations: 2, // exposure repair on the adopted function, never a create
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

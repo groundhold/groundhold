@@ -307,3 +307,51 @@ func TestObserveACRAbsentPublicNetworkAccessNotFabricated(t *testing.T) {
 		t.Fatalf("expected a diagnostic for the absent publicNetworkAccess, got %v", diags)
 	}
 }
+
+// TestACRDefaultRegistryOmitsPremiumOnlyNetworkField is D877, a field-caught defect: e2e
+// create of a registry with NO exposure declared sent publicNetworkAccess=Disabled on the
+// default Standard SKU, and Azure 400s that ("Disabling public network access is not
+// supported for the SKU Standard"). The driver could not create an ACR on a real account.
+func TestACRDefaultRegistryOmitsPremiumOnlyNetworkField(t *testing.T) {
+	// No exposure attribute — the case the field hit.
+	p, err := BuildACR("prod", "images", map[string]any{
+		"location.region": "westeurope", "service.managed": true}, map[string]any{"resource_group": "rg1"}, 1)
+	if err != nil {
+		t.Fatalf("a plain registry must build: %v", err)
+	}
+	if p.Sku != "Standard" {
+		t.Fatalf("a registry with no premium feature must stay Standard, got %s", p.Sku)
+	}
+	props := p.createBody(map[string]any{})["properties"].(map[string]any)
+	if _, present := props["publicNetworkAccess"]; present {
+		t.Fatalf("a Standard registry MUST NOT carry publicNetworkAccess — it is a Premium-only "+
+			"control and Azure 400s it on Standard (D877). props=%v", props)
+	}
+
+	// publicExposure=false is a private registry: it must FORCE Premium (the SKU where the
+	// control is legal) and then carry publicNetworkAccess=Disabled.
+	pp, err := BuildACR("prod", "images", map[string]any{
+		"location.region": "westeurope", "service.managed": true,
+		"network.publicExposure": false}, map[string]any{"resource_group": "rg1"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pp.Sku != "Premium" {
+		t.Fatalf("a private registry needs Premium (publicNetworkAccess is Premium-only), got %s", pp.Sku)
+	}
+	pprops := pp.createBody(map[string]any{})["properties"].(map[string]any)
+	if pprops["publicNetworkAccess"] != "Disabled" {
+		t.Fatalf("a private Premium registry must disable public access, got %v", pprops["publicNetworkAccess"])
+	}
+
+	// publicExposure=true stays Standard and still omits the Premium-only field.
+	pt, _ := BuildACR("prod", "images", map[string]any{
+		"location.region": "westeurope", "service.managed": true,
+		"network.publicExposure": true}, map[string]any{"resource_group": "rg1"}, 1)
+	if pt.Sku != "Standard" {
+		t.Fatalf("an explicitly-public registry needs no Premium, got %s", pt.Sku)
+	}
+	if _, present := pt.createBody(map[string]any{})["properties"].(map[string]any)["publicNetworkAccess"]; present {
+		t.Fatal("a public Standard registry must omit publicNetworkAccess (Premium-only)")
+	}
+}

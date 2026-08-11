@@ -54,6 +54,10 @@ func TestObserveS3RetentionMaximum(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 	srv := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "HEAD" && r.URL.RawQuery == "" { // HeadBucket (D520)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			switch r.URL.RawQuery {
 			case "versioning":
 				_, _ = w.Write([]byte(`<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>`))

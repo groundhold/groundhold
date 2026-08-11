@@ -56,7 +56,7 @@ func (d *Driver) createAzureRole(environment, capability string,
 		"properties": map[string]any{
 			"roleDefinitionId": roleDefinitionID(d.Subscription, plan.RoleGuid),
 			"principalId":      plan.PrincipalID,
-			"principalType":    "ServicePrincipal",
+			"principalType":    plan.PrincipalType,
 		},
 	})
 	st, resp, e := d.doARM("PUT", d.roleAssignmentURL(d.Subscription, guid), body)
@@ -88,6 +88,16 @@ type azureRoleDoc struct {
 	} `json:"properties"`
 }
 
+// azRoleAssignmentIsOurs answers ownership for a role ASSIGNMENT, which carries no tags
+// and whose name is a GUID. The create derives that GUID from (scope, principal, role),
+// so an assignment is ours exactly when its name is the hash of ITS OWN properties —
+// which the delete can only learn by reading the assignment first. A stranger's
+// assignment has a random GUID and fails the equality (D458).
+func azRoleAssignmentIsOurs(sub, guid string, doc azureRoleDoc) bool {
+	roleGuid := doc.Properties.RoleDefinitionID[strings.LastIndex(doc.Properties.RoleDefinitionID, "/")+1:]
+	return guid == azAssignmentGUID("/subscriptions/"+sub, doc.Properties.PrincipalID, roleGuid)
+}
+
 func (d *Driver) observeAzureRole(capability, providerID string) ([]provider.Observation, []string, error) {
 	sub, guid, err := splitAzureRoleProviderID(providerID)
 	if err != nil {
@@ -101,7 +111,11 @@ func (d *Driver) observeAzureRole(capability, providerID string) ([]provider.Obs
 		return nil, nil, fmt.Errorf("roleAssignments.get: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"role assignment not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"role assignment not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("roleAssignments.get: HTTP %d", st)
@@ -111,7 +125,9 @@ func (d *Driver) observeAzureRole(capability, providerID string) ([]provider.Obs
 		return nil, nil, &armReadError{Op: "roleAssignments.get", Cause: "body", Status: st}
 	}
 	roleGuid := doc.Properties.RoleDefinitionID[strings.LastIndex(doc.Properties.RoleDefinitionID, "/")+1:]
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "grant.role", Value: azRoleNameForGuid(roleGuid), Derivation: "measured"},
 		{Path: "grant.principal", Value: doc.Properties.PrincipalID, Derivation: "measured"},
 		{Path: "access.scope", Value: "account", Derivation: "measured"},
@@ -130,6 +146,34 @@ func (d *Driver) deleteAzureRole(capability, environment, providerID string) pro
 	sub, guid, err := splitAzureRoleProviderID(providerID)
 	if err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if sub != d.Subscription && d.Subscription != "" {
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("providerId subscription %q is not the driver's", sub)}
+	}
+	// D458 — ownership before the mutation. Revoking a grant that was never ours takes
+	// a principal's access away with no record of what it was.
+	gst, gresp, gerr := d.doARM("GET", d.roleAssignmentURL(sub, guid), nil)
+	switch {
+	case gerr != nil:
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: fmt.Sprintf("pre-delete read gave no answer — reconcile: %v", gerr)}
+	case gst == http.StatusNotFound:
+		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // idempotent
+	case gst != http.StatusOK:
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: fmt.Sprintf("pre-delete read HTTP %d — reconcile", gst)}
+	}
+	var gdoc azureRoleDoc
+	if json.Unmarshal(gresp, &gdoc) != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: (&armReadError{Op: "roleAssignments.get", Cause: "body",
+				Status: gst}).Error() + " — reconcile"}
+	}
+	if !azRoleAssignmentIsOurs(sub, guid, gdoc) {
+		return provider.CreateResult{Status: "failed",
+			Reason: "role assignment id is not the one this contract would have minted " +
+				"for its own principal and role — refusing to revoke a grant that is not ours"}
 	}
 	st, resp, e := d.doARM("DELETE", d.roleAssignmentURL(sub, guid), nil)
 	if e != nil {

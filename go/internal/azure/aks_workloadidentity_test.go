@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"groundhold/internal/provider"
 )
 
 const testIssuer = "https://westeurope.oic.prod-aks.azure.com/tenant/abc123/"
@@ -88,8 +90,15 @@ func TestBuildAKSWorkloadIdentityRefusals(t *testing.T) {
 }
 
 func TestClassifyAKSWorkloadIdentityChange(t *testing.T) {
-	if verb, _ := classifyAKSWorkloadIdentityChange("workload.namespace"); verb != "immutable" {
-		t.Errorf("namespace change should be immutable, got %q", verb)
+	// D831: this pinned "immutable", which is right for the EKS and GKE twins — their
+	// providerId encodes the namespace and service account, so a change addresses a
+	// different resource. Here it does not: the credential name is derived from
+	// capability+environment, and the subject is a property Azure updates with a PUT on the
+	// same credential. The old expectation pinned replacing a binding that never moved.
+	for _, path := range []string{"workload.namespace", "workload.serviceAccount"} {
+		if verb, why := classifyAKSWorkloadIdentityChange(path); verb != "unsupported" || why == "" {
+			t.Errorf("%s should be unsupported with a reason, got %q/%q", path, verb, why)
+		}
 	}
 	if verb, _ := classifyAKSWorkloadIdentityChange("cost.monthly"); verb != "unsupported" {
 		t.Errorf("cost.monthly should be unsupported, got %q", verb)
@@ -204,8 +213,12 @@ func TestObserveAKSWorkloadIdentityNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(obs) != 0 || len(diags) == 0 {
-		t.Fatalf("absent credential should observe nothing with a diag, got obs=%v diags=%v", obs, diags)
+	// Corrected with D518: this asserted SILENCE for an absent bound resource,
+	// which is the defect F-LC3 exists to prevent — the compile sees an empty set,
+	// plans nothing, and converge reports a world that no longer contains it.
+	if len(diags) == 0 || !absentMarked(obs) {
+		t.Fatalf("absent credential must report %s=true with a diag, got obs=%v diags=%v",
+			provider.ResourceAbsentPath, obs, diags)
 	}
 }
 

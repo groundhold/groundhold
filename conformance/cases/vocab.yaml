@@ -235,3 +235,172 @@ cases:
             cost.monthly: { amount: "100", currency: USD }
     expect:
       error: candidate
+  - name: vocab-unordered-list-canonicalizes-to-a-set
+    description: |
+      D532, from the field: an attribute the vocabulary describes as "the full set of
+      regions" was compared POSITIONALLY, so a candidate declaring the identical set in
+      a different order than the cloud returns it was refused with "adoption must not
+      lie". The sets were equal; only the order differed, and a set has no order.
+
+      `unordered: true` marks a list whose order carries no meaning. Such a list is
+      CANONICALIZED (sorted) at load, so declared and observed compare equal everywhere
+      — verifier, adopt, reconcile — with no second meaning of equality and no new
+      operator (invariant #4 untouched). D34's answer to "two forms, one meaning",
+      applied to a type rather than to a document.
+    vocab:
+      - capability: capability.database.relational
+        version: 0.1
+        attributes:
+          network.zones:
+            kind: list
+            unordered: true
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: v-unord, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-zones
+            subject: db
+            path: network.zones
+            op: equals
+            value: [eu-central-1a, eu-central-1b, eu-central-1c]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: v-unord
+      capabilities:
+        db:
+          attributes:
+            network.zones: [eu-central-1c, eu-central-1a, eu-central-1b]
+    expect:
+      executable: true
+      verdicts:
+        c-zones: satisfied
+
+  - name: vocab-unordered-set-ignores-the-contracts-own-order
+    description: |
+      D660. D532 canonicalized the CANDIDATE's list at load and left the constraint's
+      own operand exactly as the contract author typed it — and list equality is
+      positional. The case above happens to write the operand already sorted, so it
+      passed either way; this one writes it in a different order, which is the half
+      that was broken.
+    vocab:
+      - capability: capability.database.relational
+        version: 0.1
+        attributes:
+          network.zones:
+            kind: list
+            unordered: true
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: v-unord2, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-zones
+            subject: db
+            path: network.zones
+            op: equals
+            value: [eu-central-1c, eu-central-1a, eu-central-1b]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: v-unord2
+      capabilities:
+        db:
+          attributes:
+            network.zones: [eu-central-1a, eu-central-1b, eu-central-1c]
+    expect:
+      executable: true
+      verdicts:
+        c-zones: satisfied
+
+  - name: vocab-unordered-set-is-forbidden-in-every-order
+    description: |
+      D660, the dangerous direction. `not-equals` over a set must refuse that set
+      however either side spells it. With only the candidate canonicalized, this
+      contract PROVED the very set it forbids — and the one shipped `unordered`
+      attribute is inference.destinationRegions, the data-residency surface.
+    vocab:
+      - capability: capability.database.relational
+        version: 0.1
+        attributes:
+          network.zones:
+            kind: list
+            unordered: true
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: v-unord3, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-not-zones
+            subject: db
+            path: network.zones
+            op: not-equals
+            value: [eu-central-1c, eu-central-1a, eu-central-1b]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: v-unord3
+      capabilities:
+        db:
+          attributes:
+            network.zones: [eu-central-1a, eu-central-1b, eu-central-1c]
+    expect:
+      executable: false
+      verdicts:
+        c-not-zones: violated
+
+  - name: vocab-ordered-list-still-compares-positionally
+    description: |
+      The default is unchanged and must stay so: a plain `kind: list` is an ORDERED
+      sequence and order is part of its identity (D21). Only an attribute declaring
+      `unordered: true` is a set, so sensitivity to order survives exactly where order
+      means something.
+    vocab:
+      - capability: capability.database.relational
+        version: 0.1
+        attributes:
+          network.zones:
+            kind: list
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: v-ord, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-zones
+            subject: db
+            path: network.zones
+            op: equals
+            value: [eu-central-1a, eu-central-1b, eu-central-1c]
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: v-ord
+      capabilities:
+        db:
+          attributes:
+            network.zones: [eu-central-1c, eu-central-1a, eu-central-1b]
+    expect:
+      executable: false
+      verdicts:
+        c-zones: violated

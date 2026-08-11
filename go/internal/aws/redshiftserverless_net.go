@@ -258,19 +258,26 @@ func (d *Driver) observeRedshiftServerless(capability, providerID string) ([]pro
 		return nil, nil, wgOK
 	}
 	if !wgFound {
-		return nil, []string{"workgroup not found — nothing to observe"}, nil
+		// F-LC3 (D521): a BOUND resource the API says is GONE. A diagnostic
+		// alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"workgroup not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
-		{Path: "encryption.atRest", Value: true, Derivation: "config-intent"}, // always encrypted
+		{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"}, // always encrypted
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		{Path: "network.publicExposure", Value: wg.PubliclyAccessible, Derivation: "measured"},
 	}
 	// a customer key is present iff the namespace carries a non-default kmsKeyId.
 	ns, nsFound, nsOK := d.getNamespace(region, name)
-	if nsOK == nil && nsFound && ns.KmsKeyID != "" && !strings.Contains(ns.KmsKeyID, "aws/redshift") {
+	if nsOK == nil && nsFound {
 		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
-			Value: true, Derivation: "measured"})
+			Value:      ns.KmsKeyID != "" && !strings.Contains(ns.KmsKeyID, "aws/redshift"),
+			Derivation: "measured"})
 	}
 	return obs, nil, nil
 }
@@ -300,12 +307,45 @@ func (d *Driver) deleteRedshiftServerless(capability, environment, providerID st
 		if r := d.rssDelete(region, "DeleteWorkgroup", fmt.Sprintf(`{"workgroupName":%q}`, name), providerID, "workgroup"); r != nil {
 			return *r
 		}
+		// D888: DeleteWorkgroup is ASYNC — the workgroup enters "deleting" and lingers, and
+		// DeleteNamespace fails while ANY workgroup still references the namespace. The
+		// original retire deleted the workgroup and immediately tried the namespace, which
+		// failed, leaving an orphaned namespace the driver could no longer re-claim (claim
+		// keys ownership off the now-gone workgroup). Poll until the workgroup is truly gone
+		// before deleting the namespace, mirroring the create-side poll.
+		deadline := d.Now().Add(d.PollTimeout)
+		for {
+			_, stillThere, rerr := d.getWorkgroup(region, name)
+			if rerr == nil && !stillThere {
+				break // workgroup fully gone — safe to delete the namespace
+			}
+			if d.Now().After(deadline) {
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: "workgroup still deleting at poll timeout — reconcile before the namespace delete"}
+			}
+			time.Sleep(d.PollInterval)
+		}
 	}
 	// no finalSnapshotName: retirement is data loss (the D47 gate authorized it).
 	if r := d.rssDelete(region, "DeleteNamespace", fmt.Sprintf(`{"namespaceName":%q}`, name), providerID, "namespace"); r != nil {
 		return *r
 	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// ---- poll to absence (D968 class, D983) ----
+	// DeleteNamespace is async: the namespace (the DATA half) enters "deleting", not
+	// gone. The workgroup leg above already polls (D888); the namespace did not, so
+	// reporting succeeded here tombstoned data still being torn down. Poll getNamespace
+	// to a confirmed absence; unknown on timeout keeps the handle.
+	deadline := d.Now().Add(d.PollTimeout)
+	for {
+		if _, found, rerr := d.getNamespace(region, name); rerr == nil && !found {
+			return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // confirmed gone
+		}
+		if d.Now().After(deadline) {
+			return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+				Reason: "namespace still deleting at poll timeout — reconcile via GetNamespace"}
+		}
+		time.Sleep(d.PollInterval)
+	}
 }
 
 // rssDelete issues one delete; nil = ok (or idempotent absence), non-nil = a terminal

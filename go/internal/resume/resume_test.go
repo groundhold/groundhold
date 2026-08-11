@@ -215,7 +215,7 @@ func TestNothingToResumeOnEmptyLedger(t *testing.T) {
 func TestProviderThatCannotReconcileRefuses(t *testing.T) {
 	w, path := seedWriter(t)
 	seedReceipt(t, w, "db", map[string]any{"operationId": "op1",
-		"operation": "create", "idempotencyKey": "k1", "target": "gcp.fake/db",
+		"operation": "create", "idempotencyKey": "k1", "target": "fake.fakedb/db",
 		"generation": 1})
 	res := runResume(t, path, nonReconciler{}, resumeAt)
 	if res.Status != "refused" || res.Code != perr.UnsupportedOperation ||
@@ -231,7 +231,7 @@ func TestProviderThatCannotReconcileRefuses(t *testing.T) {
 func TestBadAtRefusesStructurally(t *testing.T) {
 	w, path := seedWriter(t)
 	seedReceipt(t, w, "db", map[string]any{"operationId": "op1",
-		"operation": "create", "idempotencyKey": "k1", "target": "gcp.fake/db",
+		"operation": "create", "idempotencyKey": "k1", "target": "fake.fakedb/db",
 		"generation": 1})
 	res := runResume(t, path, &provider.Fake{}, "not-a-timestamp")
 	if res.Status != "refused" || res.Code != perr.StructuralError ||
@@ -246,7 +246,7 @@ func TestBadAtRefusesStructurally(t *testing.T) {
 func TestArmedMismatchedAnchorRefuses(t *testing.T) {
 	w, path := seedWriter(t)
 	seedReceipt(t, w, "db", map[string]any{"operationId": "op1",
-		"operation": "create", "idempotencyKey": "k1", "target": "gcp.fake/db",
+		"operation": "create", "idempotencyKey": "k1", "target": "fake.fakedb/db",
 		"generation": 1})
 	// a well-formed anchor claiming a head/count the ledger does not have
 	anchor := `{"apiVersion":"state/v0","kind":"LedgerAnchor","events":999,` +
@@ -273,7 +273,7 @@ func TestArmedMismatchedAnchorRefuses(t *testing.T) {
 func TestCreateConcludedWritesBinding(t *testing.T) {
 	w, path := seedWriter(t)
 	seedReceipt(t, w, "db", map[string]any{"operationId": "op1",
-		"operation": "create", "idempotencyKey": "k1", "target": "gcp.fake/db",
+		"operation": "create", "idempotencyKey": "k1", "target": "fake.fakedb/db",
 		"generation": 1})
 	res := runResume(t, path, &provider.Fake{}, resumeAt)
 
@@ -304,7 +304,7 @@ func TestCreateConcludedWritesBinding(t *testing.T) {
 func TestUnknownStaysPendingAndBlocks(t *testing.T) {
 	w, path := seedWriter(t)
 	seedReceipt(t, w, "db", map[string]any{"operationId": "op1",
-		"operation": "create", "idempotencyKey": "k1", "target": "gcp.fake/db",
+		"operation": "create", "idempotencyKey": "k1", "target": "fake.fakedb/db",
 		"generation": 1})
 	prov := &provider.Fake{UnknownKeys: map[string]bool{"k1": true}}
 	res := runResume(t, path, prov, resumeAt)
@@ -334,7 +334,7 @@ func TestUnknownStaysPendingAndBlocks(t *testing.T) {
 func TestFailedConcludedClearsPendingNoBinding(t *testing.T) {
 	w, path := seedWriter(t)
 	seedReceipt(t, w, "db", map[string]any{"operationId": "op1",
-		"operation": "create", "idempotencyKey": "k1", "target": "gcp.fake/db",
+		"operation": "create", "idempotencyKey": "k1", "target": "fake.fakedb/db",
 		"generation": 1})
 	prov := &provider.Fake{FailKeys: map[string]bool{"k1": true}}
 	res := runResume(t, path, prov, resumeAt)
@@ -363,7 +363,7 @@ func TestDeleteConcludedEmptiesBindingWithTombstone(t *testing.T) {
 	w, path := seedWriter(t)
 	seedBinding(t, w, "db", "fake:old", 3)
 	seedReceipt(t, w, "db", map[string]any{"operationId": "op1",
-		"operation": "delete", "idempotencyKey": "k1", "target": "gcp.fake/db",
+		"operation": "delete", "idempotencyKey": "k1", "target": "fake.fakedb/db",
 		"targetProviderId": "fake:old", "targetGeneration": 3})
 	res := runResume(t, path, &provider.Fake{}, resumeAt)
 
@@ -396,7 +396,7 @@ func TestUpdateConcludedKeepsIdentityBumpsGeneration(t *testing.T) {
 	w, path := seedWriter(t)
 	seedBinding(t, w, "db", "fake:p1", 1)
 	seedReceipt(t, w, "db", map[string]any{"operationId": "op1",
-		"operation": "update", "idempotencyKey": "k1", "target": "gcp.fake/db",
+		"operation": "update", "idempotencyKey": "k1", "target": "fake.fakedb/db",
 		"targetProviderId": "fake:p1", "generation": 2})
 	res := runResume(t, path, &provider.Fake{}, resumeAt)
 
@@ -431,7 +431,7 @@ func TestConcludedCreateOrphanDoesNotClobberLiveBinding(t *testing.T) {
 	w, path := seedWriter(t)
 	seedBinding(t, w, "db", "fake:other", 1) // rebound while the create hung
 	seedReceipt(t, w, "db", map[string]any{"operationId": "op1",
-		"operation": "create", "idempotencyKey": "k1", "target": "gcp.fake/db",
+		"operation": "create", "idempotencyKey": "k1", "target": "fake.fakedb/db",
 		"generation": 1})
 	res := runResume(t, path, &provider.Fake{}, resumeAt) // reconciles to fake:k1
 
@@ -463,10 +463,10 @@ func TestConcludedCreateOrphanDoesNotClobberLiveBinding(t *testing.T) {
 func TestPartialUnknownBlocksButCommitsConcluded(t *testing.T) {
 	w, path := seedWriter(t)
 	seedReceipt(t, w, "a", map[string]any{"operationId": "opA",
-		"operation": "create", "idempotencyKey": "ka", "target": "gcp.fake/a",
+		"operation": "create", "idempotencyKey": "ka", "target": "fake.fakedb/a",
 		"generation": 1})
 	seedReceipt(t, w, "b", map[string]any{"operationId": "opB",
-		"operation": "create", "idempotencyKey": "kb", "target": "gcp.fake/b",
+		"operation": "create", "idempotencyKey": "kb", "target": "fake.fakedb/b",
 		"generation": 1})
 	prov := &provider.Fake{UnknownKeys: map[string]bool{"kb": true}}
 	res := runResume(t, path, prov, resumeAt)
@@ -498,7 +498,7 @@ func TestConcludedUpdateOrphanDoesNotClobberLiveBinding(t *testing.T) {
 	w, path := seedWriter(t)
 	seedBinding(t, w, "db", "fake:live", 4) // rebound while the update hung
 	seedReceipt(t, w, "db", map[string]any{"operationId": "op1",
-		"operation": "update", "idempotencyKey": "k1", "target": "gcp.fake/db",
+		"operation": "update", "idempotencyKey": "k1", "target": "fake.fakedb/db",
 		"targetProviderId": "fake:p1", "generation": 2}) // patched fake:p1
 	res := runResume(t, path, &provider.Fake{}, resumeAt)
 
@@ -533,7 +533,7 @@ func TestConcludedDeleteOfNonLivePinKeepsLiveResource(t *testing.T) {
 	w, path := seedWriter(t)
 	seedBinding(t, w, "db", "fake:live", 2)
 	seedReceipt(t, w, "db", map[string]any{"operationId": "op1",
-		"operation": "delete", "idempotencyKey": "k1", "target": "gcp.fake/db",
+		"operation": "delete", "idempotencyKey": "k1", "target": "fake.fakedb/db",
 		"targetProviderId": "fake:old", "targetGeneration": 1}) // not the live one
 	res := runResume(t, path, &provider.Fake{}, resumeAt)
 
@@ -563,7 +563,7 @@ func TestActiveLeaseBlocksResume(t *testing.T) {
 		t.Fatalf("hold lease: %v", err)
 	}
 	seedReceipt(t, w, "db", map[string]any{"operationId": "op1",
-		"operation": "create", "idempotencyKey": "k1", "target": "gcp.fake/db",
+		"operation": "create", "idempotencyKey": "k1", "target": "fake.fakedb/db",
 		"generation": 1})
 	res := runResume(t, path, &provider.Fake{}, resumeAt)
 
@@ -600,4 +600,78 @@ func tombstoned(body map[string]any, providerID string) bool {
 		}
 	}
 	return false
+}
+
+// D736: a receipt CONCLUDED as a failure leaves the resource unmanaged, and `resume`
+// said `{"status":"resumed"}` with exit 0 and nothing else. Measured in the field on
+// three budgets whose alert notification had not landed: the reconciler concluded
+// `failed` for each — which is the DESIGNED path, so a re-apply can heal them — and the
+// operator read OK and moved on. Three cost controls stood in the account, unbound and
+// never alerting.
+//
+// The exit code is NOT changed here: concluding a pending receipt is what this verb is
+// for, and it did that. What was missing is the sentence saying the resources are not
+// under management and what to do about it.
+func TestResumeNamesTheOperationsThatConcludedAsFailures(t *testing.T) {
+	w, path := seedWriter(t)
+	seedReceipt(t, w, "db", map[string]any{"operationId": "op1",
+		"operation": "create", "idempotencyKey": "k1", "target": "fake.fakedb/db",
+		"generation": 1})
+	prov := &provider.Fake{FailKeys: map[string]bool{"k1": true}}
+	res := runResume(t, path, prov, resumeAt)
+
+	joined := strings.Join(res.Reasons, "\n")
+	for _, want := range []string{
+		"CONCLUDED AS FAILURES",
+		"NOT under management",
+		"Re-apply to heal",
+		"db (create)",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("resume does not say %q; it said:\n%s", want, joined)
+		}
+	}
+	// The decided semantics stay: pending is cleared and nothing is bound.
+	if res.Exit != 0 || res.Status != "resumed" {
+		t.Fatalf("the exit code is a separate, decided question — got %q/%d",
+			res.Status, res.Exit)
+	}
+}
+
+// TestResumeSkipsReceiptConcludedUnderLease pins D960: resume computes its pending set
+// from the entry-time ledger, but between that load and its lease another run can conclude
+// the same receipt (and advance the resource). Re-concluding a receipt that is no longer
+// pending re-writes a stale outcome (a create's generation-1 binding over a live gen-2).
+// Resume must re-derive the pending set under its lease and skip what is already concluded.
+func TestResumeSkipsReceiptConcludedUnderLease(t *testing.T) {
+	w, path := seedWriter(t)
+	seedReceipt(t, w, "db", map[string]any{"operationId": "op1",
+		"operation": "create", "idempotencyKey": "k1", "target": "fake.fakedb/db",
+		"generation": 1})
+	// the STALE entry-time snapshot resume will be handed — db/op1 is pending here.
+	staleLed, err := ledger.ReplayFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a concurrent run concludes op1 in the FILE, between our load and our lease.
+	concLed, err := ledger.ReplayFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	concClock, _ := ledger.ParseTs("2026-07-01T12:00:00Z") // after seedAt, before resumeAt
+	concW := &ledger.Writer{Path: path, Led: concLed, Env: "test", Clock: concClock, Actor: "concurrent"}
+	if err := concW.Append("operation.receipt", []string{"db"}, map[string]any{
+		"operationId": "op1", "operation": "create", "status": "succeeded",
+		"providerId": "fake:the-db"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	// resume with the STALE ledger + the modified file. AppendLease re-replays the file, so
+	// w.Led (post-lease) no longer lists op1 as pending.
+	res := Run(&contract.Contract{Environment: "test"}, staleLed, path, &provider.Fake{}, resumeAt)
+	for _, r := range res.Resolved {
+		if r.Capability == "db" {
+			t.Fatalf("resume re-concluded op1, already concluded under the lease by another "+
+				"run — a stale outcome over advanced state; resolved=%+v", res.Resolved)
+		}
+	}
 }

@@ -130,8 +130,17 @@ func (p Projection) Render(w io.Writer) {
 	if basis == "" {
 		basis = "no declared cost"
 	}
-	fmt.Fprintf(w, "Estimated cost (%s) — projection, not a quote:\n", basis)
-	fmt.Fprintf(w, "  ~ %s / month   %s / week   %s / year\n",
+	// D595: with partial coverage the figure can only be wrong ONE way — every
+	// capability without a declared cost still costs something — so it is a floor,
+	// not a central estimate, and a tilde reads as the latter. The project already
+	// uses this word where a count rests on partial data (shadowLowerBound); a price
+	// deserves it more, because the error runs toward "cheaper than it is".
+	lead, mark := "Estimated cost", "~"
+	if p.Priced < p.Total {
+		lead, mark = "Estimated cost AT LEAST", "≥"
+	}
+	fmt.Fprintf(w, "%s (%s) — projection, not a quote:\n", lead, basis)
+	fmt.Fprintf(w, "  %s %s / month   %s / week   %s / year\n", mark,
 		money(p.Monthly, p.Currency), money(p.weekly(), p.Currency),
 		money(p.yearly(), p.Currency))
 	fmt.Fprintf(w, "  based on %d of %d capabilities with a declared cost.monthly\n",

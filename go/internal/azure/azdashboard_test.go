@@ -34,7 +34,7 @@ func TestBuildAzureDashboardHonors(t *testing.T) {
 		t.Fatalf("plan = %+v", p)
 	}
 	body := p.createBody(map[string]any{})
-	parts := body["properties"].(map[string]any)["lenses"].(map[string]any)["0"].(map[string]any)["parts"].(map[string]any)
+	parts := body["properties"].(map[string]any)["lenses"].([]any)[0].(map[string]any)["parts"].([]any)
 	if len(parts) != 2 {
 		t.Fatalf("expected 2 parts, got %d", len(parts))
 	}
@@ -70,7 +70,18 @@ func TestBuildAzureDashboardRefusals(t *testing.T) {
 
 func azDashServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	var stored map[string]any
+	// D524: pre-seeded with the dashboard ALREADY STANDING and carrying OUR
+	// ownership tags, so CertifyCreateAdoptsExisting exercises the ADOPT path.
+	// It used to start empty, which meant the first GET 404'd, the driver simply
+	// CREATED one, and a test named "AdoptsExisting" adopted nothing.
+	stored := map[string]any{
+		"name": "gh-golden-prod-1",
+		"tags": map[string]any{
+			"groundhold-capability":  "golden",
+			"groundhold-environment": "prod",
+		},
+		"properties": map[string]any{"lenses": []any{}},
+	}
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
@@ -141,7 +152,7 @@ func TestCreateObserveDeleteAzureDashboard(t *testing.T) {
 func TestDeleteAzureDashboardForeignRefused(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
-			_, _ = w.Write([]byte(`{"tags":{"groundhold-capability":"someone-else","groundhold-environment":"prod"},"properties":{"lenses":{}}}`))
+			_, _ = w.Write([]byte(`{"tags":{"groundhold-capability":"someone-else","groundhold-environment":"prod"},"properties":{"lenses":[]}}`))
 			return
 		}
 		w.WriteHeader(200)
@@ -164,7 +175,7 @@ func azDashOwnedServer(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded"}}`))
 		case "GET":
 			_, _ = w.Write([]byte(`{"tags":{"groundhold-capability":"golden","groundhold-environment":"prod"},` +
-				`"properties":{"lenses":{"0":{"parts":{"0":{"metadata":{"inputs":[{"value":{"chart":{"metrics":[{"name":"Percentage CPU"}]}}}]}}}}}}}`))
+				`"properties":{"lenses":[{"parts":[{"metadata":{"inputs":[{"value":{"chart":{"metrics":[{"name":"Percentage CPU"}]}}}]}}]}]}}`))
 		case "DELETE":
 			w.WriteHeader(200)
 		default:

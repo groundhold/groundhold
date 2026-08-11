@@ -102,7 +102,11 @@ func (d *Driver) observeRoute53HealthCheck(capability, providerID string) ([]pro
 		return nil, nil, fmt.Errorf("GetHealthCheck: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"health check not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"health check not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("GetHealthCheck: HTTP %d", st)
@@ -117,6 +121,8 @@ func (d *Driver) observeRoute53HealthCheck(capability, providerID string) ([]pro
 		return nil, nil, fmt.Errorf("GetHealthCheck: unparseable")
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "check.target", Value: r.FQDN, Derivation: "measured"},
 		{Path: "check.period", Value: fmt.Sprintf("%ds", r.Interval), Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},

@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"groundhold/internal/provider"
 )
 
 func assetFeedAttrs() map[string]any {
@@ -104,6 +106,7 @@ func assetFeedDriver(t *testing.T, srv *httptest.Server) *Driver {
 	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
 	d := NewDriver("acme-prod")
 	d.AssetFeedBaseURL = srv.URL
+	d.ProjNumber = "12345" // feeds.get/delete address the project by NUMBER, not ID
 	return d
 }
 
@@ -140,6 +143,53 @@ func TestCreateObserveDeleteAssetFeed(t *testing.T) {
 
 	if del := d.deleteAssetFeed("changefeed", "prod", res.ProviderID); del.Status != "succeeded" {
 		t.Fatalf("delete: %+v", del)
+	}
+}
+
+// feeds.get and feeds.delete must address the feed by the project NUMBER — the
+// Cloud Asset API 400s a project ID in the {name}. Field 2026-08-10: get/delete
+// used the ID, so a retire's pre-delete read and the delete both 400'd forever,
+// the feed was never removed, and resume reported "pending" indefinitely.
+func TestAssetFeedGetDeleteAddressByProjectNumber(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case "GET":
+			paths = append(paths, "GET "+r.URL.Path)
+			_, _ = w.Write([]byte(`{"name":"projects/12345/feeds/x",` +
+				`"feedOutputConfig":{"pubsubDestination":{"topic":"projects/acme-prod/topics/infra-changes"}}}`))
+		case "DELETE":
+			paths = append(paths, "DELETE "+r.URL.Path)
+			w.WriteHeader(200)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	d := assetFeedDriver(t, srv)
+	pid := "assetfeed:acme-prod:" + AssetFeedID("acme-prod", "prod", "changefeed", 1)
+
+	if _, _, err := d.getAssetFeed("acme-prod", AssetFeedID("acme-prod", "prod", "changefeed", 1)); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if del := d.deleteAssetFeed("changefeed", "prod", pid); del.Status != "succeeded" {
+		t.Fatalf("delete: %+v", del)
+	}
+	var sawGet, sawDelete bool
+	for _, p := range paths {
+		sawGet = sawGet || strings.HasPrefix(p, "GET ")
+		sawDelete = sawDelete || strings.HasPrefix(p, "DELETE ")
+	}
+	if !sawGet || !sawDelete {
+		t.Fatalf("want at least one GET and one DELETE, got %v", paths)
+	}
+	for _, p := range paths {
+		if !strings.Contains(p, "/projects/12345/feeds/") {
+			t.Errorf("%s must address the project by NUMBER (12345), not ID", p)
+		}
+		if strings.Contains(p, "/projects/acme-prod/feeds/") {
+			t.Errorf("%s addressed the project by ID — feeds.get/delete 400 on that", p)
+		}
 	}
 }
 
@@ -198,7 +248,23 @@ func TestObserveAssetFeedNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(obs) != 0 || len(diags) == 0 {
-		t.Fatalf("a missing feed observes nothing with a diagnostic, got obs=%v diags=%v", obs, diags)
+	// Corrected with D519: this asserted SILENCE for an absent bound resource,
+	// which is the defect F-LC3 exists to prevent — the compile sees an empty set,
+	// plans nothing, and converge reports a world that no longer contains it.
+	if !absentMarked(obs) || len(diags) == 0 {
+		t.Fatalf("a missing feed must report %s=true with a diagnostic, got obs=%v diags=%v",
+			provider.ResourceAbsentPath, obs, diags)
 	}
+}
+
+// absentMarked reports whether an observation set carries the F-LC3 marker set
+// true — the one way a driver says a BOUND resource is authoritatively gone.
+func absentMarked(obs []provider.Observation) bool {
+	for _, o := range obs {
+		if o.Path == provider.ResourceAbsentPath {
+			gone, _ := o.Value.(bool)
+			return gone
+		}
+	}
+	return false
 }

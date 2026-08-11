@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func bqReadBody(r *http.Request) map[string]any {
@@ -197,4 +200,52 @@ func TestMetamorphicBigQueryRoundTrip(t *testing.T) {
 			}
 		})
 	}
+}
+
+func gcpRESTRole(req *http.Request, _ []byte) certifynet.Role {
+	if req.Method == http.MethodGet {
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingBigQuery enrols bigquery in the D391/D413 gate. A dataset id is
+// deterministic, so a re-converge meets a 409 and the driver must recognise its own
+// labels and bind rather than fail against an estate that is already correct.
+func TestAdoptsExistingBigQuery(t *testing.T) {
+	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
+	doc := `{"datasetReference":{"datasetId":"pv_lake_prod_x","projectId":"acme-prod"},` +
+		`"location":"US","labels":{"groundhold-capability":"lake","groundhold-environment":"prod"}}`
+	p := &certifynet.ExistingProbe{
+		Name:     "gcp/bigquery",
+		Classify: gcpRESTRole,
+		ExistingServer: func() *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/datasets"):
+						w.WriteHeader(http.StatusConflict)
+						_, _ = w.Write([]byte(`{"error":{"code":409,"message":"Already Exists"}}`))
+					case r.Method == "GET":
+						_, _ = w.Write([]byte(doc))
+					default:
+						w.WriteHeader(404)
+					}
+				}))
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("acme-prod")
+			d.HTTP = &http.Client{Transport: rt}
+			d.BQBaseURL = happyURL
+			d.Now = time.Now
+			d.PollInterval = time.Millisecond
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("bigquery", "lake", "prod", bqAttrs(), nil, "k", 1)
+		},
+		AllowedMutations: 1, // the refused create
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

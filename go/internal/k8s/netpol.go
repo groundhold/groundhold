@@ -91,7 +91,15 @@ func netpolApplyResult(pid string, st int, b []byte, e error) provider.CreateRes
 	case st == http.StatusOK || st == http.StatusCreated:
 		return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
 	case st == http.StatusConflict:
-		return provider.CreateResult{ProviderID: pid, Status: "failed", Reason: "field ownership conflict — another manager owns fields (release it first)"}
+		// The API server names the conflicting manager AND every field path it
+		// holds ("conflict with \"kubectl-label\" using v1: .metadata.labels...").
+		// This is the one refusal an operator cannot act on without that detail —
+		// "release it first" says nothing about what to release — and it was the
+		// only branch here that dropped the body instead of passing it through
+		// mutDetail (D509). Found on a real cluster: a `kubectl label` took the
+		// enforce label, and the next converge could no longer correct the drift.
+		return provider.CreateResult{ProviderID: pid, Status: "failed",
+			Reason: "field ownership conflict — another manager owns fields: " + mutDetail(b)}
 	case st >= 500:
 		return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: fmt.Sprintf("apply HTTP %d (server error) — reconcile", st)}
 	default:
@@ -106,10 +114,20 @@ func netpolApplyResult(pid string, st int, b []byte, e error) provider.CreateRes
 // path is absent from one vantage, so it is a probe FAILURE (unknown), never a
 // fabricated "private". No intrusive path (a dial mutates nothing).
 func (d *Driver) Probe(service, capability, providerID string, allowIntrusive bool) (provider.ProbeOutcome, error) {
-	if err := d.requireService(service); err != nil {
-		return provider.ProbeOutcome{}, err
-	}
+	// D574: ask the registry FIRST, so a service the driver SERVES but has no probe
+	// for gets the true reason instead of "unknown service". Reversed, the dispatch
+	// gate answered a different question — an operator reads "unknown service" as
+	// "this driver cannot see my resource" and hunts a bug that is not there, for a
+	// service the same driver observes, creates, adopts and retires.
 	if service != "netpol" {
+		if m, _ := d.serviceMapping(service, forRead); m != nil {
+			return provider.ProbeOutcome{}, fmt.Errorf(
+				"k8s driver: no probe is wired for service %q — the driver observes and "+
+					"manages it, but reachability here has nothing to dial", service)
+		}
+		if err := d.requireService(service); err != nil {
+			return provider.ProbeOutcome{}, err
+		}
 		return provider.ProbeOutcome{}, fmt.Errorf("k8s driver: probes for service %q are not wired", service)
 	}
 	_, _, ns, name, err := splitRBACProviderID(providerID, "NetworkPolicy")

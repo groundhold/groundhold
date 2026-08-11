@@ -8,6 +8,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 // fakeAddon is a stateful fake EKS addon (REST-JSON) endpoint. It records the
@@ -430,4 +435,43 @@ func TestEKSAddonAdoptPersistentReadFailureIsActionable(t *testing.T) {
 	if !strings.Contains(res.Reason, "eks:DescribeAddon") {
 		t.Fatalf("the reason must name the missing permission to be actionable, got %q", res.Reason)
 	}
+}
+
+// TestAdoptsExistingEKSAddon enrols eks-addon in the D391 gate. An addon is identified
+// by (cluster, addon name) and the foreign case already has a test; the OURS case — an
+// addon we installed that is already there, which is what every re-converge meets —
+// did not.
+func TestAdoptsExistingEKSAddon(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	attrs, impl := addonCandidate()
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/eks-addon",
+		Classify: eksRole,
+		ExistingServer: func() *httptest.Server {
+			f := newFakeAddon()
+			f.exists = true
+			f.tags = map[string]string{
+				"groundhold-capability":  sanitizeTag(eksAddonCap),
+				"groundhold-environment": sanitizeTag("prod"),
+			}
+			return f.handler(t, nil)
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.EKSBaseURL = happyURL
+			d.EC2BaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.PollInterval = 0
+			d.PollTimeout = 2 * time.Second
+			d.EKSLROTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("eks-addon", eksAddonCap, "prod", attrs, impl, "k", 1)
+		},
+		PID: addonPID(),
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

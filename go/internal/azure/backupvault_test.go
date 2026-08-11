@@ -2,6 +2,7 @@ package azure
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -114,7 +115,11 @@ func backupVaultServer(t *testing.T, region, immState string, retDays int, cmk b
 				"immutabilitySettings": map[string]any{"state": immState},
 			}
 			if retDays > 0 {
-				sec["softDeleteSettings"] = map[string]any{"state": "On", "retentionDurationInDays": retDays}
+				// D908: Azure returns retentionDurationInDays as a JSON number WITH a
+				// fraction (e.g. 30.0), not a bare int — the fake mirrors that so a struct
+				// that types it as int fails to parse the whole document, exactly as it did
+				// against the real service.
+				sec["softDeleteSettings"] = json.RawMessage(fmt.Sprintf(`{"state":"On","retentionDurationInDays":%d.0}`, retDays))
 			}
 			if cmk {
 				sec["encryptionSettings"] = map[string]any{"state": "Enabled"}
@@ -254,6 +259,11 @@ func TestHonestyHarnessAzureBackupVault(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "archive",
 		DeterministicID: true,
+		// F-LC3 (D522): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("backupvault", "archive", pid)
+		},
+		GoneCode: "ResourceNotFound", // this service's own not-found code (D522)
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -282,4 +292,59 @@ func TestHonestyHarnessAzureBackupVault(t *testing.T) {
 		},
 	}
 	certifynet.CertifyDriverNet(t, p)
+}
+
+// D741: a failed vault delete used to be rewritten to "vault still holds backup
+// instances" whatever the cause. A missing permission, a throttle and a policy denial
+// all told the operator to wait for recovery points to age out — a cause never
+// established, and an action wrong for every case but one.
+func TestVaultDeleteRefusalNamesAMeasuredCause(t *testing.T) {
+	cases := []struct {
+		name      string
+		instances string
+		instSt    int
+		want      string
+	}{
+		{"the vault really does hold data",
+			`{"value":[{"name":"bi-1"},{"name":"bi-2"}]}`, 200, "holds 2 backup instance(s)"},
+		{"empty vault — the refusal is something else",
+			`{"value":[]}`, 200, "NOT about stored data"},
+		{"instances unreadable — say so, never assume empty",
+			`{"error":{"code":"AuthorizationFailed"}}`, 403, "cause was not established"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.Contains(r.URL.Path, "/backupInstances"):
+					if c.instSt != 200 {
+						w.WriteHeader(c.instSt)
+					}
+					_, _ = w.Write([]byte(c.instances))
+				case r.Method == "DELETE":
+					w.WriteHeader(409)
+					_, _ = w.Write([]byte(`{"error":{"code":"VaultNotEmpty","message":"provider said this"}}`))
+				default:
+					_, _ = w.Write([]byte(`{"tags":{"groundhold-capability":"archive",` +
+						`"groundhold-environment":"prod"},"properties":{}}`))
+				}
+			}))
+			defer srv.Close()
+			d := backupVaultDriver(t, srv)
+
+			res := d.Delete("backupvault", "archive", "prod",
+				"backupvault:"+testSub+":rg1:v1", "k")
+			if res.Status != "failed" {
+				t.Fatalf("a refused delete must fail, got %+v", res)
+			}
+			if !strings.Contains(res.Reason, c.want) {
+				t.Fatalf("reason does not say %q; it said: %s", c.want, res.Reason)
+			}
+			// The provider's own words must survive in every branch — the tool's
+			// reading is added to them, never substituted for them.
+			if !strings.Contains(res.Reason, "provider said this") {
+				t.Fatalf("the provider's own reason was discarded: %s", res.Reason)
+			}
+		})
+	}
 }

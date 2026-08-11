@@ -36,8 +36,9 @@ var azBuiltinRole = map[string]struct {
 
 // AzureRolePlan is the attribute-derived shape a create assembles.
 type AzureRolePlan struct {
-	RoleGuid    string // the role-definition GUID
-	PrincipalID string // the principal object id (a GUID)
+	RoleGuid      string // the role-definition GUID
+	PrincipalID   string // the principal object id (a GUID)
+	PrincipalType string // D896: User | Group | ServicePrincipal — Azure rejects a wrong type
 }
 
 // BuildAzureRole maps capability.authorization.grant attributes to an assignment
@@ -97,6 +98,22 @@ func BuildAzureRole(environment, capability string,
 	if p.PrincipalID == "" || !azGUIDOK.MatchString(p.PrincipalID) {
 		return AzureRolePlan{}, fmt.Errorf(
 			"grant.principal %q is missing or not a valid principal object id (a GUID)", p.PrincipalID)
+	}
+	// D896: an object GUID does not encode its principal type, and Azure REJECTS a role
+	// assignment whose declared principalType does not match the real principal ("has type
+	// 'User', which is different from specified PrincipalType 'ServicePrincipal'"). The
+	// driver used to hardcode ServicePrincipal, so a grant to a User or Group was
+	// uncreatable. The operator names the type (default ServicePrincipal — the workload
+	// grant, the common case); a wrong value is refused rather than sent to a 400.
+	p.PrincipalType, _ = impl["principal_type"].(string)
+	if p.PrincipalType == "" {
+		p.PrincipalType = "ServicePrincipal"
+	}
+	switch p.PrincipalType {
+	case "User", "Group", "ServicePrincipal":
+	default:
+		return AzureRolePlan{}, fmt.Errorf(
+			"implementation.principal_type %q must be User, Group, or ServicePrincipal", p.PrincipalType)
 	}
 	if privSet && roleKnown && roleKnownPriv != declaredPriv {
 		return AzureRolePlan{}, fmt.Errorf(

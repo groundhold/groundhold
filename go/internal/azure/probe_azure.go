@@ -111,11 +111,24 @@ func (d *Driver) Probe(service, capability, providerID string,
 // so it is a FAILURE, never a fabricated false.
 func (d *Driver) probeExposure(fqdn, publicNetworkAccess string,
 	out *provider.ProbeOutcome) {
-	if fqdn == "" || publicNetworkAccess == "Disabled" {
+	// D775, the Azure twin of the same fold: `publicNetworkAccess: Enabled` with an
+	// EMPTY FQDN is a server whose name is not readable yet, not a server without a
+	// public endpoint. Reporting it as a measured `false` invents a proven negative out
+	// of missing data.
+	if publicNetworkAccess != "Disabled" && fqdn == "" {
+		out.Failures = append(out.Failures, provider.ProbeFailure{
+			Path: "network.publicExposure", Method: "tcp-connect",
+			Reason: "publicNetworkAccess is not Disabled and the server returned no FQDN " +
+				"— there is nothing to dial yet, and an unknown name is not a proven " +
+				"absence of exposure",
+			Retryable: true})
+		return
+	}
+	if publicNetworkAccess == "Disabled" {
 		out.Measurements = append(out.Measurements, provider.ProbeMeasurement{
 			Path: "network.publicExposure", Value: false,
-			Method:   "tcp-connect",
-			Evidence: "no public endpoint to reach (publicNetworkAccess Disabled or no FQDN)",
+			Method:   "provider-config",
+			Evidence: "publicNetworkAccess is Disabled; nothing was dialled",
 		})
 		return
 	}

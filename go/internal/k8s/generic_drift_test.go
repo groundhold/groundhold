@@ -113,3 +113,84 @@ func TestGuardDriftEndToEnd(t *testing.T) {
 		t.Fatalf("unreachable schema must surface an UNCHECKED diagnostic, got %v", diags)
 	}
 }
+
+// The two GitOps mappings shipped with `mappedSurface: ""` — drift UNCHECKED —
+// marked "PENDING CRD schema vendoring". They were pending because a bare cluster
+// has no cert-manager/Argo/Flux CRDs, so there was nothing to vendor FROM. D511
+// closed that: the CRDs were installed on a throwaway cluster and the schemas
+// recorded verbatim (with `description` stripped, which the fingerprint excludes
+// by construction — the live gate proves the hash is identical either way).
+//
+// These pin the same property the other mappings have: the committed fingerprint
+// is the one the vendored schema produces. Without them, a re-recording could
+// silently change the mapped surface and nothing would notice.
+func TestGitOpsMappingPinsMatchVendoredSchemas(t *testing.T) {
+	// flux-kustomization's surface spans TWO documents since D551: its own CRD, and
+	// the GitRepository CRD whose spec.url the resolve-ref attribute reads. The
+	// property under test is unchanged — the committed pin is the one the vendored
+	// schemas produce — but a hop's fingerprint is only honest if the referent's
+	// document is actually present, so both are loaded.
+	for _, tc := range []struct {
+		service  string
+		fixtures []string
+	}{
+		{"argocd-application", []string{"testdata/argocd-application-openapi.json"}},
+		{"flux-kustomization", []string{
+			"testdata/flux-kustomization-openapi.json",
+			"testdata/flux-gitrepository-openapi.json",
+		}},
+	} {
+		m := embeddedMappings[tc.service]
+		if m == nil {
+			t.Fatalf("%s: no such mapping", tc.service)
+		}
+		if m.Schema.MappedSurface == "" {
+			t.Fatalf("%s: still unpinned — drift is unchecked for this mapping", tc.service)
+		}
+		schemas := map[string]any{}
+		for _, f := range tc.fixtures {
+			for k, v := range loadSchemasFile(t, f) {
+				schemas[k] = v
+			}
+		}
+		got, err := m.MappedSurfaceHash(schemas)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.service, err)
+		}
+		if got != m.Schema.MappedSurface {
+			t.Errorf("%s: committed pin %s != vendored-schema hash %s",
+				tc.service, m.Schema.MappedSurface, got)
+		}
+	}
+}
+
+func loadSchemasFile(t *testing.T, path string) map[string]any {
+	t.Helper()
+	fd, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(fd, &doc); err != nil {
+		t.Fatal(err)
+	}
+	return doc["components"].(map[string]any)["schemas"].(map[string]any)
+}
+
+// Now that every embedded mapping carries a fingerprint (D511), a new one may not
+// arrive without it. "mappedSurface: \"\"" is not a neutral default — it turns the
+// drift guard OFF for that resource, and the two mappings that shipped that way
+// stayed unguarded for as long as nobody had a cluster to vendor a schema from.
+// The exemption is now a decision someone has to argue for, not a blank field.
+func TestEveryMappingPinsItsSurface(t *testing.T) {
+	if len(embeddedMappings) == 0 {
+		t.Fatal("no embedded mappings — this gate would be vacuous")
+	}
+	for name, m := range embeddedMappings {
+		if m.Schema.MappedSurface == "" {
+			t.Errorf("%s ships with no mappedSurface fingerprint — the drift guard is OFF "+
+				"for it, so a mapped field can change type or vanish unnoticed. Vendor the "+
+				"schema (a throwaway cluster is enough) and pin it.", name)
+		}
+	}
+}

@@ -1,6 +1,8 @@
 package k8s
 
 import (
+	"groundhold/internal/provider"
+
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -51,6 +53,12 @@ func TestNetpolLensObservations(t *testing.T) {
 			map[string]any{"podSelector": map[string]any{}, "policyTypes": []any{"Egress"}, "egress": []any{}},
 			map[string]any{"egress.restricted": true, "service.managed": true},
 			[]string{"CONFIG-INTENT"}},
+		// D987: an egress rule list with a wide-open rule ({}) ALLOWS all outbound —
+		// egress.restricted must NOT be emitted (there is no prober to correct it).
+		{"egress-allow-all-rule",
+			map[string]any{"podSelector": map[string]any{}, "policyTypes": []any{"Egress"}, "egress": []any{map[string]any{}}},
+			map[string]any{"service.managed": true},
+			[]string{"allows specific egress", "CONFIG-INTENT"}},
 	}
 	m := loadRealMapping(t, "k8s.networkpolicy.yaml")
 	for _, c := range cases {
@@ -66,6 +74,14 @@ func TestNetpolLensObservations(t *testing.T) {
 			for _, o := range obs {
 				got[o.Path] = o.Value
 			}
+			// Every present resource now carries the absence marker set to false
+			// (F-LC3, D513) — asserted once here rather than repeated in each
+			// case's want, which is about the LENS's semantics.
+			if got[provider.ResourceAbsentPath] != false {
+				t.Fatalf("%s: a present object must clear %s, got %v",
+					c.name, provider.ResourceAbsentPath, got[provider.ResourceAbsentPath])
+			}
+			delete(got, provider.ResourceAbsentPath)
 			if !reflect.DeepEqual(got, c.want) {
 				t.Fatalf("%s observations = %#v, want %#v", c.name, got, c.want)
 			}
@@ -113,5 +129,38 @@ func TestNetpolLensDriftOnLensField(t *testing.T) {
 	spec["properties"].(map[string]any)["policyTypes"].(map[string]any)["type"] = "string"
 	if _, err := m.checkDrift(schemas); err == nil || !strings.Contains(err.Error(), "mapping-schema-drift") {
 		t.Fatalf("drift on a lens input must refuse, got %v", err)
+	}
+}
+
+// cert-manager REQUIRES spec.secretName — a Certificate without it is rejected by
+// the API server with a 422, always. This function's own comment says the issuer
+// and the target secret are both operands, and it refused for the issuer while
+// silently omitting the secret, so every Certificate it built was invalid. Found
+// the first time the mapping met a real cluster (D511): the object never reached
+// etcd, on any cluster, ever.
+func TestCertificateRefusesWithoutItsTargetSecret(t *testing.T) {
+	attrs := map[string]any{"domain": "app.example.com"}
+	issuer := map[string]any{"name": "selfsigned", "kind": "ClusterIssuer", "group": "cert-manager.io"}
+
+	obj := map[string]any{}
+	err := writeLensCertmanagerPrimaryDomain(obj, attrs, map[string]any{"issuerRef": issuer})
+	if err == nil {
+		t.Fatalf("a Certificate was built with no secretName; the API server rejects it "+
+			"with `spec.secretName: Required value`, so this object could never be created.\n  spec: %v",
+			obj["spec"])
+	}
+	if !strings.Contains(err.Error(), "secretName") {
+		t.Errorf("the refusal does not name the missing operand: %v", err)
+	}
+
+	// with it, the spec carries it through unchanged
+	obj = map[string]any{}
+	if err := writeLensCertmanagerPrimaryDomain(obj, attrs,
+		map[string]any{"issuerRef": issuer, "secretName": "app-tls"}); err != nil {
+		t.Fatalf("a complete Certificate was refused: %v", err)
+	}
+	spec, _ := obj["spec"].(map[string]any)
+	if spec["secretName"] != "app-tls" {
+		t.Errorf("secretName = %v, want app-tls", spec["secretName"])
 	}
 }

@@ -320,6 +320,29 @@ func Run(opts Options) (*RestoreReport, int) {
 		"originalAnchorHead": anchor.Head,
 		"capsuleHeads":       capsuleHeads(byCap),
 	}
+
+	// D618: `--partial` returned ExitOK however much it had failed to restore —
+	// including ALL of it. A run where every capability came back `unknown` wrote a
+	// zero-byte ledger, wrote a FRESH anchor beside it, and exited 0; from the next
+	// minute on, `anchor --check` and `attest` both certified that empty file as the
+	// recovered history. The truth lived only inside the `partial[]` block of a
+	// report nobody re-reads after a green exit.
+	//
+	// `--partial` means "give me what can be proven and tell me what cannot", not
+	// "call an empty recovery a success". A restore that recovered NOTHING is a
+	// failed restore, and D313 already established that a refused run must not leave
+	// a plausible artefact behind.
+	if opts.Partial && restored.TotalEvents() == 0 {
+		os.Remove(ledger.AnchorPath(opts.Out))
+		os.Remove(opts.Out)
+		rep.Status = "refused"
+		rep.Events = 0
+		rep.Reasons = append(rep.Reasons, "--partial restored ZERO events: every "+
+			"capability was unprovable, so there is no history here. The empty ledger "+
+			"and its anchor have been removed rather than left for a later check to "+
+			"certify as a recovered estate.")
+		return rep, ExitRefused
+	}
 	return rep, ExitOK
 }
 

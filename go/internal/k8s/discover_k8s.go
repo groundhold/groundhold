@@ -63,28 +63,30 @@ type roleBindingListDoc struct {
 // ClusterRoleBinding, so a takeover sees permission sets and the grants that
 // confer them at both scopes.
 func (d *Driver) List(region string) ([]provider.Discovered, []string, error) {
-	var out []provider.Discovered
-	var diags []string
 	reg := d.serviceDiscoverers()
+	// Only the kinds this scope actually sweeps count: a cluster-scoped kind is
+	// meaningful on a cluster-wide List, and a namespace-narrowed List skips it.
+	// Counting skipped kinds as successes would let the all-failed floor never fire
+	// on a namespaced sweep.
+	var toks []string
 	for _, tok := range d.DiscoverableServices() { // sorted, deterministic
-		sw := reg[tok]
-		// a cluster-scoped kind is only meaningful on a cluster-wide sweep; a
-		// namespace-narrowed List skips it (parity with the prior scope logic).
-		if sw.clusterScoped && region != "" {
+		if reg[tok].clusterScoped && region != "" {
 			continue
 		}
-		part, d2, err := sw.fn(region)
-		if err != nil {
-			// resilient like the cloud drivers: a service the identity cannot list
-			// (or a CRD that is not installed — e.g. cert-manager absent) becomes a
-			// diagnostic, never a hard failure that hides every other kind.
-			diags = append(diags, tok+": "+err.Error())
-			continue
-		}
-		out = append(out, part...)
-		diags = append(diags, d2...)
+		toks = append(toks, tok)
 	}
-	return out, diags, nil
+	// D642: a kind the identity cannot list (or a CRD that is not installed — e.g.
+	// cert-manager absent) is a diagnostic, never a hard failure that hides every
+	// other kind. All of them failing is a cluster that was never reached: the k8s
+	// driver had no precondition at all, so `discover --provider k8s` against a
+	// dead API server exited 0 with an empty estate.
+	return provider.SweepAll(toks, func(tok string) ([]provider.Discovered, []string, error) {
+		part, d2, err := reg[tok].fn(region)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: %v", tok, err)
+		}
+		return part, d2, nil
+	}, d.trunc)
 }
 
 // k8sSweep pairs a discovery sweep with whether the kind is cluster-scoped (swept
@@ -191,7 +193,7 @@ func (d *Driver) sweepMapped(m *Mapping, region string) ([]provider.Discovered, 
 			continue
 		}
 		diags = append(diags, od...)
-		out = append(out, provider.Discovered{ProviderID: pid, ResourceType: m.Capability, Observations: obs})
+		out = append(out, provider.Discovered{ProviderID: pid, ResourceType: m.Capability, Observations: provider.WithoutAbsence(obs)})
 	}
 	return out, diags, nil
 }
@@ -231,7 +233,7 @@ func (d *Driver) sweepQuotas(region string) ([]provider.Discovered, []string, er
 		out = append(out, provider.Discovered{
 			ProviderID:   quotaProviderID(ns, it.Metadata.Name),
 			ResourceType: "capability.compute.quota",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, nil, nil
@@ -261,7 +263,7 @@ func (d *Driver) sweepNamespaces() ([]provider.Discovered, []string, error) {
 		out = append(out, provider.Discovered{
 			ProviderID:   nsProviderID(it.Metadata.Name),
 			ResourceType: "capability.cluster.namespace",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -321,7 +323,7 @@ func (d *Driver) sweep(ki rbacKind, region string) ([]provider.Discovered, []str
 			out = append(out, provider.Discovered{
 				ProviderID:   rbacProviderID(rbacGroup, rbacVersion, ki.Kind, ns, it.Metadata.Name),
 				ResourceType: "capability.authorization.grant",
-				Observations: obs,
+				Observations: provider.WithoutAbsence(obs),
 			})
 		}
 	}
@@ -338,4 +340,21 @@ func nsOr(got string, ki rbacKind, region string) string {
 		return got
 	}
 	return region
+}
+
+// ServiceCapabilities reports, for every service this driver serves, the capability
+// type it realises — derived from the mapping registry, never a second hand-written
+// list (D550's lesson: a list beside a registry falls behind it and the bypass looks
+// like coverage).
+//
+// D561: the k8s driver did not implement this, so the vocabulary-mappings gate could
+// not ask it and did not — while its own constant read "COMPLETE: every provider the
+// drivers serve is named". The gate was measured over the three drivers that happened
+// to expose the method.
+func (d *Driver) ServiceCapabilities() map[string]string {
+	out := make(map[string]string, len(d.Mappings))
+	for svc, m := range d.Mappings {
+		out[svc] = m.Capability
+	}
+	return out
 }

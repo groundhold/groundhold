@@ -285,9 +285,14 @@ func classifyAppRunnerChange(path string) (string, string) {
 	case "replicas.minimum":
 		return "mutable", "in place via UpdateService (swap the AutoScalingConfigurationArn)"
 	case "network.publicExposure":
-		// App Runner sets ingress public/private at create; treat a drift as a
-		// replacement rather than claim an in-place ingress flip we do not exercise.
-		return "immutable", "App Runner ingress (public/private) is set at create — reconciling a drift replaces the (stateless) service"
+		// D822: "set at create" is a claim about App Runner, and App Runner's own model
+		// contradicts it — UpdateService accepts NetworkConfiguration (botocore
+		// apprunner/2020-05-15). The service is stateless, so a replacement costs less here
+		// than it does for a machine or a database, but it is still an outage nobody needs
+		// and a false reason for it.
+		return "unsupported", "in-place ingress change is not wired for App Runner in this " +
+			"slice — AWS does support it (UpdateService takes NetworkConfiguration), so this " +
+			"is a gap in groundhold rather than a reason to replace the service"
 	case "location.region":
 		return "immutable", "the region is the service's home — a change is a new service (replacement; stateless, no data loss)"
 	case "tls.enforced":

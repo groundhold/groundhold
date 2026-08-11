@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"groundhold/internal/provider"
@@ -70,10 +71,38 @@ func (d *Driver) CheckPermissions(project string, permissions []string) (denied,
 		return nil, nil, nil
 	}
 	url := d.crmBase() + "/projects/" + project + ":testIamPermissions"
-	status, body, cerr := d.call("POST", url,
-		map[string]any{"permissions": permissions})
-	if cerr != nil {
-		return nil, nil, fmt.Errorf("testIamPermissions: %v", cerr)
+	// D917: projects.testIamPermissions rejects the WHOLE request with 400 if it
+	// contains even one permission that is not valid for a PROJECT resource — a
+	// billing-account permission (billing.budgets.create) or an org/folder one lives
+	// at a different scope, and one of them poisons the entire project-scoped check.
+	// Rather than fail the whole preflight closed (which made cost.budget uncreatable
+	// though the identity HELD billing.budgets.create at the billing account), peel off
+	// each permission the 400 names, mark it UNATTESTED (the project surface genuinely
+	// cannot vouch for a permission scoped elsewhere — D75 skip-loudly, never a denial),
+	// and retry with the rest so the project-scoped permissions are still attested.
+	testable := append([]string(nil), permissions...)
+	var scopedElsewhere []string
+	var body []byte
+	var status int
+	for {
+		var cerr error
+		status, body, cerr = d.call("POST", url, map[string]any{"permissions": testable})
+		if cerr != nil {
+			return nil, nil, fmt.Errorf("testIamPermissions: %v", cerr)
+		}
+		if status == http.StatusBadRequest {
+			if bad := invalidPermissionName(body); bad != "" {
+				testable = removeString(testable, bad)
+				scopedElsewhere = append(scopedElsewhere, bad)
+				if len(testable) == 0 {
+					// every required permission is scoped off the project — nothing the
+					// project surface can attest; all are unattested, none denied.
+					return nil, scopedElsewhere, nil
+				}
+				continue
+			}
+		}
+		break
 	}
 	if status != http.StatusOK {
 		// SERVICE_DISABLED (Cloud Resource Manager API off — the single most
@@ -84,6 +113,7 @@ func (d *Driver) CheckPermissions(project string, permissions []string) (denied,
 				"API on %s and check the token's scope): %s",
 			status, project, mutDetail(body))
 	}
+	unattested = append(unattested, scopedElsewhere...)
 	var out struct {
 		Permissions []string `json:"permissions"`
 	}
@@ -94,7 +124,7 @@ func (d *Driver) CheckPermissions(project string, permissions []string) (denied,
 	for _, p := range out.Permissions {
 		granted[p] = true
 	}
-	for _, p := range permissions {
+	for _, p := range testable {
 		if granted[p] {
 			continue
 		}
@@ -107,6 +137,33 @@ func (d *Driver) CheckPermissions(project string, permissions []string) (denied,
 	return denied, unattested, nil
 }
 
+// invalidPermissionOnResource matches projects.testIamPermissions' 400 for a permission
+// that is not valid for a project resource (it names the offending permission), e.g.
+// "Permission billing.budgets.create is not valid for this resource." (D917).
+var invalidPermissionOnResource = regexp.MustCompile(`Permission ([a-zA-Z0-9._-]+) is not valid for this resource`)
+
+// invalidPermissionName pulls the offending permission out of such a 400 body, or "".
+func invalidPermissionName(body []byte) string {
+	if m := invalidPermissionOnResource.FindSubmatch(body); len(m) == 2 {
+		return string(m[1])
+	}
+	return ""
+}
+
+// removeString returns s without the first occurrence of v.
+func removeString(s []string, v string) []string {
+	out := s[:0:0]
+	removed := false
+	for _, x := range s {
+		if !removed && x == v {
+			removed = true
+			continue
+		}
+		out = append(out, x)
+	}
+	return out
+}
+
 // CheckResourcePermissions implements provider.ResourcePreflighter (D80): the
 // AUTHORITATIVE check for an existing resource. testIamPermissions on the
 // resource itself evaluates the permission at that scope, so its negative is a
@@ -114,21 +171,21 @@ func (d *Driver) CheckPermissions(project string, permissions []string) (denied,
 // here too (verified live): GCS uses GET /iam/testPermissions, Cloud Run v2
 // uses POST :testIamPermissions. Cloud SQL has no such surface -> the caller
 // falls back to the project check (its cloudsql.* are CRM-attested anyway).
-func (d *Driver) CheckResourcePermissions(service, providerID string, permissions []string) ([]string, error) {
+func (d *Driver) CheckResourcePermissions(service, providerID string, permissions []string) ([]string, []string, error) {
 	if len(permissions) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	var granted map[string]bool
 	switch service {
 	case "cloudsql":
-		return nil, provider.ErrNoResourceSurface
+		return nil, nil, provider.ErrNoResourceSurface
 	case "gcs":
 		project, bucket, err := splitGcsProviderID(providerID)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := d.sameProject(project); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		q := ""
 		for _, p := range permissions {
@@ -136,35 +193,35 @@ func (d *Driver) CheckResourcePermissions(service, providerID string, permission
 		}
 		status, body, cerr := d.call("GET", d.bucketURL(bucket)+"/iam/testPermissions?"+q[1:], nil)
 		if cerr != nil {
-			return nil, fmt.Errorf("bucket testIamPermissions: %v", cerr)
+			return nil, nil, fmt.Errorf("bucket testIamPermissions: %v", cerr)
 		}
 		if status != http.StatusOK {
-			return nil, fmt.Errorf("bucket testIamPermissions HTTP %d: %s", status, mutDetail(body))
+			return nil, nil, fmt.Errorf("bucket testIamPermissions HTTP %d: %s", status, mutDetail(body))
 		}
 		var perr error
 		if granted, perr = grantedSet(body); perr != nil {
-			return nil, perr // a malformed 200 is inconclusive, NOT all-denied (D78)
+			return nil, nil, perr // a malformed 200 is inconclusive, NOT all-denied (D78)
 		}
 	case "cloudrun":
 		project, region, name, err := splitRunProviderID(providerID)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := d.sameProject(project); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		status, body, cerr := d.call("POST",
 			d.runServiceURL(project, region, name)+":testIamPermissions",
 			map[string]any{"permissions": permissions})
 		if cerr != nil {
-			return nil, fmt.Errorf("service testIamPermissions: %v", cerr)
+			return nil, nil, fmt.Errorf("service testIamPermissions: %v", cerr)
 		}
 		if status != http.StatusOK {
-			return nil, fmt.Errorf("service testIamPermissions HTTP %d: %s", status, mutDetail(body))
+			return nil, nil, fmt.Errorf("service testIamPermissions HTTP %d: %s", status, mutDetail(body))
 		}
 		var perr error
 		if granted, perr = grantedSet(body); perr != nil {
-			return nil, perr // a malformed 200 is inconclusive, NOT all-denied (D78)
+			return nil, nil, perr // a malformed 200 is inconclusive, NOT all-denied (D78)
 		}
 	case "pubsub-topic", "pubsub-queue":
 		// D94. Pub/Sub topics have a resource testIamPermissions surface
@@ -172,26 +229,26 @@ func (d *Driver) CheckResourcePermissions(service, providerID string, permission
 		// authoritative — unlike the project surface's silence on pubsub.*.
 		project, name, err := splitPubSubProviderID(providerID)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := d.sameProject(project); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		status, body, cerr := d.call("POST",
 			d.topicURL(project, name)+":testIamPermissions",
 			map[string]any{"permissions": permissions})
 		if cerr != nil {
-			return nil, fmt.Errorf("topic testIamPermissions: %v", cerr)
+			return nil, nil, fmt.Errorf("topic testIamPermissions: %v", cerr)
 		}
 		if status != http.StatusOK {
-			return nil, fmt.Errorf("topic testIamPermissions HTTP %d: %s", status, mutDetail(body))
+			return nil, nil, fmt.Errorf("topic testIamPermissions HTTP %d: %s", status, mutDetail(body))
 		}
 		var perr error
 		if granted, perr = grantedSet(body); perr != nil {
-			return nil, perr // a malformed 200 is inconclusive, NOT all-denied (D78)
+			return nil, nil, perr // a malformed 200 is inconclusive, NOT all-denied (D78)
 		}
 	default:
-		return nil, provider.ErrNoResourceSurface
+		return nil, nil, provider.ErrNoResourceSurface
 	}
 	var denied []string
 	for _, p := range permissions {
@@ -199,7 +256,7 @@ func (d *Driver) CheckResourcePermissions(service, providerID string, permission
 			denied = append(denied, p) // AUTHORITATIVE: the surface evaluated it
 		}
 	}
-	return denied, nil
+	return denied, nil, nil
 }
 
 // grantedSet parses a testIamPermissions response. An unparseable 200 is an

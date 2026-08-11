@@ -13,6 +13,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
+	"net/url"
 
 	"groundhold/internal/provider"
 )
@@ -22,24 +23,50 @@ import (
 // DescribeKey + GetKeyRotationStatus (metadata only — the key material is never
 // read, D53). Per-key isolation: an unreadable DescribeKey is a diagnostic.
 func (d *Driver) discoverKMS(region string) ([]provider.Discovered, []string, error) {
-	st, body, err := d.kmsCall(region, "ListKeys", "{}")
-	if err != nil {
-		return nil, nil, fmt.Errorf("kms ListKeys: %v", err)
+	// D817: FOLLOW the pages. ListKeys answers 100 at a time and says so twice — a
+	// Truncated flag and a NextMarker (botocore kms/2014-11-01: input Marker, output
+	// NextMarker, more_results Truncated). Honour BOTH: stop only when neither says
+	// there is more.
+	type kmsKey struct {
+		KeyID string `json:"KeyId"`
 	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("kms ListKeys: HTTP %d: %s", st, ecsErr(body))
-	}
-	var r struct {
-		Keys []struct {
-			KeyID string `json:"KeyId"`
-		} `json:"Keys"`
-	}
-	if err := json.Unmarshal(body, &r); err != nil {
-		return nil, nil, readBody("kms ListKeys", st)
+	var keys []kmsKey
+	marker := ""
+	for page := 0; ; page++ {
+		if page >= maxAWSListPages {
+			return nil, nil, fmt.Errorf("kms ListKeys: more than %d pages", maxAWSListPages)
+		}
+		req := "{}"
+		if marker != "" {
+			b, _ := json.Marshal(struct {
+				Marker string `json:"Marker"`
+			}{marker})
+			req = string(b)
+		}
+		st, body, err := d.kmsCall(region, "ListKeys", req)
+		if err != nil {
+			return nil, nil, fmt.Errorf("kms ListKeys: %v", err)
+		}
+		if st != http.StatusOK {
+			return nil, nil, fmt.Errorf("kms ListKeys: HTTP %d: %s", st, ecsErr(body))
+		}
+		var r struct {
+			Keys       []kmsKey `json:"Keys"`
+			Truncated  bool     `json:"Truncated"`
+			NextMarker string   `json:"NextMarker"`
+		}
+		if err := json.Unmarshal(body, &r); err != nil {
+			return nil, nil, readBody("kms ListKeys", st)
+		}
+		keys = append(keys, r.Keys...)
+		if !r.Truncated || r.NextMarker == "" {
+			break
+		}
+		marker = r.NextMarker
 	}
 	var out []provider.Discovered
 	var diags []string
-	for _, k := range r.Keys {
+	for _, k := range keys {
 		if k.KeyID == "" {
 			continue
 		}
@@ -55,7 +82,7 @@ func (d *Driver) discoverKMS(region string) ([]provider.Discovered, []string, er
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.key.encryption",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -77,10 +104,13 @@ func (d *Driver) discoverMSK(region string) ([]provider.Discovered, []string, er
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("msk ListClustersV2: HTTP %d: %s", st, mskErr(body))
 	}
+	// restJson1 camelCase wire names (D879): PascalCase parsed every clusterName empty
+	// and the loop below skipped it — discovery would report ZERO msk clusters on a real
+	// account that has them, the dangerous false-absence direction.
 	var r struct {
 		ClusterInfoList []struct {
-			ClusterName string `json:"ClusterName"`
-		} `json:"ClusterInfoList"`
+			ClusterName string `json:"clusterName"`
+		} `json:"clusterInfoList"`
 	}
 	if err := json.Unmarshal(body, &r); err != nil {
 		return nil, nil, readBody("msk ListClustersV2", st)
@@ -103,7 +133,7 @@ func (d *Driver) discoverMSK(region string) ([]provider.Discovered, []string, er
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.messaging.kafka",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -118,7 +148,7 @@ func (d *Driver) discoverOpenSearch(region string) ([]provider.Discovered, []str
 	if err != nil {
 		return nil, nil, fmt.Errorf("opensearch: %v", err)
 	}
-	st, body, err := d.openSearchDo("GET", region, openSearchPath+"/domain", nil)
+	st, body, err := d.openSearchDo("GET", region, openSearchAccountPath+"/domain", nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opensearch ListDomainNames: %v", err)
 	}
@@ -151,7 +181,7 @@ func (d *Driver) discoverOpenSearch(region string) ([]provider.Discovered, []str
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.search.index",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -195,7 +225,7 @@ func (d *Driver) discoverRedshiftServerless(region string) ([]provider.Discovere
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.warehouse.analytics",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -207,24 +237,47 @@ func (d *Driver) discoverRedshiftServerless(region string) ([]provider.Discovere
 // never read. Private zones are surfaced too — brownfield is honest.
 func (d *Driver) discoverRoute53(region string) ([]provider.Discovered, []string, error) {
 	_ = region // Route 53 is global; the endpoint is region-independent.
-	st, body, err := d.r53Do("GET", route53Path+"/hostedzone", "")
-	if err != nil {
-		return nil, nil, fmt.Errorf("route53 ListHostedZones: %v", err)
+	// D817: FOLLOW the pages. ListHostedZones caps at 100 zones and answers IsTruncated +
+	// NextMarker (botocore route53/2013-04-01: input Marker, output NextMarker,
+	// more_results IsTruncated). A DNS zone missed here is a zone the tool reports as
+	// unmanaged when it is not there at all.
+	type r53Zone struct {
+		ID string `xml:"Id"`
 	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("route53 ListHostedZones: HTTP %d: %s", st, r53ErrCode(body))
-	}
-	var r struct {
-		Zones []struct {
-			ID string `xml:"Id"`
-		} `xml:"HostedZones>HostedZone"`
-	}
-	if err := xml.Unmarshal(body, &r); err != nil {
-		return nil, nil, fmt.Errorf("route53 ListHostedZones: %w", err)
+	var zones []r53Zone
+	marker := ""
+	for page := 0; ; page++ {
+		if page >= maxAWSListPages {
+			return nil, nil, fmt.Errorf("route53 ListHostedZones: more than %d pages", maxAWSListPages)
+		}
+		path := route53Path + "/hostedzone"
+		if marker != "" {
+			path += "?marker=" + url.QueryEscape(marker)
+		}
+		st, body, err := d.r53Do("GET", path, "")
+		if err != nil {
+			return nil, nil, fmt.Errorf("route53 ListHostedZones: %v", err)
+		}
+		if st != http.StatusOK {
+			return nil, nil, fmt.Errorf("route53 ListHostedZones: HTTP %d: %s", st, r53ErrCode(body))
+		}
+		var r struct {
+			Zones       []r53Zone `xml:"HostedZones>HostedZone"`
+			IsTruncated bool      `xml:"IsTruncated"`
+			NextMarker  string    `xml:"NextMarker"`
+		}
+		if err := xml.Unmarshal(body, &r); err != nil {
+			return nil, nil, fmt.Errorf("route53 ListHostedZones: %w", err)
+		}
+		zones = append(zones, r.Zones...)
+		if !r.IsTruncated || r.NextMarker == "" {
+			break
+		}
+		marker = r.NextMarker
 	}
 	var out []provider.Discovered
 	var diags []string
-	for _, z := range r.Zones {
+	for _, z := range zones {
 		id := stripZoneID(z.ID)
 		if id == "" {
 			continue
@@ -241,7 +294,7 @@ func (d *Driver) discoverRoute53(region string) ([]provider.Discovered, []string
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.dns.zone",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -286,7 +339,7 @@ func (d *Driver) discoverRoute53Health(region string) ([]provider.Discovered, []
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.monitoring.uptime",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -332,7 +385,7 @@ func (d *Driver) discoverVpnGateway(region string) ([]provider.Discovered, []str
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.vpn.gateway",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -381,7 +434,7 @@ func (d *Driver) discoverWAF(region string) ([]provider.Discovered, []string, er
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.security.waf",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

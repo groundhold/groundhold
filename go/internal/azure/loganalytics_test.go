@@ -163,6 +163,71 @@ func laDriver(t *testing.T, srv *httptest.Server) *Driver {
 	return d
 }
 
+// TestObserveLogAnalyticsCMKConfirmedAgainstCluster pins D985: a workspace linked to a
+// dedicated cluster reports customerManagedKeys=true ONLY when that cluster actually
+// carries a key vault key. A linked cluster is a prerequisite for BYOK, not proof of it
+// (a commitment-tier cluster can run on Microsoft's platform key), so the linkage alone
+// must not certify a control that does not exist.
+func TestObserveLogAnalyticsCMKConfirmedAgainstCluster(t *testing.T) {
+	clusterID := "/subscriptions/" + testSub + "/resourceGroups/rg1/providers/Microsoft.OperationalInsights/clusters/pv-cl"
+	newSrv := func(keyName string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && strings.Contains(r.URL.Path, "/clusters/"):
+				kv := ""
+				if keyName != "" {
+					kv = `"keyVaultProperties":{"keyName":"` + keyName + `","keyVaultUri":""}`
+				}
+				_, _ = w.Write([]byte(`{"properties":{` + kv + `}}`))
+			case r.Method == "GET": // the workspace
+				_, _ = w.Write([]byte(`{"location":"eastus",` +
+					`"tags":{"groundhold-capability":"app-logs","groundhold-environment":"prod"},` +
+					`"properties":{"provisioningState":"Succeeded","features":{"clusterResourceId":"` + clusterID + `"}}}`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	}
+	pid := laProviderID(testSub, "rg1", azResourceName("pv-la", "prod", "app-logs", 1))
+
+	// (a) the linked cluster carries a key → CMK is confirmed true.
+	srv := newSrv("mykey")
+	d := laDriver(t, srv)
+	obs, _, err := d.observeLogAnalytics("app-logs", pid)
+	srv.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmk := false
+	for _, o := range obs {
+		if o.Path == "encryption.customerManagedKeys" && o.Value == true {
+			cmk = true
+		}
+	}
+	if !cmk {
+		t.Fatalf("a cluster carrying a key vault key must report CMK=true, got %+v", obs)
+	}
+
+	// (b) the linked cluster carries NO key → CMK must NOT be emitted (false BYOK), and a
+	// diagnostic must explain why.
+	srv2 := newSrv("")
+	d2 := laDriver(t, srv2)
+	obs2, diags2, err := d2.observeLogAnalytics("app-logs", pid)
+	srv2.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range obs2 {
+		if o.Path == "encryption.customerManagedKeys" {
+			t.Fatalf("a linked cluster with no key must NOT report CMK — false BYOK; got %+v", o)
+		}
+	}
+	joined := strings.Join(diags2, " | ")
+	if !strings.Contains(joined, "platform-managed") {
+		t.Fatalf("expected a not-observed diagnostic for the keyless cluster, got %q", joined)
+	}
+}
+
 func TestCreateObserveDeleteLogAnalytics(t *testing.T) {
 	srv := laServer(t, "app-logs", 90)
 	defer srv.Close()

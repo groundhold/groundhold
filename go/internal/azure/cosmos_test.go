@@ -45,6 +45,34 @@ func TestBuildCosmosHonors(t *testing.T) {
 	}
 }
 
+// D934: the default (non-PITR) account uses a Periodic backup policy, and Azure
+// rejects a bare {"type":"Periodic"} — it requires periodicModeProperties. The
+// fake accepted the bare shape, so the golden path was field-dead until proven
+// on the real cloud. Assert the mode properties are present and well-formed.
+func TestBuildCosmosPeriodicCarriesModeProperties(t *testing.T) {
+	a := cosmosAttrs()
+	delete(a, "encryption.customerManagedKeys") // stay on the default Periodic path
+	a["backup.pointInTimeRecovery"] = false
+	p, err := BuildCosmos("prod", "sessions", a, cosmosImpl(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.PITR {
+		t.Fatalf("expected non-PITR plan, got PITR")
+	}
+	backup := p.createBody(map[string]any{})["properties"].(map[string]any)["backupPolicy"].(map[string]any)
+	if backup["type"] != "Periodic" {
+		t.Fatalf("backup type = %v, want Periodic", backup["type"])
+	}
+	mode, ok := backup["periodicModeProperties"].(map[string]any)
+	if !ok {
+		t.Fatalf("Periodic policy missing periodicModeProperties — Azure 400s this body: %+v", backup)
+	}
+	if mode["backupIntervalInMinutes"] == nil || mode["backupRetentionIntervalInHours"] == nil {
+		t.Fatalf("periodicModeProperties incomplete: %+v", mode)
+	}
+}
+
 func TestBuildCosmosRefusals(t *testing.T) {
 	cases := map[string]map[string]any{
 		"deletion-protection": {"deletion.protection": true}, // the honest Azure gap
@@ -72,6 +100,12 @@ func TestBuildCosmosRefusals(t *testing.T) {
 	}
 }
 
+// cosmosLocations is the locations array the fake serves. It served NONE, so the field
+// that decides availability.class could not appear in any test in either value — the
+// same blind-spot fixture as preflightFake (D750), iamRoleXML (D751) and bkdrServer
+// (D752). Default: what this driver now builds for `availability.class: regional`.
+var cosmosLocations = `,"locations":[{"locationName":"eastus","isZoneRedundant":true}]`
+
 func cosmosServer(t *testing.T, capLabel, backupType, kms string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(
@@ -87,7 +121,8 @@ func cosmosServer(t *testing.T, capLabel, backupType, kms string) *httptest.Serv
 				}
 				_, _ = w.Write([]byte(`{"location":"eastus",` +
 					`"tags":{"groundhold-capability":"` + capLabel + `","groundhold-environment":"prod"},` +
-					`"properties":{"provisioningState":"Succeeded","backupPolicy":{"type":"` + backupType + `"}` + kv + `}}`))
+					`"properties":{"provisioningState":"Succeeded","backupPolicy":{"type":"` + backupType + `"}` +
+					cosmosLocations + kv + `}}`))
 			case "DELETE":
 				w.WriteHeader(200)
 			default:
@@ -146,14 +181,15 @@ func TestDeleteCosmosForeignRefused(t *testing.T) {
 func TestHonestyHarnessCosmos(t *testing.T) {
 	pid := cosmosProviderID(testSub, "rg1", cosmosAccountName("prod", "sessions", 1))
 	p := &certifynet.Probe{
-		// AssertTransient left false — D237 TODO: this driver's create/delete ladder
-		// still maps 429/503/403 to terminal failed (and drops the providerId); it must
-		// route through provider.MutationResult before the transient invariant can lock.
 		Name:            "azure/cosmos",
 		Classify:        armRole,
 		OwnerTagValue:   "sessions",
 		AssertTransient: true, // D237
 		DeterministicID: true,
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("cosmos", "sessions", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -255,8 +291,81 @@ func TestMetamorphicCosmosRoundTrip(t *testing.T) {
 			if got["backup.pointInTimeRecovery"] != c.pitr {
 				t.Errorf("pitr round-trip: want %v got %v", c.pitr, got["backup.pointInTimeRecovery"])
 			}
-			if _, has := got["encryption.customerManagedKeys"]; has != c.cmek {
-				t.Errorf("cmek round-trip: want present=%v got %v", c.cmek, got["encryption.customerManagedKeys"])
+			if got["encryption.customerManagedKeys"] != c.cmek {
+				t.Errorf("cmek round-trip: want %v got %v", c.cmek, got["encryption.customerManagedKeys"])
+			}
+		})
+	}
+}
+
+// D753. `availability.class` was the constant "regional" while the create sent
+// `isZoneRedundant: false` — the tool built a single-zone account and reported the class
+// this vocabulary defines as "replicated across zones in one region". A contract asking
+// to survive a zone failure read satisfied against an account that does not.
+func TestCosmosZoneRedundancyIsBuiltAndRead(t *testing.T) {
+	t.Run("the create sends the redundancy it promises", func(t *testing.T) {
+		p, err := BuildCosmos("prod", "sessions", cosmosAttrs(), cosmosImpl(), 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := json.Marshal(p.createBody(nil))
+		if !strings.Contains(string(body), `"isZoneRedundant":true`) {
+			t.Fatalf("availability.class: regional was declared and the create sends %s — "+
+				"a single-zone account cannot survive the zone failure the declaration "+
+				"claims (D753)", body)
+		}
+	})
+
+	cases := []struct {
+		name      string
+		locations string
+		want      any
+		diag      string
+	}{
+		{"zone-redundant", `,"locations":[{"locationName":"eastus","isZoneRedundant":true}]`,
+			"regional", ""},
+		{"single zone — no value in this enum fits, so none is emitted",
+			`,"locations":[{"locationName":"eastus","isZoneRedundant":false}]`,
+			nil, "does not survive a zone failure"},
+		{"no locations at all", `,"locations":[]`, nil, "reports no locations"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			old := cosmosLocations
+			cosmosLocations = c.locations
+			defer func() { cosmosLocations = old }()
+
+			srv := cosmosServer(t, "sessions", "Continuous", "")
+			defer srv.Close()
+			d := cosmosDriver(t, srv)
+
+			res := d.createCosmos("prod", "sessions", cosmosAttrs(), cosmosImpl(), 1)
+			if res.Status != "succeeded" {
+				t.Fatalf("create: %+v", res)
+			}
+			obs, diags, err := d.observeCosmos("sessions", res.ProviderID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got any
+			for _, o := range obs {
+				if o.Path == "availability.class" {
+					got = o.Value
+				}
+			}
+			if got != c.want {
+				t.Fatalf("availability.class = %v, want %v", got, c.want)
+			}
+			if c.diag != "" {
+				found := false
+				for _, dg := range diags {
+					if strings.Contains(dg, c.diag) {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("withheld the value and said nothing: %v", diags)
+				}
 			}
 		})
 	}

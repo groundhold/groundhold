@@ -117,7 +117,13 @@ func (d *Driver) observeLoadBalancer(capability, providerID string) ([]provider.
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"load balancer not found — nothing to observe"}, nil
+		return []provider.Observation{
+			// F-LC3 (D802): a BOUND resource the API authoritatively 404s is GONE. An
+			// empty return leaves the last good observations standing as the freshest
+			// word, so posture reads managed-ok and audit stays satisfied about a
+			// resource that does not exist (D513/D518, fixed here last).
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"load balancer not found — bound resource is gone (will re-create)"}, nil
 	}
 	// encryption.inTransit is only knowable from the listeners; an unreadable
 	// listener list is UNKNOWN (an error), never a fabricated inTransit=false that
@@ -469,6 +475,22 @@ func (d *Driver) deleteLoadBalancer(capability, environment, providerID string) 
 		if res := d.deleteOne(region, providerID, "DeleteLoadBalancer", "LoadBalancerArn", lb.Arn); res != nil {
 			return *res
 		}
+		// ---- poll to absence (D968 class, D980) ----
+		// DeleteLoadBalancer is async: the LB lingers in a deleting state (and still
+		// references its target group, which cannot be deleted meanwhile). Reporting
+		// succeeded here tombstones an hourly-billable LB still live. Poll to a
+		// confirmed absence before the target-group cleanup; unknown on timeout.
+		deadline := d.Now().Add(d.PollTimeout)
+		for {
+			if _, stillThere, rerr := d.describeLoadBalancer(region, name); rerr == nil && !stillThere {
+				break // LB fully gone — safe to delete the target group
+			}
+			if d.Now().After(deadline) {
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: "load balancer still deleting at poll timeout — reconcile via DescribeLoadBalancers"}
+			}
+			time.Sleep(d.PollInterval)
+		}
 	}
 	// (3) DeleteTargetGroup — resolved by the shared name (independent of the LB, so a
 	// partial where the LB is gone but the target group leaked is still cleaned).
@@ -527,7 +549,16 @@ func classifyLBChange(path string, desired any, impl map[string]any) (string, st
 	case "network.publicExposure":
 		return "immutable", "an ALB's scheme (internet-facing vs internal) is fixed at creation — a change is a replacement"
 	case "encryption.inTransit":
-		return "immutable", "switching the front door between HTTP and HTTPS re-shapes the listener + certificate — a replacement, not an in-place patch"
+		// D832: the sentence names the LISTENER and the verdict destroyed the LOAD BALANCER.
+		// ModifyListener takes Protocol, SslPolicy and Certificates, and AWS documents the
+		// switch itself — "Changing the protocol from HTTPS to HTTP, or from TLS to TCP,
+		// removes the security policy and default certificate". Replacing the balancer
+		// changes its DNS name, which is the address every client and every DNS record
+		// holds; the listener change does not touch it.
+		return "unsupported", "in-place TLS switch is not wired for this load balancer in " +
+			"this slice — AWS does support it (ModifyListener takes Protocol, SslPolicy and " +
+			"Certificates on the existing listener), so this is a gap in groundhold rather " +
+			"than a reason to replace the balancer and change its DNS name"
 	case "healthCheckPath":
 		return "mutable", "the target-group health-check path is modifiable in place (ModifyTargetGroup)"
 	case "location.region", "service.managed":

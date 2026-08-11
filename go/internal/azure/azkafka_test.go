@@ -153,14 +153,15 @@ func TestDeleteAzKafkaForeignRefused(t *testing.T) {
 func TestHonestyHarnessAzKafka(t *testing.T) {
 	pid := azKafkaProviderID(testSub, "rg1", azKafkaNamespaceName("prod", "bus", 1))
 	p := &certifynet.Probe{
-		// AssertTransient left false — D237 TODO: this driver's create/delete ladder
-		// still maps 429/503/403 to terminal failed (and drops the providerId); it must
-		// route through provider.MutationResult before the transient invariant can lock.
 		Name:            "azure/azkafka",
 		Classify:        armRole,
 		OwnerTagValue:   "bus",
 		AssertTransient: true, // D237
 		DeterministicID: true,
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("azkafka", "bus", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -269,8 +270,8 @@ func TestMetamorphicAzKafkaRoundTrip(t *testing.T) {
 			if got["availability.class"] != c.wantAvail {
 				t.Errorf("availability round-trip: want %q got %v", c.wantAvail, got["availability.class"])
 			}
-			if _, has := got["encryption.customerManagedKeys"]; has != c.cmek {
-				t.Errorf("cmek round-trip: want present=%v got %v", c.cmek, got["encryption.customerManagedKeys"])
+			if got["encryption.customerManagedKeys"] != c.cmek {
+				t.Errorf("cmek round-trip: want %v got %v", c.cmek, got["encryption.customerManagedKeys"])
 			}
 		})
 	}

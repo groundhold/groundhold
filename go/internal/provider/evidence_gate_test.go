@@ -92,6 +92,12 @@ func TestEveryDeclaredEvidenceClassIsInTheClosedSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("embedded vocabularies: %v", err)
 	}
+	// D579: same floor, same reason — ValidateEvidence over an empty set is a green
+	// check with no subject.
+	if len(vocabs) < 20 {
+		t.Fatalf("only %d embedded vocabularies — an empty set validates trivially and "+
+			"would restore the pre-D311 behaviour everywhere without failing", len(vocabs))
+	}
 	for _, v := range vocabs {
 		if err := v.ValidateEvidence(); err != nil {
 			t.Error(err)

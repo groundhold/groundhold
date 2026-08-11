@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -16,9 +17,14 @@ import (
 // failover->availability mapping or dropped transit encryption fails here.
 func metamorphicECServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	var transit, failover, kms string
+	var transit, failover, multiaz, kms string
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			// D800: the driver asks KMS who manages the key, so the fixture answers.
+			if strings.HasSuffix(r.Header.Get("X-Amz-Target"), ".DescribeKey") {
+				_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"CUSTOMER"}}`))
+				return
+			}
 			body, _ := io.ReadAll(r.Body)
 			form, _ := url.ParseQuery(string(body))
 			switch form.Get("Action") {
@@ -28,6 +34,12 @@ func metamorphicECServer(t *testing.T) *httptest.Server {
 					failover = "enabled"
 				} else {
 					failover = "disabled"
+				}
+				// D955: MultiAZ is the zone-survival field observe now reads.
+				if form.Get("MultiAZEnabled") == "true" {
+					multiaz = "enabled"
+				} else {
+					multiaz = "disabled"
 				}
 				kms = form.Get("KmsKeyId")
 				_, _ = w.Write([]byte(`<CreateReplicationGroupResponse></CreateReplicationGroupResponse>`))
@@ -40,7 +52,8 @@ func metamorphicECServer(t *testing.T) *httptest.Server {
 					`<ReplicationGroups><ReplicationGroup><Status>available</Status>` +
 					`<AtRestEncryptionEnabled>true</AtRestEncryptionEnabled>` +
 					`<TransitEncryptionEnabled>` + transit + `</TransitEncryptionEnabled>` +
-					`<AutomaticFailover>` + failover + `</AutomaticFailover>` + kmsX +
+					`<AutomaticFailover>` + failover + `</AutomaticFailover>` +
+					`<MultiAZ>` + multiaz + `</MultiAZ>` + kmsX +
 					`</ReplicationGroup></ReplicationGroups>` +
 					`</DescribeReplicationGroupsResult></DescribeReplicationGroupsResponse>`))
 			case "ListTagsForResource":

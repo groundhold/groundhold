@@ -2,6 +2,30 @@ package posture
 
 import "testing"
 
+// TestPostureExitCode pins D958: the unattended exit code (the only alert, D649) is
+// non-zero for shadow/drift AND for unknown (unverifiable compliance) AND for an incomplete
+// sweep (shadowLowerBound), but 0 for a clean or merely-decayed estate. Reporting 0 for
+// unknown or incomplete scope would read "all clear" over an estate posture could not judge.
+func TestPostureExitCode(t *testing.T) {
+	cases := []struct {
+		name string
+		s    Summary
+		want int
+	}{
+		{"clean", Summary{ManagedOK: 3}, 0},
+		{"decayed alone renews, not fails", Summary{Decayed: 2}, 0},
+		{"shadow", Summary{Shadow: 1}, 2},
+		{"drift", Summary{Drifted: 1}, 2},
+		{"unknown is not clean", Summary{Unknown: 1}, 2},
+		{"incomplete sweep is not clean", Summary{ShadowLowerBound: true}, 2},
+	}
+	for _, c := range cases {
+		if got := c.s.ExitCode(); got != c.want {
+			t.Errorf("%s: ExitCode()=%d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
 func classOf(doc *Document, pid string) string {
 	for _, r := range doc.Rows {
 		if r.ProviderID == pid {
@@ -21,6 +45,10 @@ func TestFiveClasses(t *testing.T) {
 			{ProviderID: "fake:decayed", Scope: "s", ScopeComplete: true},
 			{ProviderID: "fake:shadow", Scope: "s", ScopeComplete: true}, // no binding
 		},
+		// D650: the sweep's completeness travels per SCOPE now; this fixture
+		// always meant "one scope, listed completely" — it just used to say so
+		// once per resource.
+		Scopes: []Scope{{Provider: "fake", Scope: "s", Complete: true}},
 		Bindings: map[string]string{
 			"ok-cap":    "fake:managed",
 			"drift-cap": "fake:drifted",

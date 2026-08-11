@@ -157,9 +157,11 @@ func TestClassifyAKSChange(t *testing.T) {
 		"cluster.version":     "mutable",
 		"network.apiExposure": "mutable",
 		"encryption.secrets":  "unsupported",
-		"availability.class":  "immutable",
-		"location.region":     "immutable",
-		"service.managed":     "unsupported",
+		// D830: the zones belong to a NODE POOL, a child resource with its own PUT and
+		// DELETE — replacing it leaves the cluster, its API server and its workloads alone.
+		"availability.class": "unsupported",
+		"location.region":    "immutable",
+		"service.managed":    "unsupported",
 	}
 	for p, w := range want {
 		got, reason := classifyAKSChange(p)
@@ -701,6 +703,10 @@ func TestReadStormAKS(t *testing.T) {
 		AssertTransient: true, // D237 sweep
 		Name:            "azure/aks",
 		Classify:        aksRole,
+		// F-LC3 (D523): hand-wired.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("aks", aksCap, aksProviderID(testSub, "rg1", "pv-"+aksCap+"-prod-1"))
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL

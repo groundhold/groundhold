@@ -139,7 +139,26 @@ type Probe struct {
 	// it false (its old ladder still maps those to failed) and is a tracked TODO,
 	// never a silent claim of coverage.
 	AssertTransient bool
-	Ops             []Op
+	// ObserveAbsent runs the driver's Observe for THIS probe's resource, at the
+	// providerId its ops already use. Supplying it opts the service into the
+	// F-LC3 absence property (D517) and the harness then locks it; leaving it nil
+	// is an un-migrated service the ratchet counts. Unlike a boolean flag it
+	// cannot claim coverage it does not have — the only way to assert the
+	// property is to hand the harness something it can run.
+	ObserveAbsent func(p provider.Provider) ([]provider.Observation, []string, error)
+	// GoneCode is the not-found code THIS service's API returns (D522) —
+	// "NoSuchEntity", "FileSystemNotFound", "NonExistentQueue". Empty means the
+	// generic "NotFound". A correct driver matches on its own service's code, so
+	// an estate that always said "NotFound" failed correct drivers.
+	GoneCode string
+	// GoneEmptyList marks a service whose read is a COLLECTION query, where
+	// absence is an EMPTY COLLECTION rather than an error — MSK's
+	// ListClustersV2, WAF's ListWebACLs. Those reads are correct and were
+	// failing a gate that answered 404 to a call whose API never 404s (D523).
+	// The estate then answers 200 with an empty document, which unmarshals to
+	// an empty slice under any field name.
+	GoneEmptyList bool
+	Ops           []Op
 }
 
 // TestingT is the minimal testing surface (mirrors provider.CertifyDriver so this
@@ -178,11 +197,21 @@ func peekBody(req *http.Request) []byte {
 		return nil
 	}
 	b, _ := io.ReadAll(req.Body)
+	restoreBody(req, b)
+	return b
+}
+
+// restoreBody re-seats a request's body from bytes already read. It is called BEFORE
+// classification and again AFTER it (D392): a Classifier that reaches for the request
+// instead of the peeked bytes — req.ParseForm() is the easy mistake — drains the body
+// the driver has not sent yet, and the driver then fails with "ContentLength=N with
+// Body length 0". That reads as a driver bug and is not one. Re-seating afterwards
+// makes the whole Certify family immune to it rather than leaving it to each author.
+func restoreBody(req *http.Request, b []byte) {
 	req.Body = io.NopCloser(bytes.NewReader(b))
 	if len(b) > 0 {
 		req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(b)), nil }
 	}
-	return b
 }
 
 func (s *scriptRT) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -190,6 +219,7 @@ func (s *scriptRT) RoundTrip(req *http.Request) (*http.Response, error) {
 	s.n++
 	body := peekBody(req)
 	role := s.classify(req, body)
+	restoreBody(req, body) // see restoreBody: classification must not cost the driver its body
 	rec := record{idx: i, role: role, host: req.URL.Host,
 		hasAuth: req.Header.Get("Authorization") != "" || req.Header.Get("X-Amz-Date") != ""}
 	s.trace = append(s.trace, rec)

@@ -44,12 +44,26 @@ func (d *Driver) oursAt(path, capability string) (owned, exists bool, err error)
 }
 
 // ssaApplyAt server-side-applies obj at the given path as fieldManager=groundhold.
+// force=false ALWAYS: a write that would stomp another manager's field must come back
+// as a 409 so the caller can decide, and the only caller allowed to decide is one
+// holding sealed consent (ssaApplyForced, D699).
 func (d *Driver) ssaApplyAt(path string, obj map[string]any) (int, []byte, error) {
 	body, err := json.Marshal(obj)
 	if err != nil {
 		return 0, nil, err
 	}
 	return d.callCT("PATCH", path+"?fieldManager="+fieldMgr+"&force=false", body, "application/apply-patch+yaml")
+}
+
+// ssaApplyForced re-sends the SAME object with force=true (D699). It takes exactly the
+// fields the patch carries — the ones the mapping declares — and nothing else; there
+// is no call here that forces a broader object.
+func (d *Driver) ssaApplyForced(path string, obj map[string]any) (int, []byte, error) {
+	body, err := json.Marshal(obj)
+	if err != nil {
+		return 0, nil, err
+	}
+	return d.callCT("PATCH", path+"?fieldManager="+fieldMgr+"&force=true", body, "application/apply-patch+yaml")
 }
 
 // --- ResourceQuota ------------------------------------------------------------

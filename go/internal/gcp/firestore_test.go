@@ -233,9 +233,27 @@ func TestMetamorphicFirestoreRoundTrip(t *testing.T) {
 			if got["deletion.protection"] != c.delProt {
 				t.Errorf("delProt round-trip: want %v got %v", c.delProt, got["deletion.protection"])
 			}
-			if _, has := got["encryption.customerManagedKeys"]; has != c.cmek {
-				t.Errorf("cmek round-trip: want present=%v got %v", c.cmek, got["encryption.customerManagedKeys"])
+			// D1003: no key is a measured false, not an absence.
+			if got["encryption.customerManagedKeys"] != c.cmek {
+				t.Errorf("cmek round-trip: want %v got %v", c.cmek, got["encryption.customerManagedKeys"])
 			}
 		})
+	}
+}
+
+// D799. A Firestore database can live in a MULTI-REGION (nam5, eur3), and the driver
+// reported that identifier as location.region while calling "regional" an invariant of
+// the platform. Both wrong, and together they let a residency constraint compare against
+// a name that stands for several regions at once.
+func TestFirestoreMultiRegionIsNotCalledRegional(t *testing.T) {
+	for _, loc := range []string{"nam5", "eur3"} {
+		if got := firestoreAvailability(loc); got != "multi-regional" {
+			t.Errorf("location %q reported as %q", loc, got)
+		}
+	}
+	for _, loc := range []string{"europe-west1", "us-central1", "asia-northeast3"} {
+		if got := firestoreAvailability(loc); got != "regional" {
+			t.Errorf("region %q reported as %q", loc, got)
+		}
 	}
 }

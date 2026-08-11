@@ -60,12 +60,12 @@ var azureConsumedOperands = map[string][]string{
 	"metricalert":          {"notification_channel", "resource_group", "target_resource"},
 	"portaldash":           {"resource_group", "target_resource"},
 	"rediscache":           {"capacity", "resource_group"},
-	"roleassignment":       {},
-	"scheduledquery":       {"resource_group", "scope", "value_field"},
+	"roleassignment":       {"principal_type"},
+	"scheduledquery":       {"location", "resource_group", "scope", "value_field"},
 	"servicebusqueue":      {"max_delivery_count", "resource_group"},
 	"servicebustopic":      {"resource_group"},
 	"vnet":                 {"resource_group", "service_endpoints"},
-	"webtest":              {"app_insights_id", "resource_group"},
+	"webtest":              {"app_insights_id", "location", "resource_group"},
 }
 
 // ConsumedOperands implements provider.OperandConsumer (the operand twin of the

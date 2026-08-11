@@ -32,7 +32,7 @@ func TestUpdateBudget_LimitPatchesInPlace(t *testing.T) {
 		}))
 	defer srv.Close()
 	d := budgetDriver(t, srv)
-	pid := budgetProviderID(budgetTestAccount, "pv-x")
+	pid := budgetProviderID(budgetTestAccount, BudgetName("prod", "inference", 2))
 
 	a := budgetAttrs()
 	a["budget.limit"] = "900 EUR"
@@ -53,7 +53,7 @@ func TestUpdateBudget_LimitPatchesInPlace(t *testing.T) {
 	if err := json.Unmarshal(updateBody, &ub); err != nil {
 		t.Fatalf("UpdateBudget body did not parse: %s", updateBody)
 	}
-	if ub.NewBudget.BudgetName != "pv-x" {
+	if ub.NewBudget.BudgetName != BudgetName("prod", "inference", 2) {
 		t.Fatalf("UpdateBudget must address the EXISTING name from the pid, not a re-derived one: %s", updateBody)
 	}
 	if ub.NewBudget.BudgetLimit.Amount != "900" || ub.NewBudget.BudgetLimit.Unit != "EUR" {
@@ -82,7 +82,7 @@ func TestUpdateBudget_ThresholdPatchesExistingNotification(t *testing.T) {
 		}))
 	defer srv.Close()
 	d := budgetDriver(t, srv)
-	pid := budgetProviderID(budgetTestAccount, "pv-x")
+	pid := budgetProviderID(budgetTestAccount, BudgetName("prod", "inference", 2))
 
 	a := budgetAttrs()
 	a["alert.threshold"] = 95
@@ -113,7 +113,7 @@ func TestUpdateBudget_ThresholdCreatesWhenAbsent(t *testing.T) {
 				_, _ = w.Write([]byte(`{"Budget":{"BudgetName":"pv-x","BudgetType":"COST","TimeUnit":"MONTHLY","BudgetLimit":{"Amount":"700","Unit":"EUR"}}}`))
 			case "DescribeNotificationsForBudget":
 				_, _ = w.Write([]byte(`{"Notifications":[]}`))
-			case "CreateNotificationWithSubscribers":
+			case "CreateNotification":
 				created = true
 				_, _ = w.Write([]byte(`{}`))
 			default:
@@ -122,7 +122,7 @@ func TestUpdateBudget_ThresholdCreatesWhenAbsent(t *testing.T) {
 		}))
 	defer srv.Close()
 	d := budgetDriver(t, srv)
-	pid := budgetProviderID(budgetTestAccount, "pv-x")
+	pid := budgetProviderID(budgetTestAccount, BudgetName("prod", "inference", 2))
 
 	res := d.updateBudget("inference", "prod", pid, budgetAttrs(), budgetImpl(), []string{"alert.threshold"})
 	if res.Status != "succeeded" || !created {
@@ -141,7 +141,7 @@ func TestUpdateBudget_ThresholdCreateDuplicateIsIdempotent(t *testing.T) {
 				_, _ = w.Write([]byte(`{"Budget":{"BudgetName":"pv-x","BudgetType":"COST","TimeUnit":"MONTHLY","BudgetLimit":{"Amount":"700","Unit":"EUR"}}}`))
 			case "DescribeNotificationsForBudget":
 				_, _ = w.Write([]byte(`{"Notifications":[]}`))
-			case "CreateNotificationWithSubscribers":
+			case "CreateNotification":
 				w.WriteHeader(400)
 				_, _ = w.Write([]byte(`{"__type":"DuplicateRecordException"}`))
 			default:
@@ -150,7 +150,7 @@ func TestUpdateBudget_ThresholdCreateDuplicateIsIdempotent(t *testing.T) {
 		}))
 	defer srv.Close()
 	d := budgetDriver(t, srv)
-	pid := budgetProviderID(budgetTestAccount, "pv-x")
+	pid := budgetProviderID(budgetTestAccount, BudgetName("prod", "inference", 2))
 	res := d.updateBudget("inference", "prod", pid, budgetAttrs(), budgetImpl(), []string{"alert.threshold"})
 	if res.Status != "succeeded" {
 		t.Fatalf("a raced duplicate notification create must be idempotent success, got %+v", res)
@@ -170,8 +170,10 @@ func TestUpdateBudget_UnmappedPathRefuses(t *testing.T) {
 		}))
 	defer srv.Close()
 	d := budgetDriver(t, srv)
-	pid := budgetProviderID(budgetTestAccount, "pv-x")
-	res := d.updateBudget("inference", "prod", pid, budgetAttrs(), budgetImpl(), []string{"budget.period"})
+	pid := budgetProviderID(budgetTestAccount, BudgetName("prod", "inference", 2))
+	// D806 made budget.period mutable, so this needs a path that really has no in-place
+	// mapping. The test's subject is the refusal, not the example.
+	res := d.updateBudget("inference", "prod", pid, budgetAttrs(), budgetImpl(), []string{"location.region"})
 	if res.Status != "failed" || !strings.Contains(res.Reason, "does not honor") {
 		t.Fatalf("an unmapped path must refuse, got %+v", res)
 	}
@@ -185,7 +187,7 @@ func TestUpdateBudget_VanishedFails(t *testing.T) {
 		}))
 	defer srv.Close()
 	d := budgetDriver(t, srv)
-	pid := budgetProviderID(budgetTestAccount, "pv-x")
+	pid := budgetProviderID(budgetTestAccount, BudgetName("prod", "inference", 2))
 	res := d.updateBudget("inference", "prod", pid, budgetAttrs(), budgetImpl(), []string{"budget.limit"})
 	if res.Status != "failed" || !strings.Contains(res.Reason, "no longer exists") {
 		t.Fatalf("a vanished budget must refuse update, got %+v", res)
@@ -199,7 +201,7 @@ func TestUpdateBudget_PreUpdateReadUnknown(t *testing.T) {
 	d.Account = budgetTestAccount
 	budgetsBaseURLOverride = "http://127.0.0.1:1"
 	t.Cleanup(func() { budgetsBaseURLOverride = "" })
-	pid := budgetProviderID(budgetTestAccount, "pv-x")
+	pid := budgetProviderID(budgetTestAccount, BudgetName("prod", "inference", 2))
 	res := d.updateBudget("inference", "prod", pid, budgetAttrs(), budgetImpl(), []string{"budget.limit"})
 	if res.Status != "unknown" || res.ProviderID != pid {
 		t.Fatalf("an unreachable pre-update read must be unknown WITH the pid, got %+v", res)

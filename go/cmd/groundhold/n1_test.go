@@ -21,6 +21,15 @@ import (
 func TestTimeSensitiveVerbsMembership(t *testing.T) {
 	want := []string{
 		"adopt", "apply", "attest", "audit", "converge", "crawl",
+		// D631: `discover` joined the set deliberately. It stamps --at into the
+		// DiscoveryDocument AND into the canonical discoveryHash that
+		// `adopt --discovery` writes to the ledger as the adoption's provenance
+		// root — so with no clock it recorded 1970 forever, and with a malformed
+		// one it recorded the literal string. Its refusal is confirmed in
+		// TestEveryVerbThatReadsTheClockIsGated and by hand:
+		//   discover --provider fake --project p1                 -> exit 1
+		//   discover --provider fake --project p1 --at not-a-time -> exit 1
+		"discover",
 		"forecast", "observe", "plan", "posture", "probe", "publish",
 		"react", "refresh", "resume", "runs", "status", "unadopt",
 	}

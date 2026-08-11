@@ -98,8 +98,21 @@ def canon(v: Any) -> str:
     if isinstance(v, list):
         return "[" + ",".join(canon(x) for x in v) + "]"
     if isinstance(v, dict):
-        items = sorted(v.items(), key=lambda kv: str(kv[0]))
-        return ("{" + ",".join(_quote(str(k)) + ":" + canon(x)
+        # D685: `_quote(str(k))` made this canonicalizer NON-INJECTIVE. `{8: v}`,
+        # `{"8": v}` and `{010: v}` are three distinct documents and all three
+        # produced one hash, so the reference handed a document the Go runtime
+        # REFUSES the identity of a different, valid one. That is the same
+        # injectivity argument `_num_str`'s two refusals are built on, one level up
+        # and unguarded. The runtime refuses a non-string key; so does this.
+        for k in v:
+            if not isinstance(k, str):
+                raise ContractError(
+                    f"cannot canonicalize map with non-string key of type "
+                    f"{type(k).__name__} ({k!r}) — a key that is not a string is "
+                    "not the string that prints like it, and folding the two "
+                    "together gives two documents one identity")
+        items = sorted(v.items(), key=lambda kv: kv[0])
+        return ("{" + ",".join(_quote(k) + ":" + canon(x)
                                for k, x in items) + "}")
     raise ContractError(f"cannot canonicalize value of type {type(v).__name__}")
 
@@ -125,6 +138,10 @@ def _scalar_model(s: scalars.Scalar) -> dict:
 
 def _constraint_model(c: Constraint) -> dict:
     m: dict = {"id": c.id, "severity": c.severity, "verify": c.verify_method}
+    # D728: the two-bar form is a DIFFERENT document and hashes differently; a contract
+    # that never writes it keeps the scalar spelling and its existing hash.
+    if getattr(c, "runtime_method", c.verify_method) != c.verify_method:
+        m["verify"] = {"design": c.verify_method, "runtime": c.runtime_method}
     if c.subject:
         m["subject"] = c.subject
     if c.path:
@@ -185,6 +202,10 @@ def candidate_model(cand: Candidate) -> dict:
             entry["attributes"].append(am)
         for k, v in (cand.extras.get(cid) or {}).items():
             entry[k] = v
+        # D677: the capability's identity is the MAP KEY and is written last, so a
+        # body carrying `id:` cannot overwrite it. It could — two candidates
+        # implementing different capabilities hashed identically.
+        entry["id"] = cid
         caps.append(entry)
     return {
         "apiVersion": "candidate/v0.1",

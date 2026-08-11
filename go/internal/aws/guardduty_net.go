@@ -206,11 +206,18 @@ func (d *Driver) createGuardDuty(region, environment, capability string,
 	}
 
 	// ---- CreateDetector (Enable + Features + frequency + ownership tags) ----
+	// D735: GuardDuty's REST-JSON body is camelCase — `enable`, `features`,
+	// `findingPublishingFrequency`, `tags`, and `name`/`status` inside each feature.
+	// This sent PascalCase, so the REQUIRED `enable` field never arrived and AWS
+	// answered "The request is rejected because the JSON could not be processed". The
+	// capability could never be created at all. The READS survived only because
+	// encoding/json matches field names case-insensitively when decoding — which is
+	// exactly why nothing here looked wrong.
 	body := jsonBody(map[string]any{
-		"Enable":                     plan.Enabled,
-		"Features":                   plan.desiredFeatures(),
-		"FindingPublishingFrequency": plan.FindingFrequency,
-		"Tags": map[string]string{
+		"enable":                     plan.Enabled,
+		"features":                   plan.desiredFeatures(),
+		"findingPublishingFrequency": plan.FindingFrequency,
+		"tags": map[string]string{
 			"groundhold-capability":  sanitizeTag(capability),
 			"groundhold-environment": sanitizeTag(environment),
 		},
@@ -253,9 +260,9 @@ func (d *Driver) ensureGuardDutyConfig(region, pid string, plan GuardDutyPlan) p
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	body := jsonBody(map[string]any{
-		"Enable":                     plan.Enabled,
-		"Features":                   plan.desiredFeatures(),
-		"FindingPublishingFrequency": plan.FindingFrequency,
+		"enable":                     plan.Enabled,
+		"features":                   plan.desiredFeatures(),
+		"findingPublishingFrequency": plan.FindingFrequency,
 	})
 	st, resp, err := d.guarddutyDo("POST", region, guardDutyDetectorPath+"/"+detectorID, []byte(body))
 	switch {
@@ -287,9 +294,15 @@ func (d *Driver) observeGuardDuty(capability, providerID string) ([]provider.Obs
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"detector not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"detector not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "detection.enabled", Value: det.Status == "ENABLED", Derivation: "measured"},
 		{Path: "protection.kubernetes", Value: det.featureEnabled(gdFeatureEKSAuditLogs), Derivation: "measured"},
@@ -398,7 +411,7 @@ func (d *Driver) discoverGuardDuty(region string) ([]provider.Discovered, []stri
 		}
 		diags = append(diags, od...)
 		found = append(found, provider.Discovered{
-			ProviderID: pid, ResourceType: "capability.security.threatdetection", Observations: obs})
+			ProviderID: pid, ResourceType: "capability.security.threatdetection", Observations: provider.WithoutAbsence(obs)})
 	}
 	return found, diags, nil
 }

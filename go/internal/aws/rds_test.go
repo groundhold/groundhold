@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func rdsAttrs() map[string]any {
@@ -109,17 +112,26 @@ func TestBuildRDSInTransitParamGroup(t *testing.T) {
 	}
 }
 
-// TestObserveRDSInTransit: observe reads rds.force_ssl from the attached DB
-// parameter group (DescribeDBParameters) and reports the MEASURED reality —
-// force_ssl=1 => inTransit true, absent/0 => false.
+// TestObserveRDSInTransit: observe reads the ENGINE'S TLS-enforcement parameter from
+// the attached DB parameter group (DescribeDBParameters) and reports the MEASURED
+// reality. D952: the parameter name is engine-specific — rds.force_ssl for Postgres,
+// require_secure_transport for MySQL/MariaDB. The MySQL/MariaDB cases are the regression
+// guard: before the fix observe scanned only rds.force_ssl, so a MySQL instance ENFORCING
+// TLS via require_secure_transport was reported inTransit=false (a security-shaped lie).
 func TestObserveRDSInTransit(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		force string
-		want  bool
+		name    string
+		engine  string
+		version string
+		param   string
+		value   string
+		want    bool
 	}{
-		{"forced", "1", true},
-		{"not forced", "0", false},
+		{"postgres forced", "postgres", "16.3", "rds.force_ssl", "1", true},
+		{"postgres not forced", "postgres", "16.3", "rds.force_ssl", "0", false},
+		{"mysql forced", "mysql", "8.0", "require_secure_transport", "ON", true},
+		{"mysql not forced", "mysql", "8.0", "require_secure_transport", "OFF", false},
+		{"mariadb forced", "mariadb", "10.11", "require_secure_transport", "1", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(
@@ -137,17 +149,14 @@ func TestObserveRDSInTransit(t *testing.T) {
 						_, _ = w.Write([]byte(`<DescribeDBInstancesResponse><DescribeDBInstancesResult><DBInstances><DBInstance>` +
 							`<DBInstanceIdentifier>db-x</DBInstanceIdentifier>` +
 							`<DBInstanceStatus>available</DBInstanceStatus>` +
-							`<Engine>postgres</Engine><EngineVersion>16.3</EngineVersion>` +
+							`<Engine>` + tc.engine + `</Engine><EngineVersion>` + tc.version + `</EngineVersion>` +
 							`<StorageEncrypted>true</StorageEncrypted><PubliclyAccessible>false</PubliclyAccessible>` +
 							`<MultiAZ>false</MultiAZ>` +
-							`<DBParameterGroups><DBParameterGroup><DBParameterGroupName>force-ssl-pg16</DBParameterGroupName></DBParameterGroup></DBParameterGroups>` +
+							`<DBParameterGroups><DBParameterGroup><DBParameterGroupName>tls-grp</DBParameterGroupName></DBParameterGroup></DBParameterGroups>` +
 							`</DBInstance></DBInstances></DescribeDBInstancesResult></DescribeDBInstancesResponse>`))
 					case "DescribeDBParameters":
-						param := ""
-						if tc.force != "" {
-							param = `<Parameter><ParameterName>rds.force_ssl</ParameterName>` +
-								`<ParameterValue>` + tc.force + `</ParameterValue></Parameter>`
-						}
+						param := `<Parameter><ParameterName>` + tc.param + `</ParameterName>` +
+							`<ParameterValue>` + tc.value + `</ParameterValue></Parameter>`
 						_, _ = w.Write([]byte(`<DescribeDBParametersResponse><DescribeDBParametersResult>` +
 							`<Parameters>` + param + `</Parameters>` +
 							`</DescribeDBParametersResult></DescribeDBParametersResponse>`))
@@ -166,7 +175,8 @@ func TestObserveRDSInTransit(t *testing.T) {
 				got[o.Path] = o.Value
 			}
 			if got["encryption.inTransit"] != tc.want {
-				t.Fatalf("encryption.inTransit = %v, want %v", got["encryption.inTransit"], tc.want)
+				t.Fatalf("engine %s: encryption.inTransit = %v, want %v",
+					tc.engine, got["encryption.inTransit"], tc.want)
 			}
 		})
 	}
@@ -230,6 +240,7 @@ func TestObserveRDSCMK(t *testing.T) {
 func rdsServer(t *testing.T, createErr, delProtect string) *httptest.Server {
 	t.Helper()
 	describes := 0
+	deleted := false
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			body := make([]byte, r.ContentLength)
@@ -239,6 +250,13 @@ func rdsServer(t *testing.T, createErr, delProtect string) *httptest.Server {
 				if strings.HasPrefix(kv, "Action=") {
 					action = strings.TrimPrefix(kv, "Action=")
 				}
+			}
+			// once deleted, the instance is GONE — the delete's poll-to-absence
+			// (D968) must be able to confirm a 404, or a delete could never conclude.
+			if deleted && action == "DescribeDBInstances" {
+				w.WriteHeader(404)
+				_, _ = w.Write([]byte("<ErrorResponse><Error><Code>DBInstanceNotFound</Code></Error></ErrorResponse>"))
+				return
 			}
 			switch action {
 			case "CreateDBInstance":
@@ -264,6 +282,7 @@ func rdsServer(t *testing.T, createErr, delProtect string) *httptest.Server {
 					`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag></TagList>` +
 					`</DBInstance></DBInstances></DescribeDBInstancesResult></DescribeDBInstancesResponse>`))
 			case "DeleteDBInstance":
+				deleted = true
 				_, _ = w.Write([]byte(`<DeleteDBInstanceResponse></DeleteDBInstanceResponse>`))
 			default:
 				w.WriteHeader(404)
@@ -336,6 +355,47 @@ func TestDeleteRDSOurs(t *testing.T) {
 	}
 }
 
+// TestDeleteRDSAsyncNotGoneIsUnknown pins D968: a delete the provider ACCEPTS but
+// that leaves the instance in "deleting" (not gone) must report unknown — keep the
+// handle for a reconcile — never a terminal "succeeded" that tombstones a resource
+// still live and billing. Before the fix, the accepted delete returned succeeded.
+func TestDeleteRDSAsyncNotGoneIsUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			body := make([]byte, r.ContentLength)
+			r.Body.Read(body)
+			action := ""
+			for _, kv := range strings.Split(string(body), "&") {
+				if strings.HasPrefix(kv, "Action=") {
+					action = strings.TrimPrefix(kv, "Action=")
+				}
+			}
+			switch action {
+			case "DescribeDBInstances": // never gone — stays "deleting"
+				_, _ = w.Write([]byte(`<DescribeDBInstancesResponse><DescribeDBInstancesResult><DBInstances><DBInstance>` +
+					`<DBInstanceIdentifier>db-x</DBInstanceIdentifier><DBInstanceStatus>deleting</DBInstanceStatus>` +
+					`<Engine>postgres</Engine><EngineVersion>16.3</EngineVersion>` +
+					`<StorageEncrypted>true</StorageEncrypted><PubliclyAccessible>false</PubliclyAccessible>` +
+					`<MultiAZ>false</MultiAZ><DeletionProtection>false</DeletionProtection>` +
+					`<TagList><Tag><Key>groundhold-capability</Key><Value>db</Value></Tag>` +
+					`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag></TagList>` +
+					`</DBInstance></DBInstances></DescribeDBInstancesResult></DescribeDBInstancesResponse>`))
+			case "DeleteDBInstance":
+				_, _ = w.Write([]byte(`<DeleteDBInstanceResponse></DeleteDBInstanceResponse>`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	defer srv.Close()
+	d := rdsTestDriver(t, srv)
+	d.PollTimeout = 5 * time.Millisecond // the instance never leaves "deleting" → times out fast
+	res := d.deleteRDS("db", "prod", "rds:eu-central-1:db-abcd1234")
+	if res.Status != "unknown" {
+		t.Fatalf("an accepted-but-not-terminal delete must be unknown (keep the handle, reconcile), "+
+			"got %+v — reporting succeeded tombstones a resource still live and billing", res)
+	}
+}
+
 func TestSplitRDSProviderID(t *testing.T) {
 	if _, _, err := splitRDSProviderID("rds:eu-central-1:db-abcd1234"); err != nil {
 		t.Fatalf("valid id rejected: %v", err)
@@ -345,4 +405,33 @@ func TestSplitRDSProviderID(t *testing.T) {
 			t.Errorf("accepted malformed rds id %q", bad)
 		}
 	}
+}
+
+// TestAdoptsExistingRDS enrols rds in the D391 gate. The instance identifier is
+// deterministic and client-assigned, so a second create is answered
+// DBInstanceAlreadyExists — the tags on the standing instance are what license binding
+// it, and an instance at our name that is not ours is refused. rdsServer's stock fixture
+// already carries our tags, so the whole existing estate is one createErr away.
+func TestAdoptsExistingRDS(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:           "aws/rds",
+		Classify:       rdsQueryRole,
+		ExistingServer: func() *httptest.Server { return rdsServer(t, "DBInstanceAlreadyExists", "false") },
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.RDSBaseURL = happyURL
+			d.KMSBaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.PollInterval = time.Millisecond
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("rds", "db", "prod", rdsAttrs(), rdsImpl(), "db", 1)
+		},
+		AllowedMutations: 1, // the refused CreateDBInstance
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

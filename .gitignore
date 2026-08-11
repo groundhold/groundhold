@@ -1,8 +1,13 @@
 __pycache__/
 *.pyc
 bin/
+# D581: `make cover` writes a 2 MB profile into the tree. Untracked and unignored,
+# one `git add -A` puts it in history for good.
+go/cover.out
 differential-failures/
 .integration/
 .canary/
 .groundhold/
 state/
+# mkdocs build output (D490: `mkdocs build --strict` now runs in CI and locally)
+website/site/

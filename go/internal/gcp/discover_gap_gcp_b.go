@@ -81,7 +81,7 @@ func (d *Driver) discoverCloudRunJobs(region string) ([]provider.Discovered, []s
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.container.job",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -129,7 +129,7 @@ func (d *Driver) discoverFilestore(region string) ([]provider.Discovered, []stri
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.storage.filesystem",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -177,7 +177,7 @@ func (d *Driver) discoverManagedKafka(region string) ([]provider.Discovered, []s
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.messaging.kafka",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -222,7 +222,7 @@ func (d *Driver) discoverDashboards(region string) ([]provider.Discovered, []str
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.monitoring.dashboard",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -268,7 +268,7 @@ func (d *Driver) discoverLogMetrics(region string) ([]provider.Discovered, []str
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.monitoring.logmetric",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -310,60 +310,51 @@ func (d *Driver) schedLocations() ([]string, error) {
 // (jobs.list has no cross-location wildcard). A per-location list failure is a
 // diagnostic — it never hides the jobs another location did return.
 func (d *Driver) discoverCloudScheduler(region string) ([]provider.Discovered, []string, error) {
-	var locations []string
-	var diags []string
-	if region != "" {
-		locations = []string{region}
-	} else {
-		locs, err := d.schedLocations()
-		if err != nil {
-			return nil, nil, err
-		}
-		locations = locs
-	}
-	var out []provider.Discovered
-	for _, loc := range locations {
-		status, body, err := d.call("GET", fmt.Sprintf(
-			"%s/projects/%s/locations/%s/jobs", d.schedBase(), d.Project, loc), nil)
-		if err != nil {
-			diags = append(diags, "jobs.list "+loc+": "+err.Error())
-			continue
-		}
-		if status != http.StatusOK {
-			diags = append(diags, fmt.Sprintf("jobs.list %s: HTTP %d", loc, status))
-			continue
-		}
-		var resp struct {
-			Jobs []struct {
-				Name string `json:"name"`
-			} `json:"jobs"`
-		}
-		if err := json.Unmarshal(body, &resp); err != nil {
-			diags = append(diags, loc+": "+readBody("jobs.list", status).Error())
-			continue
-		}
-		for _, j := range resp.Jobs {
-			jobID := leafName(j.Name)
-			if jobID == "" {
-				continue
-			}
-			pid := schedProviderID(d.Project, loc, jobID)
-			obs, odiags, err := d.observeCloudScheduler("", pid)
+	return d.sweepEachLocation(region, d.schedLocations,
+		func(loc string) ([]provider.Discovered, []string, error) {
+			var out []provider.Discovered
+			var diags []string
+			status, body, err := d.call("GET", fmt.Sprintf(
+				"%s/projects/%s/locations/%s/jobs", d.schedBase(), d.Project, loc), nil)
 			if err != nil {
-				diags = append(diags, jobID+": "+err.Error())
-				continue
+				// D642: the LIST failed — this location was not read.
+				return nil, nil, fmt.Errorf("%s", "jobs.list "+loc+": "+err.Error())
 			}
-			for _, dg := range odiags {
-				diags = append(diags, jobID+": "+dg)
+			if status != http.StatusOK {
+				// D642: the LIST failed — this location was not read.
+				return nil, nil, fmt.Errorf("%s", fmt.Sprintf("jobs.list %s: HTTP %d", loc, status))
 			}
-			out = append(out, provider.Discovered{
-				ProviderID:   pid,
-				ResourceType: "capability.scheduler.cron",
-				Observations: obs,
-			})
-		}
-	}
-	return out, diags, nil
+			var resp struct {
+				Jobs []struct {
+					Name string `json:"name"`
+				} `json:"jobs"`
+			}
+			if err := json.Unmarshal(body, &resp); err != nil {
+				// D642: the LIST failed — this location was not read.
+				return nil, nil, fmt.Errorf("%s", loc+": "+readBody("jobs.list", status).Error())
+			}
+			for _, j := range resp.Jobs {
+				jobID := leafName(j.Name)
+				if jobID == "" {
+					continue
+				}
+				pid := schedProviderID(d.Project, loc, jobID)
+				obs, odiags, err := d.observeCloudScheduler("", pid)
+				if err != nil {
+					diags = append(diags, jobID+": "+err.Error())
+					continue
+				}
+				for _, dg := range odiags {
+					diags = append(diags, jobID+": "+dg)
+				}
+				out = append(out, provider.Discovered{
+					ProviderID:   pid,
+					ResourceType: "capability.scheduler.cron",
+					Observations: provider.WithoutAbsence(obs),
+				})
+			}
+			return out, diags, nil
+		})
 }
 
 // discoverVPNGateways enumerates HA VPN gateways as capability.vpn.gateway,
@@ -417,7 +408,7 @@ func (d *Driver) discoverVPNGateways(region string) ([]provider.Discovered, []st
 			out = append(out, provider.Discovered{
 				ProviderID:   pid,
 				ResourceType: "capability.vpn.gateway",
-				Observations: obs,
+				Observations: provider.WithoutAbsence(obs),
 			})
 		}
 	}

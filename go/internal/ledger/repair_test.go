@@ -200,9 +200,11 @@ func TestDiagnoseReportsAllFindingKinds(t *testing.T) {
 	if d.Status != "corrupt" || d.Findings[0].Kind != "unparseable-line" {
 		t.Fatalf("garbage line misdiagnosed: %+v", d.Findings)
 	}
-	if d.Events < d.ValidPrefixLines {
-		t.Fatalf("Events (%d) < ValidPrefixLines (%d) — DroppedLines "+
-			"would go negative", d.Events, d.ValidPrefixLines)
+	// D654: the arithmetic this guards is in LINES (quarantine truncates to a
+	// line), which is now what the field is called. The assertion is unchanged.
+	if d.TailLines < d.ValidPrefixLines {
+		t.Fatalf("TailLines (%d) < ValidPrefixLines (%d) — DroppedLines "+
+			"would go negative", d.TailLines, d.ValidPrefixLines)
 	}
 	res, _, err := Quarantine(path, d.Fingerprint)
 	if err != nil {

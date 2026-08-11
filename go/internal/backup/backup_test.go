@@ -3,6 +3,7 @@ package backup
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"groundhold/internal/canonical"
@@ -164,5 +165,39 @@ func TestBackupDocumentsCopyVerifyTamper(t *testing.T) {
 	_, tcode := VerifyDocuments(docsDir)
 	if tcode != ExitRefused {
 		t.Fatalf("a swapped document blob must refuse (5), got %d", tcode)
+	}
+}
+
+// D708: a sidecar that exists and cannot be read is not "no snapshot".
+//
+// The refusal below exists because capsule DR and compaction are mutually exclusive:
+// capsules emitted from a compacted ledger cannot restore. The old test skipped it
+// whenever the sidecar failed to PARSE, so the one case where we cannot tell whether
+// the ledger is compacted took the same path as the one where we know it is not —
+// and produced a backup that reports success and cannot restore.
+func TestBackupRefusesAnUnreadableSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	lp := filepath.Join(dir, "l.jsonl")
+	if err := os.WriteFile(lp, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ledger.SnapshotPath(lp), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rep, code := Run(Options{LedgerPath: lp, Out: filepath.Join(dir, "out")})
+	if code == 0 || rep.Status != "refused" {
+		t.Fatalf("an unreadable snapshot must refuse the backup, got status=%q code=%d",
+			rep.Status, code)
+	}
+	// Which guard refuses is not the claim: `ReplayFile` already fails closed on an
+	// unreadable sidecar, so backup's own check is defence in depth (D188's shape)
+	// rather than the only thing standing there. What must hold is that the refusal
+	// NAMES the snapshot, so the operator is not left hunting.
+	if !strings.Contains(strings.Join(rep.Reasons, " "), "snapshot") {
+		t.Errorf("the refusal must name the snapshot, got %v", rep.Reasons)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "out")); err == nil {
+		t.Error("the backup directory was created for a backup that cannot be shown " +
+			"to be restorable")
 	}
 }

@@ -240,6 +240,13 @@ func BuildAzureVM(environment, capability string,
 func (p AzureVMPlan) createBody(tags map[string]any) map[string]any {
 	osDisk := map[string]any{
 		"createOption": "FromImage",
+		// D941: cascade the OS disk with the VM. The create implicitly provisions this
+		// managed disk (createOption:FromImage), but Azure's default deleteOption is
+		// Detach — so deleting the VM left the Premium_LRS OS disk standing and billing,
+		// while observe read only the VM's 404 and reported the estate "gone". The NIC is
+		// an operator operand (network_interface_id), so the disk is the ONLY
+		// driver-created companion; deleteOption:Delete makes it cascade (D920 residue).
+		"deleteOption": "Delete",
 		"managedDisk":  map[string]any{"storageAccountType": "Premium_LRS"},
 	}
 	if p.DiskEncSetID != "" {
@@ -300,7 +307,16 @@ func classifyAzureVMChange(path string) (string, string) {
 	case "encryption.atRest":
 		return "unsupported", "Azure managed disks are always encrypted at rest with a platform key — there is nothing to patch"
 	case "encryption.customerManagedKeys":
-		return "immutable", "the disk-encryption set is bound when the disk is created — re-keying is a new disk, and so a new machine"
+		// D825: the same sentence D823 disproved on the disk, with a heavier conclusion
+		// drawn from it. Microsoft's own procedure attaches a disk encryption set to an
+		// EXISTING disk — stop the VM, open the disk, pick the key vault and key, save —
+		// and rotating WHICH key happens on the encryption set and reaches every disk
+		// referencing it. Destroying a machine for this loses its instance data as well as
+		// its uptime.
+		return "unsupported", "in-place customer-managed-key change is not wired for Azure " +
+			"VMs in this slice — Azure does support it (a disk encryption set attaches to an " +
+			"existing disk with the VM stopped; rotating the key is done on the encryption " +
+			"set), so this is a gap in groundhold, not a reason to replace the machine"
 	case "service.managed":
 		return "unsupported", "platform/projection property — nothing to patch"
 	}

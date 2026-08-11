@@ -131,7 +131,7 @@ func TestSnippetGolden(t *testing.T) {
 		"  path: encryption.inTransit\n" +
 		"  op: equals\n" +
 		"  value: true\n" +
-		"  verify: { method: static }"
+		"  verify: { method: provider-api }"
 	if got := r.Suggestions[0].Snippet; got != want {
 		t.Fatalf("snippet golden mismatch:\n got: %q\nwant: %q", got, want)
 	}
@@ -165,4 +165,33 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// D773. The advisor recommends HARDENING — encryption, exposure, flow logs, rotation —
+// and baked `verify: {method: static}` into every snippet, which is the bar the author's
+// own declaration meets. Paste the tool's advice, declare the value it told you to
+// declare, and the control is green from the assertion.
+//
+// The bar is now DERIVED from what the vocabulary says is reachable, not chosen. The test
+// asserts the derivation rather than the three strings, so a fourth evidence class fails
+// here instead of silently taking the default.
+func TestTheRecommendedBarIsDerivedFromWhatCanBeRead(t *testing.T) {
+	for _, c := range []struct {
+		evidence string
+		want     string
+		why      string
+	}{
+		{"resource", "provider-api",
+			"ordinary resource state can be READ; recommending a bar the declaration meets " +
+				"turns a hardening control into a restatement"},
+		{"probe", "probe", "an outcome needs a measurement, not a config read"},
+		{"projection", "static",
+			"no reading will ever exist (D311); static is the only reachable bar and the " +
+				"compile-time advisory says so"},
+		{"", "provider-api", "an unmarked attribute is ordinary resource state"},
+	} {
+		if got := snippetMethod(c.evidence); got != c.want {
+			t.Errorf("evidence %q -> %q, want %q — %s", c.evidence, got, c.want, c.why)
+		}
+	}
 }

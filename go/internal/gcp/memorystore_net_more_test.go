@@ -222,7 +222,10 @@ func TestObserveMemorystoreNotFound(t *testing.T) {
 	defer srv.Close()
 	d := redisDriver(t, srv)
 	obs, diags, err := d.observeMemorystore("sessions", "gredis:acme-prod:europe-west1:x")
-	if err != nil || len(obs) != 0 || len(diags) == 0 {
+	// Corrected with D519: this asserted SILENCE for an absent bound resource,
+	// which is the defect F-LC3 exists to prevent — the compile sees an empty set,
+	// plans nothing, and converge reports a world that no longer contains it.
+	if err != nil || !absentMarked(obs) || len(diags) == 0 {
 		t.Fatalf("a gone instance must be nothing-to-observe, got obs=%v diags=%v err=%v", obs, diags, err)
 	}
 }

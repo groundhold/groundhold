@@ -131,6 +131,12 @@ func TestUpdateServiceBusQueueDeadLetter(t *testing.T) {
 			_, _ = w.Write([]byte(`{"properties":{}}`))
 			return
 		}
+		if r.Method == "GET" && !isQueue {
+			// the namespace the update now reads for ownership before its PUT (D460)
+			_, _ = w.Write([]byte(`{"tags":{"groundhold-capability":"orders",` +
+				`"groundhold-environment":"prod"},"properties":{}}`))
+			return
+		}
 		w.WriteHeader(200)
 	}))
 	defer srv.Close()

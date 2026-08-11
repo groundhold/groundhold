@@ -1,6 +1,8 @@
 package aws
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
@@ -263,6 +265,130 @@ func TestBuildS3Refusals(t *testing.T) {
 			mutate(a)
 			if _, err := BuildS3Requests("acct", "prod", "assets", a, nil, 1); err == nil {
 				t.Fatalf("expected refusal for %q", name)
+			}
+		})
+	}
+}
+
+// D729. A field report mapped every hard constraint onto whether the driver measures the
+// attribute it stands on, and found the worst possible spread: `encryption.atRest` was
+// MEASURED for queues, topics and secrets — which only carry data — and DECLARED for the
+// three buckets that hold it. After D722 that meant a hard constraint asking for
+// provider evidence on the data-at-rest of a media store, an application-state store and
+// an audit store could never be satisfied, while the call that answers it was already
+// being made for `encryption.customerManagedKeys`.
+func TestBucketEncryptionAtRestIsMeasuredWhenTheBucketSaysSo(t *testing.T) {
+	cases := []struct {
+		name      string
+		encBody   string
+		encCode   int
+		wantDeriv string
+	}{
+		{"a default-encryption rule is this bucket's own configuration",
+			`<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault>` +
+				`<SSEAlgorithm>aws:kms</SSEAlgorithm><KMSMasterKeyID>arn:aws:kms:eu-central-1:000000000000:key/k</KMSMasterKeyID>` +
+				`</ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>`,
+			200, "measured"},
+		// D759: this case's own name said "platform guarantee" while asserting the
+		// label for "a value the resource stores". S3 has encrypted every object by
+		// default since 2023 whatever the bucket's rules say; the bucket stores
+		// nothing here. Same evidence bar, honest provenance.
+		{"no rule leaves only the platform guarantee",
+			`<Error><Code>ServerSideEncryptionConfigurationNotFoundError</Code></Error>`,
+			404, "platform-invariant"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.Contains(r.URL.RawQuery, "encryption"):
+					if c.encCode != 200 {
+						w.WriteHeader(c.encCode)
+					}
+					_, _ = w.Write([]byte(c.encBody))
+				case strings.Contains(r.URL.RawQuery, "tagging"):
+					_, _ = w.Write([]byte(`<Tagging><TagSet>` +
+						`<Tag><Key>groundhold-capability</Key><Value>media</Value></Tag>` +
+						`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag>` +
+						`</TagSet></Tagging>`))
+				default:
+					_, _ = w.Write([]byte(`<Response/>`))
+				}
+			}))
+			defer srv.Close()
+			t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+			t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+			d := NewDriver("eu-central-1")
+			d.S3BaseURL = srv.URL
+			d.Account = "000000000000"
+
+			obs, _, err := d.Observe("s3", "media", "s3:eu-central-1:pv-media")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var deriv string
+			for _, o := range obs {
+				if o.Path == "encryption.atRest" {
+					deriv = o.Derivation
+				}
+			}
+			if deriv != c.wantDeriv {
+				t.Fatalf("encryption.atRest derivation = %q, want %q — a hard constraint "+
+					"asking for provider evidence turns on exactly this", deriv, c.wantDeriv)
+			}
+		})
+	}
+}
+
+// TestObserveS3CMKExcludesAWSManagedKey pins D985: a bucket encrypted with the
+// AWS-managed aws/s3 key answers SSEAlgorithm=aws:kms with a key id, but that is NOT a
+// customer key — reporting customerManagedKeys=true there certifies a BYOK control the
+// bucket does not have. Every other AWS driver excludes its managed alias; S3 did not.
+func TestObserveS3CMKExcludesAWSManagedKey(t *testing.T) {
+	cases := []struct {
+		name    string
+		keyID   string
+		wantCMK bool
+	}{
+		{"a customer key is BYOK", "arn:aws:kms:eu-central-1:000000000000:key/k", true},
+		{"the aws/s3 managed alias is NOT BYOK", "arn:aws:kms:eu-central-1:000000000000:alias/aws/s3", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.Contains(r.URL.RawQuery, "encryption"):
+					_, _ = w.Write([]byte(`<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault>` +
+						`<SSEAlgorithm>aws:kms</SSEAlgorithm><KMSMasterKeyID>` + c.keyID + `</KMSMasterKeyID>` +
+						`</ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>`))
+				case strings.Contains(r.URL.RawQuery, "tagging"):
+					_, _ = w.Write([]byte(`<Tagging><TagSet>` +
+						`<Tag><Key>groundhold-capability</Key><Value>media</Value></Tag>` +
+						`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag>` +
+						`</TagSet></Tagging>`))
+				default:
+					_, _ = w.Write([]byte(`<Response/>`))
+				}
+			}))
+			defer srv.Close()
+			t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+			t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+			d := NewDriver("eu-central-1")
+			d.S3BaseURL = srv.URL
+			d.Account = "000000000000"
+
+			obs, _, err := d.Observe("s3", "media", "s3:eu-central-1:pv-media")
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotCMK := false
+			for _, o := range obs {
+				if o.Path == "encryption.customerManagedKeys" && o.Value == true {
+					gotCMK = true
+				}
+			}
+			if gotCMK != c.wantCMK {
+				t.Fatalf("customerManagedKeys = %v, want %v — the aws/s3 managed key must not read as BYOK", gotCMK, c.wantCMK)
 			}
 		})
 	}

@@ -60,6 +60,15 @@ func NewDriver(scope string) *Driver {
 
 func (d *Driver) Name() string { return "cloudflare" }
 
+// D732: this driver OBSERVES and never authors — every write verb below returns
+// notImplemented. Without saying so, `provider.CanAuthor` returned its permissive
+// default, the compiler planned a create, the plan SEALED, and only apply discovered
+// there was nothing to write. D177 built the witness concept for exactly this and said
+// why: emitting a create for a service the driver refuses at apply is a lie in the plan.
+func init() {
+	provider.RegisterWitnessPredicate("cloudflare", func(service string) bool { return true })
+}
+
 func (d *Driver) base() string {
 	if d.BaseURL != "" {
 		return d.BaseURL
@@ -107,9 +116,14 @@ func (d *Driver) Observe(service, capability, providerID string) ([]provider.Obs
 	if !d.hasToken() {
 		return nil, nil, fmt.Errorf("cloudflare Observe requires CLOUDFLARE_API_TOKEN in the environment")
 	}
+	// D874: WAF posture is bound as cfwaf:<zoneId>; DNS as dns:<zoneId>:<recordId>.
+	if zoneID, ok := parseWAFProviderID(providerID); ok {
+		obs, diags := d.mapZoneWAF(zoneID)
+		return obs, diags, nil
+	}
 	zoneID, recordID, ok := parseRecordProviderID(providerID)
 	if !ok {
-		return nil, nil, fmt.Errorf("cloudflare Observe: providerId %q is not dns:<zoneId>:<recordId>", providerID)
+		return nil, nil, fmt.Errorf("cloudflare Observe: providerId %q is not dns:<zoneId>:<recordId> or cfwaf:<zoneId>", providerID)
 	}
 	st, body, err := d.get("/zones/" + zoneID + "/dns_records/" + recordID)
 	if err != nil {

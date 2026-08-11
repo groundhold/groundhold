@@ -33,6 +33,21 @@ capability: capability.security.threatdetection
 version: 0.1
 stateful: false
 
+# D698: PROTECTION. Deleting this does not remove a resource — it lowers a guard.
+# `stateful: false` above is right and says nothing about that: the question it
+# answers is whether a delete loses DATA. This repo's rule is that a protection is
+# never auto-lifted (D47) — it is why a delete refuses while deletionProtection is on
+# — and switching detection off as a side effect of retiring a contract does exactly
+# what that rule forbids, with no consent step and no record. Worse, create adopts an
+# already-on control silently, so the retirement cannot tell "we enabled this" from
+# "it was on before groundhold arrived".
+#
+# Retirement of a protection capability therefore REFUSES unless the contract scopes
+# `autonomy.allow_protection_lift` to it. The alternative needs no flag: drop the
+# capability from the contract and groundhold stops asserting it, leaving the control
+# ON — `posture` then reports it as unmanaged, which is true.
+protection: true
+
 attributes:
 
   location.region:
@@ -40,30 +55,45 @@ attributes:
     description: The region the detector protects (GuardDuty is per-region — one detector per account per region)
     mappings:
       aws.guardduty: the detector's region (the regional guardduty endpoint)
+      # D543: all three report the SENTINEL "global" — threat detection is an
+      # account/subscription/project-wide posture, not a regional resource. The
+      # sentinel is a contract convention, not a cloud value.
+      azure.defender: const "global" — Defender plans are subscription-wide
+      gcp.scc: const "global" — SCC services are org/project-wide
 
   detection.enabled:
     kind: bool
     description: Whether continuous threat detection is ACTIVE — the core posture switch. Assert =true to require the platform's threat detector be on.
     mappings:
       aws.guardduty: get-detector Status == ENABLED
+      azure.defender: the VirtualMachines Defender plan priced at Standard
+      gcp.scc: the event-threat-detection module's effectiveEnablementState == ENABLED
 
   protection.kubernetes:
     kind: bool
     description: Whether EKS Protection (Kubernetes audit-log monitoring) is enabled — the control-plane threat surface Acme §7 requires for its EKS substrate.
     mappings:
       aws.guardduty: the EKS_AUDIT_LOGS feature Status == ENABLED
+      azure.defender: the Containers Defender plan, found AND priced at Standard
+      gcp.scc: container-threat-detection's effectiveEnablementState == ENABLED
 
   protection.malware:
     kind: bool
     description: Whether Malware Protection (EBS volume scanning on suspicious findings) is enabled — optional deepening of the posture.
     mappings:
       aws.guardduty: the EBS_MALWARE_PROTECTION feature Status == ENABLED
+      azure.defender: >
+        the Storage Defender plan at Standard AND its malware-scanning extension
+        enabled — BOTH, since the plan alone does not scan
+      gcp.scc: virtual-machine-threat-detection's effectiveEnablementState == ENABLED
 
   service.managed:
     kind: bool
     description: Whether groundhold manages this threat-detection configuration
     mappings:
       aws.guardduty: const true when observed through the driver
+      azure.defender: const true
+      gcp.scc: const true
 
   cost.monthly:
     kind: money

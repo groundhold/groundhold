@@ -44,11 +44,19 @@ func splitEBSProviderID(providerID string) (region, name string, err error) {
 }
 
 type ebsScheduleDoc struct {
-	Name        string `json:"Name"`
-	Arn         string `json:"Arn"`
-	State       string `json:"State"`
-	Description string `json:"Description"`
+	Name               string `json:"Name"`
+	Arn                string `json:"Arn"`
+	State              string `json:"State"`
+	Description        string `json:"Description"`
+	ScheduleExpression string `json:"ScheduleExpression"` // D1004: the cron/rate expression, for drift
 }
+
+// ebsScheduleOperand is the reserved observation path the DECLARED schedule expression and
+// the OBSERVED one compare on (D1004). The expression is opaque impl (invariant #4), so it
+// is an operand, not a vocab attribute — but a change to it must be SEEN, or the contract
+// can stand a schedule up and never keep it (a key-destroying timer silently drifting off
+// its declared cadence is a term nobody guards; field: acme).
+const ebsScheduleOperand = provider.OperandPrefix + "schedule"
 
 // getSchedule reads a schedule. found=false + readable=true is authoritative "does not
 // exist"; readable=false is transport/HTTP/parse failure.
@@ -124,14 +132,80 @@ func (d *Driver) observeEventBridgeScheduler(capability, providerID string) ([]p
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"schedule not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"schedule not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		{Path: "schedule.enabled", Value: doc.State == "ENABLED", Derivation: "measured"},
+		// D1004: the cron/rate expression, so a change to it is a detected drift, not silence.
+		{Path: ebsScheduleOperand, Value: doc.ScheduleExpression, Derivation: "measured"},
 	}
 	return obs, nil, nil
+}
+
+// updateEventBridgeScheduler patches a LIVE schedule in place via UpdateSchedule (PUT
+// /schedules/{Name}) — the schedule identity survives, unlike a replacement (D1004).
+// EventBridge Scheduler's UpdateSchedule requires the FULL definition, so it re-sends the
+// create body. Ownership (the Description marker) is re-checked BEFORE any mutation.
+func (d *Driver) updateEventBridgeScheduler(capability, environment, providerID string,
+	attrs, impl map[string]any, changes []string) provider.CreateResult {
+	region, name, err := splitEBSProviderID(providerID)
+	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	doc, found, rerr := d.getSchedule(region, name)
+	if rerr != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: "pre-update read gave no answer — reconcile: " + rerr.Error()}
+	}
+	if !found {
+		return provider.CreateResult{Status: "failed", Reason: "schedule no longer exists — re-observe and re-plan"}
+	}
+	if !awsMarkerOurs(doc.Description, capability, environment) {
+		return provider.CreateResult{Status: "failed",
+			Reason: "schedule marker does not match — refusing to patch a resource that is not ours"}
+	}
+	plan, berr := BuildEventBridgeScheduler(environment, capability, attrs, impl, 1)
+	if berr != nil {
+		return provider.CreateResult{Status: "failed", Reason: berr.Error()}
+	}
+	plan.Name = name
+	body, _ := json.Marshal(plan.createBody(capability, environment))
+	st, resp, e := d.ebsCall("PUT", region, "/schedules/"+name, body)
+	switch {
+	case e != nil:
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("UpdateSchedule outcome unknown: %v", e)}
+	case st == http.StatusOK:
+		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	case st >= 500:
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("UpdateSchedule HTTP %d (server error) — reconcile", st)}
+	default:
+		if r := provider.MutationResult(st, ecsErr(resp), nil, providerID, "UpdateSchedule"); r != nil {
+			return *r
+		}
+		return provider.CreateResult{ProviderID: providerID, Status: "failed", Reason: fmt.Sprintf("UpdateSchedule HTTP %d: %s", st, ecsErr(resp))}
+	}
+}
+
+// classifyEBSChange (D1004): the schedule expression and enabled state patch in place via
+// UpdateSchedule; the region is fixed at creation (a replacement).
+func classifyEBSChange(path string) (string, string) {
+	switch path {
+	case ebsScheduleOperand:
+		return "mutable", "the schedule expression patches in place via UpdateSchedule (no replacement)"
+	case "schedule.enabled":
+		return "mutable", "the schedule's enabled state patches in place via UpdateSchedule"
+	case "location.region":
+		return "immutable", "a schedule's region is fixed at creation — a change is a replacement"
+	default:
+		return "immutable", "not an in-place-patchable schedule attribute — a change is a replacement"
+	}
 }
 
 func (d *Driver) deleteEventBridgeScheduler(capability, environment, providerID string) provider.CreateResult {
@@ -151,7 +225,12 @@ func (d *Driver) deleteEventBridgeScheduler(capability, environment, providerID 
 		return provider.CreateResult{Status: "failed",
 			Reason: "schedule marker does not match — refusing to delete a resource that is not ours"}
 	}
-	st, resp, err := d.ebsCall("DELETE", region, "/schedules/"+name, nil)
+	// D899: EventBridge Scheduler's DeleteSchedule REQUIRES a clientToken query
+	// parameter — without it AWS rejects the call ("ClientToken cannot be empty",
+	// HTTP 400) and the schedule is never deleted (it lingers and keeps firing). The
+	// token is deterministic (derived from the schedule name, as the CreateSchedule
+	// token is) so a retried delete is idempotent rather than a new request.
+	st, resp, err := d.ebsCall("DELETE", region, "/schedules/"+name+"?clientToken="+ebsClientToken(name), nil)
 	if err != nil {
 		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
 			Reason: fmt.Sprintf("delete outcome unknown: %v", err)}

@@ -68,6 +68,9 @@ type cosmosDoc struct {
 		} `json:"backupPolicy"`
 		Locations []struct {
 			LocationName string `json:"locationName"`
+			// isZoneRedundant is the field that decides whether this account survives
+			// a zone failure — the whole meaning of availability.class (D753).
+			IsZoneRedundant bool `json:"isZoneRedundant"`
 		} `json:"locations"`
 	} `json:"properties"`
 }
@@ -86,7 +89,11 @@ func (d *Driver) observeCosmos(capability, providerID string) ([]provider.Observ
 		return nil, nil, fmt.Errorf("databaseAccounts.get: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"cosmos account not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"cosmos account not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("databaseAccounts.get: HTTP %d", st)
@@ -99,18 +106,40 @@ func (d *Driver) observeCosmos(capability, providerID string) ([]provider.Observ
 	if region == "" && len(doc.Properties.Locations) > 0 {
 		region = doc.Properties.Locations[0].LocationName
 	}
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
-		{Path: "availability.class", Value: "regional", Derivation: "config-intent"},
 		{Path: "backup.pointInTimeRecovery", Value: doc.Properties.BackupPolicy.Type == "Continuous", Derivation: "measured"},
 	}
 	if region != "" {
 		obs = append(obs, provider.Observation{Path: "location.region", Value: strings.ToLower(region), Derivation: "measured"})
 	}
-	if doc.Properties.KeyVaultKeyUri != "" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: true, Derivation: "measured"})
+	var diags []string
+	// D753. This emitted the constant "regional" with derivation config-intent, while
+	// the create sent `isZoneRedundant: false` — so the tool built a single-zone account
+	// and reported the class the vocabulary defines as "replicated across zones in one
+	// region". A contract asking to survive a zone failure read satisfied against an
+	// account that does not.
+	//
+	// The enum for this capability is [regional, multi-regional]: there is no value for
+	// a non-zone-redundant account, so an account that is not zone-redundant gets NO
+	// observation and a diagnostic saying why. Withholding blocks a hard constraint,
+	// which is the safe direction; naming a class it does not have does not.
+	switch {
+	case len(doc.Properties.Locations) == 0:
+		diags = append(diags, "availability.class not observed: the account reports no "+
+			"locations, so its zone redundancy cannot be read")
+	case doc.Properties.Locations[0].IsZoneRedundant:
+		obs = append(obs, provider.Observation{Path: "availability.class",
+			Value: "regional", Derivation: "measured"})
+	default:
+		diags = append(diags, "availability.class not observed: the account's write "+
+			"region is NOT zone-redundant (isZoneRedundant=false), so it does not "+
+			"survive a zone failure — which is what regional means here")
 	}
-	return obs, nil, nil
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: doc.Properties.KeyVaultKeyUri != "", Derivation: "measured"})
+	return obs, diags, nil
 }
 
 func (d *Driver) deleteCosmos(capability, environment, providerID string) provider.CreateResult {
@@ -138,21 +167,8 @@ func (d *Driver) deleteCosmos(capability, environment, providerID string) provid
 		return provider.CreateResult{Status: "failed",
 			Reason: "cosmos account tags do not match — refusing to delete a resource that is not ours"}
 	}
-	dst, dresp, de := d.doARM("DELETE", acctURL, nil)
-	if de != nil {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("delete outcome unknown: %v", de)}
-	}
-	if dst == http.StatusNotFound {
-		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
-	}
-	if dst >= 500 {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("delete HTTP %d (server error) — reconcile", dst)}
-	}
-	if dst < 200 || dst >= 300 {
-		if r := provider.MutationResult(dst, azErrCode(dresp), nil, providerID, "delete"); r != nil {
-			return *r
-		}
-		return provider.CreateResult{ProviderID: providerID, Status: "failed", Reason: fmt.Sprintf("delete HTTP %d: %s", dst, mutDetailAz(dresp))}
-	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// D984: route the delete through deleteAndConfirm (D971) — Cosmos DELETE returns
+	// 202 Accepted (async), so concluding succeeded here tombstoned an account still
+	// live; the helper polls to a confirmed 404, unknown on timeout.
+	return *d.deleteAndConfirm(acctURL, providerID, "cosmos account")
 }

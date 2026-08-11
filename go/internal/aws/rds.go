@@ -80,6 +80,24 @@ func engineFromProtocol(proto string) (engine, version string, err error) {
 	}
 }
 
+// rdsTLSParam names the DB-parameter that ENFORCES TLS for an RDS engine. The
+// engines do NOT share it (field 2026-08-08, DescribeEngineDefaultParameters):
+// PostgreSQL (and SQL Server) reject non-TLS connections via rds.force_ssl, while
+// MySQL and MariaDB use require_secure_transport. Hardcoding the Postgres name meant
+// a MySQL/MariaDB instance created WITH enforcement was observed as inTransit=false
+// forever — the D288 Aurora fix (auroraTLSParam), left uncorrected in the plain RDS
+// driver (D952). An engine this driver cannot name yields ok=false, so observe emits a
+// diagnostic rather than reading the wrong parameter and asserting a false negative.
+func rdsTLSParam(engine string) (name string, ok bool) {
+	switch {
+	case engine == "postgres" || strings.HasPrefix(engine, "sqlserver"):
+		return "rds.force_ssl", true
+	case engine == "mysql" || engine == "mariadb":
+		return "require_secure_transport", true
+	}
+	return "", false
+}
+
 // BuildRDSCreate maps capability.database.relational attributes + the impl block
 // to a CreateDBInstance query body. Every error is a refusal apply surfaces in
 // preflight, before any mutation.
@@ -203,7 +221,8 @@ func BuildRDSCreate(account, environment, capability string,
 				if pg == "" {
 					return "", "", fmt.Errorf(
 						"encryption.inTransit=true requires implementation.db_parameter_group " +
-							"(a DB parameter group with rds.force_ssl=1) — a separate binding " +
+							"(a DB parameter group that enforces TLS: rds.force_ssl=1 for Postgres/SQL " +
+							"Server, require_secure_transport=ON for MySQL/MariaDB) — a separate binding " +
 							"the driver references but does not create")
 				}
 				p["DBParameterGroupName"] = pg

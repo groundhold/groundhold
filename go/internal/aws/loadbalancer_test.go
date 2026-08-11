@@ -207,7 +207,8 @@ type fakeELB struct {
 	listenerBody    string
 
 	// injection
-	listenerStatus int // if non-zero, CreateListener returns this HTTP status (failure)
+	listenerStatus int  // if non-zero, CreateListener returns this HTTP status (failure)
+	keepLB         bool // async test (D980): DeleteLoadBalancer accepted but LB stays present
 
 	order []string
 }
@@ -322,7 +323,9 @@ func (f *fakeELB) handler(t *testing.T, rec *capture) *httptest.Server {
 			_, _ = w.Write([]byte(`<DeleteListenerResponse><DeleteListenerResult/></DeleteListenerResponse>`))
 		case "DeleteLoadBalancer":
 			f.order = append(f.order, act)
-			f.lbCreated = false
+			if !f.keepLB {
+				f.lbCreated = false
+			}
 			_, _ = w.Write([]byte(`<DeleteLoadBalancerResponse><DeleteLoadBalancerResult/></DeleteLoadBalancerResponse>`))
 		case "DeleteTargetGroup":
 			f.order = append(f.order, act)
@@ -431,6 +434,31 @@ func TestLoadBalancerComposite_CreateObserveDelete(t *testing.T) {
 	}
 }
 
+// TestDeleteLoadBalancerAsyncNotGoneIsUnknown pins D980: a DeleteLoadBalancer the
+// provider ACCEPTS but that leaves the LB present (still deleting) must report unknown
+// — never a terminal "succeeded" that tombstones an hourly-billable LB still live (and
+// still referencing its target group, which cannot be deleted meanwhile).
+func TestDeleteLoadBalancerAsyncNotGoneIsUnknown(t *testing.T) {
+	f := newFakeELB()
+	f.lbCreated = true
+	f.keepLB = true // DeleteLoadBalancer accepted, but the LB never leaves the describe
+	f.tags["groundhold-capability"] = lbCap
+	f.tags["groundhold-environment"] = "prod"
+	srv := f.handler(t, nil)
+	defer srv.Close()
+	d := lbProvDriver(t, srv)
+	d.PollTimeout = 5 * time.Millisecond // the LB never goes NotFound → times out fast
+	del := d.Delete("loadbalancer", lbCap, "prod", elbv2ProviderID("eu-central-1", lbTestName), "k")
+	if del.Status != "unknown" {
+		t.Fatalf("an accepted-but-still-deleting load balancer must be unknown (keep the handle), got %+v", del)
+	}
+	for _, a := range f.order {
+		if a == "DeleteTargetGroup" {
+			t.Fatal("the target group was deleted while the LB was still present — the poll must gate it")
+		}
+	}
+}
+
 // TestLoadBalancerCreate_MissingOperandRefuses: a required operand missing is a
 // refuse-BEFORE-mutate — failed, no ELBv2 call, honest reason. Covers both the cert
 // (HTTPS with no certificateArn) and the subnets (<2) refusals.
@@ -532,7 +560,10 @@ func TestLoadBalancerClassifyChange(t *testing.T) {
 		want string
 	}{
 		{"network.publicExposure", "immutable"},
-		{"encryption.inTransit", "immutable"},
+		// D832: this pinned "immutable" for a TLS switch. ModifyListener takes Protocol,
+		// SslPolicy and Certificates on the existing listener — the old expectation pinned
+		// replacing a balancer, and with it the DNS name every client holds.
+		{"encryption.inTransit", "unsupported"},
 		{"healthCheckPath", "mutable"},
 	} {
 		got, _ := d.ClassifyChange("loadbalancer", tc.path, nil, nil, nil)

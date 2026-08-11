@@ -64,6 +64,10 @@ func TestBuildFrontDoorWAFRefusals(t *testing.T) {
 	}
 }
 
+// fdWafEnabledState lets a test model a policy someone switched OFF (D739). Empty means
+// the field is absent, which Azure treats as enabled.
+var fdWafEnabledState string
+
 func fdWafServer(t *testing.T, capLabel, mode string, managed, bot bool) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(
@@ -81,7 +85,8 @@ func fdWafServer(t *testing.T, capLabel, mode string, managed, bot bool) *httpte
 					sets = append(sets, `{"ruleSetType":"Microsoft_BotManagerRuleSet"}`)
 				}
 				_, _ = w.Write([]byte(`{"tags":{"groundhold-capability":"` + capLabel + `","groundhold-environment":"prod"},` +
-					`"properties":{"provisioningState":"Succeeded","policySettings":{"mode":"` + mode + `"},` +
+					`"properties":{"provisioningState":"Succeeded","policySettings":{"mode":"` + mode + `"` +
+					fdWafEnabledState + `},` +
 					`"managedRules":{"managedRuleSets":[` + strings.Join(sets, ",") + `]}}}`))
 			case "DELETE":
 				w.WriteHeader(200)
@@ -140,14 +145,15 @@ func TestDeleteFrontDoorWAFForeignRefused(t *testing.T) {
 func TestHonestyHarnessFrontDoorWAF(t *testing.T) {
 	pid := frontDoorWAFProviderID(testSub, "rg1", frontDoorWAFName("prod", "edge", 1))
 	p := &certifynet.Probe{
-		// AssertTransient left false — D237 TODO: this driver's create/delete ladder
-		// still maps 429/503/403 to terminal failed (and drops the providerId); it must
-		// route through provider.MutationResult before the transient invariant can lock.
 		Name:            "azure/frontdoorwaf",
 		Classify:        armRole,
 		OwnerTagValue:   "edge",
 		AssertTransient: true, // D237
 		DeterministicID: true,
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("frontdoorwaf", "edge", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -233,7 +239,8 @@ func TestMetamorphicFrontDoorWAFRoundTrip(t *testing.T) {
 							sets = append(sets, `{"ruleSetType":"Microsoft_BotManagerRuleSet"}`)
 						}
 						_, _ = w.Write([]byte(`{"tags":{"groundhold-capability":"edge","groundhold-environment":"prod"},` +
-							`"properties":{"provisioningState":"Succeeded","policySettings":{"mode":"` + mode + `"},` +
+							`"properties":{"provisioningState":"Succeeded","policySettings":{"mode":"` + mode + `"` +
+							fdWafEnabledState + `},` +
 							`"managedRules":{"managedRuleSets":[` + strings.Join(sets, ",") + `]}}}`))
 					default:
 						w.WriteHeader(200)
@@ -263,6 +270,58 @@ func TestMetamorphicFrontDoorWAFRoundTrip(t *testing.T) {
 			if got["managed.ruleset"] != c.managed || got["bot.protection"] != c.bot {
 				t.Errorf("ruleset round-trip: managed want %v got %v, bot want %v got %v",
 					c.managed, got["managed.ruleset"], c.bot, got["bot.protection"])
+			}
+		})
+	}
+}
+
+// D739: an Azure WAF policy whose `enabledState` is "Disabled" enforces nothing,
+// whatever its mode says. The create sets `enabledState: "Enabled"` and the read struct
+// never carried the field, so a policy someone switched off still reported
+// `policy.mode: prevention` — a firewall in blocking mode that blocks nothing, read as
+// satisfied. Same shape as D726's alarms, one control over.
+//
+// Driven through the real observe against the fixture. The first version of this test
+// re-computed the driver's own expression and asserted it equalled itself, which is the
+// circular shape D726 recorded and deleted — written again here by the same author on
+// the same night, which is the argument for writing that entry down.
+func TestDisabledWAFPolicyIsNotPreventing(t *testing.T) {
+	cases := []struct {
+		name    string
+		enabled string
+		want    string
+	}{
+		{"armed", `,"enabledState":"Enabled"`, "prevention"},
+		{"switched off", `,"enabledState":"Disabled"`, "detection"},
+		{"absent means armed, per Azure's default", "", "prevention"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			old := fdWafEnabledState
+			fdWafEnabledState = c.enabled
+			defer func() { fdWafEnabledState = old }()
+
+			srv := fdWafServer(t, "edge", "Prevention", true, true)
+			defer srv.Close()
+			d := fdWafDriver(t, srv)
+
+			res := d.createFrontDoorWAF("prod", "edge", fdWafAttrs(), fdWafImpl(), 1)
+			if res.Status != "succeeded" {
+				t.Fatalf("create: %+v", res)
+			}
+			obs, _, err := d.observeFrontDoorWAF("edge", res.ProviderID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got any
+			for _, o := range obs {
+				if o.Path == "policy.mode" {
+					got = o.Value
+				}
+			}
+			if got != c.want {
+				t.Fatalf("policy.mode = %v, want %v — a disabled policy enforces nothing",
+					got, c.want)
 			}
 		})
 	}

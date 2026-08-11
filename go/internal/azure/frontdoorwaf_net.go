@@ -62,6 +62,11 @@ type frontDoorWAFDoc struct {
 		ProvisioningState string `json:"provisioningState"`
 		PolicySettings    struct {
 			Mode string `json:"mode"`
+			// D739: the arming switch. The create sets it to "Enabled" and this struct
+			// never read it back, so a policy switched off still reported
+			// policy.mode: prevention — a firewall in blocking mode that blocks
+			// nothing. Same shape as D726's alarms, one control over.
+			EnabledState string `json:"enabledState"`
 		} `json:"policySettings"`
 		ManagedRules struct {
 			ManagedRuleSets []struct {
@@ -85,7 +90,11 @@ func (d *Driver) observeFrontDoorWAF(capability, providerID string) ([]provider.
 		return nil, nil, fmt.Errorf("wafPolicies.get: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"waf policy not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"waf policy not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("wafPolicies.get: HTTP %d", st)
@@ -94,8 +103,13 @@ func (d *Driver) observeFrontDoorWAF(capability, providerID string) ([]provider.
 	if json.Unmarshal(resp, &doc) != nil {
 		return nil, nil, &armReadError{Op: "wafPolicies.get", Cause: "body", Status: st}
 	}
+	// D739: a policy whose enabledState is "Disabled" enforces NOTHING, whatever its
+	// mode says. `Prevention` on a disabled policy is a firewall in blocking mode that
+	// blocks nothing, and the contract read it as satisfied. An absent field is treated
+	// as enabled, which is what Azure documents as the default.
 	mode := "detection"
-	if doc.Properties.PolicySettings.Mode == "Prevention" {
+	disabled := strings.EqualFold(doc.Properties.PolicySettings.EnabledState, "Disabled")
+	if doc.Properties.PolicySettings.Mode == "Prevention" && !disabled {
 		mode = "prevention"
 	}
 	managed, bot := false, false
@@ -108,6 +122,8 @@ func (d *Driver) observeFrontDoorWAF(capability, providerID string) ([]provider.
 		}
 	}
 	return []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		{Path: "policy.mode", Value: mode, Derivation: "measured"},
 		{Path: "managed.ruleset", Value: managed, Derivation: "measured"},

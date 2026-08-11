@@ -504,12 +504,18 @@ cases:
           operation: update
           changes: [versioning.enabled]
 
-  - name: gcs-plan-refuses-immutable-drift
+  - name: gcs-plan-blocks-a-relocation-it-cannot-perform
     impl: go
     description: >
-      D46/D77: location drift on a GCS bucket is create-time-only — a replacement,
-      refused at plan (consent-required), never a paper patch. Symmetric with the
-      S3 immutable case.
+      D826: RETIRES gcs-plan-refuses-immutable-drift, which pinned "location drift on a
+      GCS bucket is create-time-only — a replacement, refused at plan
+      (consent-required)". That was true when it was written; Cloud Storage now publishes
+      buckets.relocate (destinationLocation + destinationCustomPlacementConfig), so a
+      bucket moves under its own name with its objects. The old expectation therefore
+      pinned asking an operator to consent to destroying every object for a change Google
+      performs in place. groundhold does not wire the relocation, so the honest outcome is
+      a BLOCKED capability naming what the provider supports — never a replacement, and
+      never a silent patch.
     plan:
       at: "2026-07-11T17:05:00Z"
       bindings: { obj: "gcs:acme-prod:pv-assets-abcd1234" }
@@ -543,8 +549,7 @@ cases:
             attributes:
               location.region: eu
     expect:
-      error: plan
-      code: consent-required
+      blocked: [obj]
   - name: pubsub-plan-emits-update-for-mutable-exposure
     impl: go
     description: >
@@ -1064,7 +1069,6 @@ cases:
             implementation:
               image_uri: 123456789012.dkr.ecr.eu-central-1.amazonaws.com/fn:sha
               role_arn: arn:aws:iam::123456789012:role/fn-exec
-              url_auth: iam
     expect:
       actions:
         a-update-fn:

@@ -33,21 +33,37 @@ func (d *Driver) List(region string) ([]provider.Discovered, []string, error) {
 		if region != "" && z.Name != region {
 			continue // another zone — not this filtered sweep
 		}
-		records, err := d.listRecords(z.ID)
-		if err != nil {
-			diags = append(diags, fmt.Sprintf("%s: dns_records.list: %v", z.Name, err))
-			continue
-		}
-		for _, rec := range records {
-			if rec.ID == "" {
-				continue
+		// D874b: DNS records and the WAF posture are INDEPENDENT reads. A DNS failure
+		// (a token with zone-list but no dns_records read — a real field case) must NOT
+		// skip the WAF emission, or a whole zone's WAF posture goes invisible whenever
+		// its records can't be read. So a record failure is a diagnostic and the loop
+		// falls through to the WAF read rather than `continue`.
+		if records, rerr := d.listRecords(z.ID); rerr != nil {
+			diags = append(diags, fmt.Sprintf("%s: dns_records.list: %v", z.Name, rerr))
+		} else {
+			for _, rec := range records {
+				if rec.ID == "" {
+					continue
+				}
+				out = append(out, provider.Discovered{
+					ProviderID:   d.recordProviderID(z.ID, rec.ID),
+					ResourceType: "capability.dns.record",
+					Observations: mapRecord(rec),
+				})
 			}
-			out = append(out, provider.Discovered{
-				ProviderID:   d.recordProviderID(z.ID, rec.ID),
-				ResourceType: "capability.dns.record",
-				Observations: mapRecord(rec),
-			})
 		}
+		// D874: one capability.security.waf per zone (the zone is Cloudflare's WAF
+		// boundary). A read that fails is a diagnostic on the resource, never a hidden
+		// sweep failure — the WAF posture is still emitted with what could be read.
+		wafObs, wafDiags := d.mapZoneWAF(z.ID)
+		for _, dg := range wafDiags {
+			diags = append(diags, z.Name+": "+dg)
+		}
+		out = append(out, provider.Discovered{
+			ProviderID:   d.wafProviderID(z.ID),
+			ResourceType: "capability.security.waf",
+			Observations: wafObs,
+		})
 	}
 	return out, diags, nil
 }
