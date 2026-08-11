@@ -88,16 +88,37 @@ func aksAddonProfiles(cluster map[string]any) map[string]any {
 // aksAddonReadEnabled reverse-reads one addon's enablement from a cluster doc.
 // present=false means the profile is absent or malformed — the caller must NOT
 // treat that as "disabled" blindly (parity with the GKE readEnabled discipline).
-func aksAddonReadEnabled(cluster map[string]any, profileKey string) (enabled, present bool) {
-	profile, ok := aksAddonProfiles(cluster)[profileKey].(map[string]any)
-	if !ok {
-		return false, false
+// aksAddonState is what the cluster's profile actually tells us about one addon. It
+// replaces a pair of booleans whose false/false carried three different meanings at once
+// (D801, and the same shape one cloud over on GKE).
+type aksAddonState int
+
+const (
+	aksAddonAbsent     aksAddonState = iota // no profile — the addon is not configured
+	aksAddonOn                              // configured and on
+	aksAddonOff                             // configured and off
+	aksAddonUnreadable                      // a profile we cannot interpret
+)
+
+func aksAddonReadState(cluster map[string]any, profileKey string) aksAddonState {
+	raw, exists := aksAddonProfiles(cluster)[profileKey]
+	if !exists {
+		return aksAddonAbsent
 	}
+	profile, ok := raw.(map[string]any)
+	if !ok {
+		return aksAddonUnreadable
+	}
+	// ARM serializes false explicitly, so unlike GKE an absent flag is not a default
+	// here — it is a profile shaped in a way this driver does not understand.
 	v, ok := profile["enabled"].(bool)
 	if !ok {
-		return false, false
+		return aksAddonUnreadable
 	}
-	return v, true
+	if v {
+		return aksAddonOn
+	}
+	return aksAddonOff
 }
 
 // setAKSAddonInCluster mutates the cluster doc IN PLACE, setting the ONE addon's
@@ -200,7 +221,7 @@ func (d *Driver) createAKSAddon(environment, capability string,
 			Reason: fmt.Sprintf("cluster %q not found in resource group %s — the addon's operand cluster must exist; refusing to toggle an addon on a nonexistent cluster",
 				plan.ClusterName, plan.ResourceGrp)}
 	}
-	if enabled, _ := aksAddonReadEnabled(doc, plan.ProfileKey); enabled {
+	if aksAddonReadState(doc, plan.ProfileKey) == aksAddonOn {
 		return provider.CreateResult{ProviderID: pid, Status: "succeeded"} // idempotent — already enabled
 	}
 
@@ -242,13 +263,27 @@ func (d *Driver) observeAKSAddon(capability, providerID string) ([]provider.Obse
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"cluster not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"cluster not found — bound resource is gone (will re-create)"}, nil
 	}
-	enabled, present := aksAddonReadEnabled(doc, profileKey)
-	if !present || !enabled {
-		return nil, []string{fmt.Sprintf("addon %q is not enabled on cluster %q — nothing to observe", addon, cluster)}, nil
+	switch aksAddonReadState(doc, profileKey) {
+	case aksAddonUnreadable:
+		// D801/D306: a profile we cannot parse is not an addon that is off.
+		return nil, nil, fmt.Errorf("addon %q on cluster %q: the addon profile is present "+
+			"but not readable — refusing to report it as disabled", addon, cluster)
+	case aksAddonAbsent, aksAddonOff:
+		return []provider.Observation{
+			// D802: same as the GKE twin — an addon that is off is a bound subject that
+			// is not there, and silence let posture keep calling it managed.
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{fmt.Sprintf("addon %q is not enabled on cluster %q — bound resource is gone (will re-create)", addon, cluster)}, nil
 	}
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "addon.name", Value: addon, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
@@ -299,10 +334,16 @@ func (d *Driver) deleteAKSAddon(capability, environment, providerID string) prov
 	if !found {
 		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // cluster gone — the flag is gone with it
 	}
-	if enabled, present := aksAddonReadEnabled(doc, profileKey); !present {
-		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // never enabled — idempotent
-	} else if !enabled {
-		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // already disabled — idempotent
+	switch aksAddonReadState(doc, profileKey) {
+	case aksAddonAbsent, aksAddonOff:
+		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // already off — idempotent
+	case aksAddonUnreadable:
+		// D801: folded into "never enabled" before, so a delete claimed a removal of a
+		// control whose state nobody could read.
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "the addon profile for " + addon + " is present but not readable — " +
+				"cannot tell whether the addon is on, and will not report a removal that " +
+				"may not have happened"}
 	}
 
 	setAKSAddonInCluster(doc, profileKey, false, nil)
@@ -368,7 +409,12 @@ func (d *Driver) discoverAKSAddon(region string) ([]provider.Discovered, []strin
 		item := map[string]any{"properties": c.Props}
 		for _, name := range canon {
 			key := aksAddonRegistry[name]
-			if enabled, present := aksAddonReadEnabled(item, key); !present || !enabled {
+			switch aksAddonReadState(item, key) {
+			case aksAddonUnreadable:
+				diags = append(diags, "addon profile "+key+" is present but not readable — "+
+					"the addon is neither reported nor called absent")
+				continue
+			case aksAddonAbsent, aksAddonOff:
 				continue
 			}
 			pid := aksAddonProviderID(d.Subscription, rg, c.Name, name)
@@ -381,7 +427,7 @@ func (d *Driver) discoverAKSAddon(region string) ([]provider.Discovered, []strin
 				diags = append(diags, c.Name+"/"+name+": "+dg)
 			}
 			out = append(out, provider.Discovered{
-				ProviderID: pid, ResourceType: "capability.cluster.addon", Observations: obs})
+				ProviderID: pid, ResourceType: "capability.cluster.addon", Observations: provider.WithoutAbsence(obs)})
 		}
 	}
 	return out, diags, nil

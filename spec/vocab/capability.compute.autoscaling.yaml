@@ -47,7 +47,7 @@ attributes:
     mappings:
       aws.asg: the region of the group's subnets
       gcp.mig: the group's region, or the region of its zone
-      azure.vmss: the scale set's location
+      azure.azvmss: the scale set's location
 
   availability.class:
     kind: string
@@ -56,7 +56,7 @@ attributes:
     mappings:
       aws.asg: regional when the group spans subnets in more than one availability zone
       gcp.mig: regional for a regional managed instance group, zonal otherwise
-      azure.vmss: regional when the scale set declares more than one zone
+      azure.azvmss: regional when the scale set declares more than one zone
 
   replicas.minimum:
     kind: number
@@ -64,7 +64,7 @@ attributes:
     mappings:
       aws.asg: MinSize
       gcp.mig: the autoscaler's minNumReplicas, or targetSize when no autoscaler exists
-      azure.vmss: the autoscale profile's minimum capacity, or sku.capacity when fixed
+      azure.azvmss: the autoscale profile's minimum capacity, or sku.capacity when fixed
 
   replicas.maximum:
     kind: number
@@ -72,7 +72,7 @@ attributes:
     mappings:
       aws.asg: MaxSize
       gcp.mig: the autoscaler's maxNumReplicas
-      azure.vmss: the autoscale profile's maximum capacity
+      azure.azvmss: the autoscale profile's maximum capacity
 
   autoscaling.enabled:
     kind: bool
@@ -80,7 +80,7 @@ attributes:
     mappings:
       aws.asg: a scaling policy is attached to the group
       gcp.mig: an autoscaler is attached to the group
-      azure.vmss: an autoscale setting targets the scale set
+      azure.azvmss: an autoscale setting targets the scale set
 
   network.publicExposure:
     kind: bool
@@ -88,7 +88,7 @@ attributes:
     mappings:
       aws.asg: the launch template associates a public IP
       gcp.mig: the instance template's network interface has an external IP
-      azure.vmss: the scale set's network profile assigns public IPs
+      azure.azvmss: the scale set's network profile assigns public IPs
 
   cost.monthly:
     kind: money
@@ -97,7 +97,7 @@ attributes:
     mappings:
       aws.asg: MinSize × the instance type's on-demand rate
       gcp.mig: the floor × the machine type's on-demand rate
-      azure.vmss: the floor × the VM size's pay-as-you-go rate
+      azure.azvmss: the floor × the VM size's pay-as-you-go rate
 
   service.managed:
     kind: bool
@@ -105,4 +105,4 @@ attributes:
     mappings:
       aws.asg: const true when observed through the driver
       gcp.mig: const true when observed through the driver
-      azure.vmss: const true when observed through the driver
+      azure.azvmss: const true when observed through the driver

@@ -57,8 +57,17 @@ func (d *Driver) createBlob(environment, capability string,
 
 	// ---- 1. storage account (the constitutive substrate; async) ----
 	acctURL, _ := d.armURL(rg, d.acctPath(plan.Account), storageAPIVersion)
+	// D989 (user-directed): network.publicExposure governs NETWORK reachability
+	// (publicNetworkAccess), matching every other Azure driver — not the anonymous-blob
+	// -access toggle. Anonymous access is a separate control, defaulted OFF (the secure
+	// choice, and Azure's own modern default).
+	pna := "Disabled"
+	if plan.Public {
+		pna = "Enabled"
+	}
 	acctProps := map[string]any{
-		"allowBlobPublicAccess": plan.Public,
+		"publicNetworkAccess":   pna,
+		"allowBlobPublicAccess": false,
 		"minimumTlsVersion":     "TLS1_2",
 	}
 	if plan.KmsKeyVaultURI != "" {
@@ -256,11 +265,18 @@ func azErrCode(body []byte) string {
 		Error struct {
 			Code string `json:"code"`
 		} `json:"error"`
+		// D929: some ARM errors (AKS managedClusters 400, etc.) carry {"code","message"}
+		// at the TOP LEVEL rather than wrapped in "error" — fall back to it so the code
+		// (e.g. K8sVersionNotSupported) is not swallowed.
+		Code string `json:"code"`
 	}
 	if json.Unmarshal(body, &e) != nil {
 		return ""
 	}
-	return e.Error.Code
+	if e.Error.Code != "" {
+		return e.Error.Code
+	}
+	return e.Code
 }
 
 // terminalOr maps a mutation response to a terminal result (or nil on 2xx). D237:
@@ -298,9 +314,9 @@ type blobAccountDoc struct {
 	Tags       map[string]string     `json:"tags"`
 	Sku        struct{ Name string } `json:"sku"`
 	Properties struct {
-		ProvisioningState     string `json:"provisioningState"`
-		AllowBlobPublicAccess *bool  `json:"allowBlobPublicAccess"`
-		Encryption            struct {
+		ProvisioningState   string `json:"provisioningState"`
+		PublicNetworkAccess string `json:"publicNetworkAccess"`
+		Encryption          struct {
 			KeySource string `json:"keySource"`
 		} `json:"encryption"`
 	} `json:"properties"`
@@ -323,16 +339,23 @@ func (d *Driver) observeBlob(capability, providerID string) ([]provider.Observat
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"storage account not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"storage account not found — bound resource is gone (will re-create)"}, nil
 	}
-	var obs []provider.Observation
+	// Present: clear the marker, or a stale "gone" survives a re-create.
+	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
+	}
 	var diags []string
 	if doc.Location != "" {
 		obs = append(obs, provider.Observation{Path: "location.region", Value: strings.ToLower(doc.Location), Derivation: "measured"})
 	}
 	obs = append(obs,
 		provider.Observation{Path: "service.managed", Value: true, Derivation: "measured"},
-		provider.Observation{Path: "encryption.atRest", Value: true, Derivation: "config-intent"},
+		provider.Observation{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"},
 	)
 	switch doc.Sku.Name {
 	case "Standard_LRS":
@@ -342,13 +365,18 @@ func (d *Driver) observeBlob(capability, providerID string) ([]provider.Observat
 	case "Standard_GZRS":
 		obs = append(obs, provider.Observation{Path: "durability.class", Value: "multi-regional", Derivation: "measured"})
 	}
-	if doc.Properties.AllowBlobPublicAccess != nil {
-		obs = append(obs, provider.Observation{Path: "network.publicExposure",
-			Value: *doc.Properties.AllowBlobPublicAccess, Derivation: "measured"})
+	// D989: network.publicExposure from publicNetworkAccess (network reachability), as
+	// every other Azure driver does. An absent field must NOT collapse to a measured
+	// false (the false-safe direction) — it is left unread.
+	switch doc.Properties.PublicNetworkAccess {
+	case "Enabled":
+		obs = append(obs, provider.Observation{Path: "network.publicExposure", Value: true, Derivation: "measured"})
+	case "Disabled":
+		obs = append(obs, provider.Observation{Path: "network.publicExposure", Value: false, Derivation: "measured"})
+	default:
+		diags = append(diags, "network.publicExposure not observed: publicNetworkAccess absent from the storage account's properties")
 	}
-	if doc.Properties.Encryption.KeySource == "Microsoft.Keyvault" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: true, Derivation: "measured"})
-	}
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: doc.Properties.Encryption.KeySource == "Microsoft.Keyvault", Derivation: "measured"})
 	// retention.minimum / retention.locked: the container's immutability policy
 	// (WORM). Absent (404) means no immutability protection — the paths are simply
 	// absent, not an error.
@@ -362,6 +390,14 @@ func (d *Driver) observeBlob(capability, providerID string) ([]provider.Observat
 	repObs, repDiags := d.observeBlobReplication(rg, account)
 	obs = append(obs, repObs...)
 	diags = append(diags, repDiags...)
+	// retention.maximum: the lifecycle expiry create writes as a management policy.
+	// D471 — this was WRITTEN and never read back, while its S3 twin has always read
+	// the lifecycle Expiration rule. An attribute realised on one cloud and invisible
+	// on the other is the same declaration answering `satisfied` in one estate and
+	// `unverifiable` in the other.
+	lcObs, lcDiags := d.observeBlobLifecycle(rg, account, container)
+	obs = append(obs, lcObs...)
+	diags = append(diags, lcDiags...)
 	diags = append(diags, "versioning observed on the account/blobServices child — reconcile for full detail")
 	return obs, diags, nil
 }
@@ -512,13 +548,37 @@ func classifyBlobChange(path string) (string, string) {
 	case "location.region":
 		return "immutable", "a storage account's region is fixed at creation — a change is a replacement"
 	case "durability.class":
-		return "immutable", "the storage account SKU/redundancy is fixed at creation — a change is a replacement"
-	case "retention.minimum", "retention.locked":
-		return "immutable", "an immutability policy (WORM) is a create-time foundation — a " +
-			"locked floor is irreversible and can only be extended; a change is a replacement"
+		// D824: this said the redundancy is "fixed at creation". Microsoft publishes a page
+		// titled "Change how a storage account is replicated": the geo-redundant and
+		// read-access settings are changed from the portal, PowerShell or the CLI, and
+		// LRS→ZRS has a documented conversion (Start-AzStorageAccountMigration). Replacing
+		// a storage account to change this destroys every blob in it.
+		return "unsupported", "in-place redundancy change is not wired for the blob driver " +
+			"in this slice — Azure does support it (the geo-redundancy and read-access " +
+			"settings are editable, and LRS→ZRS has a conversion path, with limits for ZRS " +
+			"Classic and NFSv3 accounts), so this is a gap in groundhold rather than a reason " +
+			"to replace the account and its data"
+	case "retention.locked":
+		return "immutable", "locking an immutability policy is irreversible — a WORM floor " +
+			"cannot be unlocked, so removing the lock is a replacement"
+	case "retention.minimum":
+		// D824: this shared a case with retention.locked and inherited its verdict, but the
+		// two are not the same claim — the sentence even said the floor "can only be
+		// extended", which is a change. Microsoft: "You can modify an unlocked time-based
+		// retention policy to shorten or lengthen the retention interval", and a locked one
+		// can be extended (az storage container immutability-policy extend).
+		return "unsupported", "in-place retention-floor change is not wired for the blob " +
+			"driver in this slice — Azure does support it (an unlocked policy can be " +
+			"shortened or lengthened, a locked one extended), so this is a gap in groundhold " +
+			"rather than a reason to replace the account and its data"
 	case "replication.enabled", "replication.destinationRegion":
-		return "immutable", "object replication is not wired for in-place update on the blob " +
-			"driver — a change is a replacement of the stateful account (never a mutable-without-updater gap)"
+		// D824: the reason already said this was about the DRIVER, not about Azure — and
+		// `immutable` still made the plan destroy a stateful account. Object replication is
+		// a POLICY applied to accounts that already exist (portal, PowerShell, CLI, REST),
+		// not a create-time property.
+		return "unsupported", "object replication is not wired for in-place update on the " +
+			"blob driver — Azure configures it as a policy on existing accounts, so this is " +
+			"a gap in groundhold rather than a reason to replace the account and its data"
 	default:
 		return "unsupported", "no azure blob in-place mapping for " + path
 	}
@@ -577,4 +637,73 @@ func (d *Driver) deleteBlob(capability, environment, providerID string) provider
 		return provider.CreateResult{ProviderID: providerID, Status: "failed", Reason: fmt.Sprintf("delete HTTP %d", dst)}
 	}
 	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+}
+
+// observeBlobLifecycle MEASURES retention.maximum from the account's management policy —
+// the same object createBlob writes (managementPolicyBody). It reads back OUR rule by
+// name and by the container prefix it filters on, because an account-level policy can
+// carry rules nobody here wrote: attributing a stranger's expiry to this capability
+// would be a measurement of the wrong thing, which is worse than no measurement.
+//
+// Absent (404) means no lifecycle policy — the path is simply absent, not an error, the
+// same shape observeBlobImmutability uses for an unprotected container.
+func (d *Driver) observeBlobLifecycle(rg, account, container string) ([]provider.Observation, []string) {
+	mpURL, err := d.armURL(rg, d.acctPath(account)+"/managementPolicies/default", storageAPIVersion)
+	if err != nil {
+		return nil, []string{"retention.maximum not observed: " + err.Error()}
+	}
+	st, resp, e := d.doARM("GET", mpURL, nil)
+	if e != nil {
+		return nil, []string{"retention.maximum not observed: " + azReadWhy(st, resp, e)}
+	}
+	if st == http.StatusNotFound {
+		return nil, nil // no lifecycle policy — absent, not an error
+	}
+	if st != http.StatusOK {
+		return nil, []string{fmt.Sprintf("retention.maximum not observed: managementPolicies.get HTTP %d", st)}
+	}
+	var doc struct {
+		Properties struct {
+			Policy struct {
+				Rules []struct {
+					Name       string `json:"name"`
+					Enabled    bool   `json:"enabled"`
+					Definition struct {
+						Filters struct {
+							PrefixMatch []string `json:"prefixMatch"`
+						} `json:"filters"`
+						Actions struct {
+							BaseBlob struct {
+								Delete struct {
+									Days *float64 `json:"daysAfterModificationGreaterThan"`
+								} `json:"delete"`
+							} `json:"baseBlob"`
+						} `json:"actions"`
+					} `json:"definition"`
+				} `json:"rules"`
+			} `json:"policy"`
+		} `json:"properties"`
+	}
+	if json.Unmarshal(resp, &doc) != nil {
+		return nil, []string{"retention.maximum not observed: managementPolicies.get unparseable"}
+	}
+	for _, r := range doc.Properties.Policy.Rules {
+		if r.Name != "groundhold-retention-maximum" || !r.Enabled {
+			continue
+		}
+		mine := false
+		for _, p := range r.Definition.Filters.PrefixMatch {
+			if p == container+"/" {
+				mine = true
+			}
+		}
+		if !mine {
+			continue
+		}
+		if days := r.Definition.Actions.BaseBlob.Delete.Days; days != nil && *days > 0 {
+			return []provider.Observation{{Path: "retention.maximum",
+				Value: fmt.Sprintf("%dd", int64(*days)), Derivation: "measured"}}, nil
+		}
+	}
+	return nil, nil // a policy exists but carries no expiry of ours
 }

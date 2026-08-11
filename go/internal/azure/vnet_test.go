@@ -126,6 +126,56 @@ func TestCreateObserveDeleteVNet(t *testing.T) {
 	}
 }
 
+// TestAzureDeleteAndConfirmAsyncNotGone pins D971 for every ARM delete: a 202
+// Accepted is a long-running delete — the resource is still deleting, not gone. It
+// must report unknown (keep the handle), never a terminal "succeeded" that
+// tombstones a resource still live. deleteAndConfirm is the shared fold behind
+// ~15 Azure deletes, so this covers all of them.
+func TestAzureDeleteAndConfirmAsyncNotGone(t *testing.T) {
+	url := "/subscriptions/x/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet?api-version=2023-05-01"
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case "DELETE":
+				w.WriteHeader(202) // accepted, long-running
+			case "GET": // the resource is still present (deleting)
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Deleting"}}`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	defer srv.Close()
+	d := vnetTestDriver(t, srv)
+	d.PollTimeout = 5 * time.Millisecond // the resource never leaves Deleting → times out fast
+	res := d.deleteAndConfirm(srv.URL+url, "pid", "test resource")
+	if res.Status != "unknown" {
+		t.Fatalf("a 202-accepted delete whose resource is still present must be unknown (keep the "+
+			"handle), got %+v — reporting succeeded tombstones a resource still live", res)
+	}
+}
+
+// TestAzureDeleteAndConfirm202PollsToGone: a 202 whose resource then reads 404 is
+// genuinely gone — succeeded, once confirmed.
+func TestAzureDeleteAndConfirm202PollsToGone(t *testing.T) {
+	url := "/subscriptions/x/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet?api-version=2023-05-01"
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case "DELETE":
+				w.WriteHeader(202)
+			default: // GET → gone
+				w.WriteHeader(404)
+			}
+		}))
+	defer srv.Close()
+	d := vnetTestDriver(t, srv)
+	res := d.deleteAndConfirm(srv.URL+url, "pid", "test resource")
+	if res.Status != "succeeded" {
+		t.Fatalf("a 202-accepted delete polled to a confirmed 404 must succeed, got %+v", res)
+	}
+}
+
 func TestDeleteVNetForeignRefused(t *testing.T) {
 	srv := armFake(t, "someone-else")
 	defer srv.Close()
@@ -276,5 +326,134 @@ func TestCreateVNetNoTokenRefuses(t *testing.T) {
 	res := d.Create("vnet", "backbone", "prod", vnetAttrs(), map[string]any{"resource_group": "rg1"}, "k", 1)
 	if res.Status != "failed" || !strings.Contains(res.Reason, "no Azure access token") {
 		t.Fatalf("no token must refuse before mutating, got %+v", res)
+	}
+}
+
+// D744: "a subnet references a network security group" is not a measurement of
+// destination discipline — an NSG whose only outbound rule allows any destination
+// restricts nothing, and the container's presence stood for the rules inside it. The
+// two directions are not symmetric: no group at all genuinely measures that nothing
+// restricts egress, which is why only the `true` side moved to config-intent.
+func TestAzureEgressRestrictedDoesNotMeasureAContainer(t *testing.T) {
+	t.Run("a group is attached — its rules were not read", func(t *testing.T) {
+		srv := armFake(t, "backbone")
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		res := d.createVNet("prod", "backbone", vnetAttrs(), map[string]any{"resource_group": "rg1"}, 1)
+		if res.Status != "succeeded" {
+			t.Fatalf("create: %+v", res)
+		}
+		obs, diags, err := d.observeVNet("backbone", res.ProviderID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, o := range obs {
+			if o.Path != "egress.restricted" {
+				continue
+			}
+			if o.Value != true || o.Derivation != "config-intent" {
+				t.Fatalf("egress.restricted = %v/%s, want true/config-intent — the group's "+
+					"outbound rules were never read", o.Value, o.Derivation)
+			}
+		}
+		var saidWhy bool
+		for _, dg := range diags {
+			if strings.Contains(dg, "outbound rules were not read") {
+				saidWhy = true
+			}
+		}
+		if !saidWhy {
+			t.Fatalf("withholding the measurement without saying why is its own defect: %v", diags)
+		}
+	})
+}
+
+// D940: deleteAndConfirm never returns nil, so the leaf-delete guard `r != nil`
+// returned unconditionally and the NAT-companion cleanup (NSG, NAT gateway, public
+// IP) was unreachable dead code — a billable NAT gateway + public IP orphaned while
+// retire reported succeeded. A succeeded vnet delete must fall through to reclaim
+// its driver-created companions.
+func TestDeleteVNetReclaimsNATCompanions(t *testing.T) {
+	var deletes []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case "GET":
+			_, _ = w.Write([]byte(`{"location":"eastus",` +
+				`"tags":{"groundhold-capability":"backbone","groundhold-environment":"prod"},` +
+				`"properties":{"provisioningState":"Succeeded"}}`))
+		case "DELETE":
+			deletes = append(deletes, r.URL.Path)
+			w.WriteHeader(200)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	d := vnetTestDriver(t, srv)
+
+	res := d.deleteVNet("backbone", "prod", vnetProviderID(testSub, "rg1", "pv-net-backbone-prod-abcd1234"))
+	if res.Status != "succeeded" {
+		t.Fatalf("delete: %+v", res)
+	}
+	for _, seg := range []string{"/networkSecurityGroups/", "/natGateways/", "/publicIPAddresses/"} {
+		found := false
+		for _, p := range deletes {
+			if strings.Contains(p, seg) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("companion %s was never DELETEd — dead-code cleanup (D940); deletes=%v", seg, deletes)
+		}
+	}
+}
+
+// D943: for a brownfield-adopted vnet with an arbitrary name, the derived companion
+// name (`<vnet>-nsg` etc — a very common Azure convention) could be a FOREIGN resource
+// groundhold never created. The companion cleanup (reachable since D940) must read each
+// companion's tags and NEVER delete one that is not ours.
+func TestDeleteVNetLeavesForeignCompanionsUntouched(t *testing.T) {
+	var deletes []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case "GET":
+			if strings.Contains(r.URL.Path, "/virtualNetworks/") {
+				// the parent vnet is ours (adopted)
+				_, _ = w.Write([]byte(`{"location":"eastus",` +
+					`"tags":{"groundhold-capability":"backbone","groundhold-environment":"prod"},` +
+					`"properties":{"provisioningState":"Succeeded"}}`))
+				return
+			}
+			// a FOREIGN sibling sits at the derived companion name (no groundhold tags)
+			_, _ = w.Write([]byte(`{"location":"eastus","tags":{"owner":"someone-else"},` +
+				`"properties":{"provisioningState":"Succeeded"}}`))
+		case "DELETE":
+			deletes = append(deletes, r.URL.Path)
+			w.WriteHeader(200)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	d := vnetTestDriver(t, srv)
+
+	res := d.deleteVNet("backbone", "prod", vnetProviderID(testSub, "rg1", "hub-vnet"))
+	if res.Status != "succeeded" {
+		t.Fatalf("delete: %+v", res)
+	}
+	// the vnet itself (ours) must be deleted; NO foreign companion may be
+	sawVnet := false
+	for _, p := range deletes {
+		if strings.Contains(p, "/virtualNetworks/") {
+			sawVnet = true
+		}
+		for _, seg := range []string{"/networkSecurityGroups/", "/natGateways/", "/publicIPAddresses/"} {
+			if strings.Contains(p, seg) {
+				t.Errorf("D943 FOREIGN-DELETE: companion %s was deleted despite not being ours — deletes=%v", seg, deletes)
+			}
+		}
+	}
+	if !sawVnet {
+		t.Errorf("the owned vnet was not deleted — deletes=%v", deletes)
 	}
 }

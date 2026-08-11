@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func readJSONBody(r *http.Request) map[string]any {
@@ -41,13 +44,23 @@ func TestBuildMSKHonors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.KafkaVersion != "3.5.1" || p.Brokers != 2 || !p.CMEK || p.KmsKeyId == "" {
+	if p.KafkaVersion != "3.6.0" || p.Brokers != 2 || !p.CMEK || p.KmsKeyId == "" {
 		t.Fatalf("plan = %+v", p)
 	}
 	body := p.createBody("bus", "prod")
-	prov := body["Provisioned"].(map[string]any)
-	if prov["EncryptionInfo"].(map[string]any)["EncryptionAtRest"].(map[string]any)["DataVolumeKMSKeyId"] == nil {
+	// D879: the wire is restJson1 camelCase. Pin the exact key path so a mutation back
+	// to PascalCase (which AWS would drop, then 400) is caught at the desk, not on a run.
+	if _, pascal := body["Provisioned"]; pascal {
+		t.Fatalf("createBody emits PascalCase Provisioned — AWS ignores it (D879): %+v", body)
+	}
+	prov := body["provisioned"].(map[string]any)
+	if prov["encryptionInfo"].(map[string]any)["encryptionAtRest"].(map[string]any)["dataVolumeKMSKeyId"] == nil {
 		t.Fatalf("body = %+v", prov)
+	}
+	for _, k := range []string{"clusterName", "provisioned", "tags"} {
+		if _, ok := body[k]; !ok {
+			t.Fatalf("createBody missing camelCase key %q (real MSK locationName): %+v", k, body)
+		}
 	}
 }
 
@@ -83,27 +96,43 @@ func TestBuildMSKRefusals(t *testing.T) {
 func mskServer(t *testing.T, capLabel, kafkaVersion string, cmek bool) *httptest.Server {
 	t.Helper()
 	const arn = "arn:aws:kafka:eu-central-1:000000000000:cluster/pv-c/uuid-1"
+	deleted := false
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			// once deleted, the cluster is GONE — the delete's poll-to-absence (D974)
+			// must be able to confirm an empty cluster list.
+			if deleted && r.Method == "GET" && strings.Contains(r.URL.Path, "/api/v2/clusters") {
+				_, _ = w.Write([]byte(`{"clusterInfoList":[]}`))
+				return
+			}
 			switch {
 			case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/api/v2/clusters"):
 				w.WriteHeader(200)
-				_, _ = w.Write([]byte(`{"ClusterArn":"` + arn + `","ClusterName":"pv-c","State":"CREATING"}`))
+				_, _ = w.Write([]byte(`{"clusterArn":"` + arn + `","clusterName":"pv-c","state":"CREATING"}`))
 			case r.Method == "GET" && strings.Contains(r.URL.Path, "/api/v2/clusters"):
 				// ListClustersV2 (name filter) — echo the requested name back so the
 				// exact-match resolver finds it.
 				reqName := r.URL.Query().Get("clusterNameFilter")
 				enc := ""
 				if cmek {
-					enc = `,"DataVolumeKMSKeyId":"arn:aws:kms:eu-central-1:000000000000:key/abc"`
+					enc = `,"dataVolumeKMSKeyId":"arn:aws:kms:eu-central-1:000000000000:key/abc"`
 				}
-				_, _ = w.Write([]byte(`{"ClusterInfoList":[{"ClusterArn":"` + arn + `","ClusterName":"` + reqName +
-					`","State":"ACTIVE","Tags":{"groundhold-capability":"` + capLabel + `","groundhold-environment":"prod"},` +
-					`"Provisioned":{"CurrentBrokerSoftwareInfo":{"KafkaVersion":"` + kafkaVersion + `"},` +
-					`"EncryptionInfo":{"EncryptionInTransit":{"ClientBroker":"TLS"},"EncryptionAtRest":{` + strings.TrimPrefix(enc, ",") + `}}}}]}`))
-			case r.Method == "DELETE":
+				_, _ = w.Write([]byte(`{"clusterInfoList":[{"clusterArn":"` + arn + `","clusterName":"` + reqName +
+					`","state":"ACTIVE","tags":{"groundhold-capability":"` + capLabel + `","groundhold-environment":"prod"},` +
+					`"provisioned":{"currentBrokerSoftwareInfo":{"kafkaVersion":"` + kafkaVersion + `"},` +
+					`"encryptionInfo":{"encryptionInTransit":{"clientBroker":"TLS"},"encryptionAtRest":{` + strings.TrimPrefix(enc, ",") + `}}}}]}`))
+			case r.Method == "DELETE" && r.URL.EscapedPath() == mskDeletePath+"/"+rfc3986(arn):
+				deleted = true
+				// D717: EXACT, not "any DELETE". This case used to match the method
+				// alone, so it answered 200 to a delete addressed anywhere — and the
+				// driver was addressing it to a route MSK does not have. A fixture that
+				// answers a request the cloud would reject is not a double for the cloud.
+				// D880: the cluster ARN is single-encoded on the wire (rfc3986, one segment),
+				// as botocore serializes it against the non-greedy {clusterArn} route.
 				w.WriteHeader(200)
 			default:
+				t.Errorf("fixture asked for %s %s — MSK has no such route, or the test "+
+					"has outgrown the fixture", r.Method, r.URL.EscapedPath())
 				w.WriteHeader(404)
 			}
 		}))
@@ -123,7 +152,7 @@ func mskDriver(t *testing.T, srv *httptest.Server) *Driver {
 }
 
 func TestCreateObserveDeleteMSK(t *testing.T) {
-	srv := mskServer(t, "bus", "3.5.1", true)
+	srv := mskServer(t, "bus", "3.6.0", true)
 	defer srv.Close()
 	d := mskDriver(t, srv)
 	res := d.createMSK("eu-central-1", "000000000000", "prod", "bus", mskAttrs(), mskImpl(), 1)
@@ -153,13 +182,42 @@ func TestCreateObserveDeleteMSK(t *testing.T) {
 }
 
 func TestDeleteMSKForeignRefused(t *testing.T) {
-	srv := mskServer(t, "someone-else", "3.5.1", false)
+	srv := mskServer(t, "someone-else", "3.6.0", false)
 	defer srv.Close()
 	d := mskDriver(t, srv)
 	pid := mskProviderID("eu-central-1", "000000000000", MSKClusterName("prod", "bus", 1))
 	res := d.deleteMSK("bus", "prod", pid)
 	if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
 		t.Fatalf("foreign cluster must refuse delete, got %+v", res)
+	}
+}
+
+// TestDeleteMSKAsyncNotGoneIsUnknown pins D974: a cluster delete the provider
+// ACCEPTS but that stays present (DELETING, not gone) must report unknown —
+// never a terminal "succeeded" that tombstones a data-bearing Kafka cluster
+// still live.
+func TestDeleteMSKAsyncNotGoneIsUnknown(t *testing.T) {
+	const arn = "arn:aws:kafka:eu-central-1:000000000000:cluster/pv-c/uuid-1" // same as mskServer: keep the delete route already route-captured
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && strings.Contains(r.URL.Path, "/api/v2/clusters"): // never gone
+				reqName := r.URL.Query().Get("clusterNameFilter")
+				_, _ = w.Write([]byte(`{"clusterInfoList":[{"clusterArn":"` + arn + `","clusterName":"` + reqName +
+					`","state":"DELETING","tags":{"groundhold-capability":"bus","groundhold-environment":"prod"}}]}`))
+			case r.Method == "DELETE":
+				w.WriteHeader(200)
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	defer srv.Close()
+	d := mskDriver(t, srv)
+	d.PollTimeout = 5 * time.Millisecond // the cluster never leaves DELETING → times out fast
+	res := d.deleteMSK("bus", "prod", "msk:eu-central-1:000000000000:pv-bus-prod-1")
+	if res.Status != "unknown" {
+		t.Fatalf("an accepted-but-still-deleting cluster must be unknown (keep the handle), "+
+			"got %+v — reporting succeeded tombstones a Kafka cluster still live", res)
 	}
 }
 
@@ -185,29 +243,29 @@ func TestMetamorphicMSKRoundTrip(t *testing.T) {
 					switch {
 					case r.Method == "POST":
 						body := readJSONBody(r)
-						prov, _ := body["Provisioned"].(map[string]any)
-						if v, ok := prov["KafkaVersion"].(string); ok {
+						prov, _ := body["provisioned"].(map[string]any)
+						if v, ok := prov["kafkaVersion"].(string); ok {
 							kafkaVersion = v
 						}
-						if enc, ok := prov["EncryptionInfo"].(map[string]any); ok {
-							if ar, ok := enc["EncryptionAtRest"].(map[string]any); ok {
-								if k, ok := ar["DataVolumeKMSKeyId"].(string); ok {
+						if enc, ok := prov["encryptionInfo"].(map[string]any); ok {
+							if ar, ok := enc["encryptionAtRest"].(map[string]any); ok {
+								if k, ok := ar["dataVolumeKMSKeyId"].(string); ok {
 									kms = k
 								}
 							}
 						}
 						w.WriteHeader(200)
-						_, _ = w.Write([]byte(`{"ClusterArn":"` + arn + `","State":"CREATING"}`))
+						_, _ = w.Write([]byte(`{"clusterArn":"` + arn + `","state":"CREATING"}`))
 					case r.Method == "GET":
 						reqName := r.URL.Query().Get("clusterNameFilter")
 						enc := ""
 						if kms != "" {
-							enc = `"DataVolumeKMSKeyId":"` + kms + `"`
+							enc = `"dataVolumeKMSKeyId":"` + kms + `"`
 						}
-						_, _ = w.Write([]byte(`{"ClusterInfoList":[{"ClusterArn":"` + arn + `","ClusterName":"` + reqName +
-							`","State":"ACTIVE","Tags":{"groundhold-capability":"bus","groundhold-environment":"prod"},` +
-							`"Provisioned":{"CurrentBrokerSoftwareInfo":{"KafkaVersion":"` + kafkaVersion + `"},` +
-							`"EncryptionInfo":{"EncryptionInTransit":{"ClientBroker":"TLS"},"EncryptionAtRest":{` + enc + `}}}}]}`))
+						_, _ = w.Write([]byte(`{"clusterInfoList":[{"clusterArn":"` + arn + `","clusterName":"` + reqName +
+							`","state":"ACTIVE","tags":{"groundhold-capability":"bus","groundhold-environment":"prod"},` +
+							`"provisioned":{"currentBrokerSoftwareInfo":{"kafkaVersion":"` + kafkaVersion + `"},` +
+							`"encryptionInfo":{"encryptionInTransit":{"clientBroker":"TLS"},"encryptionAtRest":{` + enc + `}}}}]}`))
 					default:
 						w.WriteHeader(200)
 					}
@@ -254,4 +312,59 @@ func TestMetamorphicMSKRoundTrip(t *testing.T) {
 			}
 		})
 	}
+}
+
+func mskRESTRole(req *http.Request, _ []byte) certifynet.Role {
+	if req.Method == http.MethodGet {
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingMSK enrols msk in the D391 gate. The cluster name is deterministic,
+// a second create is answered with a Conflict, and the driver resolves by name and
+// checks the tags before adopting.
+func TestAdoptsExistingMSK(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	const arn = "arn:aws:kafka:eu-central-1:000000000000:cluster/pv-c/uuid-1"
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/msk",
+		Classify: mskRESTRole,
+		ExistingServer: func() *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/api/v2/clusters"):
+						w.WriteHeader(409)
+						_, _ = w.Write([]byte(`{"message":"Conflict: cluster already exists"}`))
+					case r.Method == "GET" && strings.Contains(r.URL.Path, "/api/v2/clusters"):
+						reqName := r.URL.Query().Get("clusterNameFilter")
+						_, _ = w.Write([]byte(`{"clusterInfoList":[{"clusterArn":"` + arn +
+							`","clusterName":"` + reqName + `","state":"ACTIVE",` +
+							`"tags":{"groundhold-capability":"events","groundhold-environment":"prod"},` +
+							`"provisioned":{"currentBrokerSoftwareInfo":{"kafkaVersion":"3.6.0"},` +
+							`"encryptionInfo":{"encryptionInTransit":{"clientBroker":"TLS"},` +
+							`"encryptionAtRest":{}}}}]}`))
+					default:
+						w.WriteHeader(404)
+					}
+				}))
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.MSKBaseURL = happyURL
+			d.Now = time.Now
+			d.PollInterval = time.Millisecond
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("msk", "events", "prod", mskAttrs(), mskImpl(), "events", 1)
+		},
+		AllowedMutations: 1, // the refused create
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

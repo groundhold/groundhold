@@ -234,7 +234,7 @@ func reverseMapLoadBalancer(doc lbDoc) []provider.Observation {
 		{Path: "network.publicExposure", Value: public, Derivation: "measured"},
 		// An L4 load balancer forwards packets; it never terminates TLS. inTransit
 		// is false by construction of the type — honest, not a fabricated true.
-		{Path: "encryption.inTransit", Value: false, Derivation: "config-intent"},
+		{Path: "encryption.inTransit", Value: false, Derivation: "platform-invariant"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
 }

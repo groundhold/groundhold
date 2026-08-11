@@ -42,17 +42,58 @@ import (
 	"time"
 )
 
-// Verdict is the reachability outcome. Only 2xx/3xx is reachable; every other
-// answer (a 401/403 anonymous denial, a transport failure, any other status) is
-// unknown — never collapsed to a boolean, never a confident accusation. There is
-// no Layer-1 "denied" verdict: a 403 to an anonymous probe is ambiguous, so
-// blaming a cause belongs to a Layer-2 DECLARED constraint, not to the probe.
+// Verdict is the reachability outcome. THREE disjoint states, never two (D696):
+// the edge served the public path, the probe did not establish it, or the edge
+// answered with something that has no second reading.
+//
+// The two-state shape folded "I could not confirm this" into the same bucket as
+// "this is broken", and the field reported what that costs: a deployment gate
+// probing through a rate-limited endpoint took a 429, found no expected phrase,
+// fell through to "skipped", changed its mind between runs and shipped an image
+// built without a key. The probe did not fail — collapsing a third state into a
+// second did.
+//
+// There is still no "denied" verdict: a 403 to an anonymous probe is ambiguous
+// (a missing grant, an auth-gated path, an org guardrail), so blaming a cause
+// belongs to a Layer-2 DECLARED constraint, not to the probe. Failing is for
+// answers that admit no alternative explanation, not for answers we dislike.
 type Verdict string
 
 const (
 	Reachable Verdict = "reachable"
 	Unknown   Verdict = "unknown"
+	// Failing: the edge is there and what it returned is a failure. A 5xx, or a
+	// TLS layer that did not complete. Neither is a policy and neither is a
+	// vantage-point artefact.
+	Failing Verdict = "failing"
+	// Skipped is not classified from an answer — it is what the CALLER records
+	// when the probe did not run at all (--no-reachability). It lives here so the
+	// published closed set has one home.
+	Skipped Verdict = "skipped"
 )
+
+// ReportedVerdicts is the CLOSED SET a machine reader can see in the `reachability`
+// field of applyResult and convergeResult, sorted.
+//
+// D696: the published schema listed `denied`, which no code path can produce (it was
+// removed when a 403 became ambiguous), and of course did not list `failing`. A
+// consumer generating types from the schema got one value that never arrives and
+// missed one that does. The set has one home now and a gate holds the schema to it —
+// the same fix as every other published closed set that drifted (D329/D330/D338).
+var ReportedVerdicts = []string{
+	string(Failing), string(Reachable), string(Skipped), string(Unknown)}
+
+// Checked names what the measurement COVERED, and rides on every result (D696).
+//
+// Asked for from the field, with the incident that motivated it: a function that
+// would not start answered HTTP 200 carrying {"errorType":"Runtime.InvalidEntrypoint"},
+// and a smoke gate keyed on the status class passed it as clean. A dead API looked
+// healthy. The boundary is deliberate — the CONTENT contract belongs to whoever owns
+// the service, and this probe does not read bodies — but a reader must not have to
+// infer the boundary from silence. `--no-reachability` already says "the edge was NOT
+// probed"; this says what a probe that DID run actually measured.
+const Checked = "reachability and HTTP status class only — the response body was " +
+	"not inspected, so a 2xx carrying an error payload reads here as reachable"
 
 // Classify maps an HTTP GET result to the reachability verdict with a NAMED
 // cause. err != nil means no usable HTTP response was seen (unreachable from
@@ -64,6 +105,9 @@ const (
 // success, and unreachable-from-here never reads as a denial.
 func Classify(status int, err error) (Verdict, string) {
 	if err != nil {
+		if failingTransport(err) {
+			return Failing, networkCause(err)
+		}
 		return Unknown, networkCause(err)
 	}
 	switch {
@@ -73,11 +117,42 @@ func Classify(status int, err error) (Verdict, string) {
 		return Unknown, fmt.Sprintf("edge returned HTTP %d to an anonymous "+
 			"request — the public path is not anonymously reachable (ambiguous: a "+
 			"missing grant action, an auth-gated path, or an org guardrail)", status)
+	case status >= 500:
+		// D696: the edge answered, and 5xx is the edge saying it failed. No
+		// policy reads this way and no vantage point produces it.
+		return Failing, fmt.Sprintf("edge returned HTTP %d — it answered, and what "+
+			"it answered is a failure; no policy and no vantage point explains a 5xx",
+			status)
 	default:
 		return Unknown, fmt.Sprintf("edge responded HTTP %d — reachable at the "+
 			"network layer but not confirming the public path; not a proven success",
 			status)
 	}
+}
+
+// failingTransport separates a transport failure that admits no second reading from
+// one that does (D696).
+//
+// FAILING: the TLS layer did not complete — a certificate that does not verify, or a
+// handshake that broke. An expired or wrong-name certificate is not a policy and not a
+// propagation delay; the edge is there and the connection to it is broken.
+//
+// UNKNOWN, deliberately, and this is where this implementation stops short of what
+// the field asked for: NXDOMAIN, connection refused and timeouts. Each has a live
+// second reading MINUTES AFTER A CREATE — DNS propagation, an edge still
+// provisioning, a firewalled vantage point — and a probe that runs right after apply
+// would turn those into confident accusations. This project refuses confident
+// accusations in the other direction just as firmly; making them here to satisfy a
+// tidier state machine would be the same error wearing the opposite sign. Bounding
+// propagation is a policy decision (how long is too long), and a policy belongs in a
+// DECLARED constraint, not compiled into a prober.
+func failingTransport(err error) bool {
+	var certErr *tls.CertificateVerificationError
+	if errors.As(err, &certErr) {
+		return true
+	}
+	var recErr tls.RecordHeaderError
+	return errors.As(err, &recErr)
 }
 
 // networkCause names the transport failure so a human/agent never sees a bare
@@ -223,10 +298,19 @@ func edgeOutputs(capType string) (cands []edgeCand, gatePublic bool, ok bool) {
 		// edge (a refused gap), so nothing else lists here.
 		return []edgeCand{{"domainName", false}}, false, true
 	case "capability.function.serverless":
-		// AWS Lambda functionUrl / GCP Cloud Functions gen2 url — both full URLs,
-		// both PUBLIC-only outputs (present only for a public function), so
-		// output-presence is the gate.
-		return []edgeCand{{"functionUrl", true}, {"url", true}}, false, true
+		// AWS Lambda functionUrl / GCP Cloud Functions gen2 url — both full URLs.
+		//
+		// This used to say they are "PUBLIC-only outputs (present only for a public
+		// function), so output-presence is the gate", and that was simply untrue of
+		// AWS (D537): a Function URL exists with AuthType AWS_IAM, which is the
+		// CORRECT shape behind CloudFront/OAC — present, and deliberately private.
+		// The probe therefore measured an origin whose 403 to an anonymous GET IS
+		// the origin working, and reported the run BLOCKED. A field partner turned
+		// the probe off over it and quoted our own rule: a signal that is always
+		// red stops being a signal.
+		//
+		// Gated on exposure now, which D534 made a true input by measuring AuthType.
+		return []edgeCand{{"functionUrl", true}, {"url", true}}, true, true
 	case "capability.workload.container":
 		// GCP Cloud Run uri (full *.run.app URL); Azure Container Apps fqdn (a
 		// bare host) slots in here later. The uri exists regardless of ingress, so
@@ -286,13 +370,17 @@ func Targets(capTypes map[string]string, outputs map[string]map[string]any, publ
 	return ts
 }
 
-// CapResult is one edge's four-valued reachability outcome.
+// CapResult is one edge's reachability outcome, in three disjoint states.
 type CapResult struct {
 	Capability string  `json:"capability"`
 	URL        string  `json:"url"`
 	Verdict    Verdict `json:"verdict"`
 	Cause      string  `json:"cause"`
 	Status     int     `json:"status,omitempty"`
+	// Checked names the SCOPE of the measurement, on every result including the
+	// clean ones (D696) — a reader keying on `verdict` alone must be able to see,
+	// in the same object, what "reachable" did and did not establish.
+	Checked string `json:"checked"`
 }
 
 // Probe GETs every target and classifies it four-valued. Pure given the
@@ -303,21 +391,52 @@ func Probe(g Getter, targets []Target) []CapResult {
 		status, err := g.Get(t.URL)
 		v, cause := Classify(status, err)
 		out = append(out, CapResult{Capability: t.Capability, URL: t.URL,
-			Verdict: v, Cause: cause, Status: status})
+			Verdict: v, Cause: cause, Status: status, Checked: Checked})
 	}
 	return out
 }
 
-// Overall folds per-edge verdicts to the run verdict: any unknown makes the run
-// unknown (it did not confirm the public path); otherwise reachable. Empty
+// Overall folds per-edge verdicts to the run verdict, worst-first: one failing
+// edge makes the run failing, else one unknown makes it unknown, else reachable.
+// Failing outranks unknown because it carries strictly more knowledge — "this is
+// broken" is a measurement, "I could not tell" is the absence of one. Empty
 // results have no verdict (the caller reports nothing).
 func Overall(results []CapResult) Verdict {
+	worst := Reachable
 	for _, r := range results {
-		if r.Verdict == Unknown {
-			return Unknown
+		switch r.Verdict {
+		case Failing:
+			return Failing
+		case Unknown:
+			worst = Unknown
 		}
 	}
-	return Reachable
+	return worst
+}
+
+// Fold assigns every result to its rollup bucket and returns the run verdict.
+//
+// It exists because two renderers — `converge`'s phase output and the `probe` verb —
+// each had their own copy of "which verdict means what", and D696 had to add a third
+// state to both. A meaning kept in two places is a meaning that will disagree in one
+// of them; the prose stays per-verb, the CLASSIFICATION lives here.
+//
+// A failing edge is a VIOLATION (something was measured and it is wrong), never an
+// unknown (nothing was established). That distinction is the whole of this entry.
+func Fold(results []CapResult) (violated, unknown []string, verdict Verdict) {
+	for _, r := range results {
+		switch r.Verdict {
+		case Failing:
+			violated = append(violated, r.Capability+" public edge is failing")
+		case Unknown:
+			if IsAnonymousDenied(r) {
+				unknown = append(unknown, r.Capability+" public edge not anonymously reachable")
+			} else {
+				unknown = append(unknown, r.Capability+" public edge unreachable-from-here")
+			}
+		}
+	}
+	return violated, unknown, Overall(results)
 }
 
 // IsAnonymousDenied reports whether an unknown result came from a 401/403 — the
@@ -347,8 +466,17 @@ type Observation struct {
 func Observations(results []CapResult) []Observation {
 	var obs []Observation
 	for _, r := range results {
-		if r.Verdict == Reachable {
+		switch r.Verdict {
+		case Reachable:
 			obs = append(obs, Observation{Capability: r.Capability, Value: true,
+				Evidence: fmt.Sprintf("GET %s -> %s", r.URL, r.Cause)})
+		case Failing:
+			// D696: a confirmed failure is a MEASUREMENT — at this instant the edge
+			// did not serve the public path — so it enters the observation stream as
+			// false, with its evidence, where a declared constraint can be violated
+			// by it. Unknown still records nothing: absence of knowledge is not a
+			// reading, and writing one would be the collapse this entry undoes.
+			obs = append(obs, Observation{Capability: r.Capability, Value: false,
 				Evidence: fmt.Sprintf("GET %s -> %s", r.URL, r.Cause)})
 		}
 	}

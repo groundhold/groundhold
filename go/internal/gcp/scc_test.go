@@ -341,11 +341,13 @@ func TestSCC_ObserveNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("not-found must not error, got %v", err)
 	}
-	if len(obs) != 0 {
-		t.Fatalf("not-found must yield no observations, got %v", obs)
+	// Corrected with D521: this asserted SILENCE for an absent bound resource,
+	// which is the defect F-LC3 exists to prevent.
+	if !absentMarked(obs) {
+		t.Fatalf("not-found must mark the resource absent, got %v", obs)
 	}
-	if len(diags) == 0 || !strings.Contains(diags[0], "nothing to observe") {
-		t.Fatalf("not-found must carry a nothing-to-observe diagnostic, got %v", diags)
+	if len(diags) == 0 || !strings.Contains(diags[0], "bound resource is gone") {
+		t.Fatalf("not-found must carry a gone diagnostic, got %v", diags)
 	}
 }
 

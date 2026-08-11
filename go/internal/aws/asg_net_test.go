@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 // asgServer routes on the Query Action across BOTH services this driver uses:
@@ -23,6 +26,8 @@ type asgServer struct {
 	template     string
 	templateErr  int
 	deleteStatus int
+	deleteKeeps  bool // async test (D977): stay present after delete — never reaches gone
+	deleted      bool
 	calls        []string
 	bodies       []string
 }
@@ -50,6 +55,11 @@ func (s *asgServer) handler() http.HandlerFunc {
 				fail(s.describeErr)
 				return
 			}
+			if s.deleted && !s.deleteKeeps {
+				// the group has finished deleting — the poll-to-absence (D977) confirms gone.
+				_, _ = w.Write([]byte(`<DescribeAutoScalingGroupsResponse><DescribeAutoScalingGroupsResult><AutoScalingGroups/></DescribeAutoScalingGroupsResult></DescribeAutoScalingGroupsResponse>`))
+				return
+			}
 			_, _ = w.Write([]byte(s.describe))
 		case "DescribePolicies":
 			if s.policiesErr != 0 {
@@ -70,6 +80,7 @@ func (s *asgServer) handler() http.HandlerFunc {
 			}
 			_, _ = w.Write([]byte(s.template))
 		case "DeleteAutoScalingGroup":
+			s.deleted = true
 			w.WriteHeader(s.deleteStatus)
 			_, _ = w.Write([]byte(`<DeleteAutoScalingGroupResponse/>`))
 		default:
@@ -434,6 +445,18 @@ func TestDeleteASG(t *testing.T) {
 			t.Errorf("DeleteAutoScalingGroup did not force — a non-empty group would strand")
 		}
 	})
+	t.Run("an accepted delete that never leaves the fleet present is unknown (D977)", func(t *testing.T) {
+		// DeleteAutoScalingGroup accepted, but the group stays present (still terminating
+		// its members). Concluding succeeded would tombstone a fleet still being torn down;
+		// the poll must time out to unknown and keep the handle.
+		s := asgHappyServer()
+		s.deleteKeeps = true
+		d, done := asgTestDriver(t, s)
+		defer done()
+		if got := d.deleteASG("web-fleet", "production", asgPID); got.Status != "unknown" {
+			t.Fatalf("status = %q, want unknown — an accepted-but-still-deleting fleet keeps its handle", got.Status)
+		}
+	})
 	t.Run("refuses a fleet that is not ours", func(t *testing.T) {
 		s := asgHappyServer()
 		s.describe = strings.Replace(asgGroupXML, "<Value>web-fleet</Value>",
@@ -511,4 +534,51 @@ func TestSplitASGProviderID(t *testing.T) {
 			t.Errorf("%q was accepted as an ASG providerId", bad)
 		}
 	}
+}
+
+func asgQueryRole(_ *http.Request, body []byte) certifynet.Role {
+	if strings.HasPrefix(actionOf(string(body)), "Describe") {
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingASG enrols asg in the D391 gate. An auto-scaling group NAME is
+// deterministic, so a second create is answered AlreadyExists — and the tag check is
+// what stops the driver binding somebody else's FLEET to this contract, which the
+// driver's own comment calls out. The existing fixture already describes an owned
+// group; only the create answer changes.
+func TestAdoptsExistingASG(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "SECRET")
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/asg",
+		Classify: asgQueryRole,
+		ExistingServer: func() *httptest.Server {
+			s := asgHappyServer()
+			s.createStatus = 400
+			// NB the envelope: rdsErrCode parses `Error>Code` relative to the ROOT, so
+			// the fake's own fail() shape (<Response><Errors><Error>) yields an EMPTY
+			// code — harmless where a test only asserts the status, and exactly the F28
+			// pattern in miniature. The driver sees this shape from real AWS.
+			s.createBody = `<ErrorResponse><Error><Code>AlreadyExists</Code></Error></ErrorResponse>`
+			return httptest.NewServer(s.handler())
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.AutoScalingBaseURL = happyURL
+			d.EC2BaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.PollInterval = time.Millisecond
+			d.PollTimeout = 50 * time.Millisecond
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("asg", "web-fleet", "production", asgAttrs(), asgImpl(), "web-fleet", 0)
+		},
+		PID:              asgPID,
+		AllowedMutations: 2, // the refused create + the scaling policy
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

@@ -85,7 +85,8 @@ func (d *Driver) createAzureCustomRole(environment, capability string,
 type azureCustomRoleDoc struct {
 	Properties struct {
 		Permissions []struct {
-			Actions []string `json:"actions"`
+			Actions    []string `json:"actions"`
+			NotActions []string `json:"notActions"`
 		} `json:"permissions"`
 	} `json:"properties"`
 }
@@ -103,7 +104,11 @@ func (d *Driver) observeAzureCustomRole(capability, providerID string) ([]provid
 		return nil, nil, fmt.Errorf("roleDefinitions.get: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"custom role not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"custom role not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("roleDefinitions.get: HTTP %d", st)
@@ -112,19 +117,43 @@ func (d *Driver) observeAzureCustomRole(capability, providerID string) ([]provid
 	if json.Unmarshal(resp, &doc) != nil || len(doc.Properties.Permissions) == 0 {
 		return nil, nil, fmt.Errorf("roleDefinitions.get: empty permissions — %w", armBody("roleDefinitions.get", st))
 	}
-	actions := doc.Properties.Permissions[0].Actions
+	actions, narrowed := azRoleActions(doc)
+	var diags []string
+	if narrowed {
+		diags = append(diags, "role.permissions lists the granted actions only: the role "+
+			"also carries notActions, which NARROW what those actions reach. They are not "+
+			"subtracted here — ignoring a narrowing over-reports privilege, which is the "+
+			"safe side of a security attribute, but the reported set is a ceiling rather "+
+			"than an exact grant")
+	}
 	return []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "role.permissions", Value: actions, Derivation: "measured"},
 		{Path: "access.mutating", Value: azRoleMutating(actions), Derivation: "measured"},
 		{Path: "access.privileged", Value: azRolePrivileged(actions), Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
-	}, nil, nil
+	}, diags, nil
 }
 
 func (d *Driver) deleteAzureCustomRole(capability, environment, providerID string) provider.CreateResult {
 	sub, guid, err := splitAzureCustomRoleProviderID(providerID)
 	if err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if sub != d.Subscription && d.Subscription != "" {
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("providerId subscription %q is not the driver's", sub)}
+	}
+	// D458 — ownership. A roleDefinition carries no tags, but its NAME is a GUID this
+	// runtime derives from (scope, roleName): recomputing it is an exact answer, not a
+	// heuristic. Deleting a stranger's custom role revokes every permission it grants
+	// from every principal assigned to it, at once, with nothing to undo it.
+	if want := azRoleDefGUID("/subscriptions/"+sub,
+		azCustomRoleName(capability, environment)); guid != want {
+		return provider.CreateResult{Status: "failed",
+			Reason: "role definition id is not the one this contract would have minted — " +
+				"refusing to delete a role that is not ours"}
 	}
 	st, resp, e := d.doARM("DELETE", d.customRoleURL(sub, guid), nil)
 	if e != nil {

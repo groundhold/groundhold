@@ -682,8 +682,18 @@ func TestPartialCouplingDemotes(t *testing.T) {
 	restoredPath := filepath.Join(t.TempDir(), "restored.jsonl")
 	rep, code := Run(Options{Out: restoredPath, AnchorPath: anchorPath,
 		CapsulePaths: capsules, Partial: true})
-	if code != ExitOK {
-		t.Fatalf("partial restore must succeed, got %d: %v", code, rep.Reasons)
+
+	// D618 supersedes this case's original expectation, deliberately and in writing.
+	// It used to require ExitOK plus an empty restored ledger on disk: --partial had
+	// reported honestly per capability, so exiting 0 read as consistent. What changed
+	// is what happens NEXT to that empty file. D613 shows the zero-event anchor
+	// beside it verifies any ledger it is later checked against, and D617 shows the
+	// integrity verbs answered "healthy" over an absent history — so the artefacts a
+	// zero-recovery left behind were being certified as a recovered estate. A restore
+	// that recovered NOTHING is a failed restore; the per-capability honesty stays in
+	// the report, and the run refuses instead of leaving something to bless.
+	if code == ExitOK {
+		t.Fatalf("a partial restore that recovered zero events must refuse: %v", rep.Reasons)
 	}
 	if !hasCapStatus(rep.Partial, "cache-net", "unknown", "capsule-missing") {
 		t.Fatalf("cache-net must be capsule-missing: %+v", rep.Partial)
@@ -691,12 +701,14 @@ func TestPartialCouplingDemotes(t *testing.T) {
 	if !hasCapStatus(rep.Partial, "orders-db", "unknown", "capsule-coupled") {
 		t.Fatalf("orders-db must be demoted capsule-coupled (shares the tip): %+v", rep.Partial)
 	}
-	restored, err := ledger.ReplayFile(restoredPath)
-	if err != nil {
-		t.Fatal(err)
+	if rep.Events != 0 {
+		t.Fatalf("both capabilities unknown -> zero events, got %d", rep.Events)
 	}
-	if restored.TotalEvents() != 0 {
-		t.Fatalf("both capabilities unknown -> an empty ledger, got %d events", restored.TotalEvents())
+	for _, leftover := range []string{restoredPath, restoredPath + ".anchor"} {
+		if _, err := os.Stat(leftover); err == nil {
+			t.Fatalf("%s survived a failed restore — D313: a refused run leaves no "+
+				"plausible artefact", leftover)
+		}
 	}
 }
 

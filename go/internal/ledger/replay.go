@@ -5,6 +5,7 @@ package ledger
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,6 +48,39 @@ func readLedger(path string) ([]byte, error) {
 // SnapshotPath is the sidecar the replay seeds from when present (D137).
 func SnapshotPath(ledgerPath string) string { return ledgerPath + ".snapshot" }
 
+// ReplayExisting is ReplayFile for a reader that is ASKING ABOUT a ledger rather than
+// preparing to write one (D617).
+//
+// ReplayFile treats a missing file as an empty ledger — a bootstrap affordance for
+// writers, since the first append creates it. Six read-only verbs inherited it and
+// answered questions about a file that was not there:
+//
+//	attest  --ledger gone.jsonl   exit 0, a clean IntegrityReport
+//	repair  --ledger gone.jsonl   exit 0, {"status":"healthy"}      ← the diagnose verb
+//	anchor  --ledger gone.jsonl   exit 0, emits an events:0 anchor  ← which D613 shows
+//	                                                                  rubber-stamps
+//	deposed/posture/refresh       exit 0
+//
+// while `export` and `snapshot` exit 1 and `backup` exits 5 on the identical input.
+// A typo in a path is the ordinary case here, and "healthy" is the worst possible
+// answer to it.
+func ReplayExisting(path string) (*Ledger, error) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w at %s — a question about a ledger that is not "+
+				"there has no answer, and an empty one is not the same as a healthy one",
+				ErrNoLedger, path)
+		}
+		return nil, err
+	}
+	return ReplayFile(path)
+}
+
+// ErrNoLedger separates "the path is wrong" from "the bytes do not replay" (D617).
+// They are different operator problems and they had four different exit codes between
+// them; a caller that branches on the status must be able to tell them apart.
+var ErrNoLedger = errors.New("no ledger")
+
 func ReplayFile(path string) (*Ledger, error) {
 	led := New()
 	led.Lenient = true // existing history is tolerated, never re-judged
@@ -62,14 +96,26 @@ func ReplayFile(path string) (*Ledger, error) {
 		if err != nil {
 			return nil, err
 		}
+		// D710: the ledger side of the same pin. An empty hash here makes
+		// CheckAnchor report DIVERGED against any anchor that has one — fail-closed,
+		// but with a reason that blames a swap when the truth is that the fold could
+		// not be hashed. Say which it is.
 		var snapDoc map[string]any
-		rawSnap, _ := json.Marshal(snap)
-		if err := json.Unmarshal(rawSnap, &snapDoc); err == nil {
-			normalize(snapDoc)
-			if h, err := HashSnapshot(snapDoc); err == nil {
-				led.snapshotHash = h
-			}
+		rawSnap, merr := json.Marshal(snap)
+		if merr != nil {
+			return nil, fmt.Errorf("cannot re-encode the snapshot to hash it: %v", merr)
 		}
+		if err := json.Unmarshal(rawSnap, &snapDoc); err != nil {
+			return nil, fmt.Errorf("cannot re-read the snapshot to hash it: %v", err)
+		}
+		normalize(snapDoc)
+		h, herr := HashSnapshot(snapDoc)
+		if herr != nil {
+			return nil, fmt.Errorf("cannot hash the snapshot this ledger seeds from "+
+				"(%v) — an anchor comparison would report a swapped fold when the "+
+				"truth is that the fold is unhashable", herr)
+		}
+		led.snapshotHash = h
 		led.Lenient = true
 	}
 	raw, err := readLedger(path)
@@ -288,6 +334,84 @@ func (w *Writer) BuildDoc(etype string, caps []string,
 		"apiVersion": "state/v0", "kind": "LedgerEvent", "event": ev}
 }
 
+// lockLedger opens the ledger and takes the exclusive lock, then CHECKS that the
+// descriptor it holds is still the file at that path.
+//
+// D655: the open and the lock are two steps, and `Rotate` renames the ledger to its
+// archive while holding the lock on the same inode. A writer that opened before the
+// rename woke up holding a lock on the ARCHIVED file, replayed the new path, and
+// appended to the old one — reporting success. The line then exists in no fold, and
+// because the snapshot pinned the archive's hash BEFORE that write, the ledger is
+// permanently un-exportable: attest says the archive is mismatched, repair exits 5,
+// export and backup refuse. Measured 12 times in 15 trials against the real binary,
+// with `observe` and `converge` both printing success.
+//
+// The check is dev+inode, which is what "the same file" means to the kernel. A
+// rotation that beat us is not an error, it is a race we lost — so retry against
+// the new file, bounded, and refuse loudly rather than write into a ghost.
+func lockLedger(path string) (*os.File, error) {
+	for attempt := 0; attempt < 8; attempt++ {
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		// D675: a blocked writer used to wait forever in silence — measured, a
+		// 12-second `observe` against a held lock produced exit 124 with an EMPTY
+		// stdout and stderr. Try without blocking first, so the wait can be
+		// announced; an operator who sees nothing for a minute has no way to tell a
+		// held lock from a hang.
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			fmt.Fprintf(os.Stderr,
+				"waiting for the ledger lock on %s — another groundhold process is "+
+					"writing; this run continues as soon as it releases\n", path)
+			if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+				f.Close()
+				return nil, err
+			}
+		}
+		same, serr := sameFile(f, path)
+		if serr != nil {
+			syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			f.Close()
+			return nil, serr
+		}
+		if same {
+			return f, nil
+		}
+		// The ledger was rotated (or replaced) while we waited. Drop everything and
+		// take the lock on whatever is at the path now.
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}
+	return nil, fmt.Errorf("%s was replaced repeatedly while waiting for the "+
+		"ledger lock — refusing to append into a file that is no longer the "+
+		"ledger (D655)", path)
+}
+
+// sameFile reports whether the open descriptor and the path name one file.
+func sameFile(f *os.File, path string) (bool, error) {
+	fi, err := f.Stat()
+	if err != nil {
+		return false, err
+	}
+	pi, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil // rotated away and not yet recreated
+		}
+		return false, err
+	}
+	a, aok := fi.Sys().(*syscall.Stat_t)
+	b, bok := pi.Sys().(*syscall.Stat_t)
+	if !aok || !bok {
+		// Without inode identity we cannot tell — and this decides whether a write
+		// lands in the ledger or in a ghost, so it does not guess.
+		return false, fmt.Errorf("cannot establish file identity for %s on this "+
+			"platform — refusing to append rather than guess (D655)", path)
+	}
+	return a.Dev == b.Dev && a.Ino == b.Ino, nil
+}
+
 // commitUnderLock is the linearizable persisted-append (D67): under a
 // file lock held across replay/validate/token-alloc/append/fsync (never
 // across provider calls), it RE-REPLAYS the current file, builds the
@@ -304,14 +428,11 @@ func (w *Writer) commitUnderLock(etype string, caps []string,
 	if err := os.MkdirAll(filepath.Dir(w.Path), 0o700); err != nil {
 		return Result{}, err
 	}
-	f, err := os.OpenFile(w.Path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := lockLedger(w.Path)
 	if err != nil {
 		return Result{}, err
 	}
 	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		return Result{}, err
-	}
 	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 
 	fresh, err := ReplayFile(w.Path)

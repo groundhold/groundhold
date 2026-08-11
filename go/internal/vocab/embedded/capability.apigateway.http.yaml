@@ -27,7 +27,7 @@ attributes:
     kind: string
     description: Region the gateway is served from
     mappings:
-      aws.apigatewayv2: the provider region (an HTTP API is regional)
+      aws.apigateway: the provider region (an HTTP API is regional)
       azure.apim: the API Management service location
 
   protocol:
@@ -39,7 +39,7 @@ attributes:
       Azure APIM it is REFUSED (APIM has no service-level websocket-API primitive) —
       refused rather than silently downgrading to http.
     mappings:
-      aws.apigatewayv2: CreateApi ProtocolType (HTTP | WEBSOCKET)
+      aws.apigateway: CreateApi ProtocolType (HTTP | WEBSOCKET)
       azure.apim: HTTP gateway — websocket refused
 
   service.managed:

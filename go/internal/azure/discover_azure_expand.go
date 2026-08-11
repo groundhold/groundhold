@@ -81,7 +81,7 @@ func (d *Driver) discoverRegional(providerPath, apiVersion, region, resourceType
 		out = append(out, provider.Discovered{
 			ProviderID:   p,
 			ResourceType: resourceType,
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -172,7 +172,7 @@ func (d *Driver) discoverCustomRoles(_ string) ([]provider.Discovered, []string,
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.authorization.role",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -223,7 +223,7 @@ func (d *Driver) discoverRoleAssignments(_ string) ([]provider.Discovered, []str
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.authorization.grant",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

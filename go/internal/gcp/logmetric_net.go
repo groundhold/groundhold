@@ -114,13 +114,19 @@ func (d *Driver) observeLogMetric(capability, providerID string) ([]provider.Obs
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"log metric not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"log metric not found — bound resource is gone (will re-create)"}, nil
 	}
 	kind := "counter"
 	if doc.ValueExtractor != "" {
 		kind = "gauge"
 	}
 	return []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "metric.name", Value: doc.Name, Derivation: "measured"},
 		{Path: "metric.filter", Value: doc.Filter, Derivation: "measured"},
 		{Path: "metric.kind", Value: kind, Derivation: "measured"},

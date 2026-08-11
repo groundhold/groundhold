@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 const cloudTrailTestAccount = "000000000000"
@@ -241,7 +244,10 @@ func TestObserveCloudTrail(t *testing.T) {
 					`"HomeRegion":"eu-central-1","IsMultiRegionTrail":true,"LogFileValidationEnabled":true,` +
 					`"KmsKeyId":"` + cloudTrailTestKms + `","S3BucketName":"` + cloudTrailTestBucket + `"}}`))
 			case "GetTrailStatus":
-				_, _ = w.Write([]byte(`{"IsLogging":true}`))
+				// D725: a HEALTHY trail has actually delivered. `IsLogging` alone only says
+				// StartLogging was called, and a trail whose bucket refuses the writes
+				// keeps it true forever.
+				_, _ = w.Write([]byte(`{"IsLogging":true,"LatestDeliveryTime":1700000000}`))
 			default:
 				w.WriteHeader(400)
 			}
@@ -280,7 +286,10 @@ func TestObserveCloudTrailNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("not-found must not error: %v", err)
 	}
-	if len(obs) != 0 || len(diags) != 1 {
+	// Corrected with D520: this asserted SILENCE for an absent bound resource,
+	// which is the defect F-LC3 exists to prevent — the compile sees an empty set,
+	// plans nothing, and converge reports a world that no longer contains it.
+	if !absentMarked(obs) || len(diags) != 1 {
 		t.Fatalf("not-found = obs %v diags %v", obs, diags)
 	}
 }
@@ -463,7 +472,10 @@ func TestDiscoverCloudTrail(t *testing.T) {
 				_, _ = w.Write([]byte(`{"Trail":{"Name":"pv-audit-prod-abcdefgh","TrailARN":"` + cloudTrailArn("pv-audit-prod-abcdefgh") +
 					`","HomeRegion":"eu-central-1","IsMultiRegionTrail":true,"LogFileValidationEnabled":true}}`))
 			case "GetTrailStatus":
-				_, _ = w.Write([]byte(`{"IsLogging":true}`))
+				// D725: a HEALTHY trail has actually delivered. `IsLogging` alone only says
+				// StartLogging was called, and a trail whose bucket refuses the writes
+				// keeps it true forever.
+				_, _ = w.Write([]byte(`{"IsLogging":true,"LatestDeliveryTime":1700000000}`))
 			default:
 				w.WriteHeader(400)
 			}
@@ -480,5 +492,156 @@ func TestDiscoverCloudTrail(t *testing.T) {
 	if len(found) != 1 || found[0].ResourceType != "capability.audit.trail" ||
 		found[0].ProviderID != "cloudtrail:eu-central-1:pv-audit-prod-abcdefgh" {
 		t.Fatalf("discover = %+v (shadow trail from another home region must be filtered)", found)
+	}
+}
+
+func cloudTrailRole(req *http.Request, _ []byte) certifynet.Role {
+	switch cloudTrailAction(req) {
+	case "GetTrail", "GetTrailStatus", "ListTags", "DescribeTrails":
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingCloudTrail enrols cloudtrail in the D391 gate. The create reads the
+// trail and its tags before writing (D391), so a trail of OURS standing at the name is
+// adopted: logging is ensured and the binding returns succeeded. D804 replaced a fixture
+// that modelled a RACE instead — see TestCloudTrailRaceConcludesUnknown below, which
+// keeps that case rather than losing it.
+func TestAdoptsExistingCloudTrail(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/cloudtrail",
+		Classify: cloudTrailRole,
+		// D804: this fixture used to answer TrailNotFound to GetTrail and
+		// TrailAlreadyExists to CreateTrail — a RACE (the trail appears between the read
+		// and the write), not the ownership question this probe exists to ask. The
+		// driver has read and checked tags since D391; the register listed it under
+		// "creates that issue no read", which is a cause nobody measured here.
+		//
+		// The estate now SERVES the trail, carrying our tags, so the probe exercises the
+		// real pre-read and the create adopts. The race keeps its own test below.
+		ExistingServer: func() *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					switch cloudTrailAction(r) {
+					case "GetTrail":
+						_, _ = w.Write([]byte(`{"Trail":{"Name":"pv-x","TrailARN":"` +
+							cloudTrailArn("pv-x") + `","HomeRegion":"eu-central-1",` +
+							`"IsMultiRegionTrail":true,"LogFileValidationEnabled":true,` +
+							`"KmsKeyId":"` + cloudTrailTestKms + `","S3BucketName":"` +
+							cloudTrailTestBucket + `"}}`))
+					case "ListTags":
+						_, _ = w.Write([]byte(`{"ResourceTagList":[{"ResourceId":"` +
+							cloudTrailArn("pv-x") + `","TagsList":[` +
+							`{"Key":"groundhold-capability","Value":"audit"},` +
+							`{"Key":"groundhold-environment","Value":"prod"}]}]}`))
+					case "GetTrailStatus":
+						_, _ = w.Write([]byte(`{"IsLogging":true,"LatestDeliveryTime":1700000000}`))
+					case "StartLogging":
+						_, _ = w.Write([]byte(`{}`))
+					default:
+						w.WriteHeader(400)
+					}
+				}))
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.Account = cloudTrailTestAccount
+			cloudTrailBaseURLOverride = happyURL
+			t.Cleanup(func() { cloudTrailBaseURLOverride = "" })
+			d.Now = time.Now
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("cloudtrail", "audit", "prod", cloudTrailAttrs(), cloudTrailImpl(), "audit", 1)
+		},
+		AllowedMutations: 1, // the refused CreateTrail
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
+
+// D725: the audit trail that is on and writes nothing. AWS keeps `IsLogging: true` when
+// the destination bucket refuses the log files, and reports the refusal in
+// `LatestDeliveryError` — "This error occurs only when there is a problem with the
+// destination S3 bucket." A `delivery.assured: true` here tells an operator their audit
+// record exists when it does not, which is the reading they would discover at incident
+// time.
+//
+// The first version of this test asserted that the driver READ the error field. That is
+// plumbing, and the mutation meter proved it: re-injecting the bug left it green. It
+// asserts the OBSERVATION now — what a contract is judged against.
+func TestCloudTrailDeliveryIsFalseWhenTheBucketRefusesTheWrites(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			switch cloudTrailAction(r) {
+			case "GetTrail":
+				_, _ = w.Write([]byte(`{"Trail":{"Name":"` + CloudTrailName("prod", "audit", 1) +
+					`","TrailARN":"` + cloudTrailArn(CloudTrailName("prod", "audit", 1)) + `",` +
+					`"HomeRegion":"eu-central-1","IsMultiRegionTrail":true,"LogFileValidationEnabled":true,` +
+					`"KmsKeyId":"` + cloudTrailTestKms + `","S3BucketName":"` + cloudTrailTestBucket + `"}}`))
+			case "GetTrailStatus":
+				_, _ = w.Write([]byte(`{"IsLogging":true,"LatestDeliveryTime":1700000000,` +
+					`"LatestDeliveryError":"AccessDenied. Check the S3 bucket policy"}`))
+			default:
+				_, _ = w.Write([]byte(`{}`))
+			}
+		}))
+	defer srv.Close()
+	d := cloudTrailDriver(t, srv)
+	pid := cloudTrailProviderID("eu-central-1", CloudTrailName("prod", "audit", 1))
+
+	obs, diags, err := d.observeCloudTrail("audit", pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got any
+	for _, o := range obs {
+		if o.Path == "delivery.assured" {
+			got = o.Value
+		}
+	}
+	if got != false {
+		t.Fatalf("delivery.assured = %v — AWS reported that CloudTrail cannot write to "+
+			"the destination bucket, so the audit record is not being kept", got)
+	}
+	var named bool
+	for _, dg := range diags {
+		if strings.Contains(dg, "AccessDenied") {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("the refusal reason must reach the operator; diags=%v", diags)
+	}
+}
+
+// D804. The race the adopt probe used to model, kept as its own test: the ownership
+// pre-read finds nothing, and CreateTrail then answers TrailAlreadyExists because
+// something created the trail in between. Nothing was duplicated — the create was
+// refused — but who owns it is unsettled, so this concludes UNKNOWN with the pid and
+// leaves ownership to reconcile, rather than binding a trail it never read.
+func TestCloudTrailRaceConcludesUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			switch cloudTrailAction(r) {
+			case "GetTrail":
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`{"__type":"TrailNotFoundException","message":"no such trail"}`))
+			case "CreateTrail":
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`{"__type":"TrailAlreadyExistsException","message":"TrailAlreadyExists"}`))
+			default:
+				w.WriteHeader(400)
+			}
+		}))
+	defer srv.Close()
+	d := cloudTrailDriver(t, srv)
+	res := d.Create("cloudtrail", "audit", "prod", cloudTrailAttrs(), cloudTrailImpl(), "audit", 1)
+	if res.Status != "unknown" || res.ProviderID == "" {
+		t.Fatalf("a trail that appeared between the read and the write must conclude "+
+			"unknown WITH the pid, got %+v", res)
 	}
 }

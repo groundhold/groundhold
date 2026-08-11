@@ -24,6 +24,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"groundhold/internal/canonical"
@@ -112,6 +115,12 @@ type SnapLease struct {
 	Expiry int  `json:"expiry"`
 	TTL    int  `json:"ttl"`
 	Ended  bool `json:"ended"`
+	// Seq identifies the LEASE across its capabilities (D633). It must survive the
+	// compaction boundary: without it a seeded fold cannot tell two same-token leases
+	// apart, and the one-mutation-one-lease rule would relax to the old per-capability
+	// check for any ledger that has been snapshotted — the silent projection loss the
+	// snapshot-equivalence fuzz exists to catch, and did.
+	Seq int `json:"seq,omitempty"`
 }
 
 // HashSnapshot: identity of the fold — the raw canonical tree with the
@@ -154,6 +163,46 @@ func sortedToSet(m map[string][]string) map[string]map[string]bool {
 
 // LoadSnapshotFile reads the sidecar; nil when absent (no snapshot is
 // a normal state, a malformed one never is).
+// SnapshotState is the THREE-valued answer to "is this ledger compacted?" (D708).
+//
+// LoadSnapshotFile has always answered three ways — absent is (nil, nil), unreadable
+// is (nil, err), present is (snap, nil) — and three of its six callers wrote a
+// two-valued test:
+//
+//	if snap, err := LoadSnapshotFile(p); err == nil && snap != nil { … }
+//
+// which folds "I could not read this" into "this is not there". `backup` skipped the
+// refusal that exists because capsule DR and compaction are mutually exclusive, and
+// emitted capsules that cannot restore while reporting success. `attest` left the
+// snapshot facts empty, so a report meant to be evidence read as "no snapshot".
+// `runstatus` silently stopped reading the archive, so runs that live in it became
+// "no such run".
+//
+// This type exists so the third answer has a name a caller has to look at. It is not
+// a different mechanism — it is the same call, with the outcome that was being
+// discarded made into a value.
+type SnapshotState string
+
+const (
+	SnapshotAbsent     SnapshotState = "absent"
+	SnapshotPresent    SnapshotState = "present"
+	SnapshotUnreadable SnapshotState = "unreadable"
+)
+
+// SnapshotStateOf reads the sidecar beside a ledger and says which of the three it
+// found. The error is returned as well, for callers that report the reason.
+func SnapshotStateOf(ledgerPath string) (*Snapshot, SnapshotState, error) {
+	snap, err := LoadSnapshotFile(SnapshotPath(ledgerPath))
+	switch {
+	case err != nil:
+		return nil, SnapshotUnreadable, err
+	case snap == nil:
+		return nil, SnapshotAbsent, nil
+	default:
+		return snap, SnapshotPresent, nil
+	}
+}
+
 func LoadSnapshotFile(path string) (*Snapshot, error) {
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -281,7 +330,7 @@ func BuildSnapshot(led *Ledger) *Snapshot {
 		s.Leases = map[string]SnapLease{}
 		for c, l := range led.leases {
 			s.Leases[c] = SnapLease{Token: l.token, Expiry: l.expiry,
-				TTL: l.ttl, Ended: l.ended}
+				TTL: l.ttl, Ended: l.ended, Seq: l.seq}
 		}
 	}
 	return s
@@ -336,6 +385,51 @@ func normalizeSnapshot(s *Snapshot) {
 
 // ArchivePath names where a compacted prefix lands — never deleted:
 // capsules and audits of old history read the archive.
+// ArchiveIntegrity is the answer to "is the file this snapshot archived the file
+// it says it archived?" — four-valued on purpose, because "I could not look" and
+// "it does not match" are different facts (D646).
+type ArchiveIntegrity struct {
+	Status string `json:"status"` // not-claimed | matched | mismatched | missing | misnamed
+	File   string `json:"file,omitempty"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// CheckArchive reads the archive a snapshot names and compares it to the hash the
+// snapshot pinned. Until D646 that field had ZERO readers anywhere in the tree,
+// while the spec told operators a swapped or truncated archive was detectable —
+// truncating an 18-event archive to 3 left every verb green.
+//
+// The snapshot does not get to nominate WHICH file satisfies its own hash: the
+// name must be the one compaction would have written for this ledger at this base.
+// Only the directory is allowed to differ, so a backup that was moved still checks.
+func CheckArchive(ledgerPath string, snap *Snapshot) ArchiveIntegrity {
+	if snap == nil || snap.Archive == nil || snap.Archive.Sha256 == "" {
+		return ArchiveIntegrity{Status: "not-claimed"}
+	}
+	want := ArchivePath(ledgerPath, snap.BaseEvents)
+	if filepath.Base(snap.Archive.File) != filepath.Base(want) {
+		return ArchiveIntegrity{Status: "misnamed", File: snap.Archive.File,
+			Detail: fmt.Sprintf("the snapshot points its archive hash at %q, but a "+
+				"compaction at base %d writes %q — a sidecar does not get to choose "+
+				"which file satisfies its own hash",
+				snap.Archive.File, snap.BaseEvents, filepath.Base(want))}
+	}
+	raw, err := os.ReadFile(want)
+	if err != nil {
+		return ArchiveIntegrity{Status: "missing", File: want,
+			Detail: fmt.Sprintf("%v — the compacted history is not beside the "+
+				"ledger, so nothing here can prove what was folded away", err)}
+	}
+	got := fmt.Sprintf("sha256:%x", sha256.Sum256(raw))
+	if got != snap.Archive.Sha256 {
+		return ArchiveIntegrity{Status: "mismatched", File: want,
+			Detail: fmt.Sprintf("the archive hashes to %s but the snapshot pinned "+
+				"%s — it was truncated, swapped or edited after compaction",
+				got, snap.Archive.Sha256)}
+	}
+	return ArchiveIntegrity{Status: "matched", File: want}
+}
+
 func ArchivePath(ledgerPath string, baseEvents int) string {
 	return fmt.Sprintf("%s.archive.%d", ledgerPath, baseEvents)
 }
@@ -349,15 +443,45 @@ func ArchivePath(ledgerPath string, baseEvents int) string {
 // dir, THEN move the ledger to its archive — so no crash window leaves
 // "no snapshot and no ledger" (the silently-empty state D137 forbids).
 func Rotate(ledgerPath string) (*Snapshot, *Anchor, error) {
-	// take the lock FIRST, on the ledger file, and hold it throughout
-	lf, err := os.OpenFile(ledgerPath, os.O_RDWR, 0o600)
+	// D655: lockLedger opens with O_CREATE (an append names the file into
+	// existence), but a compaction of a file that is not there is a typo, not a
+	// rotation — the same distinction D617 drew for every other verb.
+	if _, err := os.Stat(ledgerPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil, fmt.Errorf("%w at %s — nothing to compact",
+				ErrNoLedger, ledgerPath)
+		}
+		return nil, nil, err
+	}
+	// D675: `os.Rename` acts on the LINK, not its target. Compacting through a
+	// symlink therefore moved the link into `<path>.archive.<N>` — so the "archive"
+	// aliased a file that is still live, a fresh regular file took the operator's
+	// path, and the next write through the real path made the ledger permanently
+	// un-exportable (attest: archive mismatched, repair exit 5). Measured with no
+	// concurrency at all.
+	//
+	// Resolving instead of refusing would be worse: every reader derives the
+	// snapshot, archive and anchor paths from the path IT was given, so a rotation
+	// that wrote them beside the resolved file would leave a reader following the
+	// link unable to see any of them — and a tail read as a whole history is the
+	// silent answer this refuses to give.
+	if fi, lerr := os.Lstat(ledgerPath); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+		target, _ := filepath.EvalSymlinks(ledgerPath)
+		return nil, nil, fmt.Errorf(
+			"%s is a symlink (to %s) and compaction renames the path it is given — "+
+				"the link would become the archive while the real file stays live, "+
+				"and the ledger would be permanently un-exportable. Compact the "+
+				"target path directly (D675)", ledgerPath, target)
+	}
+	// take the lock FIRST, on the ledger file, and hold it throughout. D655: and
+	// verify the locked descriptor is still the file at this path — two rotations
+	// racing would otherwise archive the same inode twice, which is the same
+	// lost-write window from the other side.
+	lf, err := lockLedger(ledgerPath)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer lf.Close()
-	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
-		return nil, nil, err
-	}
 	defer syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
 
 	led, err := ReplayFile(ledgerPath)
@@ -480,10 +604,36 @@ func Rotate(ledgerPath string) (*Snapshot, *Anchor, error) {
 	// it under the SAME armed policy (absolute totals, D137), pinning
 	// the fold hash so a swapped snapshot is detectable. tmp+rename.
 	anchor := BuildAnchor(led)
-	if h, err := HashSnapshot(doc); err == nil {
-		anchor.SnapshotHash = h
+	// D710: never swallow, for exactly the reason `previousSnapshotHash` above says
+	// it. This pin is what lets a receiver detect a SWAPPED FOLD rather than only a
+	// rewritten tail, and `CheckAnchor` only makes that comparison when the pin is
+	// non-empty — so a hash failure here used to write an anchor that silently
+	// carries no swap detection, two lines under a comment promising it does.
+	hs, err := HashSnapshot(doc)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot hash the snapshot to pin it in the "+
+			"anchor (%v) — an anchor without that pin detects a rewritten tail but "+
+			"not a swapped fold, and would say nothing about the difference", err)
 	}
-	if _, err := os.Stat(AnchorPath(ledgerPath)); err == nil {
+	anchor.SnapshotHash = hs
+	// D647: an anchor the OPERATOR placed pins the trust policy on purpose (D135),
+	// and a refresh keeps that. An anchor compaction creates on its own is a
+	// WITNESS of the fold — writing a policy into it would arm one nobody chose,
+	// and the next replay would refuse for a reason the operator never configured.
+	hadAnchor := false
+	if _, serr := os.Stat(AnchorPath(ledgerPath)); serr == nil {
+		hadAnchor = true
+	}
+	if !hadAnchor {
+		anchor.Trust = nil
+	}
+	// D647: this used to refresh the anchor only if one already happened to exist.
+	// Compaction is the moment the ledger's integrity story is weakest — a fold
+	// replaces history, and without a key nothing co-located can authenticate it
+	// (D646). The anchor is the one artefact an operator can copy OFF-HOST, where
+	// an attacker who owns this directory cannot reach it, so compaction now
+	// always leaves one. Rotate already computed it and threw it away.
+	{
 		araw, _ := json.Marshal(anchor)
 		atmp := AnchorPath(ledgerPath) + ".tmp"
 		if err := writeFsync(atmp, araw); err != nil {
@@ -549,6 +699,17 @@ func writeFsync(path string, data []byte) error {
 // SeedLedger reconstructs the fold a snapshot recorded — the starting
 // state tail replay continues from. Positions stay ABSOLUTE: anchors
 // and event counts keep meaning what they always meant.
+// sortedLeaseKeys keeps the synthetic seq assignment above deterministic — a fold
+// that depends on map order is a fold that disagrees with itself.
+func sortedLeaseKeys(m map[string]SnapLease) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func SeedLedger(s *Snapshot) (*Ledger, error) {
 	if s.APIVersion != "snapshot/v0.1" || s.Kind != "LedgerSnapshot" {
 		return nil, fmt.Errorf("not a snapshot/v0.1 LedgerSnapshot document")
@@ -628,9 +789,84 @@ func SeedLedger(s *Snapshot) (*Ledger, error) {
 			}
 		}
 	}
-	for c, l := range s.Leases {
-		led.leases[c] = &lease{token: l.Token, expiry: l.Expiry,
-			ttl: l.TTL, ended: l.Ended}
+	// D644: a snapshot written before lease identity carries no seq, and
+	// `omitempty` makes its absence indistinguishable from 0. Reading them all as
+	// one lease is the silence-is-agreement answer, and it turns the covering-lease
+	// rule off for every ledger an older binary compacted. Each such lease gets a
+	// DISTINCT synthetic seq and is marked as unprovable, so a multi-capability
+	// mutation over it refuses with the reason that is actually true.
+	for _, c := range sortedLeaseKeys(s.Leases) {
+		l := s.Leases[c]
+		le := &lease{token: l.Token, expiry: l.Expiry, ttl: l.TTL, ended: l.Ended,
+			seq: l.Seq}
+		if l.Seq == 0 && !l.Ended {
+			led.leaseSeq++
+			le.seq, le.seqUnknown = led.leaseSeq, true
+		}
+		led.leases[c] = le
+		if le.seq > led.leaseSeq {
+			led.leaseSeq = le.seq
+		}
 	}
 	return led, nil
+}
+
+// ArchivedLines returns every event line the compactions moved out of the live
+// ledger, in chain order, together with a NOTE when they do not add up to what the
+// snapshot says was folded.
+//
+// D672: this lived inside internal/export (D645), which is why `runs`, `status` and
+// `wait` still could not see a compacted run: they read the live file alone, so a
+// COMPLETED deploy read `unknown` and `wait` blocked to its timeout and exited 3 —
+// the reconcile-required code, whose published remediation is `groundhold resume`.
+// One reader now, and a third caller gets it for free.
+//
+// A short or pruned archive is reported rather than refused: spec/state-model.md
+// §10 says pruning archives is an operator decision, and a reporting verb that
+// becomes permanently unusable after a lawful prune would be a worse answer than
+// "here is what I can see, and here is what I cannot".
+func ArchivedLines(ledgerPath string, want int) ([]string, string, error) {
+	names, err := filepath.Glob(ledgerPath + ".archive.*")
+	if err != nil {
+		return nil, "", err
+	}
+	type arch struct {
+		n     int
+		lines []string
+	}
+	var found []arch
+	for _, name := range names {
+		n, cerr := strconv.Atoi(strings.TrimPrefix(name, ledgerPath+".archive."))
+		if cerr != nil {
+			continue // not one of ours
+		}
+		raw, rerr := os.ReadFile(name)
+		if rerr != nil {
+			return nil, "", fmt.Errorf("cannot read the archive holding the compacted "+
+				"history (%s): %v", name, rerr)
+		}
+		if len(raw) > 0 && raw[len(raw)-1] != '\n' {
+			return nil, "", fmt.Errorf("%s has a torn final line — repair required", name)
+		}
+		var ls []string
+		for _, l := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+			if l != "" {
+				ls = append(ls, l)
+			}
+		}
+		found = append(found, arch{n: n, lines: ls})
+	}
+	sort.Slice(found, func(i, j int) bool { return found[i].n < found[j].n })
+	var out []string
+	for _, a := range found {
+		out = append(out, a.lines...)
+	}
+	note := ""
+	if len(out) != want {
+		note = fmt.Sprintf("the snapshot says %d events were compacted and the "+
+			"archives beside the ledger hold %d — %d events of this history cannot "+
+			"be read (looked for %s.archive.*)",
+			want, len(out), want-len(out), ledgerPath)
+	}
+	return out, note, nil
 }

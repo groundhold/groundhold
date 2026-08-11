@@ -57,7 +57,7 @@ constraints:
 			TTLSeconds: 86400, Derivation: "measured", Source: "provider-api"},
 	})
 	res, err := Run(c, led, filepath.Join(td, "l.jsonl"),
-		"2026-07-15T12:05:00Z", false)
+		"2026-07-15T12:05:00Z", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ constraints:
 			TTLSeconds: 86400, Derivation: "measured", Source: "provider-api"},
 	})
 	res, err := Run(c, led, filepath.Join(td, "l.jsonl"),
-		"2026-07-15T12:00:00Z", false) // eval BEFORE the observation
+		"2026-07-15T12:00:00Z", false, nil) // eval BEFORE the observation
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ constraints:
 			TTLSeconds: 86400, Derivation: "config-intent", Source: "provider-api"},
 	})
 	res, err := Run(c, led, filepath.Join(td, "l.jsonl"),
-		"2026-07-15T12:05:00Z", false)
+		"2026-07-15T12:05:00Z", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ constraints:
 	seedObs(led, "db", map[string]ledger.ObsRecord{
 		"recovery.rto": {Value: "35m", ObservedAt: "2026-07-15T12:00:00Z",
 			TTLSeconds: 86400, Derivation: "measured", Source: "probe"}})
-	res, err = Run(c, led, filepath.Join(td, "l.jsonl"), "2026-07-15T12:05:00Z", false)
+	res, err = Run(c, led, filepath.Join(td, "l.jsonl"), "2026-07-15T12:05:00Z", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,12 +236,237 @@ constraints:
 				TTLSeconds: 86400, Derivation: "config-intent", Source: "provider-api"},
 		},
 	}
-	res, err := Run(c, led, filepath.Join(td, "l.jsonl"), "2026-07-15T13:05:00Z", false)
+	res, err := Run(c, led, filepath.Join(td, "l.jsonl"), "2026-07-15T13:05:00Z", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.Verdicts[0].Verdict != "satisfied" {
 		t.Fatalf("the retained probe measurement must satisfy the probe-method "+
 			"constraint despite a newer provider-api observe, got %+v", res.Verdicts[0])
+	}
+}
+
+// D722, from the field, on a live account with a hard EU-residency requirement:
+//
+//	{"path":"egress.restricted","value":true,"derivation":"config-intent"}
+//
+// The contract's HARD constraint `egress.restricted == true` read SATISFIED. Measured
+// independently, both security groups in that network allowed `-1` to `0.0.0.0/0` —
+// default-allow, the exact opposite of the vocabulary's "default-deny egress
+// allow-list". The reporter's sentence: "Narzędzie ma znacznik `derivation` i go nie
+// używa przy ocenie ograniczeń."
+//
+// `config-intent` means the resource STORES the value and does not itself enforce it.
+// It is a rung below a provider-api MEASUREMENT, and the evidence ladder ranked it the
+// same, because it keyed on `source` alone.
+func TestConfigIntentCannotSatisfyAProviderAPIConstraint(t *testing.T) {
+	td := t.TempDir()
+	cpath := filepath.Join(td, "c.yaml")
+	if err := os.WriteFile(cpath, []byte(`
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta: { id: net, environment: test, version: 1 }
+capabilities:
+  - id: vpc
+    type: capability.network.private
+constraints:
+  hard:
+    - id: c-egress
+      subject: vpc
+      path: egress.restricted
+      op: equals
+      value: true
+      verify: { method: provider-api }
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := contract.LoadContract(cpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	led := ledger.New()
+	seedObs(led, "vpc", map[string]ledger.ObsRecord{
+		"egress.restricted": {Value: true, ObservedAt: "2026-08-03T12:00:00Z",
+			TTLSeconds: 86400, Derivation: "config-intent", Source: "provider-api"},
+	})
+	res, err := Run(c, led, filepath.Join(td, "l.jsonl"), "2026-08-03T12:05:00Z", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Verdicts) != 1 {
+		t.Fatalf("expected one verdict, got %+v", res.Verdicts)
+	}
+	if got := res.Verdicts[0].Verdict; got != "unknown" {
+		t.Fatalf("a hard constraint asking for provider-api evidence was ruled %q on a "+
+			"config-intent reading — the marker exists and the judgement ignores it; "+
+			"the estate that produced this had default-allow egress", got)
+	}
+}
+
+// The other side, so the rule is not a blanket downgrade: an author who declares
+// `verify: {method: static}` has accepted the document's own word, and a config-intent
+// reading is exactly that. It must still satisfy.
+func TestConfigIntentStillSatisfiesAStaticConstraint(t *testing.T) {
+	td := t.TempDir()
+	cpath := filepath.Join(td, "c.yaml")
+	if err := os.WriteFile(cpath, []byte(`
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta: { id: net, environment: test, version: 1 }
+capabilities:
+  - id: vpc
+    type: capability.network.private
+constraints:
+  hard:
+    - id: c-egress
+      subject: vpc
+      path: egress.restricted
+      op: equals
+      value: true
+      verify: { method: static }
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := contract.LoadContract(cpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	led := ledger.New()
+	seedObs(led, "vpc", map[string]ledger.ObsRecord{
+		"egress.restricted": {Value: true, ObservedAt: "2026-08-03T12:00:00Z",
+			TTLSeconds: 86400, Derivation: "config-intent", Source: "provider-api"},
+	})
+	res, err := Run(c, led, filepath.Join(td, "l.jsonl"), "2026-08-03T12:05:00Z", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.Verdicts[0].Verdict; got != "satisfied" {
+		t.Fatalf("a static-method constraint accepts the configuration's own word; got %q", got)
+	}
+}
+
+// D728: the whole point of the two bars is that they are consulted by different
+// commands. This is the audit half — the same constraint that passes `verify` on the
+// candidate's declaration must be judged against its RUNTIME bar here, so a
+// config-intent reading does not satisfy it.
+func TestAuditJudgesAgainstTheRuntimeBarNotTheDesignBar(t *testing.T) {
+	td := t.TempDir()
+	cpath := filepath.Join(td, "c.yaml")
+	if err := os.WriteFile(cpath, []byte(`
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta: { id: net, environment: test, version: 1 }
+capabilities:
+  - id: vpc
+    type: capability.network.private
+constraints:
+  hard:
+    - id: c-egress
+      subject: vpc
+      path: egress.restricted
+      op: equals
+      value: true
+      verify: { design: static, runtime: provider-api }
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := contract.LoadContract(cpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Constraints[0].VerifyMethod != "static" ||
+		c.Constraints[0].RuntimeMethod != "provider-api" {
+		t.Fatalf("the two bars did not survive loading: design=%q runtime=%q",
+			c.Constraints[0].VerifyMethod, c.Constraints[0].RuntimeMethod)
+	}
+	led := ledger.New()
+	seedObs(led, "vpc", map[string]ledger.ObsRecord{
+		"egress.restricted": {Value: true, ObservedAt: "2026-08-03T12:00:00Z",
+			TTLSeconds: 86400, Derivation: "config-intent", Source: "provider-api"},
+	})
+	res, err := Run(c, led, filepath.Join(td, "l.jsonl"), "2026-08-03T12:05:00Z", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.Verdicts[0].Verdict; got != "unknown" {
+		t.Fatalf("audit ruled %q — it judged against the DESIGN bar (static, which any "+
+			"declaration meets) instead of the runtime bar the contract wrote for it", got)
+	}
+}
+
+// D759. A third derivation, because the set had two values and reality has three.
+// Measured across the drivers: 65 of 72 `config-intent` observations were BARE CONSTANTS
+// — `encryption.atRest: true` on a service that always encrypts — and the published
+// definition of that label is "a value the resource STORES but does not itself enforce".
+// The resource stores nothing of the kind. The values are true; the provenance was not.
+//
+// It earns the SAME bar as config-intent, and that is the load-bearing half. A provider
+// guarantee is tempting to rank high — it cannot be otherwise — and three entries in one
+// day were an author asserting a guarantee that was not one (D752, D753, D754). Nothing
+// about THIS resource was read, so the static bar is what it earns. The new value buys
+// honest provenance, never more trust.
+func TestPlatformInvariantIsHonestProvenanceNotMoreTrust(t *testing.T) {
+	contractFor := func(t *testing.T, method string) *contract.Contract {
+		t.Helper()
+		cpath := filepath.Join(t.TempDir(), "c.yaml")
+		if err := os.WriteFile(cpath, []byte(`
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta: { id: net, environment: test, version: 1 }
+capabilities:
+  - id: vpc
+    type: capability.network.private
+constraints:
+  hard:
+    - id: c-egress
+      subject: vpc
+      path: egress.restricted
+      op: equals
+      value: true
+      verify: { method: `+method+` }
+`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := contract.LoadContract(cpath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	verdictFor := func(t *testing.T, method, derivation string) string {
+		t.Helper()
+		led := ledger.New()
+		seedObs(led, "vpc", map[string]ledger.ObsRecord{
+			"egress.restricted": {Value: true, ObservedAt: "2026-08-03T12:00:00Z",
+				TTLSeconds: 86400, Derivation: derivation, Source: "provider-api"},
+		})
+		res, err := Run(contractFor(t, method), led, filepath.Join(t.TempDir(), "l.jsonl"),
+			"2026-08-03T12:05:00Z", false, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Verdicts) != 1 {
+			t.Fatalf("expected one verdict, got %+v", res.Verdicts)
+		}
+		return res.Verdicts[0].Verdict
+	}
+
+	if got := verdictFor(t, "provider-api", "platform-invariant"); got != "unknown" {
+		t.Errorf("a hard constraint asking for a provider-api READING was ruled %q on a "+
+			"platform guarantee — nothing was read about this resource, and an author who "+
+			"asserted a guarantee wrongly is exactly how D752/D753/D754 happened", got)
+	}
+	if got := verdictFor(t, "static", "platform-invariant"); got != "satisfied" {
+		t.Errorf("a static-bar constraint was ruled %q on a platform guarantee — the "+
+			"author accepted a claim, and this is one", got)
+	}
+	// The control: the new value must not be the old one under another name, nor
+	// silently rejected as an unknown basis.
+	if got := verdictFor(t, "static", "measured"); got != "satisfied" {
+		t.Errorf("measured at the static bar = %q, want satisfied", got)
+	}
+	if got := verdictFor(t, "provider-api", "measured"); got != "satisfied" {
+		t.Errorf("measured at the provider-api bar = %q, want satisfied — the fix must "+
+			"not demote real readings", got)
 	}
 }

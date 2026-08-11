@@ -77,7 +77,18 @@ func TestBuildAzureAlertRefusals(t *testing.T) {
 
 func azAlertServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	var stored map[string]any
+	// D525: pre-seeded with the resource ALREADY STANDING under OUR ownership tags,
+	// so CertifyCreateAdoptsExisting exercises the ADOPT path. Starting empty meant
+	// the first GET 404'd and the driver simply CREATED one — a test named
+	// "AdoptsExisting" that adopted nothing (D524).
+	stored := map[string]any{
+		"name": "gh-cpu-prod-1",
+		"tags": map[string]any{
+			"groundhold-capability":  "cpu",
+			"groundhold-environment": "prod",
+		},
+		"properties": map[string]any{},
+	}
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {

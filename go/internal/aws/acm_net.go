@@ -187,15 +187,24 @@ func (d *Driver) observeACM(capability, providerID string) ([]provider.Observati
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := d.sameAccount(account); err != nil {
+		return nil, nil, err
+	}
 	arn := acmARN(region, account, certID)
 	cert, found, rerr := d.describeACM(region, arn)
 	if rerr != nil {
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"certificate not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"certificate not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
@@ -226,6 +235,9 @@ func (d *Driver) observeACM(capability, providerID string) ([]provider.Observati
 func (d *Driver) deleteACM(capability, environment, providerID string) provider.CreateResult {
 	region, account, certID, err := splitACMProviderID(providerID)
 	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if err := d.sameAccount(account); err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	arn := acmARN(region, account, certID)
@@ -301,6 +313,9 @@ func (d *Driver) updateACM(capability, environment, providerID string,
 	changes []string) provider.CreateResult {
 	region, account, certID, err := splitACMProviderID(providerID)
 	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if err := d.sameAccount(account); err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	arn := acmARN(region, account, certID)

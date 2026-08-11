@@ -11,6 +11,8 @@
 package aws
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -20,6 +22,11 @@ import (
 
 // lambdaMaxTimeoutSec is AWS Lambda's hard per-invocation ceiling: 15 minutes.
 const lambdaMaxTimeoutSec = 900
+
+// wantsFunctionURL answers whether this plan calls for a Function URL to exist.
+// Anonymous exposure needs one; so does the edge pattern, whose URL is reachable
+// only by a SigV4-signed caller and is therefore NOT public exposure (D749).
+func (p LambdaPlan) wantsFunctionURL() bool { return p.Public || p.URLAuth == "iam" }
 
 // LambdaPlan is the attribute-derived shape a create assembles.
 type LambdaPlan struct {
@@ -43,6 +50,12 @@ type LambdaPlan struct {
 	// function is not public (fail closed).
 	URLAuth string
 
+	// URLAuthSet records whether the operand was PRESENT, which "none" (the
+	// default) cannot express on its own: an absent operand on a private
+	// function is silence, an explicit `url_auth: none` on one is a
+	// contradiction, and the two must not be answered the same way (D749).
+	URLAuthSet bool
+
 	// VpcConfig operands (D26): the private subnets + security groups the
 	// function's ENIs attach to, so a Lambda can reach a private Aurora. Named
 	// exactly as the ecs driver reads them (subnets / security_groups) for
@@ -58,6 +71,50 @@ type LambdaPlan struct {
 	// and inject the password through a secret reference the function reads at
 	// runtime. This driver does not build secret injection.
 	Environment map[string]string
+
+	// Architecture is the instruction-set the function runs on: "arm64" (Graviton)
+	// or "x86_64" (D1001). It is IMMUTABLE and set once at CreateFunction. Reported
+	// from the field: the driver never sent Architectures, so AWS defaulted x86_64
+	// while the operator's image was arm64 — the function created "Active"/"Successful"
+	// yet died on first invoke (Runtime.InvalidEntrypoint), a success reported over a
+	// resource that cannot run. It is an OPERAND (a build detail, not a capability
+	// semantic), and its target is emitted for drift ONLY when declared, so an adopted
+	// arm64 function is never spuriously replaced because the contract stayed silent.
+	// ArchitectureSet distinguishes an absent operand (AWS default x86_64) from an
+	// explicit one. NOTE (D1001 follow-up): the driver does not yet READ the image
+	// manifest to refuse a declared-arch-vs-image mismatch — the operand is the
+	// load-bearing fix; the manifest cross-check is recorded, not built.
+	Architecture    string
+	ArchitectureSet bool
+
+	// Invokers is who — other than the edge — may invoke this function (D852).
+	// Reported from the field: a scheduled job invokes a Lambda DIRECTLY, the
+	// contract had no way to say "this role may call me", and the operator's only
+	// route was a hand-written `lambda:InvokeFunction` grant to `Principal: "*"`
+	// with no condition — the widest grant AWS has, on the function it was trying
+	// to protect. The machinery already existed: the CloudFront grants this driver
+	// writes carry a SourceArn condition. Only a way to ASK for one was missing.
+	Invokers []LambdaInvoker
+}
+
+// LambdaInvoker is one entry of the `invokers` operand: a principal allowed to
+// invoke, and the resource whose events justify it.
+type LambdaInvoker struct {
+	// Principal is an IAM principal ARN (a role or user) or an AWS SERVICE
+	// principal (`scheduler.amazonaws.com`). AWS distinguishes them by shape, not
+	// by a flag, so the two candidate keys (`principal:` / `service:`) fold into
+	// one field here and the shape is checked when it is read.
+	Principal string
+
+	// SourceArn narrows a service principal to ONE resource. It is optional for an
+	// IAM principal (an ARN already names exactly one) and REQUIRED for a service
+	// principal, because `scheduler.amazonaws.com` unqualified means every
+	// scheduler in every account — a wildcard wearing a specific-looking name.
+	SourceArn string
+
+	// Service records that this entry named a service principal, so the refusal
+	// above can be phrased about what the operator wrote.
+	Service bool
 }
 
 // isRefShape reports whether v is an unresolved intra-plan $ref operand
@@ -116,6 +173,7 @@ func BuildLambda(account, environment, capability string,
 	// never valid here (this is a closed enum, not a producer output), so only a
 	// literal string is read; an absent operand keeps the "none" default. ----
 	if raw, has := impl["url_auth"]; has {
+		p.URLAuthSet = true
 		s, ok := raw.(string)
 		if !ok {
 			return LambdaPlan{}, fmt.Errorf("implementation.url_auth must be a string (\"iam\" or \"none\")")
@@ -130,6 +188,27 @@ func BuildLambda(account, environment, capability string,
 				"implementation.url_auth %q is not a Function URL AuthType — use \"iam\" "+
 					"(AWS_IAM, edge/SigV4 only) or \"none\" (anonymous)", s)
 		}
+	}
+
+	// ---- architectures operand (D1001): the instruction set (arm64 | x86_64) ----
+	// Accepts a bare string ("arm64") or a single-element list (["arm64"], AWS's own
+	// shape); a two-arch Lambda does not exist, so more than one is refused. Absent
+	// keeps AWS's x86_64 default.
+	if raw, has := impl["architectures"]; has {
+		arch, err := parseLambdaArchitecture(raw)
+		if err != nil {
+			return LambdaPlan{}, err
+		}
+		p.Architecture, p.ArchitectureSet = arch, true
+	}
+
+	// ---- invokers operand (D852): who may invoke, and on whose behalf ----
+	if raw, has := impl["invokers"]; has {
+		inv, err := parseLambdaInvokers(raw)
+		if err != nil {
+			return LambdaPlan{}, err
+		}
+		p.Invokers = inv
 	}
 
 	// ---- VpcConfig operands (D26): reuse ecs's subnets/security_groups names ----
@@ -233,12 +312,33 @@ func BuildLambda(account, environment, capability string,
 					"(handler, memory size, env vars, layers, VPC config are opaque implementation config)", path)
 		}
 	}
-	// url_auth REFINES a public exposure; on a private function there is no URL
-	// for it to refine — refuse rather than silently ignore it (fail closed).
-	if p.URLAuth == "iam" && !p.Public {
+	// D749. The vocabulary defines network.publicExposure as "invokable over public
+	// HTTPS by ANYONE", and its AWS mapping spells the test out: AuthType NONE *plus*
+	// an anonymous invoke grant — "both, or the function stays private". observe
+	// measures exactly that. This path read the SAME attribute as "has a Function URL",
+	// so the edge pattern (a URL only a CloudFront OAC can sign for) could not be
+	// declared honestly: publicExposure:false was refused outright, and the only
+	// accepted declaration made every plan want to ADD an anonymous grant to a function
+	// that is deliberately protected. One attribute, two definitions, no declaration
+	// that converges.
+	//
+	// url_auth decides whether a URL exists and how it authenticates; publicExposure
+	// states the resulting reachability. Both are declared, so both can disagree — and
+	// a disagreement is a contradiction to name, not a definition to pick.
+	switch {
+	case p.URLAuth == "iam" && p.Public:
 		return LambdaPlan{}, fmt.Errorf(
-			"implementation.url_auth=iam requires network.publicExposure: true — it refines HOW a " +
-				"Function URL authenticates, and a private function has no URL to authenticate")
+			"implementation.url_auth=iam contradicts network.publicExposure: true — an " +
+				"AWS_IAM Function URL carries no anonymous invoke grant, so nobody can " +
+				"call it unsigned and observe will measure publicExposure false for as " +
+				"long as it stands. Declare network.publicExposure: false: the URL still " +
+				"exists, and a CloudFront Origin Access Control signs the origin request")
+	case p.URLAuthSet && p.URLAuth == "none" && !p.Public:
+		return LambdaPlan{}, fmt.Errorf(
+			"implementation.url_auth=none contradicts network.publicExposure: false — an " +
+				"AuthType NONE Function URL is anonymous by definition. Declare " +
+				"network.publicExposure: true, or use url_auth: iam for an endpoint only " +
+				"a signed caller can reach")
 	}
 	if p.Region == "" {
 		return LambdaPlan{}, fmt.Errorf("lambda requires location.region")
@@ -261,6 +361,11 @@ func (p LambdaPlan) createBody(capability, environment string) map[string]any {
 			"groundhold-capability":  sanitizeTag(capability),
 			"groundhold-environment": sanitizeTag(environment),
 		},
+	}
+	// D1001: send Architectures so the function matches its image (an arm64 image
+	// needs an arm64 function); omitted keeps AWS's x86_64 default.
+	if p.Architecture != "" {
+		body["Architectures"] = []any{p.Architecture}
 	}
 	if p.TimeoutSec > 0 {
 		body["Timeout"] = p.TimeoutSec
@@ -376,4 +481,148 @@ func (p LambdaPlan) updateConfigBody() map[string]any {
 // first log line is not a guarantee.
 func lambdaLogGroupName(functionName string) string {
 	return "/aws/lambda/" + functionName
+}
+
+// parseLambdaArchitecture reads the `architectures` operand (D1001): a bare string
+// or a single-element list, normalised to "arm64" or "x86_64". A closed set — an
+// unknown value refuses rather than silently defaulting, since a wrong architecture
+// produces a function that starts "Active" and dies on the first invoke.
+func parseLambdaArchitecture(raw any) (string, error) {
+	var s string
+	switch v := raw.(type) {
+	case string:
+		s = v
+	case []any:
+		if len(v) != 1 {
+			return "", fmt.Errorf("implementation.architectures must name exactly one architecture "+
+				"(a Lambda function runs on one), got %d", len(v))
+		}
+		s, _ = v[0].(string)
+	default:
+		return "", fmt.Errorf("implementation.architectures must be \"arm64\" or \"x86_64\" "+
+			"(or a single-element list), got %T", raw)
+	}
+	switch strings.TrimSpace(strings.ToLower(s)) {
+	case "arm64":
+		return "arm64", nil
+	case "x86_64", "x86-64", "amd64":
+		return "x86_64", nil
+	default:
+		return "", fmt.Errorf("implementation.architectures %q is not a Lambda architecture — "+
+			"use \"arm64\" (Graviton) or \"x86_64\"", s)
+	}
+}
+
+// parseLambdaInvokers reads the `invokers` operand (D852).
+//
+// The shape is a list of entries, each naming EITHER an IAM principal ARN
+// (`principal:`) or an AWS service principal (`service:`), with an optional
+// `source_arn:` narrowing it to one resource.
+//
+// One refusal here is the reason the operand exists. A SERVICE principal without
+// a source_arn is not a narrow grant that happens to lack a detail: it authorises
+// that service in EVERY account, which is materially the `Principal: "*"` the
+// reporter was driven to write by hand. An operand added to replace a wildcard
+// must not quietly accept one, so it refuses and says what to add.
+func parseLambdaInvokers(raw any) ([]LambdaInvoker, error) {
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("implementation.invokers must be a list of entries, each with " +
+			"`principal:` (an IAM role/user ARN) or `service:` (an AWS service principal)")
+	}
+	if len(list) == 0 {
+		return nil, fmt.Errorf("implementation.invokers is empty — remove the key rather than " +
+			"declaring an empty allow-list, which reads as a decision nobody made")
+	}
+	var out []LambdaInvoker
+	seen := map[string]bool{}
+	for i, item := range list {
+		m, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("implementation.invokers[%d] must be a mapping with "+
+				"`principal:` or `service:`", i)
+		}
+		for k := range m {
+			switch k {
+			case "principal", "service", "source_arn":
+			default:
+				return nil, fmt.Errorf("implementation.invokers[%d] has an unknown key %q — "+
+					"the entry accepts principal, service and source_arn", i, k)
+			}
+		}
+		principal, _ := m["principal"].(string)
+		service, _ := m["service"].(string)
+		source, _ := m["source_arn"].(string)
+		principal, service, source = strings.TrimSpace(principal), strings.TrimSpace(service), strings.TrimSpace(source)
+
+		switch {
+		case principal != "" && service != "":
+			return nil, fmt.Errorf("implementation.invokers[%d] names both a principal and a "+
+				"service — one entry grants to one caller; write two entries", i)
+		case principal == "" && service == "":
+			return nil, fmt.Errorf("implementation.invokers[%d] names neither `principal:` nor "+
+				"`service:`", i)
+		}
+
+		e := LambdaInvoker{SourceArn: source}
+		if service != "" {
+			e.Principal, e.Service = service, true
+			if !strings.Contains(service, ".amazonaws.com") {
+				return nil, fmt.Errorf("implementation.invokers[%d] service %q is not an AWS "+
+					"service principal (e.g. scheduler.amazonaws.com)", i, service)
+			}
+			if source == "" {
+				return nil, fmt.Errorf("implementation.invokers[%d] grants %s with no "+
+					"source_arn, which authorises that service in EVERY AWS account — add "+
+					"source_arn naming the one resource that may invoke (e.g. the schedule's "+
+					"ARN), or name an IAM role with `principal:` instead", i, service)
+			}
+		} else {
+			e.Principal = principal
+			if !strings.HasPrefix(principal, "arn:") {
+				return nil, fmt.Errorf("implementation.invokers[%d] principal %q is not an ARN "+
+					"— name the role or user in full (arn:aws:iam::<account>:role/<name>)", i, principal)
+			}
+		}
+		if source != "" && !strings.HasPrefix(source, "arn:") {
+			return nil, fmt.Errorf("implementation.invokers[%d] source_arn %q is not an ARN", i, source)
+		}
+		key := e.Principal + "|" + e.SourceArn
+		if seen[key] {
+			return nil, fmt.Errorf("implementation.invokers[%d] repeats %s — one grant is one "+
+				"statement, and a duplicate would collide on its own statement id", i, e.Principal)
+		}
+		seen[key] = true
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Principal != out[j].Principal {
+			return out[i].Principal < out[j].Principal
+		}
+		return out[i].SourceArn < out[j].SourceArn
+	})
+	return out, nil
+}
+
+// StatementID is the deterministic AddPermission Sid for this grant. Deterministic
+// because reconciliation reads the live policy and must recognise its own work:
+// a random id would leave an orphan statement behind on every apply.
+func (e LambdaInvoker) StatementID() string {
+	sum := sha256.Sum256([]byte(e.Principal + "|" + e.SourceArn))
+	return lambdaInvokerSidPrefix + hex.EncodeToString(sum[:6])
+}
+
+// Canon renders one grant for the operand comparison — the same string on the
+// declared side and the observed side, so a drift is a real difference and not a
+// formatting one.
+func (e LambdaInvoker) Canon() string { return e.Principal + "@" + e.SourceArn }
+
+// CanonLambdaInvokers renders a whole set, sorted, for operand drift.
+func CanonLambdaInvokers(in []LambdaInvoker) string {
+	parts := make([]string, 0, len(in))
+	for _, e := range in {
+		parts = append(parts, e.Canon())
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ";")
 }

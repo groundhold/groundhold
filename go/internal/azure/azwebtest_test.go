@@ -23,6 +23,7 @@ func azWebtestAttrs() map[string]any {
 func azWebtestImpl() map[string]any {
 	return map[string]any{
 		"resource_group":  "rg1",
+		"location":        "westeurope", // D902: a web test is regional, never "global"
 		"app_insights_id": "/subscriptions/" + testSub + "/resourceGroups/rg1/providers/Microsoft.Insights/components/ai1",
 	}
 }
@@ -34,6 +35,35 @@ func TestBuildAzureWebtestHonors(t *testing.T) {
 	}
 	if p.URL != "https://api.example.com/healthz" || p.FrequencySec != 300 || p.AppInsightsID == "" {
 		t.Fatalf("plan = %+v", p)
+	}
+}
+
+// TestBuildAzureWebtestIsRegionalNotGlobal (D902): a web test is a REGIONAL resource —
+// Azure refuses location "global" ("Unsupported location: global"). The create body must
+// carry the operator's region, and a missing region must refuse rather than default to a
+// value the platform rejects.
+func TestBuildAzureWebtestIsRegionalNotGlobal(t *testing.T) {
+	p, err := BuildAzureWebtest("prod", "api", azWebtestAttrs(), azWebtestImpl(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := p.createBody(map[string]any{})
+	if body["location"] != "westeurope" {
+		t.Fatalf("web test location must be the region, got %v (a hardcoded \"global\" 400s)", body["location"])
+	}
+	// D902b: Azure requires the WebTest XML configuration, and it must carry the URL.
+	cfg, ok := body["properties"].(map[string]any)["Configuration"].(map[string]any)
+	if !ok || cfg["WebTest"] == "" {
+		t.Fatal("createBody omits properties.Configuration.WebTest — Azure 400s the create without it")
+	}
+	if xml, _ := cfg["WebTest"].(string); !strings.Contains(xml, "https://api.example.com/healthz") || !strings.Contains(xml, "<WebTest") {
+		t.Fatalf("WebTest XML does not carry the request URL: %v", cfg["WebTest"])
+	}
+	// a missing region must refuse, not fall back to "global"
+	impl := azWebtestImpl()
+	delete(impl, "location")
+	if _, err := BuildAzureWebtest("prod", "api", azWebtestAttrs(), impl, 1); err == nil {
+		t.Fatal("a web test with no location was accepted — it would be born global and rejected by Azure")
 	}
 }
 
@@ -69,7 +99,18 @@ func TestBuildAzureWebtestRefusals(t *testing.T) {
 
 func azWebtestServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	var stored map[string]any
+	// D525: pre-seeded with the resource ALREADY STANDING under OUR ownership tags,
+	// so CertifyCreateAdoptsExisting exercises the ADOPT path. Starting empty meant
+	// the first GET 404'd and the driver simply CREATED one — a test named
+	// "AdoptsExisting" that adopted nothing (D524).
+	stored := map[string]any{
+		"name": "gh-api-prod-1",
+		"tags": map[string]any{
+			"groundhold-capability":  "api",
+			"groundhold-environment": "prod",
+		},
+		"properties": map[string]any{},
+	}
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {

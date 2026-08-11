@@ -20,7 +20,10 @@ func alertAttrs() map[string]any {
 }
 
 func alertImpl() map[string]any {
-	return map[string]any{"notification_channel": "projects/acme-prod/notificationChannels/123"}
+	return map[string]any{
+		"notification_channel": "projects/acme-prod/notificationChannels/123",
+		"resource_type":        "gce_instance", // D897: the filter must restrict resource.type
+	}
 }
 
 func TestBuildAlertPolicyHonors(t *testing.T) {
@@ -33,8 +36,13 @@ func TestBuildAlertPolicyHonors(t *testing.T) {
 	}
 	body := p.createBody("cpu", "prod")
 	cond := body["conditions"].([]any)[0].(map[string]any)["conditionThreshold"].(map[string]any)
-	if !strings.Contains(cond["filter"].(string), "cpu/utilization") || cond["comparison"] != "COMPARISON_GT" {
+	filter := cond["filter"].(string)
+	if !strings.Contains(filter, "cpu/utilization") || cond["comparison"] != "COMPARISON_GT" {
 		t.Fatalf("body = %+v", cond)
+	}
+	// D897: the filter MUST restrict resource.type, or Cloud Monitoring 400s the create.
+	if !strings.Contains(filter, `resource.type="gce_instance"`) {
+		t.Fatalf("filter must restrict resource.type: %q", filter)
 	}
 	if _, ok := body["notificationChannels"]; !ok {
 		t.Fatalf("notify=true must set notificationChannels")
@@ -51,6 +59,8 @@ func TestBuildAlertPolicyRefusals(t *testing.T) {
 		"unmanaged":         {map[string]any{"service.managed": false}, alertImpl()},
 		"compound-attr":     {map[string]any{"alert.conditions": "a AND b"}, alertImpl()}, // no compound logic
 		"bad-threshold":     {map[string]any{"alert.threshold": "high"}, alertImpl()},
+		// D897: no resource_type -> the filter would be rejected by Cloud Monitoring
+		"no-resource-type": {nil, map[string]any{"notification_channel": "projects/acme-prod/notificationChannels/123"}},
 	}
 	for name, c := range cases {
 		a := alertAttrs()
@@ -69,10 +79,10 @@ func TestBuildAlertPolicyRefusals(t *testing.T) {
 			t.Errorf("missing %s must refuse", drop)
 		}
 	}
-	// a NON-notifying alert (notify=false) needs no channel
+	// a NON-notifying alert (notify=false) needs no channel, but still needs resource_type
 	a := alertAttrs()
 	a["alert.notify"] = false
-	if _, err := BuildAlertPolicy("acme-prod", "prod", "cpu", a, nil, 1); err != nil {
+	if _, err := BuildAlertPolicy("acme-prod", "prod", "cpu", a, map[string]any{"resource_type": "gce_instance"}, 1); err != nil {
 		t.Errorf("a non-notifying alert should build without a channel: %v", err)
 	}
 }

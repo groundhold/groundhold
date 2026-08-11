@@ -139,6 +139,42 @@ func TestCreateObserveDeleteAISearch(t *testing.T) {
 	}
 }
 
+// D956: >=3 replicas distribute across zones only in a region that HAS availability zones.
+// northcentralus exposes 0 AZs (field 2026-08-08), so a Standard service with 3 replicas
+// there is single-zone — availability.class must be zonal, not regional off the replica
+// proxy. The fake routes the subscription-locations call (regionLogicalZones) separately.
+func TestObserveAISearchNonAZRegionIsZonal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/locations") {
+			_, _ = w.Write([]byte(`{"value":[{"name":"northcentralus","availabilityZoneMappings":[]}]}`))
+			return
+		}
+		if r.Method == "GET" {
+			_, _ = w.Write([]byte(`{"location":"northcentralus","sku":{"name":"standard"},` +
+				`"tags":{"groundhold-capability":"catalog","groundhold-environment":"prod"},` +
+				`"properties":{"provisioningState":"Succeeded","publicNetworkAccess":"enabled","replicaCount":3}}`))
+			return
+		}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	d := aiSearchDriver(t, srv)
+	obs, diags, err := d.observeAISearch("catalog", "aisearch:"+testSub+":rg1:pv-catalog-prod-abcd1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]any{}
+	for _, o := range obs {
+		got[o.Path] = o.Value
+	}
+	if got["availability.class"] != "zonal" {
+		t.Fatalf("3 replicas in a non-AZ region must be zonal, got %v (diags %v)", got["availability.class"], diags)
+	}
+	if len(diags) == 0 {
+		t.Error("a downgraded availability.class should carry a diagnostic")
+	}
+}
+
 func TestDeleteAISearchForeignRefused(t *testing.T) {
 	srv := aiSearchServer(t, "someone-else", "basic", 1, "enabled", "")
 	defer srv.Close()
@@ -153,14 +189,15 @@ func TestDeleteAISearchForeignRefused(t *testing.T) {
 func TestHonestyHarnessAISearch(t *testing.T) {
 	pid := aiSearchProviderID(testSub, "rg1", aiSearchName("prod", "catalog", 1))
 	p := &certifynet.Probe{
-		// AssertTransient left false — D237 TODO: this driver's create/delete ladder
-		// still maps 429/503/403 to terminal failed (and drops the providerId); it must
-		// route through provider.MutationResult before the transient invariant can lock.
 		Name:            "azure/aisearch",
 		Classify:        armRole,
 		OwnerTagValue:   "catalog",
 		AssertTransient: true, // D237
 		DeterministicID: true,
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("aisearch", "catalog", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -261,8 +298,8 @@ func TestMetamorphicAISearchRoundTrip(t *testing.T) {
 			if got["availability.class"] != c.wantAvail {
 				t.Errorf("availability round-trip: want %q got %v", c.wantAvail, got["availability.class"])
 			}
-			if _, has := got["encryption.customerManagedKeys"]; has != c.cmek {
-				t.Errorf("cmek round-trip: want present=%v got %v", c.cmek, got["encryption.customerManagedKeys"])
+			if got["encryption.customerManagedKeys"] != c.cmek {
+				t.Errorf("cmek round-trip: want %v got %v", c.cmek, got["encryption.customerManagedKeys"])
 			}
 		})
 	}

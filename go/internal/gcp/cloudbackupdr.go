@@ -50,12 +50,26 @@ func BuildBackupDRVault(project, environment, capability string,
 			s, _ := raw.(string)
 			switch s {
 			case "compliance":
+				// D752: promising WORM is the false claim this entry removes. This
+				// driver cannot lock a vault — it never sends effectiveTime, the one
+				// field that locks one — so a vault it creates is deletable WITH ITS
+				// DATA by any principal that may call backupVaults.delete(force=true).
+				// Refuse loudly rather than build a governance vault and report it as
+				// compliance, which is what happened before.
+				return BackupDRVaultPlan{}, fmt.Errorf(
+					"retention.lockMode=compliance cannot be honored on GCP by this driver — " +
+						"it creates a vault with no lock time (effectiveTime), so the vault's " +
+						"settings stay patchable and backupVaults.delete(force=true) removes it with its " +
+						"data. Declare retention.lockMode=governance for what this builds, or " +
+						"lock the vault out of band and ADOPT it: observe reads effectiveTime " +
+						"and will report compliance once the lock is in force")
 				// the only mode GCP offers — the enforced retention is immutable
 			case "governance":
-				return BackupDRVaultPlan{}, fmt.Errorf(
-					"retention.lockMode=governance cannot be honored on GCP — a Backup and DR backup " +
-						"vault's enforced retention is immutable by construction (compliance-only); there " +
-						"is no admin-changeable governance mode")
+				// D752: this used to be the refusal, on the belief that GCP had no
+				// admin-changeable mode. It has one, and it is the ONLY one this
+				// driver builds: createBody sets no effectiveTime, so the vault it
+				// creates is patchable and its data deletable. governance is now the
+				// honest declaration for what actually gets built.
 			default:
 				return BackupDRVaultPlan{}, fmt.Errorf("retention.lockMode %q is not a recognized value", s)
 			}

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -167,5 +168,66 @@ func TestValidateRefusesUnmappableAttribute(t *testing.T) {
 		map[string]any{"role.permissions": []any{"core/pods:get"}, "bogus.attr": 1}, nil, 1)
 	if err == nil || !strings.Contains(err.Error(), "no k8s RBAC Role mapping") {
 		t.Fatalf("validate must refuse an unmappable attribute, got %v", err)
+	}
+}
+
+// The reconciler compares a candidate's DECLARED permissions against the ones
+// observe reads back. If a declared spelling does not survive that round trip,
+// the two can never agree: converge plans an update, applies it, reads back the
+// other spelling, and plans the same update again — forever, on a world nobody
+// touched. That is what a real cluster did with `/nodes:get` (D509): the writer
+// accepted the empty core group, the reader always renders it `core`, and the
+// ClusterRole never converged.
+//
+// This is the property, not the instance: every permission the writer accepts
+// must come back out of the reader unchanged.
+func TestPermissionsSurviveTheWriteReadRoundTrip(t *testing.T) {
+	cases := [][]string{
+		{"core/nodes:get", "core/nodes:list"},
+		{"apps/deployments:get"},
+		{"core/pods:get", "apps/deployments:list", "batch/jobs:create"},
+	}
+	for _, perms := range cases {
+		rules, err := buildRoleRules(perms)
+		if err != nil {
+			t.Errorf("%v: writer refused: %v", perms, err)
+			continue
+		}
+		var rr []rbacRule
+		for _, r := range rules {
+			var one rbacRule
+			for _, g := range r["apiGroups"].([]any) {
+				one.APIGroups = append(one.APIGroups, g.(string))
+			}
+			for _, x := range r["resources"].([]any) {
+				one.Resources = append(one.Resources, x.(string))
+			}
+			for _, v := range r["verbs"].([]any) {
+				one.Verbs = append(one.Verbs, v.(string))
+			}
+			rr = append(rr, one)
+		}
+		got, _ := flattenRules(rr)
+		sort.Strings(got)
+		want := append([]string(nil), perms...)
+		sort.Strings(want)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("round trip changed the permission set:\n  declared %v\n  read back %v\n"+
+				"converge would plan the same update on every run, forever", want, got)
+		}
+	}
+}
+
+// The spelling that does NOT round-trip must be refused, not silently written.
+// Precedent in this driver: a grant principal missing its namespace is refused
+// with the canonical form rather than guessed at.
+func TestEmptyCoreGroupIsRefusedNotGuessed(t *testing.T) {
+	_, err := buildRoleRules([]string{"/nodes:get"})
+	if err == nil {
+		t.Fatal("the empty core group was accepted; it writes correctly but observes " +
+			"back as \"core/nodes:get\", so the capability can never converge")
+	}
+	if !strings.Contains(err.Error(), "core/") {
+		t.Errorf("the refusal does not name the spelling that works: %v", err)
 	}
 }

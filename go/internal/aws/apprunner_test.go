@@ -354,3 +354,64 @@ func TestAppRunnerCreateBodyValidJSON(t *testing.T) {
 		t.Fatalf("create body is not valid JSON: %v", err)
 	}
 }
+
+// apprunnerConflictFake: CreateService is refused (a ServiceName is unique per
+// account+region, so a 4xx MAY mean "already exists"), and the standing service is ours.
+type apprunnerConflictFake struct{ inner *apprunnerFake }
+
+func (f *apprunnerConflictFake) handler(t *testing.T) *httptest.Server {
+	t.Helper()
+	inner := f.inner.handler(t)
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target := r.Header.Get("X-Amz-Target")
+		if strings.HasSuffix(target, "CreateService") {
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(`{"__type":"InvalidRequestException","Message":"service already exists"}`))
+			return
+		}
+		inner.Config.Handler.ServeHTTP(w, r)
+	}))
+}
+
+func apprunnerRole(req *http.Request, _ []byte) certifynet.Role {
+	tgt := req.Header.Get("X-Amz-Target")
+	switch tgt[strings.LastIndex(tgt, ".")+1:] {
+	case "ListServices", "ListTagsForResource", "DescribeService",
+		"DescribeAutoScalingConfiguration":
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingAppRunner enrols apprunner in the D391 gate. Its adoption is the
+// most inferential of the family: a 4xx on CreateService MAY mean "already exists", so
+// the driver resolves by name and only then decides — which is why the ours case
+// deserves an assertion rather than a comment.
+func TestAdoptsExistingAppRunner(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	name := AppRunnerName("000000000000", "prod", "capability.workload.container", 1)
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/apprunner",
+		Classify: apprunnerRole,
+		ExistingServer: func() *httptest.Server {
+			return (&apprunnerConflictFake{inner: &apprunnerFake{
+				name: name, tagCap: sanitizeTag("capability.workload.container")}}).handler(t)
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.AppRunnerBaseURL = happyURL
+			d.PollInterval = 0
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("apprunner", "capability.workload.container", "prod",
+				apprunnerAttrs(), apprunnerImpl(), "k", 1)
+		},
+		AllowedMutations: 1, // the refused CreateService — the detection itself
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
+}

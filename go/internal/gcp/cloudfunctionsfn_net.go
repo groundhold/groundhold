@@ -266,7 +266,7 @@ func (d *Driver) observeCloudFunctionFn(capability, providerID string) ([]provid
 	obs := []provider.Observation{
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
-		{Path: "tls.enforced", Value: true, Derivation: "config-intent"},
+		{Path: "tls.enforced", Value: true, Derivation: "platform-invariant"},
 	}
 	obs = append(obs, provider.Observation{Path: "replicas.minimum",
 		Value: float64(doc.ServiceConfig.MinInstanceCount), Derivation: "measured"})
@@ -419,7 +419,7 @@ func (d *Driver) discoverCloudFunctionFn(region string) ([]provider.Discovered, 
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.function.serverless",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

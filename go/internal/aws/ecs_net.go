@@ -197,6 +197,10 @@ type ecsService struct {
 	NetworkConfiguration struct {
 		AwsvpcConfiguration struct {
 			AssignPublicIP string `json:"assignPublicIp"`
+			// Subnets decide the failure domain: tasks run only where their subnets
+			// are, so a service whose subnets sit in ONE zone does not survive that
+			// zone. This was in the response all along, unread (D754).
+			Subnets []string `json:"subnets"`
 		} `json:"awsvpcConfiguration"`
 	} `json:"networkConfiguration"`
 	Deployments []struct {
@@ -310,15 +314,41 @@ func (d *Driver) observeECS(capability, providerID string) ([]provider.Observati
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"service not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"service not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
-		{Path: "availability.class", Value: "regional", Derivation: "config-intent"},
 		{Path: "network.publicExposure",
 			Value:      svc.NetworkConfiguration.AwsvpcConfiguration.AssignPublicIP == "ENABLED",
 			Derivation: "measured"},
+	}
+	// D754: availability.class was the constant "regional", tagged config-intent —
+	// which reads as a hedge but gates nothing: the verifier bars on SOURCE, not on
+	// derivation, so it satisfied a hard constraint exactly like a measurement. A
+	// Fargate service placed in subnets of a single zone does not survive that zone,
+	// and the vocabulary has a word for it.
+	var diags []string
+	subnets := svc.NetworkConfiguration.AwsvpcConfiguration.Subnets
+	switch zones, zerr := d.distinctSubnetZones(region, subnets); {
+	case len(subnets) == 0:
+		diags = append(diags, "availability.class not observed: the service reports no "+
+			"subnets, so the zones its tasks can run in cannot be read")
+	case zerr != nil:
+		diags = append(diags, "availability.class not observed: the service's subnets "+
+			"could not be read ("+zerr.Error()+"), so its failure domain is unknown")
+	case zones >= 2:
+		obs = append(obs, provider.Observation{Path: "availability.class",
+			Value: "regional", Derivation: "measured"})
+	default:
+		obs = append(obs, provider.Observation{Path: "availability.class",
+			Value: "zonal", Derivation: "measured"})
 	}
 	if svc.DesiredCount > 0 {
 		obs = append(obs, provider.Observation{Path: "replicas.minimum",
@@ -329,7 +359,6 @@ func (d *Driver) observeECS(capability, providerID string) ([]provider.Observati
 	// to its LB (DescribeTargetGroups) then the LB to its listeners
 	// (DescribeListeners) — the create trusts the operand, observe measures the
 	// real listener protocol so a plaintext front door is caught as violated.
-	var diags []string
 	if len(svc.LoadBalancers) > 0 && svc.LoadBalancers[0].TargetGroupArn != "" {
 		tgArn := svc.LoadBalancers[0].TargetGroupArn
 		if lbArn, ok := d.targetGroupLB(region, tgArn); !ok {
@@ -464,4 +493,25 @@ func (d *Driver) deleteECS(capability, environment, providerID string) provider.
 			Reason: "workload (service) retired; shared cluster left standing: " + ecsErr(body)}
 	}
 	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+}
+
+// distinctSubnetZones counts the DISTINCT zones a service's subnets span, reusing the
+// resolver the autoscaling driver already had (D754). That driver states the rule this
+// one was missing: "a guess would certify zone survivability". Zero subnets is not a
+// question worth asking, so it answers 0 with no call and no error.
+func (d *Driver) distinctSubnetZones(region string, subnets []string) (int, error) {
+	if len(subnets) == 0 {
+		return 0, nil
+	}
+	zones, err := d.subnetZones(region, subnets)
+	if err != nil {
+		return 0, err
+	}
+	distinct := map[string]bool{}
+	for _, z := range zones {
+		if z != "" {
+			distinct[z] = true
+		}
+	}
+	return len(distinct), nil
 }

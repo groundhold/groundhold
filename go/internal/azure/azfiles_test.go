@@ -168,14 +168,15 @@ func TestDeleteAzFilesForeignRefused(t *testing.T) {
 func TestHonestyHarnessAzureFiles(t *testing.T) {
 	pid := azFilesProviderID(testSub, "rg1", azStorageName("prod", "shared", 1), azFilesShareName("prod", "shared", 1))
 	p := &certifynet.Probe{
-		// AssertTransient left false — D237 TODO: this driver's create/delete ladder
-		// still maps 429/503/403 to terminal failed (and drops the providerId); it must
-		// route through provider.MutationResult before the transient invariant can lock.
 		Name:            "azure/azurefiles",
 		Classify:        armRole,
 		OwnerTagValue:   "shared",
 		AssertTransient: true, // D237
 		DeterministicID: true, // account + share names are chosen
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("azurefiles", "shared", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -294,8 +295,8 @@ func TestMetamorphicAzFilesRoundTrip(t *testing.T) {
 			if got["availability.class"] != c.wantAvail {
 				t.Errorf("availability round-trip: want %q got %v", c.wantAvail, got["availability.class"])
 			}
-			if _, has := got["encryption.customerManagedKeys"]; has != c.cmek {
-				t.Errorf("cmek round-trip: want present=%v got %v", c.cmek, got["encryption.customerManagedKeys"])
+			if got["encryption.customerManagedKeys"] != c.cmek {
+				t.Errorf("cmek round-trip: want %v got %v", c.cmek, got["encryption.customerManagedKeys"])
 			}
 		})
 	}

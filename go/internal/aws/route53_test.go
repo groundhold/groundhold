@@ -5,6 +5,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func r53Attrs() map[string]any {
@@ -161,4 +164,77 @@ func TestClaimRoute53(t *testing.T) {
 	if bad := d.Claim("route53", "apex", "prod", "not-a-zone"); bad.Status != "failed" {
 		t.Fatalf("a malformed route53 pid must fail cleanly, got %+v", bad)
 	}
+}
+
+// r53ExistingServer: our deterministic CallerReference already made this zone, so the
+// create is answered HostedZoneAlreadyExists and recoverRoute53 must find it by name
+// and match the reference — the same handle, never a second zone.
+func r53ExistingServer(t *testing.T, tagCap, callerRef string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "POST" && r.URL.Path == "/2013-04-01/hostedzone":
+				w.WriteHeader(409)
+				_, _ = w.Write([]byte(`<ErrorResponse><Error><Code>HostedZoneAlreadyExists</Code>` +
+					`</Error></ErrorResponse>`))
+			case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/2013-04-01/hostedzonesbyname"):
+				_, _ = w.Write([]byte(`<ListHostedZonesByNameResponse><HostedZones><HostedZone>` +
+					`<Id>/hostedzone/Z123ABC</Id><Name>example.com.</Name>` +
+					`<CallerReference>` + callerRef + `</CallerReference>` +
+					`<Config><PrivateZone>false</PrivateZone></Config>` +
+					`</HostedZone></HostedZones></ListHostedZonesByNameResponse>`))
+			case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/2013-04-01/tags/"):
+				_, _ = w.Write([]byte(`<ListTagsForResourceResponse><ResourceTagSet><Tags>` +
+					`<Tag><Key>groundhold-capability</Key><Value>` + tagCap + `</Value></Tag>` +
+					`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag>` +
+					`</Tags></ResourceTagSet></ListTagsForResourceResponse>`))
+			case r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/2013-04-01/tags/"):
+				_, _ = w.Write([]byte(`<ChangeTagsForResourceResponse></ChangeTagsForResourceResponse>`))
+			case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/2013-04-01/hostedzone/"):
+				_, _ = w.Write([]byte(`<GetHostedZoneResponse><HostedZone>` +
+					`<Id>/hostedzone/Z123ABC</Id><Name>example.com.</Name>` +
+					`<Config><PrivateZone>false</PrivateZone></Config>` +
+					`</HostedZone></GetHostedZoneResponse>`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+}
+
+func r53Role(req *http.Request, _ []byte) certifynet.Role {
+	if req.Method == http.MethodGet {
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingRoute53 enrols route53 in the D391 gate. A hosted zone id is
+// SERVER-assigned, so without recovery a retry mints a second zone for the same domain —
+// the CallerReference is what makes that recoverable, and this asserts the recovery.
+func TestAdoptsExistingRoute53(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	plan, err := BuildRoute53Zone("prod", "apex", r53Attrs(), nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &certifynet.ExistingProbe{
+		Name:           "aws/route53",
+		Classify:       r53Role,
+		ExistingServer: func() *httptest.Server { return r53ExistingServer(t, "apex", plan.CallerReference) },
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.Route53BaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("route53", "apex", "prod", r53Attrs(), nil, "apex", 1)
+		},
+		PID:              r53ProviderID("Z123ABC"),
+		AllowedMutations: 2, // the refused create + the ownership tag write
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

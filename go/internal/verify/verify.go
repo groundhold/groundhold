@@ -7,6 +7,7 @@ package verify
 
 import (
 	"fmt"
+	"sort"
 
 	"groundhold/internal/canonical"
 	"groundhold/internal/contract"
@@ -83,7 +84,13 @@ func Verify(c *contract.Contract, cand *contract.Candidate,
 	vocabs map[string]vocab.Vocabulary) (*Report, error) {
 	verdicts := make([]Verdict, 0, len(c.Constraints))
 	for _, cn := range c.Constraints {
-		v := eval(cn, cand)
+		// D660: canonicalize the constraint's own list operand the same way the
+		// candidate's value was canonicalized at load. `unordered: true` means the
+		// attribute is a SET, list equality is POSITIONAL, and only one side was
+		// being sorted — so an `equals` constraint failed and a `not-equals`
+		// constraint PASSED against the very set it forbids, decided by the order
+		// the contract author happened to type.
+		v := eval(setCanonical(cn, c, vocabs), cand)
 		v.Subject = cn.Subject
 		v.Path = cn.Path
 		v.VerifyMethod = cn.VerifyMethod
@@ -91,8 +98,34 @@ func Verify(c *contract.Contract, cand *contract.Candidate,
 		verdicts = append(verdicts, v)
 	}
 
-	// D17: a candidate must name the contract it implements
+	// D635: a capability the CONTRACT declares and the candidate does not implement
+	// used to vanish. Verify iterates constraints, and the compiler iterates the
+	// CANDIDATE's capabilities — so a declared capability with no hard constraint and
+	// no `requirements` produced no verdict, no action, and no entry in blocked,
+	// unverified, noop, witnessed or advisories. `verify` printed PROVEN and a second
+	// `converge` printed CONVERGED over a capability that does not exist and never
+	// will. This is `witnessed`'s failure mode (D-omission-resistance) reached by the
+	// plainer route of a forgotten candidate entry.
+	//
+	// A retired capability is deliberately exempt: retirement is how a contract says
+	// "this should NOT exist" (D47).
 	blocking := make([]string, 0)
+	capIDs := make([]string, 0, len(c.Capabilities))
+	for capID := range c.Capabilities {
+		capIDs = append(capIDs, capID)
+	}
+	sort.Strings(capIDs) // deterministic: the report is hashed and diffed
+	for _, capID := range capIDs {
+		if state, _ := c.Capabilities[capID]["state"].(string); state == "retired" {
+			continue
+		}
+		if _, ok := cand.Capabilities[capID]; !ok {
+			blocking = append(blocking, fmt.Sprintf(
+				"contract declares capability %q and the candidate does not implement "+
+					"it — a capability with no implementation cannot converge, and "+
+					"silence about it reads as success", capID))
+		}
+	}
 	if cand.ContractID != c.ID {
 		blocking = append(blocking, fmt.Sprintf(
 			"candidate targets contract '%s', not '%s'", cand.ContractID, c.ID))
@@ -266,12 +299,36 @@ func eval(c contract.Constraint, cand *contract.Candidate) Verdict {
 	} else {
 		v.Verdict = "violated"
 	}
-	v.Reason = fmt.Sprintf("%s %s %v: observed %v",
-		c.Path, c.Op, c.Value, pv.Scalar.Raw)
+	// D766, from the field: this said "observed" whatever the basis was. A budget
+	// constraint compared a number the AUTHOR wrote against a threshold the author
+	// wrote, and reported `observed 6 EUR` — while the bill was 2.4x that. The basis
+	// tag beside it said `declared`, which is how the reporter caught it, and the
+	// sentence a person reads still claimed a measurement. The verb now follows the
+	// provenance: nothing observed a declaration.
+	v.Reason = fmt.Sprintf("%s %s %v: %s %v",
+		c.Path, c.Op, c.Value, basisVerb(pv.Status), pv.Scalar.Raw)
 	v.Basis = strPtr(pv.Status)
 	v.Confidence = pv.Confidence
 	v.Observed = strPtr(pv.Scalar.String())
 	return v
+}
+
+// basisVerb names how a value came to be known, in the sentence a human reads. The
+// provenance set is closed (D5): declared | inferred | assumed | unknown, plus the
+// observed case an observation supplies. "observed" for a declaration is the one word
+// that turns a repeated assumption into a measurement (D766).
+func basisVerb(status string) string {
+	switch status {
+	case "declared":
+		return "declared"
+	case "inferred":
+		return "inferred"
+	case "assumed":
+		return "assumed"
+	case "unknown":
+		return "of unknown provenance:"
+	}
+	return "observed"
 }
 
 func strPtr(s string) *string { return &s }
@@ -294,4 +351,67 @@ func pathFlag(cn contract.Constraint, c *contract.Contract,
 	}
 	_, in := voc.Attributes[cn.Path]
 	return &in
+}
+
+// setCanonical returns cn with its list operand sorted when the vocabulary marks
+// the attribute `unordered: true` (D660). It copies rather than mutating: the
+// contract's identity is hashed from these values, and a contract must not have
+// one hash with a vocabulary and another without.
+func setCanonical(cn contract.Constraint, c *contract.Contract,
+	vocabs map[string]vocab.Vocabulary) contract.Constraint {
+	cn.Expected = SortIfUnordered(cn.Expected, cn.Subject, cn.Path, c, vocabs)
+	return cn
+}
+
+// isUnorderedList reports whether (subject, path) is a list attribute the
+// vocabulary marks `unordered: true` (D660) — a SET, whose element order carries
+// no meaning. Shared by setCanonical (the constraint operand) and audit (the
+// recorded observation), so both canonicalize a set identically.
+func isUnorderedList(subject, path string, c *contract.Contract,
+	vocabs map[string]vocab.Vocabulary) bool {
+	if vocabs == nil {
+		return false
+	}
+	capRaw, ok := c.Capabilities[subject]
+	if !ok {
+		return false
+	}
+	typ, _ := capRaw["type"].(string)
+	voc, ok := vocabs[typ]
+	if !ok {
+		return false
+	}
+	spec := voc.Attributes[path]
+	if spec == nil {
+		return false
+	}
+	u, _ := spec["unordered"].(bool)
+	return u
+}
+
+// SortIfUnordered returns a sorted COPY of sc when (subject, path) is an unordered
+// list attribute (D660), else sc unchanged. It never mutates sc — the contract's
+// hash and the ledger's records are read-only here. Both verify (the candidate's
+// declared value + the constraint operand) and audit (a recorded observation) call
+// it, so a SET compares the same whichever side it came from and whatever order
+// the cloud returned it in. Without it on the audit side, `not-equals` on the very
+// forbidden set reports SATISFIED when reality holds that set in another order
+// (a false-clean compliance verdict — the D716 dangerous direction).
+func SortIfUnordered(sc *scalars.Scalar, subject, path string, c *contract.Contract,
+	vocabs map[string]vocab.Vocabulary) *scalars.Scalar {
+	if sc == nil || sc.Kind != scalars.List {
+		return sc
+	}
+	if !isUnorderedList(subject, path, c, vocabs) {
+		return sc
+	}
+	dup := *sc
+	if elems, ok := sc.Value.([]*scalars.Scalar); ok {
+		dup.Value = append([]*scalars.Scalar(nil), elems...)
+	}
+	if raw, ok := sc.Raw.([]any); ok {
+		dup.Raw = append([]any(nil), raw...)
+	}
+	scalars.SortList(&dup)
+	return &dup
 }

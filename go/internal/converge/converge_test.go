@@ -19,22 +19,30 @@ import (
 func TestDescribePlanFailsClosedOnUnparseablePlan(t *testing.T) {
 	o := Options{Out: io.Discard}
 
-	if !describePlan(o, "this is not a plan document", "") {
+	// D630 gave describePlan a second return: whether the plan provably increases
+	// security exposure. An unparseable plan is fail-closed on BOTH — the gate cannot
+	// rule out either harm.
+	destructive, exposing := describePlan(o, "this is not a plan document", "")
+	if !destructive {
 		t.Fatal("an unparseable plan must be treated as destructive (fail-closed) " +
 			"so the consent gate fires")
+	}
+	if !exposing {
+		t.Fatal("an unparseable plan must also be treated as exposing — the gate " +
+			"cannot rule out an exposure it could not read")
 	}
 
 	// a valid, non-destructive plan is NOT flagged (no false positive)
 	nonDestructive := `{"plan":{"actions":[{"id":"a-update-db","operation":"update",` +
 		`"risk":{"dataLoss":"none","identityReplacement":false}}]}}`
-	if describePlan(o, nonDestructive, "") {
+	if d, _ := describePlan(o, nonDestructive, ""); d {
 		t.Fatal("a non-destructive plan must not be flagged destructive")
 	}
 
 	// a data-loss / identity-replacing plan IS destructive
-	destructive := `{"plan":{"actions":[{"id":"a-delete-db","operation":"delete",` +
+	destructivePlan := `{"plan":{"actions":[{"id":"a-delete-db","operation":"delete",` +
 		`"risk":{"dataLoss":"certain","identityReplacement":true}}]}}`
-	if !describePlan(o, destructive, "") {
+	if d, _ := describePlan(o, destructivePlan, ""); !d {
 		t.Fatal("a dataLoss=certain / identity-replacing plan must be destructive")
 	}
 }

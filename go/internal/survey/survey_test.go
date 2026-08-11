@@ -207,13 +207,43 @@ func TestRunCoveredWitnessesAllOfType(t *testing.T) {
 	if r := findRow(rep, "mysql"); r.Capability != "db-a" {
 		t.Errorf("capability = %q, want db-a (sorted first)", r.Capability)
 	}
-	// both witnessed -> no orphans, even under complete.
+	// D707: both are witnessed, so neither is drift — but a type-level finding
+	// cannot say WHICH of the two this repo uses, and `--complete` is the mode an
+	// operator runs to find a capability nobody uses. The report used to be silent
+	// about exactly that case; it now says so, as information.
 	repC := Run(c, []*Doc{d}, true)
-	if len(repC.Orphans) != 0 {
-		t.Errorf("expected no orphans, got %+v", repC.Orphans)
-	}
 	if repC.Drift {
-		t.Error("unexpected drift: both caps witnessed")
+		t.Error("unexpected drift: a type-level witness is real evidence, and " +
+			"accusing every contract with two capabilities of one type would be " +
+			"a confident accusation")
+	}
+	got := map[string]string{}
+	for _, o := range repC.Orphans {
+		got[o.Capability] = o.Status
+	}
+	for _, id := range []string{"db-a", "db-b"} {
+		if got[id] != "witnessed-by-type" {
+			t.Errorf("%s: status %q, want witnessed-by-type — one finding named the "+
+				"TYPE, so neither capability was individually sighted", id, got[id])
+		}
+	}
+}
+
+// D707: with exactly ONE capability of the type, the witness is unambiguous and
+// nothing extra is reported — the new row must not become noise on every contract.
+func TestRunSingleCapabilityOfTypeIsNotAmbiguous(t *testing.T) {
+	c := contractWith("c1", map[string]map[string]any{
+		"db": cap("capability.database.relational"),
+	})
+	d := doc("app", "sha", "",
+		find("mysql", "required", "capability.database.relational"))
+	rep := Run(c, []*Doc{d}, true)
+	if len(rep.Orphans) != 0 {
+		t.Errorf("one capability of the type was witnessed directly; nothing is "+
+			"ambiguous, got %+v", rep.Orphans)
+	}
+	if rep.Drift {
+		t.Error("unexpected drift")
 	}
 }
 

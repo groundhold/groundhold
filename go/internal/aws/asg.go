@@ -302,9 +302,24 @@ func classifyASGChange(path string) (string, string) {
 	case "location.region":
 		return "immutable", "a group is created in one region and cannot move — a region change is a new group"
 	case "availability.class":
-		return "immutable", "the zone spread follows the group's subnets, which are fixed at creation — a change is a new group"
+		// D822: this said the subnets are "fixed at creation". They are not —
+		// UpdateAutoScalingGroup accepts VPCZoneIdentifier, AvailabilityZones and
+		// AvailabilityZoneIds (botocore autoscaling/2011-01-01), and widening a group's
+		// zone spread is an ordinary operation. Replacing the group to do it terminates
+		// the running fleet for nothing.
+		return "unsupported", "in-place zone-spread change is not wired for Auto Scaling " +
+			"in this slice — AWS does support it (UpdateAutoScalingGroup takes " +
+			"VPCZoneIdentifier / AvailabilityZones), so this is a gap in groundhold rather " +
+			"than a reason to replace the group and its instances"
 	case "network.publicExposure":
-		return "immutable", "public addressing lives in the launch template, which groundhold does not author — change the template and replace the group, so the running fleet is not silently re-addressed"
+		// D822: the prose here is true — groundhold does not author launch templates — but
+		// `immutable` means "no in-place change exists", and one does:
+		// UpdateAutoScalingGroup takes a LaunchTemplate. A true sentence attached to a
+		// verdict that destroys a running fleet is still a destroyed fleet.
+		return "unsupported", "in-place exposure change is not wired for Auto Scaling in " +
+			"this slice — public addressing lives in the launch template, which groundhold " +
+			"does not author, and AWS does accept a new template version on a live group " +
+			"(UpdateAutoScalingGroup): change the template rather than replace the group"
 	case "service.managed":
 		return "unsupported", "platform/projection property — nothing to patch"
 	}

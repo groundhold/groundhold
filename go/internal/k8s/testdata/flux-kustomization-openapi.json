@@ -1,0 +1,762 @@
+{
+ "components": {
+  "schemas": {
+   "io.fluxcd.toolkit.kustomize.v1.Kustomization": {
+    "type": "object",
+    "properties": {
+     "apiVersion": {
+      "type": "string"
+     },
+     "kind": {
+      "type": "string"
+     },
+     "metadata": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"
+       }
+      ]
+     },
+     "spec": {
+      "type": "object",
+      "required": [
+       "interval",
+       "prune",
+       "sourceRef"
+      ],
+      "properties": {
+       "buildMetadata": {
+        "type": "array",
+        "items": {
+         "type": "string",
+         "enum": [
+          "originAnnotations",
+          "transformerAnnotations"
+         ]
+        }
+       },
+       "commonMetadata": {
+        "type": "object",
+        "properties": {
+         "annotations": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          }
+         },
+         "labels": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          }
+         }
+        }
+       },
+       "components": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       },
+       "decryption": {
+        "type": "object",
+        "required": [
+         "provider"
+        ],
+        "properties": {
+         "provider": {
+          "type": "string",
+          "enum": [
+           "sops"
+          ]
+         },
+         "secretRef": {
+          "type": "object",
+          "required": [
+           "name"
+          ],
+          "properties": {
+           "name": {
+            "type": "string"
+           }
+          }
+         },
+         "serviceAccountName": {
+          "type": "string"
+         }
+        }
+       },
+       "deletionPolicy": {
+        "type": "string",
+        "enum": [
+         "MirrorPrune",
+         "Delete",
+         "WaitForTermination",
+         "Orphan"
+        ]
+       },
+       "dependsOn": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "name"
+         ],
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "namespace": {
+           "type": "string"
+          },
+          "readyExpr": {
+           "type": "string"
+          }
+         }
+        }
+       },
+       "force": {
+        "type": "boolean",
+        "default": false
+       },
+       "healthCheckExprs": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "apiVersion",
+          "current"
+         ],
+         "properties": {
+          "apiVersion": {
+           "type": "string"
+          },
+          "current": {
+           "type": "string"
+          },
+          "failed": {
+           "type": "string"
+          },
+          "inProgress": {
+           "type": "string"
+          },
+          "kind": {
+           "type": "string"
+          }
+         }
+        }
+       },
+       "healthChecks": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "kind",
+          "name"
+         ],
+         "properties": {
+          "apiVersion": {
+           "type": "string"
+          },
+          "kind": {
+           "type": "string"
+          },
+          "name": {
+           "type": "string"
+          },
+          "namespace": {
+           "type": "string"
+          }
+         }
+        }
+       },
+       "ignore": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "paths"
+         ],
+         "properties": {
+          "paths": {
+           "type": "array",
+           "items": {
+            "type": "string"
+           }
+          },
+          "target": {
+           "type": "object",
+           "properties": {
+            "annotationSelector": {
+             "type": "string"
+            },
+            "group": {
+             "type": "string"
+            },
+            "kind": {
+             "type": "string"
+            },
+            "labelSelector": {
+             "type": "string"
+            },
+            "name": {
+             "type": "string"
+            },
+            "namespace": {
+             "type": "string"
+            },
+            "version": {
+             "type": "string"
+            }
+           }
+          }
+         }
+        }
+       },
+       "ignoreMissingComponents": {
+        "type": "boolean"
+       },
+       "images": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "name"
+         ],
+         "properties": {
+          "digest": {
+           "type": "string"
+          },
+          "name": {
+           "type": "string"
+          },
+          "newName": {
+           "type": "string"
+          },
+          "newTag": {
+           "type": "string"
+          }
+         }
+        }
+       },
+       "interval": {
+        "type": "string",
+        "pattern": "^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"
+       },
+       "kubeConfig": {
+        "type": "object",
+        "properties": {
+         "configMapRef": {
+          "type": "object",
+          "required": [
+           "name"
+          ],
+          "properties": {
+           "name": {
+            "type": "string"
+           }
+          }
+         },
+         "secretRef": {
+          "type": "object",
+          "required": [
+           "name"
+          ],
+          "properties": {
+           "key": {
+            "type": "string"
+           },
+           "name": {
+            "type": "string"
+           }
+          }
+         }
+        },
+        "x-kubernetes-validations": [
+         {
+          "rule": "has(self.configMapRef) || has(self.secretRef)",
+          "message": "exactly one of spec.kubeConfig.configMapRef or spec.kubeConfig.secretRef must be specified"
+         },
+         {
+          "rule": "!has(self.configMapRef) || !has(self.secretRef)",
+          "message": "exactly one of spec.kubeConfig.configMapRef or spec.kubeConfig.secretRef must be specified"
+         }
+        ]
+       },
+       "namePrefix": {
+        "type": "string",
+        "maxLength": 200,
+        "minLength": 1
+       },
+       "nameSuffix": {
+        "type": "string",
+        "maxLength": 200,
+        "minLength": 1
+       },
+       "patches": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "patch"
+         ],
+         "properties": {
+          "patch": {
+           "type": "string"
+          },
+          "target": {
+           "type": "object",
+           "properties": {
+            "annotationSelector": {
+             "type": "string"
+            },
+            "group": {
+             "type": "string"
+            },
+            "kind": {
+             "type": "string"
+            },
+            "labelSelector": {
+             "type": "string"
+            },
+            "name": {
+             "type": "string"
+            },
+            "namespace": {
+             "type": "string"
+            },
+            "version": {
+             "type": "string"
+            }
+           }
+          }
+         }
+        }
+       },
+       "path": {
+        "type": "string"
+       },
+       "postBuild": {
+        "type": "object",
+        "properties": {
+         "substitute": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          }
+         },
+         "substituteFrom": {
+          "type": "array",
+          "items": {
+           "type": "object",
+           "required": [
+            "kind",
+            "name"
+           ],
+           "properties": {
+            "kind": {
+             "type": "string",
+             "enum": [
+              "Secret",
+              "ConfigMap"
+             ]
+            },
+            "name": {
+             "type": "string",
+             "maxLength": 253,
+             "minLength": 1
+            },
+            "optional": {
+             "type": "boolean",
+             "default": false
+            }
+           }
+          }
+         },
+         "substituteStrategy": {
+          "type": "string",
+          "enum": [
+           "WithVariables",
+           "Always"
+          ]
+         }
+        }
+       },
+       "prune": {
+        "type": "boolean"
+       },
+       "retryInterval": {
+        "type": "string",
+        "pattern": "^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"
+       },
+       "serviceAccountName": {
+        "type": "string"
+       },
+       "sourceRef": {
+        "type": "object",
+        "required": [
+         "kind",
+         "name"
+        ],
+        "properties": {
+         "apiVersion": {
+          "type": "string"
+         },
+         "kind": {
+          "type": "string",
+          "enum": [
+           "OCIRepository",
+           "GitRepository",
+           "Bucket",
+           "ExternalArtifact"
+          ]
+         },
+         "name": {
+          "type": "string"
+         },
+         "namespace": {
+          "type": "string"
+         }
+        }
+       },
+       "suspend": {
+        "type": "boolean"
+       },
+       "targetNamespace": {
+        "type": "string",
+        "maxLength": 63,
+        "minLength": 1
+       },
+       "timeout": {
+        "type": "string",
+        "pattern": "^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"
+       },
+       "wait": {
+        "type": "boolean"
+       }
+      }
+     },
+     "status": {
+      "type": "object",
+      "default": {
+       "observedGeneration": -1
+      },
+      "properties": {
+       "conditions": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "lastTransitionTime",
+          "message",
+          "reason",
+          "status",
+          "type"
+         ],
+         "properties": {
+          "lastTransitionTime": {
+           "type": "string",
+           "format": "date-time"
+          },
+          "message": {
+           "type": "string",
+           "maxLength": 32768
+          },
+          "observedGeneration": {
+           "type": "integer",
+           "format": "int64",
+           "minimum": 0
+          },
+          "reason": {
+           "type": "string",
+           "maxLength": 1024,
+           "minLength": 1,
+           "pattern": "^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$"
+          },
+          "status": {
+           "type": "string",
+           "enum": [
+            "True",
+            "False",
+            "Unknown"
+           ]
+          },
+          "type": {
+           "type": "string",
+           "maxLength": 316,
+           "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$"
+          }
+         }
+        }
+       },
+       "history": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "digest",
+          "firstReconciled",
+          "lastReconciled",
+          "lastReconciledDuration",
+          "lastReconciledStatus",
+          "totalReconciliations"
+         ],
+         "properties": {
+          "digest": {
+           "type": "string"
+          },
+          "firstReconciled": {
+           "type": "string",
+           "format": "date-time"
+          },
+          "lastReconciled": {
+           "type": "string",
+           "format": "date-time"
+          },
+          "lastReconciledDuration": {
+           "type": "string"
+          },
+          "lastReconciledStatus": {
+           "type": "string"
+          },
+          "metadata": {
+           "type": "object",
+           "additionalProperties": {
+            "type": "string"
+           }
+          },
+          "totalReconciliations": {
+           "type": "integer",
+           "format": "int64"
+          }
+         }
+        }
+       },
+       "inventory": {
+        "type": "object",
+        "required": [
+         "entries"
+        ],
+        "properties": {
+         "entries": {
+          "type": "array",
+          "items": {
+           "type": "object",
+           "required": [
+            "id",
+            "v"
+           ],
+           "properties": {
+            "id": {
+             "type": "string"
+            },
+            "v": {
+             "type": "string"
+            }
+           }
+          }
+         }
+        }
+       },
+       "lastAppliedOriginRevision": {
+        "type": "string"
+       },
+       "lastAppliedRevision": {
+        "type": "string"
+       },
+       "lastAttemptedRevision": {
+        "type": "string"
+       },
+       "lastHandledReconcileAt": {
+        "type": "string"
+       },
+       "observedGeneration": {
+        "type": "integer",
+        "format": "int64"
+       }
+      }
+     }
+    },
+    "x-kubernetes-group-version-kind": [
+     {
+      "group": "kustomize.toolkit.fluxcd.io",
+      "kind": "Kustomization",
+      "version": "v1"
+     }
+    ]
+   },
+   "io.k8s.apimachinery.pkg.apis.meta.v1.FieldsV1": {
+    "type": "object"
+   },
+   "io.k8s.apimachinery.pkg.apis.meta.v1.ManagedFieldsEntry": {
+    "type": "object",
+    "properties": {
+     "apiVersion": {
+      "type": "string"
+     },
+     "fieldsType": {
+      "type": "string"
+     },
+     "fieldsV1": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.FieldsV1"
+       }
+      ]
+     },
+     "manager": {
+      "type": "string"
+     },
+     "operation": {
+      "type": "string"
+     },
+     "subresource": {
+      "type": "string"
+     },
+     "time": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Time"
+       }
+      ]
+     }
+    }
+   },
+   "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta": {
+    "type": "object",
+    "properties": {
+     "annotations": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "string",
+       "default": ""
+      }
+     },
+     "creationTimestamp": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Time"
+       }
+      ]
+     },
+     "deletionGracePeriodSeconds": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "deletionTimestamp": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.Time"
+       }
+      ]
+     },
+     "finalizers": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "default": ""
+      },
+      "x-kubernetes-list-type": "set",
+      "x-kubernetes-patch-strategy": "merge"
+     },
+     "generateName": {
+      "type": "string"
+     },
+     "generation": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "labels": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "string",
+       "default": ""
+      }
+     },
+     "managedFields": {
+      "type": "array",
+      "items": {
+       "default": {},
+       "allOf": [
+        {
+         "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ManagedFieldsEntry"
+        }
+       ]
+      },
+      "x-kubernetes-list-type": "atomic"
+     },
+     "name": {
+      "type": "string"
+     },
+     "namespace": {
+      "type": "string"
+     },
+     "ownerReferences": {
+      "type": "array",
+      "items": {
+       "default": {},
+       "allOf": [
+        {
+         "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.OwnerReference"
+        }
+       ]
+      },
+      "x-kubernetes-list-map-keys": [
+       "uid"
+      ],
+      "x-kubernetes-list-type": "map",
+      "x-kubernetes-patch-merge-key": "uid",
+      "x-kubernetes-patch-strategy": "merge"
+     },
+     "resourceVersion": {
+      "type": "string"
+     },
+     "selfLink": {
+      "type": "string"
+     },
+     "uid": {
+      "type": "string"
+     }
+    }
+   },
+   "io.k8s.apimachinery.pkg.apis.meta.v1.OwnerReference": {
+    "type": "object",
+    "required": [
+     "apiVersion",
+     "kind",
+     "name",
+     "uid"
+    ],
+    "properties": {
+     "apiVersion": {
+      "type": "string",
+      "default": ""
+     },
+     "blockOwnerDeletion": {
+      "type": "boolean"
+     },
+     "controller": {
+      "type": "boolean"
+     },
+     "kind": {
+      "type": "string",
+      "default": ""
+     },
+     "name": {
+      "type": "string",
+      "default": ""
+     },
+     "uid": {
+      "type": "string",
+      "default": ""
+     }
+    },
+    "x-kubernetes-map-type": "atomic"
+   },
+   "io.k8s.apimachinery.pkg.apis.meta.v1.Time": {
+    "type": "string",
+    "format": "date-time"
+   }
+  }
+ }
+}

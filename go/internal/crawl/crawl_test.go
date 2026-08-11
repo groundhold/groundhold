@@ -351,3 +351,35 @@ func TestContentHashIsOrderIndependentForDuplicatePaths(t *testing.T) {
 		t.Errorf("context hash depends on enumeration order for duplicate paths:\n a %s\n b %s", ha, hb)
 	}
 }
+
+// D803. A page the provider said existed and the driver did not follow is not an error,
+// which is exactly why the scope used to be recorded COMPLETE — and posture then reported
+// the count of unmanaged resources as exact. The resources found are real and are kept;
+// what changes is the claim made about the count.
+func TestTruncatedListingMakesTheScopeIncomplete(t *testing.T) {
+	clk, now := fixedClock(time.Unix(1000, 0))
+	sched := pace.New(pace.DefaultPolicy(), clk)
+	fetch := func(pair.Connection, string) Fetched {
+		return Fetched{
+			Resources:  []discover.Resource{resource("s3:one")},
+			Pace:       pace.Result{Outcome: pace.OK},
+			Incomplete: true,
+			Reason:     "the provider said more results exist",
+		}
+	}
+	doc, err := Run(reg(conn("aws", "preprod")), fetch, nil, sched,
+		pace.DefaultPolicy().Budget, "2026-08-04T00:00:00Z", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := doc.Providers[0].Scopes[0]
+	if sc.Status != "incomplete" {
+		t.Fatalf("a truncated listing left the scope %q", sc.Status)
+	}
+	if sc.Reason == "" {
+		t.Fatal("an incomplete scope must say why")
+	}
+	if len(sc.Resources) != 1 {
+		t.Fatalf("the page that WAS read must be kept: %+v", sc.Resources)
+	}
+}

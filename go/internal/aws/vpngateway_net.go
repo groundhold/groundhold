@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"groundhold/internal/provider"
 )
@@ -42,6 +43,24 @@ func (d *Driver) createVpnGateway(region, environment, capability string,
 	if plan.Region != "" {
 		region = plan.Region
 	}
+
+	// create-adoption (D253, extended by D409): a vpn gateway id is SERVER-assigned and
+	// CreateVpnGateway takes no idempotency token — the EC2 API offers none — so a blind
+	// create on a lost ledger, or a retry after a lost response, mints a DUPLICATE
+	// gateway. It is a billed resource, and a second one attached to the same VPC is
+	// worse than wasted money. Scan for an existing gateway carrying our ownership tags
+	// first: exactly one ours -> BIND it, never create; a FOREIGN-tagged gateway never
+	// matches (the scan verifies tags itself, it does not trust the server filter);
+	// ambiguous (>1) -> refuse to guess; a readable-empty or unreadable scan falls
+	// through to the normal create, so a genuine first deploy is never blocked.
+	if vgwID, n, serr := d.findVgwByTags(region, capability, environment); serr == nil && n == 1 {
+		return provider.CreateResult{ProviderID: vgwProviderID(region, vgwID), Status: "succeeded"}
+	} else if serr == nil && n > 1 {
+		return provider.CreateResult{Status: "unknown",
+			Reason: fmt.Sprintf("multiple vpn gateways carry our ownership tags for %s/%s — "+
+				"cannot pick one to adopt; reconcile manually", capability, environment)}
+	}
+
 	st, body, err := d.ec2PostBase(region, encodeForm(plan.createParams()))
 	if err != nil {
 		return provider.CreateResult{Status: "unknown",
@@ -123,9 +142,15 @@ func (d *Driver) observeVpnGateway(capability, providerID string) ([]provider.Ob
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"vpn gateway not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"vpn gateway not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		// a virtual private gateway is IPv4-only at the gateway level.
@@ -174,5 +199,67 @@ func (d *Driver) deleteVpnGateway(capability, environment, providerID string) pr
 		}
 		return provider.CreateResult{Status: "failed", Reason: fmt.Sprintf("delete HTTP %d (%s)", st, ec2ErrCode(resp))}
 	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// ---- poll to absence (D968 class, D981) ----
+	// DeleteVpnGateway is async: the gateway enters "deleting", not gone. Reporting
+	// succeeded here tombstones an hourly-billable gateway still live. Poll describeVgw
+	// to a confirmed absence; unknown on timeout keeps the handle.
+	deadline := d.Now().Add(d.PollTimeout)
+	for {
+		if _, found, rerr := d.describeVgw(region, vgwID); rerr == nil && !found {
+			return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // confirmed gone
+		}
+		if d.Now().After(deadline) {
+			return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+				Reason: "vpn gateway still deleting at poll timeout — reconcile via DescribeVpnGateways"}
+		}
+		time.Sleep(d.PollInterval)
+	}
+}
+
+// findVgwByTags scans for a vpn gateway carrying our ownership tags and returns (when
+// there is exactly one) its id. It VERIFIES the tags on each gateway that comes back —
+// never trusting the server-side filter alone — so a foreign gateway can never be
+// adopted. Any transport/HTTP/parse failure returns an error, and the caller then falls
+// back to a normal create rather than blocking a genuine first deploy. Mirrors
+// findVpcByTags (D253).
+func (d *Driver) findVgwByTags(region, capability, environment string) (vgwID string, count int, err error) {
+	body := encodeForm(map[string]string{"Action": "DescribeVpnGateways", "Version": ec2Version,
+		"Filter.1.Name": "tag:groundhold-capability", "Filter.1.Value.1": sanitizeTag(capability),
+		"Filter.2.Name": "tag:groundhold-environment", "Filter.2.Value.1": sanitizeTag(environment),
+		"Filter.3.Name": "state", "Filter.3.Value.1": "available"})
+	st, resp, e := d.ec2PostBase(region, body)
+	if e != nil {
+		return "", 0, readTransport("DescribeVpnGateways", e)
+	}
+	if st != http.StatusOK {
+		return "", 0, readHTTP("DescribeVpnGateways", st, ec2ErrCode(resp))
+	}
+	var out struct {
+		Items []struct {
+			VgwID string `xml:"vpnGatewayId"`
+			State string `xml:"state"`
+			Tags  []struct {
+				Key   string `xml:"key"`
+				Value string `xml:"value"`
+			} `xml:"tagSet>item"`
+		} `xml:"vpnGatewaySet>item"`
+	}
+	if xml.Unmarshal(resp, &out) != nil {
+		return "", 0, readBody("DescribeVpnGateways", st)
+	}
+	var owned []string
+	for _, v := range out.Items {
+		m := map[string]string{}
+		for _, t := range v.Tags {
+			m[t.Key] = t.Value
+		}
+		if v.VgwID != "" && v.State != "deleted" && v.State != "deleting" &&
+			groundholdTagsMatch(m, capability, environment) {
+			owned = append(owned, v.VgwID)
+		}
+	}
+	if len(owned) == 1 {
+		return owned[0], 1, nil
+	}
+	return "", len(owned), nil
 }

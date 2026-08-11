@@ -94,6 +94,7 @@ type billingBudgetDoc struct {
 	} `json:"amount"`
 	ThresholdRules []struct {
 		ThresholdPercent float64 `json:"thresholdPercent"`
+		SpendBasis       string  `json:"spendBasis"`
 	} `json:"thresholdRules"`
 }
 
@@ -214,7 +215,8 @@ func (d *Driver) createBillingBudget(capability, environment string,
 }
 
 // budgetObservations reverse-maps a live budget document into vocabulary paths.
-func budgetObservations(doc billingBudgetDoc) []provider.Observation {
+func budgetObservations(doc billingBudgetDoc) ([]provider.Observation, []string) {
+	var diags []string
 	obs := []provider.Observation{
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
@@ -232,12 +234,36 @@ func budgetObservations(doc billingBudgetDoc) []provider.Observation {
 	if period := budgetPeriodFromCalendar(doc.BudgetFilter.CalendarPeriod); period != "" {
 		obs = append(obs, provider.Observation{Path: "budget.period", Value: period, Derivation: "measured"})
 	}
-	if len(doc.ThresholdRules) > 0 {
+	// D798. WHICH rule this reads decides what the alert watches. A threshold rule
+	// fires on CURRENT_SPEND or on FORECASTED_SPEND, and those are different promises:
+	// one says "you have spent 80% of the budget", the other says "we predict you
+	// will". This used to take thresholdRules[0] unconditionally, so a budget whose
+	// first rule was a forecast reported a spend alert that does not exist — while the
+	// AWS driver filtered ThresholdType=PERCENTAGE and the Azure one thresholdType=
+	// Actual, for the SAME attribute. Two clouds drew the distinction; this one did not.
+	//
+	// An empty basis is a current-spend rule, and that is the API's own statement:
+	// "Behavior defaults to CURRENT_SPEND if not set".
+	forecastOnly := 0
+	spendRule := false
+	for _, r := range doc.ThresholdRules {
+		if r.SpendBasis != "" && r.SpendBasis != "CURRENT_SPEND" {
+			forecastOnly++
+			continue
+		}
 		// API is a FRACTION; the vocab is a PERCENTAGE.
 		obs = append(obs, provider.Observation{Path: "alert.threshold",
-			Value: doc.ThresholdRules[0].ThresholdPercent * 100, Derivation: "measured"})
+			Value: r.ThresholdPercent * 100, Derivation: "measured"})
+		spendRule = true
+		break
 	}
-	return obs
+	if !spendRule && forecastOnly > 0 {
+		diags = append(diags, fmt.Sprintf("alert.threshold not observed: all %d of the "+
+			"budget's threshold rules fire on FORECASTED spend, which is a prediction "+
+			"rather than a measurement of what has been spent — reporting one as the "+
+			"spend threshold would claim an alert this budget does not have", forecastOnly))
+	}
+	return obs, diags
 }
 
 func (d *Driver) observeBillingBudget(capability, providerID string) ([]provider.Observation, []string, error) {
@@ -250,13 +276,20 @@ func (d *Driver) observeBillingBudget(capability, providerID string) ([]provider
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"billing budget not found — nothing to observe"}, nil
+		return []provider.Observation{
+			// F-LC3 (D802): a BOUND resource the API authoritatively 404s is GONE. An
+			// empty return leaves the last good observations standing as the freshest
+			// word, so posture reads managed-ok and audit stays satisfied about a
+			// resource that does not exist (D513/D518, fixed here last).
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"billing budget not found — bound resource is gone (will re-create)"}, nil
 	}
 	var diags []string
 	if doc.BudgetFilter.CalendarPeriod == "" {
 		diags = append(diags, "budget.period not observed: the budget uses a custom period, which has no recurring vocab mapping")
 	}
-	return budgetObservations(doc), diags, nil
+	obs, obsDiags := budgetObservations(doc)
+	return obs, append(diags, obsDiags...), nil
 }
 
 func (d *Driver) deleteBillingBudget(capability, environment, providerID string) provider.CreateResult {
@@ -360,27 +393,41 @@ func (d *Driver) updateBillingBudget(capability, environment, providerID string,
 // resolveBillingAccount reads the billing account the pinned PROJECT is linked to
 // (cloudbilling.projects.getBillingInfo) — the vantage discovery needs, since a
 // budget is billing-account-scoped and List() only carries a project/region.
-func (d *Driver) resolveBillingAccount() (string, bool) {
+// D642: the single `bool` collapsed four different answers into one — no project
+// pinned, the request could not be made, the API refused, the body was unreadable,
+// and "this project has no billing account". Only the LAST of those means there are
+// no budgets; the others mean nothing was read, and the caller returned a nil error
+// for all five, so `discover` counted an unreachable billing API as a swept service.
+// An answered request with no account returns ("", nil) — genuinely zero budgets.
+func (d *Driver) resolveBillingAccount() (string, error) {
 	if d.Project == "" {
-		return "", false
+		return "", fmt.Errorf("no project is pinned")
 	}
 	u := fmt.Sprintf("%s/projects/%s/billingInfo", d.cloudBillingBase(), d.Project)
 	st, body, err := d.call("GET", u, nil)
-	if err != nil || st != http.StatusOK {
-		return "", false
+	if err != nil {
+		return "", fmt.Errorf("billingInfo.get: %v", err)
+	}
+	if st != http.StatusOK {
+		return "", fmt.Errorf("billingInfo.get: HTTP %d", st)
 	}
 	var info struct {
 		BillingAccountName string `json:"billingAccountName"`
 		BillingEnabled     bool   `json:"billingEnabled"`
 	}
-	if json.Unmarshal(body, &info) != nil {
-		return "", false
+	if jerr := json.Unmarshal(body, &info); jerr != nil {
+		return "", fmt.Errorf("billingInfo.get: HTTP %d but the body did not parse: %v",
+			st, jerr)
 	}
 	acct := strings.TrimPrefix(info.BillingAccountName, "billingAccounts/")
-	if !billingAccountOK.MatchString(acct) {
-		return "", false
+	if acct == "" {
+		return "", nil // answered: the project is linked to no billing account
 	}
-	return acct, true
+	if !billingAccountOK.MatchString(acct) {
+		return "", fmt.Errorf("billingInfo.get: billing account %q is not representable",
+			info.BillingAccountName)
+	}
+	return acct, nil
 }
 
 // discoverBillingBudget enumerates the billing account's budgets as
@@ -388,9 +435,16 @@ func (d *Driver) resolveBillingAccount() (string, bool) {
 // so the region argument is ignored; the billing account is resolved from the pinned
 // project's billing info. Each budget is reverse-mapped by budgetObservations.
 func (d *Driver) discoverBillingBudget(region string) ([]provider.Discovered, []string, error) {
-	acct, ok := d.resolveBillingAccount()
-	if !ok {
-		return nil, []string{"billing budgets: could not resolve the project's billing account (needs a pinned project with billing enabled and cloudbilling access) — skipping"}, nil
+	acct, aerr := d.resolveBillingAccount()
+	if aerr != nil {
+		return nil, nil, fmt.Errorf(
+			"billing budgets: could not resolve the project's billing account "+
+				"(needs a pinned project with billing enabled and cloudbilling "+
+				"access): %v", aerr)
+	}
+	if acct == "" {
+		return nil, []string{"billing budgets: this project is linked to no billing " +
+			"account, so it has no budgets"}, nil
 	}
 	list, lerr := d.billingBudgetList(acct)
 	if lerr != nil {
@@ -404,10 +458,14 @@ func (d *Driver) discoverBillingBudget(region string) ([]provider.Discovered, []
 			diags = append(diags, b.DisplayName+": budget id not representable as a providerId")
 			continue
 		}
+		budgetObs, budgetDiags := budgetObservations(b)
+		for _, dg := range budgetDiags {
+			diags = append(diags, b.DisplayName+": "+dg)
+		}
 		out = append(out, provider.Discovered{
 			ProviderID:   billingBudgetProviderID(acct, id),
 			ResourceType: "capability.cost.budget",
-			Observations: budgetObservations(b),
+			Observations: budgetObs,
 		})
 	}
 	return out, diags, nil

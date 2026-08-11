@@ -16,6 +16,7 @@ import (
 	"groundhold/internal/aws"
 	"groundhold/internal/azure"
 	"groundhold/internal/gcp"
+	"groundhold/internal/k8s"
 	"groundhold/internal/provider"
 )
 
@@ -179,7 +180,7 @@ func TestParityMatrix(t *testing.T) {
 		rows = append(rows, typ)
 	}
 	sort.Strings(rows)
-	got := BuildMatrixYAML(caps, rows)
+	got := BuildMatrixYAMLWith(caps, rows, outsideTheClouds(t))
 
 	path := filepath.Join("..", "..", "..", "spec", "parity.yaml")
 	if *update {
@@ -298,4 +299,23 @@ func TestResilientClientForcesHTTP1OverALPN(t *testing.T) {
 	if resp.ProtoMajor != 1 {
 		t.Fatalf("the resilient client must force HTTP/1.1 even against an h2-capable server, got %s", resp.Proto)
 	}
+}
+
+// outsideTheClouds reads the capability TYPES fulfilled by providers that are not one
+// of the three clouds. The Kubernetes driver declares them in its mappings, which is
+// the same authority its dispatch uses — never a second list (D502).
+func outsideTheClouds(t *testing.T) map[string][]string {
+	t.Helper()
+	d := k8s.NewDriver("http://unused", "tok")
+	if len(d.Mappings) == 0 {
+		t.Fatal("k8s driver has no mappings — the matrix would under-claim silently")
+	}
+	out := map[string][]string{}
+	for svc, m := range d.Mappings {
+		if m == nil || m.Capability == "" {
+			continue
+		}
+		out[m.Capability] = append(out[m.Capability], "k8s/"+svc)
+	}
+	return out
 }

@@ -349,7 +349,11 @@ func BuildAurora(account, environment, capability string,
 			return AuroraPlan{}, err
 		}
 		for i, sg := range list {
-			cp[fmt.Sprintf("VpcSecurityGroupIds.VpcSecurityGroupId.member.%d", i+1)] = sg
+			// D884: the member name IS VpcSecurityGroupId — a trailing `.member.N` after it
+			// is a SECOND list level the query protocol never expects, and CreateDBCluster
+			// 400s "MalformedInput: Start of list found where not expected". botocore
+			// serializes it as VpcSecurityGroupIds.VpcSecurityGroupId.N; match that exactly.
+			cp[fmt.Sprintf("VpcSecurityGroupIds.VpcSecurityGroupId.%d", i+1)] = sg
 		}
 	}
 

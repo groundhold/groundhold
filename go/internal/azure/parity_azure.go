@@ -6,7 +6,7 @@
 // ResourceType non-uniformly: some sweeps carry a literal, others thread it
 // through the shared discoverRegional/discoverGapBGlobal helper as the
 // `resourceType` argument — each such argument was traced to its literal at the
-// call site. The two non-listable tokens (changefeed, keyvaultkey) have no
+// call site. The three non-listable tokens (changefeed, keyvaultkey, dnsrecord) have no
 // top-level discover ResourceType; their TYPE is taken from the driver's Build
 // dispatch table (azure_provider.go) and noted inline.
 package azure

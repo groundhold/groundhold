@@ -203,8 +203,9 @@ func TestMetamorphicManagedKafkaRoundTrip(t *testing.T) {
 			for _, o := range obs {
 				got[o.Path] = o.Value
 			}
-			if _, has := got["encryption.customerManagedKeys"]; has != c.cmek {
-				t.Errorf("cmek round-trip: want present=%v got %v", c.cmek, got["encryption.customerManagedKeys"])
+			// D1003: no key is a measured false, not an absence.
+			if got["encryption.customerManagedKeys"] != c.cmek {
+				t.Errorf("cmek round-trip: want %v got %v", c.cmek, got["encryption.customerManagedKeys"])
 			}
 		})
 	}

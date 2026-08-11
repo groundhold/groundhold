@@ -8,10 +8,10 @@ package gcp
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"strings"
-
 	"groundhold/internal/provider"
+	"net/http"
+	"sort"
+	"strings"
 )
 
 // iamBase is the shared IAM endpoint resolver, defined once in customrole_net.go
@@ -108,7 +108,18 @@ func (d *Driver) createGServiceAccount(environment, capability string,
 	}
 }
 
+// observeGServiceAccount reads the identity. The trust read is a SECOND call, so it is
+// made here and not by the discovery sweep: a sweep touches every account in the project
+// and doubling its calls would spend the crawl's budget on a question discovery does not
+// ask (D141's gentle pace). The sweep passes withTrust=false and says so ONCE for the
+// whole sweep — per account it would be one line per account, and a diagnostic nobody can
+// read is not a disclosure. What it must not do is stay silent: an ABSENT trust.principals
+// is not an empty one (D847), and the sweep is where that confusion would start.
 func (d *Driver) observeGServiceAccount(capability, providerID string) ([]provider.Observation, []string, error) {
+	return d.observeGServiceAccountTrust(capability, providerID, true)
+}
+
+func (d *Driver) observeGServiceAccountTrust(capability, providerID string, withTrust bool) ([]provider.Observation, []string, error) {
 	project, accountID, err := splitGSAProviderID(providerID)
 	if err != nil {
 		return nil, nil, err
@@ -121,17 +132,37 @@ func (d *Driver) observeGServiceAccount(capability, providerID string) ([]provid
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"service account not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"service account not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		// a service account has no downloadable key (keyless / workload identity).
 		{Path: "key.exportable", Value: false, Derivation: "config-intent"},
 	}
+	var diags []string
+
+	// D868: WHO may assume this identity, from the account's OWN IAM policy. A second
+	// read, and worth it: an identity's permissions say what it can do, and this says who
+	// can pick it up — the half that changed silently until there was an attribute for it.
+	if withTrust {
+		if tp, ok := d.gsaTrustPrincipals(project, accountID); ok {
+			obs = append(obs, provider.Observation{
+				Path: "trust.principals", Value: tp, Derivation: "measured"})
+		} else {
+			diags = append(diags, "trust.principals not observed: the service account's IAM "+
+				"policy gave no answer, so who may assume this identity was not established")
+		}
+	}
 	if doc.DisplayName != "" {
 		obs = append(obs, provider.Observation{Path: "display.name", Value: doc.DisplayName, Derivation: "measured"})
 	}
-	return obs, nil, nil
+	return obs, diags, nil
 }
 
 func (d *Driver) deleteGServiceAccount(capability, environment, providerID string) provider.CreateResult {
@@ -170,4 +201,65 @@ func (d *Driver) deleteGServiceAccount(capability, environment, providerID strin
 		return provider.CreateResult{ProviderID: providerID, Status: "failed", Reason: fmt.Sprintf("delete HTTP %d: %s", st, mutDetail(body))}
 	}
 	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+}
+
+// assumeRoles are the GCP roles that let a principal PICK UP this identity (D868). Three,
+// and the third is the one an audit forgets: `serviceAccountUser` does not mint a token
+// directly, it lets a principal ATTACH the account to a resource they create — and the
+// resource then runs AS the account. Leaving it out would under-report who can end up
+// acting as this identity, and for a trust attribute the safe direction is to over-report.
+var assumeRoles = map[string]bool{
+	"roles/iam.serviceAccountTokenCreator": true,
+	"roles/iam.workloadIdentityUser":       true,
+	"roles/iam.serviceAccountUser":         true,
+}
+
+// trustPrincipals renders WHO may assume this service account, from its OWN IAM policy.
+//
+// The role rides with the member, because on GCP the three roles above grant different
+// powers over one identity — minting a token is not the same as attaching the account to a
+// VM — and a set of bare members would compare them equal. That is the same equality D776
+// warned about on AWS, where the condition rather than the role is what a bare set loses.
+// The binding's CONDITION rides too, for the same reason.
+//
+// ok=false means the policy did not answer — never an empty set, which is the
+// safest-looking possible answer about who can act as an identity (D847).
+func (d *Driver) gsaTrustPrincipals(project, accountID string) (principals []string, ok bool) {
+	st, body, err := d.call("POST", d.gsaURL(project, accountID)+":getIamPolicy", map[string]any{})
+	if err != nil || st != http.StatusOK {
+		return nil, false
+	}
+	var doc struct {
+		Bindings []struct {
+			Role      string   `json:"role"`
+			Members   []string `json:"members"`
+			Condition struct {
+				// `expression` only: the title is a label, and a name this decoder does not
+				// use is a name nothing confirms against Google's own models.
+				Expression string `json:"expression"`
+			} `json:"condition"`
+		} `json:"bindings"`
+	}
+	if json.Unmarshal(body, &doc) != nil {
+		return nil, false
+	}
+	seen := map[string]bool{}
+	for _, b := range doc.Bindings {
+		if !assumeRoles[b.Role] {
+			continue
+		}
+		suffix := " via " + b.Role
+		if e := strings.TrimSpace(b.Condition.Expression); e != "" {
+			suffix += " if " + e
+		}
+		for _, m := range b.Members {
+			seen[m+suffix] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for p := range seen {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out, true
 }

@@ -207,8 +207,14 @@ func (p BudgetPlan) createBudgetBody(account string) map[string]any {
 	}
 }
 
-// createNotificationBody is the CreateNotificationWithSubscribers request body:
-// an ACTUAL > threshold% notification with the SNS topic as the sole subscriber.
+// createNotificationBody is the CreateNotification request body: an ACTUAL >
+// threshold% notification with the SNS topic as the sole subscriber.
+//
+// D853: this body was sent to `CreateNotificationWithSubscribers` for as long as the
+// driver existed, and AWS has no such operation — `NotificationsWithSubscribers` is a
+// FIELD of CreateBudget, not a call. The body was right all along: its four members are
+// exactly CreateNotification's four required inputs. Every budget alert this driver
+// tried to create was rejected by the target name alone.
 func (p BudgetPlan) createNotificationBody(account string) map[string]any {
 	return map[string]any{
 		"AccountId":  account,
@@ -241,7 +247,17 @@ func classifyBudgetChange(path string) (string, string) {
 	case "alert.threshold":
 		return "mutable", "" // UpdateNotification with the new Threshold
 	case "budget.period":
-		return "immutable", "the budget period (TimeUnit) is its fundamental recurrence — a change is a replacement"
+		// D806: this said "immutable — a change is a replacement", and AWS's own
+		// documentation of UpdateBudget says the opposite in one sentence: "You can
+		// change every part of a budget except for the budgetName and the
+		// calculatedSpend." TimeUnit is part of the budget and is not excepted. The
+		// claim was about the provider's API, and the provider disagrees.
+		//
+		// It was not a harmless overstatement: `immutable` tells the compiler an
+		// in-place change is impossible, so it planned a DELETE and a CREATE — the
+		// budget loses its identity and its history — to make a change one call could
+		// have made. Both other clouds already called the same attribute mutable.
+		return "mutable", "" // UpdateBudget re-sends the whole definition, TimeUnit included
 	case "service.managed":
 		return "unsupported", "platform/projection property — nothing to patch"
 	default:

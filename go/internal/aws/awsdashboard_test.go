@@ -3,8 +3,12 @@ package aws
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func awsDashAttrs() map[string]any {
@@ -71,6 +75,16 @@ func cwDashServer(t *testing.T) *httptest.Server {
 				body = r.PostForm.Get("DashboardBody")
 				_, _ = w.Write([]byte(`<PutDashboardResponse><PutDashboardResult></PutDashboardResult></PutDashboardResponse>`))
 			case "GetDashboard":
+				// D700: before anything was put, the dashboard does NOT exist. The
+				// fixture used to answer 200 with an empty body — a dashboard that
+				// exists and is empty — which is a different world from an absent one,
+				// and the create now reads this answer before deciding to write.
+				if body == "" {
+					w.WriteHeader(400)
+					_, _ = w.Write([]byte(`<ErrorResponse><Error>` +
+						`<Code>ResourceNotFoundException</Code></Error></ErrorResponse>`))
+					return
+				}
 				_, _ = w.Write([]byte(`<GetDashboardResponse><GetDashboardResult><DashboardBody>` + body +
 					`</DashboardBody></GetDashboardResult></GetDashboardResponse>`))
 			case "DeleteDashboards":
@@ -116,4 +130,60 @@ func TestCreateObserveDeleteCWDashboard(t *testing.T) {
 	if del := d.deleteCWDashboard("golden", "prod", res.ProviderID); del.Status != "succeeded" {
 		t.Fatalf("delete: %+v", del)
 	}
+}
+
+// TestAdoptsExistingCWDashboard enrols cloudwatchdash in the D391 gate. PutDashboard is
+// an UPSERT keyed by dashboard name: a re-run overwrites the body rather than making a
+// second dashboard, so the identity bound is the whole property.
+func TestAdoptsExistingCWDashboard(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/cloudwatchdash",
+		Classify: cwQueryRole,
+		ExistingServer: func() *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					body := make([]byte, r.ContentLength)
+					_, _ = r.Body.Read(body)
+					v, _ := url.ParseQuery(string(body))
+					switch v.Get("Action") {
+					case "PutDashboard":
+						_, _ = w.Write([]byte(`<PutDashboardResponse><PutDashboardResult>` +
+							`</PutDashboardResult></PutDashboardResponse>`))
+					case "GetDashboard":
+						// D700: the estate must contain OUR dashboard, not a stranger's.
+						// This fixture served `{"widgets":[{},{}]}` — a foreign body — and
+						// the probe passed anyway, because the create never read. It reads
+						// now, and a foreign body is refused rather than overwritten, so
+						// the fixture has to mean what the probe's own doc comment says:
+						// the resource this create targets ALREADY EXISTS and is ours.
+						plan, err := BuildCWDashboard("prod", "golden", awsDashAttrs(), awsDashImpl(), 1)
+						if err != nil {
+							w.WriteHeader(500)
+							return
+						}
+						_, _ = w.Write([]byte(`<GetDashboardResponse><GetDashboardResult><DashboardBody>` +
+							plan.body() + `</DashboardBody></GetDashboardResult></GetDashboardResponse>`))
+					default:
+						w.WriteHeader(400)
+					}
+				}))
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.CloudWatchDashBaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("cloudwatchdash", "golden", "prod", awsDashAttrs(), awsDashImpl(), "golden", 1)
+		},
+		// D700: zero. A dashboard whose content already IS what this contract
+		// describes is bound without writing anything — the property in its
+		// strongest form, and only reachable now that the create reads first.
+		AllowedMutations: 0,
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

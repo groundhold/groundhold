@@ -2,6 +2,7 @@ package observe
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"groundhold/internal/ledger"
@@ -104,5 +105,72 @@ func TestObserveAllUnreadableIsEmptyPartialNotError(t *testing.T) {
 	}
 	if len(res.Unreadable) != 2 {
 		t.Errorf("both capabilities must be recorded unreadable, got %+v", res.Unreadable)
+	}
+}
+
+// D774. One unreadable output discarded EVERY readable one: the driver had just adopted a
+// function BY its ARN and then recorded no outputs at all, including that ARN, because a
+// second declared output was absent. Every $ref to the function then refused and the plan
+// blocked by a route with nothing to do with the missing value.
+//
+// And the absent one was `functionUrl` on a function declaring `network.publicExposure:
+// false` — an output whose EXISTENCE would have broken the reporter's own security
+// constraint. The registry described it as conditional in prose while the loop treated
+// every declared output as mandatory.
+//
+// Driven through outputDocs, not re-computed beside it (D726).
+type partialOutputProv struct {
+	provider.Provider
+	specs []provider.OutputSpec
+	raw   map[string]any
+}
+
+func (p partialOutputProv) OutputsFor(string) []provider.OutputSpec { return p.specs }
+func (p partialOutputProv) ReadOutputs(string, string) (map[string]any, error) {
+	return p.raw, nil
+}
+
+func TestOutputsArePartialNotAllOrNothing(t *testing.T) {
+	prov := partialOutputProv{
+		Provider: &provider.Fake{},
+		specs: []provider.OutputSpec{
+			{Name: "functionArn", Kind: "string"},
+			{Name: "functionName", Kind: "string"},
+			{Name: "functionUrl", Kind: "string", Conditional: true},
+			{Name: "missingOnPurpose", Kind: "string"},
+		},
+		raw: map[string]any{
+			"functionArn":  "arn:aws:lambda:eu-central-1:000000000000:function:api",
+			"functionName": "api",
+		},
+	}
+	res := &Result{}
+	docs := outputDocs(prov, "lambda", "api", "lambda:eu-central-1:000000000000:api",
+		"2026-08-04T10:00:00Z", 0, res)
+
+	var got []string
+	for _, d := range docs {
+		got = append(got, d.Path)
+	}
+	if len(got) != 2 || got[0] != "outputs.functionArn" {
+		t.Fatalf("recorded %v — the readable outputs must survive an unreadable sibling; "+
+			"the ARN was in the driver's hand, it had just adopted by it (D774)", got)
+	}
+	named, conditional := 0, 0
+	for _, d := range res.Diagnostics {
+		if strings.Contains(d, "missingOnPurpose") {
+			named++
+		}
+		if strings.Contains(d, "functionUrl") {
+			conditional++
+		}
+	}
+	if named != 1 {
+		t.Errorf("the genuinely missing output must be NAMED: %v", res.Diagnostics)
+	}
+	if conditional != 0 {
+		t.Errorf("a CONDITIONAL absence is the contract being honoured, not a fault — "+
+			"this function declares publicExposure:false and is supposed to have no URL: %v",
+			res.Diagnostics)
 	}
 }

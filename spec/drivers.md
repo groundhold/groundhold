@@ -121,7 +121,9 @@ its own semantics:
   ARNs, sizing. When unsure, LEAVE IT OUT and note it — an omitted fact is honest;
   a guessed one is a lie.
 - **Every observation is `measured`** (read from live state), or carries its true
-  derivation (`config-intent`, etc.). Never `measured` for something inferred.
+  derivation (`config-intent`, `platform-invariant`). Never `measured` for something
+  inferred, and never `config-intent` for something the resource does not STORE —
+  a guarantee the service makes for every instance is `platform-invariant` (D759).
 - **Secrets are structurally excluded (D53).** A driver never reads a
   password/token/key into any observation, candidate or ledger event. Where a
   driver only NEEDS a reference (a pairing), it holds the reference, never the

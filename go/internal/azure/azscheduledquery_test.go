@@ -22,6 +22,7 @@ func azSQAttrs() map[string]any {
 func azSQImpl() map[string]any {
 	return map[string]any{
 		"resource_group": "rg1",
+		"location":       "westeurope", // D890: scheduledQueryRules is regional, never "global"
 		"scope":          "/subscriptions/" + testSub + "/resourceGroups/rg1/providers/Microsoft.OperationalInsights/workspaces/law1",
 	}
 }
@@ -35,6 +36,11 @@ func TestBuildAzureScheduledQueryHonors(t *testing.T) {
 		t.Fatalf("plan = %+v", p)
 	}
 	body := p.createBody(map[string]any{})
+	// D890: the rule is regional — the body must carry the operator's region, never the
+	// hard-coded "global" Azure 400s for scheduledQueryRules.
+	if body["location"] != "westeurope" {
+		t.Fatalf("scheduled query rule location must be the region, got %v (D890)", body["location"])
+	}
 	crit := body["properties"].(map[string]any)["criteria"].(map[string]any)["allOf"].([]any)[0].(map[string]any)
 	if crit["timeAggregation"] != "Count" {
 		t.Fatalf("counter must Count: %+v", crit)
@@ -43,7 +49,7 @@ func TestBuildAzureScheduledQueryHonors(t *testing.T) {
 	g := azSQAttrs()
 	g["metric.kind"] = "gauge"
 	gp, err := BuildAzureScheduledQuery("prod", "lat", g,
-		map[string]any{"resource_group": "rg1", "scope": azSQImpl()["scope"], "value_field": "DurationMs"}, 1)
+		map[string]any{"resource_group": "rg1", "location": "westeurope", "scope": azSQImpl()["scope"], "value_field": "DurationMs"}, 1)
 	if err != nil || gp.MeasureColumn != "DurationMs" {
 		t.Fatalf("gauge plan: %+v err=%v", gp, err)
 	}
@@ -81,7 +87,18 @@ func TestBuildAzureScheduledQueryRefusals(t *testing.T) {
 
 func azSQServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	var stored map[string]any
+	// D525: pre-seeded with the resource ALREADY STANDING under OUR ownership tags,
+	// so CertifyCreateAdoptsExisting exercises the ADOPT path. Starting empty meant
+	// the first GET 404'd and the driver simply CREATED one — a test named
+	// "AdoptsExisting" that adopted nothing (D524).
+	stored := map[string]any{
+		"name": "gh-errors-prod-1",
+		"tags": map[string]any{
+			"groundhold-capability":  "errors",
+			"groundhold-environment": "prod",
+		},
+		"properties": map[string]any{},
+	}
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {

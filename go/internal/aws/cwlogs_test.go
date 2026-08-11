@@ -179,8 +179,12 @@ func TestCreateObserveDeleteCWLogs(t *testing.T) {
 		got["service.managed"] != true {
 		t.Fatalf("observe: %+v", got)
 	}
-	if _, has := got["encryption.customerManagedKeys"]; has {
-		t.Fatalf("no CMK associated — must not emit encryption.customerManagedKeys: %+v", got)
+	// D1003: no CMK is a measured FALSE, never silence. This test used to assert the
+	// attribute was ABSENT — the exact false-clean the field caught: a declared
+	// `customerManagedKeys: true` had nothing to contradict and passed vacuously over an
+	// unencrypted audit log group.
+	if v, has := got["encryption.customerManagedKeys"]; !has || v != false {
+		t.Fatalf("no CMK must observe encryption.customerManagedKeys=false, got %v (has=%v)", v, has)
 	}
 	if del := d.deleteCWLogs("app-logs", "prod", res.ProviderID); del.Status != "succeeded" {
 		t.Fatalf("delete: %+v", del)

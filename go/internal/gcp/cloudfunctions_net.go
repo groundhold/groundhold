@@ -20,8 +20,13 @@ import (
 	"strings"
 	"time"
 
+	"errors"
 	"groundhold/internal/provider"
 )
+
+// errGCPAbsent marks an authoritative "it does not exist" from a GCP read, so
+// a caller can tell it apart from a failure to read (D522).
+var errGCPAbsent = errors.New("resource does not exist")
 
 func (d *Driver) cfBase() string {
 	if d.CfBaseURL != "" {
@@ -104,6 +109,10 @@ func (d *Driver) getFunction(project, region, name string) (functionDoc, error) 
 	status, body, cerr := d.call("GET", d.functionURL(project, region, name), nil)
 	if cerr != nil {
 		return functionDoc{}, readTransport(op, cerr)
+	}
+	if status == http.StatusNotFound {
+		// F-LC3 (D522): a readable absence, not a failure to read.
+		return functionDoc{}, errGCPAbsent
 	}
 	if status != http.StatusOK {
 		return functionDoc{}, readHTTP(op, status, gcpErrCode(body))
@@ -245,6 +254,12 @@ func (d *Driver) observeCloudFunction(capability, providerID string) ([]provider
 		return nil, nil, err
 	}
 	doc, rerr := d.getFunction(project, region, name)
+	if errors.Is(rerr, errGCPAbsent) {
+		// F-LC3 (D522): GONE, said with the reserved marker.
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"function not found — bound resource is gone (will re-create)"}, nil
+	}
 	if rerr != nil {
 		return nil, nil, rerr
 	}
@@ -254,8 +269,8 @@ func (d *Driver) observeCloudFunction(capability, providerID string) ([]provider
 	obs = append(obs,
 		provider.Observation{Path: "location.region", Value: region, Derivation: "measured"},
 		provider.Observation{Path: "service.managed", Value: true, Derivation: "measured"},
-		provider.Observation{Path: "availability.class", Value: "regional", Derivation: "config-intent"},
-		provider.Observation{Path: "tls.enforced", Value: true, Derivation: "config-intent"},
+		provider.Observation{Path: "availability.class", Value: "regional", Derivation: "platform-invariant"},
+		provider.Observation{Path: "tls.enforced", Value: true, Derivation: "platform-invariant"},
 	)
 	if doc.ServiceConfig.MinInstanceCount > 0 {
 		obs = append(obs, provider.Observation{Path: "replicas.minimum",

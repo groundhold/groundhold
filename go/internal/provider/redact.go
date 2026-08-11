@@ -24,6 +24,8 @@ package provider
 
 import (
 	"strings"
+
+	"groundhold/internal/secretshape"
 )
 
 // secretKeyMarks are the implementation-key substrings that denote a CREDENTIAL
@@ -32,10 +34,9 @@ import (
 // blind the operator to which key was refused while protecting nothing. Matching
 // is case-insensitive over the key with separators stripped, so master_password,
 // masterPassword and MasterUserPassword all land on "password".
-var secretKeyMarks = []string{
-	"password", "passwd", "secret", "token", "credential",
-	"privatekey", "apikey", "passphrase",
-}
+// D648: the alphabet moved to internal/secretshape, shared with the publish-time
+// scan and the capsule certifier. Three narrower copies of this list is how a
+// plaintext DSN got certified while a bearer token was refused.
 
 // minRedactableLen guards the diagnostic against a pathological redaction: a
 // one- or two-character "secret" would blank out unrelated substrings of every
@@ -68,25 +69,22 @@ func collectSecrets(v any, underSecretKey bool, out *[]string) {
 			collectSecrets(child, underSecretKey, out)
 		}
 	case string:
-		if underSecretKey && len(t) >= minRedactableLen {
+		if len(t) < minRedactableLen {
+			return
+		}
+		// D648: a value whose SHAPE is a credential is remembered whatever key it
+		// sits under. `implementation.environment.DATABASE_URL` is not a
+		// secret-named key, and the DSN under it reached the ledger, the capsule
+		// and the public export in a provider's own error text.
+		if _, looksSecret := secretshape.ValueLooksLikeCredential(t); underSecretKey ||
+			looksSecret {
 			*out = append(*out, t)
 		}
 	}
 }
 
 // isSecretKey reports whether a key names a credential value.
-func isSecretKey(k string) bool {
-	norm := strings.ToLower(k)
-	for _, sep := range []string{"_", "-", ".", " "} {
-		norm = strings.ReplaceAll(norm, sep, "")
-	}
-	for _, mark := range secretKeyMarks {
-		if strings.Contains(norm, mark) {
-			return true
-		}
-	}
-	return false
-}
+func isSecretKey(k string) bool { return secretshape.KeyLooksLikeCredential(k) }
 
 // Redactor holds the credential values seen for the mutation in flight. The zero
 // value is usable and redacts nothing, so a driver that never registers anything

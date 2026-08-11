@@ -270,8 +270,11 @@ func TestObserveEBSVolumeMissingIsNotAnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a volume that is simply absent produced an error: %v", err)
 	}
-	if len(obs) != 0 {
-		t.Errorf("observations %v for a volume that does not exist", obs)
+	// Corrected with D520: this asserted SILENCE for an absent bound resource,
+	// which is the defect F-LC3 exists to prevent — the compile sees an empty set,
+	// plans nothing, and converge reports a world that no longer contains it.
+	if !absentMarked(obs) {
+		t.Errorf("observations %v do not mark a volume that does not exist", obs)
 	}
 	if len(unread) == 0 {
 		t.Error("no diagnostic — the caller cannot tell an absent volume from a silent one")
@@ -280,7 +283,9 @@ func TestObserveEBSVolumeMissingIsNotAnError(t *testing.T) {
 
 func TestDeleteEBSVolume(t *testing.T) {
 	t.Run("deletes what it owns", func(t *testing.T) {
-		s := &ebsVolServer{describe: []string{ebsAvailableXML}, deleteStatus: 200,
+		// pre-delete read sees it available (owned); the poll-to-absence (D978) then
+		// sees it gone before concluding succeeded.
+		s := &ebsVolServer{describe: []string{ebsAvailableXML, ebsEmptyXML}, deleteStatus: 200,
 			deleteBody: `<DeleteVolumeResponse><return>true</return></DeleteVolumeResponse>`}
 		d, done := ebsVolTestDriver(t, s)
 		defer done()
@@ -324,6 +329,19 @@ func TestDeleteEBSVolume(t *testing.T) {
 		defer done()
 		if got := d.deleteEBSVolume("orders-data", "production", ebsPID); got.Status != "succeeded" {
 			t.Errorf("status = %q, want succeeded (idempotent)", got.Status)
+		}
+	})
+
+	t.Run("an accepted delete that never leaves the volume present is unknown (D978)", func(t *testing.T) {
+		// DeleteVolume accepted, but the volume stays present (still "deleting").
+		// Concluding succeeded would tombstone data still live; the poll must time
+		// out to unknown and keep the handle.
+		s := &ebsVolServer{describe: []string{ebsAvailableXML}, deleteStatus: 200,
+			deleteBody: `<DeleteVolumeResponse><return>true</return></DeleteVolumeResponse>`}
+		d, done := ebsVolTestDriver(t, s)
+		defer done()
+		if got := d.deleteEBSVolume("orders-data", "production", ebsPID); got.Status != "unknown" {
+			t.Fatalf("status = %q, want unknown — an accepted-but-still-deleting volume keeps its handle", got.Status)
 		}
 	})
 

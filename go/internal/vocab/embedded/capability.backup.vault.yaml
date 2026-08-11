@@ -10,11 +10,19 @@
 # invariant #4); this capability is the vault itself and its retention guarantee.
 #
 # One honest per-cloud gap and one honest per-cloud requirement:
-#  - retention.lockMode=governance is REFUSED on GCP. A GCP backup vault's enforced
-#    minimum retention is immutable by construction (it can be increased, never
-#    decreased or removed), i.e. compliance-only; there is no admin-changeable
-#    governance mode, so a governance request is refused rather than silently upgraded
-#    to compliance (which would over-commit) or downgraded (which would under-deliver).
+#  - retention.lockMode=COMPLIANCE is REFUSED on GCP, and D752 turned this paragraph
+#    around. It used to say the opposite — that governance was refused because a GCP
+#    vault is "immutable by construction, compliance-only" — and Google's own contract
+#    disagrees: a backup vault carries an OPTIONAL effectiveTime, "Time after which the
+#    BackupVault resource is locked". Until it passes, backupVaults.patch updates the
+#    vault's settings and backupVaults.delete with force=true removes it "and any data
+#    source from this backup vault". An unlocked vault is admin-changeable, which is
+#    governance. This driver sends no effectiveTime, so it BUILDS governance and refuses
+#    to promise compliance; observe reads effectiveTime and reports compliance once the
+#    lock is genuinely in force.
+#
+#    Corrected here as well as at the attribute (D330): the same belief was written
+#    twice in one file, and fixing one copy left the other publishing the old claim.
 #  - retention.minimum is REQUIRED on GCP (the API mandates a minimum enforced
 #    retention at create); on AWS a vault can exist without one, honored via a Backup
 #    Vault Lock when the contract asks for it. Stated, not smoothed.
@@ -34,9 +42,9 @@ attributes:
     kind: string
     description: Region the vault (and its recovery points) live in.
     mappings:
-      aws.backup: derived from the provider region
-      gcp.backupdr: the backup vault location
-      azure.dataprotection: the backup vault location
+      aws.backupvault: derived from the provider region
+      gcp.backupvault: the backup vault location
+      azure.backupvault: the backup vault location
 
   retention.minimum:
     kind: duration
@@ -45,21 +53,31 @@ attributes:
       be deleted before this age. Required on GCP (enforced natively); on AWS enforced
       via a Backup Vault Lock's MinRetentionDays.
     mappings:
-      gcp.backupdr: backupMinimumEnforcedRetentionDuration (required)
-      aws.backup: Backup Vault Lock MinRetentionDays
-      azure.dataprotection: securitySettings.softDeleteSettings.retentionDurationInDays (optional; day-granular)
+      gcp.backupvault: backupMinimumEnforcedRetentionDuration (required)
+      aws.backupvault: Backup Vault Lock MinRetentionDays
+      azure.backupvault: securitySettings.softDeleteSettings.retentionDurationInDays (optional; day-granular)
 
   retention.lockMode:
     kind: string
     enum: [governance, compliance]
     description: >
       Whether the retention guarantee is admin-changeable (governance) or IMMUTABLE
-      (compliance / WORM). governance is REFUSED on GCP, whose enforced retention is
-      immutable by construction (compliance-only).
+      (compliance / WORM).
+
+      D752 corrects this description. It said "governance is REFUSED on GCP, whose
+      enforced retention is immutable by construction (compliance-only)", and that is
+      not what Google's contract says. A Backup and DR vault carries an OPTIONAL
+      effectiveTime, "Time after which the BackupVault resource is locked"; until it
+      passes, backupVaults.patch updates the vault's settings and backupVaults.delete
+      with force=true removes it "and any data source from this backup vault". An
+      unlocked GCP vault is admin-changeable, which is precisely governance.
     mappings:
-      aws.backup: Backup Vault Lock — governance (ChangeableForDays set) vs compliance (immutable)
-      gcp.backupdr: compliance only (enforced retention is immutable; governance refused)
-      azure.dataprotection: securitySettings.immutabilitySettings.state — Unlocked (governance) vs Locked (compliance); honors BOTH
+      aws.backupvault: Backup Vault Lock — governance (ChangeableForDays set) vs compliance (immutable)
+      gcp.backupvault: effectiveTime — absent or future means governance (patchable,
+        force-deletable with its data); past means compliance. This driver creates
+        vaults with NO lock time, so it builds governance and refuses to promise
+        compliance (D752).
+      azure.backupvault: securitySettings.immutabilitySettings.state — Unlocked (governance) vs Locked (compliance); honors BOTH
 
   encryption.customerManagedKeys:
     kind: bool
@@ -68,9 +86,9 @@ attributes:
       the provider's default key. The key id is implementation detail
       (implementation.kms_key_arn / implementation.kms_key_name), never a capability path.
     mappings:
-      aws.backup: EncryptionKeyArn (a customer key)
-      gcp.backupdr: CMEK (a customer key)
-      azure.dataprotection: securitySettings.encryptionSettings + a system-assigned identity (implementation.key_vault_key_uri)
+      aws.backupvault: EncryptionKeyArn (a customer key)
+      gcp.backupvault: CMEK (a customer key)
+      azure.backupvault: securitySettings.encryptionSettings + a system-assigned identity (implementation.key_vault_key_uri)
 
   service.managed:
     kind: bool

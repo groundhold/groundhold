@@ -28,12 +28,18 @@ attributes:
     description: Region the control plane runs in (data residency)
     mappings:
       aws.eks: cluster region
+      azure.aks: the managed cluster's ARM location
+      gcp.gke: >
+        the cluster location reduced to its REGION — a zonal cluster's
+        `europe-west1-b` reports `europe-west1`
 
   cluster.version:
     kind: string
     description: Kubernetes minor version the control plane runs — governed for end-of-life, CVE and compliance currency
     mappings:
       aws.eks: DescribeCluster cluster.version
+      azure.aks: properties.kubernetesVersion
+      gcp.gke: the cluster's currentMasterVersion
 
   network.apiExposure:
     kind: string
@@ -41,6 +47,15 @@ attributes:
     description: How the API server endpoint is reachable (public internet, VPC-private, or both)
     mappings:
       aws.eks: resourcesVpcConfig endpointPublicAccess / endpointPrivateAccess
+      # D542: read from each driver. All three clouds fold their own API-server
+      # controls onto the SAME three-valued surface (public | mixed | private), which
+      # is the point of the attribute — the contract asks one question of any cloud.
+      azure.aks: >
+        apiServerAccessProfile — enablePrivateCluster makes it `private`;
+        otherwise a non-empty authorizedIPRanges makes it `mixed`; else `public`
+      gcp.gke: >
+        privateClusterConfig.enablePrivateEndpoint makes it `private`; otherwise
+        masterAuthorizedNetworksConfig.enabled makes it `mixed`; else `public`
     recommended:
       op: in
       value: [private, mixed]
@@ -56,6 +71,10 @@ attributes:
     description: Whether Kubernetes Secrets are envelope-encrypted with a managed key at rest
     mappings:
       aws.eks: encryptionConfig with resources=[secrets] and a KMS key
+      # The same guarantee, two unrelated mechanisms — this is what the attribute
+      # abstracts over.
+      azure.aks: securityProfile.azureKeyVaultKms.enabled (etcd encrypted with a CMK)
+      gcp.gke: databaseEncryption.state == ENCRYPTED (application-layer, CMK-backed)
     recommended:
       op: equals
       value: true
@@ -73,9 +92,13 @@ attributes:
     description: Node topology across availability zones (HA)
     mappings:
       aws.eks: node group subnet AZ spread (observed with node groups, slice 2)
+      azure.aks: zonal vs regional from the agent pools' availability zones
+      gcp.gke: a zonal cluster location is `zonal`, a regional one `regional`
 
   service.managed:
     kind: bool
     description: Whether groundhold manages this cluster
     mappings:
       aws.eks: const true when observed through the driver
+      azure.aks: const true
+      gcp.gke: const true

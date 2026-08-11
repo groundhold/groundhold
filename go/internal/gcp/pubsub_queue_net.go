@@ -306,7 +306,11 @@ func (d *Driver) observePubSubQueue(capability, providerID string) ([]provider.O
 		return nil, nil, err
 	}
 	if status == http.StatusNotFound {
-		return nil, []string{"subscription not found — nothing to observe"}, nil
+		// F-LC3 (D521): a BOUND resource the API says is GONE. A diagnostic
+		// alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"subscription not found — bound resource is gone (will re-create)"}, nil
 	}
 	if status != http.StatusOK {
 		return nil, nil, fmt.Errorf("subscriptions.get: HTTP %d", status)
@@ -316,11 +320,14 @@ func (d *Driver) observePubSubQueue(capability, providerID string) ([]provider.O
 		return nil, nil, fmt.Errorf("subscriptions.get: unparseable subscription document")
 	}
 
-	var obs []provider.Observation
+	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
+	}
 	var diags []string
 	obs = append(obs,
 		provider.Observation{Path: "service.managed", Value: true, Derivation: "measured"},
-		provider.Observation{Path: "encryption.atRest", Value: true, Derivation: "config-intent"}, // always encrypts
+		provider.Observation{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"}, // always encrypts
 	)
 
 	// delivery.guarantee + ordering come from the SUBSCRIPTION.

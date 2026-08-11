@@ -245,7 +245,11 @@ func (d *Driver) observeAzureDNSRecord(capability, providerID string) ([]provide
 		return nil, nil, fmt.Errorf("dnsRecord.get: %v", ge)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"record set not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"record set not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("dnsRecord.get: HTTP %d", st)
@@ -254,7 +258,9 @@ func (d *Driver) observeAzureDNSRecord(capability, providerID string) ([]provide
 	if json.Unmarshal(resp, &doc) != nil {
 		return nil, nil, &armReadError{Op: "dnsRecord.get", Cause: "body", Status: st}
 	}
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "dns.type", Value: recordType, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}

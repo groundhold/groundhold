@@ -26,6 +26,10 @@ type Entry struct {
 	LogPath    string `json:"logPath"`
 	PID        int    `json:"pid"` // listing garnish only — the lease is liveness
 	LaunchedAt string `json:"launchedAt"`
+	// Unreadable (D678) names why this pointer cannot be trusted — it could not be
+	// read, it is not a registry entry, or a second file claims the same handle.
+	// A pointer that vanishes silently defeats the registry's only purpose.
+	Unreadable string `json:"unreadable,omitempty"`
 }
 
 // Runner starts the detached child. Production re-execs the binary in a new
@@ -89,19 +93,39 @@ func ListRegistry(ledgerPath string) ([]Entry, error) {
 		return nil, err
 	}
 	var out []Entry
+	seen := map[string]bool{}
 	for _, de := range ents {
 		name := de.Name()
 		if de.IsDir() || !strings.HasSuffix(name, ".json") {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			continue // a pointer we cannot read is not truth; skip it
+		raw, rerr := os.ReadFile(filepath.Join(dir, name))
+		if rerr != nil {
+			// D678: a pointer we cannot read used to vanish. The registry's whole
+			// job is surfacing a run the LEDGER cannot see — "launched but never
+			// admitted", which its own comment calls the most attention-worthy
+			// condition here — so a pointer that is unreadable is the strongest
+			// possible reason to say something, not to say nothing. Measured: a
+			// truncated 268-byte pointer and one at mode 000 both disappeared with
+			// no diagnostic.
+			out = append(out, Entry{Handle: strings.TrimSuffix(name, ".json"),
+				Unreadable: rerr.Error()})
+			continue
 		}
 		var e Entry
-		if json.Unmarshal(raw, &e) == nil && e.Handle != "" {
-			out = append(out, e)
+		if json.Unmarshal(raw, &e) != nil || e.Handle == "" {
+			out = append(out, Entry{Handle: strings.TrimSuffix(name, ".json"),
+				Unreadable: "the pointer is not a registry entry"})
+			continue
 		}
+		// D678: two pointer files naming one handle were listed TWICE, so a caller
+		// keying by handle collided with itself. The first wins and the duplicate is
+		// reported rather than dropped.
+		if seen[e.Handle] {
+			e.Unreadable = "a second registry pointer names this handle (" + name + ")"
+		}
+		seen[e.Handle] = true
+		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Handle < out[j].Handle })
 	return out, nil

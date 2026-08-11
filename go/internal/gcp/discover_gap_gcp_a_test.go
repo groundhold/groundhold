@@ -251,7 +251,11 @@ func TestDiscoverBackupVault(t *testing.T) {
 	}
 	by := obsByPath(got[0])
 	if by["location.region"] != "europe-west1" || by["service.managed"] != true ||
-		by["retention.lockMode"] != "compliance" || by["retention.minimum"] != "2592000s" {
+		// D752: the fixture's vault carries no effectiveTime, so it is NOT locked —
+		// its settings are patchable and `delete force=true` takes its data. That is
+		// governance. This asserted "compliance" because the driver emitted the word
+		// as a constant, whatever the estate looked like.
+		by["retention.lockMode"] != "governance" || by["retention.minimum"] != "2592000s" {
 		t.Errorf("backup vault observations: %v", by)
 	}
 }

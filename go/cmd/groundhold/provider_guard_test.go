@@ -12,9 +12,16 @@ import (
 // against the FAKE provider by default); a new provider verb added without gating
 // is the same hole. This test forces either change to be a deliberate edit.
 func TestProviderVerbsMembership(t *testing.T) {
+	// D571: `anchor` and `repair` LEFT this set, deliberately. They are pure ledger
+	// operations — runAnchor(ledgerPath, checkPath) and runRepair(ledgerPath,
+	// quarantine, fingerprint, explain) take no provider and their bodies name no
+	// driver — so there is no fake-default footgun to guard, and demanding
+	// --provider on the two verbs used when a ledger is damaged claimed they contact
+	// a cloud they never touch. This gate did its job: it refused the edit until it
+	// was justified here.
 	want := []string{
-		"adopt", "anchor", "apply", "converge", "crawl", "discover",
-		"observe", "preflight", "probe", "react", "refresh", "repair", "resume",
+		"adopt", "apply", "converge", "crawl", "discover",
+		"observe", "preflight", "probe", "react", "refresh", "resume",
 	}
 	got := make([]string, 0, len(providerVerbs))
 	for v, on := range providerVerbs {

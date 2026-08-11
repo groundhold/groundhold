@@ -84,9 +84,12 @@ func Sign(method string, u *url.URL, headers map[string]string, payloadHash,
 	// ---- canonical query string: sorted, RFC3986-encoded ----
 	canonQuery := canonicalQuery(u.Query())
 
-	// ---- canonical URI (S3 keeps the path single-encoded; path is "/" for the
-	// query/POST services we sign — encode each segment once) ----
-	canonURI := canonicalURI(u.EscapedPath())
+	// ---- canonical URI. SigV4 URI-encodes each path segment TWICE for every service
+	// except S3 (D880); for a segment with no reserved bytes the second pass is a no-op,
+	// so the query/POST services whose path is "/" and the read paths that carry a plain
+	// name are unaffected — it is the ARN-in-path reads (backup ListTags, MSK
+	// DeleteCluster) where %3A must become %253A or AWS 403s the signature. ----
+	canonURI := canonicalURI(u.EscapedPath(), service)
 
 	canonicalRequest := method + "\n" + canonURI + "\n" + canonQuery + "\n" +
 		canonHeaders.String() + "\n" + signedHeaders + "\n" + payloadHash
@@ -143,7 +146,7 @@ func canonicalQuery(q url.Values) string {
 	return strings.Join(parts, "&")
 }
 
-func canonicalURI(escapedPath string) string {
+func canonicalURI(escapedPath, service string) string {
 	if escapedPath == "" {
 		return "/"
 	}
@@ -155,7 +158,15 @@ func canonicalURI(escapedPath string) string {
 		if err != nil {
 			un = s
 		}
-		segs[i] = rfc3986(un)
+		enc := rfc3986(un)
+		if service != "s3" {
+			// D880: SigV4 URI-encodes the path segment a SECOND time for every service
+			// but S3. A no-op for plain segments; for an ARN it turns %3A into %253A,
+			// which is what AWS itself computes from the received request. Without it,
+			// an ARN-in-path read is signed against a canonical AWS never builds — 403.
+			enc = rfc3986(enc)
+		}
+		segs[i] = enc
 	}
 	return strings.Join(segs, "/")
 }

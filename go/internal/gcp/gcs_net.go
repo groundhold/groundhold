@@ -539,6 +539,14 @@ func (d *Driver) observeGCS(capability, providerID string) ([]provider.Observati
 	if err != nil {
 		return nil, nil, err
 	}
+	// F-LC3 (D519): a 404 here is a READABLE absence, not a failure to read.
+	// Folded into the generic error it made the binding block forever on
+	// unknown instead of re-creating; the contract reserves a marker for it.
+	if status == http.StatusNotFound {
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"bound resource is gone (will re-create)"}, nil
+	}
 	if status != http.StatusOK {
 		return nil, nil, fmt.Errorf("buckets.get: HTTP %d", status)
 	}
@@ -551,7 +559,10 @@ func (d *Driver) observeGCS(capability, providerID string) ([]provider.Observati
 	// already guards). Resolving OUR number needs a pinned project; the D82
 	// squat defense lives on create (409-continue) and delete, which have one.
 
-	var obs []provider.Observation
+	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
+	}
 	var diags []string
 	// location + cross-region replication. A configurable dual-region bucket
 	// carries TWO dataLocations (peers of one bucket); GCS returns them in the
@@ -585,7 +596,7 @@ func (d *Driver) observeGCS(capability, providerID string) ([]provider.Observati
 			Value: false, Derivation: "measured"})
 	}
 	obs = append(obs, provider.Observation{Path: "encryption.atRest",
-		Value: true, Derivation: "config-intent"}) // GCS always encrypts
+		Value: true, Derivation: "platform-invariant"}) // GCS always encrypts
 	obs = append(obs, provider.Observation{Path: "service.managed",
 		Value: true, Derivation: "measured"})
 	obs = append(obs, provider.Observation{Path: "versioning.enabled",

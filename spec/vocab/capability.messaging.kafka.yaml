@@ -29,7 +29,7 @@ attributes:
     mappings:
       aws.msk: provider region (the cluster is regional, brokers span AZs)
       gcp.managedkafka: cluster location
-      azure.eventhubskafka: the namespace location
+      azure.azkafka: the namespace location
 
   engine.protocol:
     kind: protocol
@@ -41,7 +41,7 @@ attributes:
     mappings:
       aws.msk: KafkaVersion (e.g. 3.5.1)
       gcp.managedkafka: managed broker version (validated, not pinned)
-      azure.eventhubskafka: Kafka 1.0+ protocol endpoint (validated, not pinned)
+      azure.azkafka: Kafka 1.0+ protocol endpoint (validated, not pinned)
 
   availability.class:
     kind: string
@@ -55,7 +55,7 @@ attributes:
     mappings:
       aws.msk: always multi-AZ (brokers across AZs) — zonal refused
       gcp.managedkafka: always regional (spread across zones) — zonal refused
-      azure.eventhubskafka: zoneRedundant=true (regional) vs false (zonal)
+      azure.azkafka: zoneRedundant=true (regional) vs false (zonal)
 
   encryption.inTransit:
     kind: bool
@@ -65,7 +65,7 @@ attributes:
     mappings:
       aws.msk: EncryptionInTransit.ClientBroker = TLS
       gcp.managedkafka: TLS/mTLS to the bootstrap endpoint
-      azure.eventhubskafka: TLS-only Kafka endpoint (SASL_SSL)
+      azure.azkafka: TLS-only Kafka endpoint (SASL_SSL)
 
   encryption.customerManagedKeys:
     kind: bool
@@ -76,7 +76,7 @@ attributes:
     mappings:
       aws.msk: EncryptionInfo.EncryptionAtRest.DataVolumeKMSKeyId
       gcp.managedkafka: gcpConfig.kmsKey
-      azure.eventhubskafka: namespace encryption keySource=Microsoft.KeyVault (Premium)
+      azure.azkafka: namespace encryption keySource=Microsoft.KeyVault (Premium)
 
   service.managed:
     kind: bool

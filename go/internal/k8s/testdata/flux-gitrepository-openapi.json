@@ -1,0 +1,405 @@
+{
+ "components": {
+  "schemas": {
+   "io.fluxcd.toolkit.source.v1.GitRepository": {
+    "properties": {
+     "apiVersion": {
+      "type": "string"
+     },
+     "kind": {
+      "type": "string"
+     },
+     "metadata": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"
+       }
+      ]
+     },
+     "spec": {
+      "properties": {
+       "ignore": {
+        "type": "string"
+       },
+       "include": {
+        "items": {
+         "properties": {
+          "fromPath": {
+           "type": "string"
+          },
+          "repository": {
+           "properties": {
+            "name": {
+             "type": "string"
+            }
+           },
+           "required": [
+            "name"
+           ],
+           "type": "object"
+          },
+          "toPath": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "repository"
+         ],
+         "type": "object"
+        },
+        "type": "array"
+       },
+       "interval": {
+        "pattern": "^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$",
+        "type": "string"
+       },
+       "provider": {
+        "enum": [
+         "generic",
+         "aws",
+         "azure",
+         "github"
+        ],
+        "type": "string"
+       },
+       "proxySecretRef": {
+        "properties": {
+         "name": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "name"
+        ],
+        "type": "object"
+       },
+       "recurseSubmodules": {
+        "type": "boolean"
+       },
+       "ref": {
+        "properties": {
+         "branch": {
+          "type": "string"
+         },
+         "commit": {
+          "type": "string"
+         },
+         "name": {
+          "type": "string"
+         },
+         "semver": {
+          "type": "string"
+         },
+         "tag": {
+          "type": "string"
+         }
+        },
+        "type": "object"
+       },
+       "secretRef": {
+        "properties": {
+         "name": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "name"
+        ],
+        "type": "object"
+       },
+       "serviceAccountName": {
+        "type": "string"
+       },
+       "sparseCheckout": {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       "suspend": {
+        "type": "boolean"
+       },
+       "timeout": {
+        "default": "60s",
+        "pattern": "^([0-9]+(\\.[0-9]+)?(ms|s|m))+$",
+        "type": "string"
+       },
+       "url": {
+        "pattern": "^(http|https|ssh)://.*$",
+        "type": "string"
+       },
+       "verify": {
+        "properties": {
+         "mode": {
+          "default": "HEAD",
+          "enum": [
+           "head",
+           "HEAD",
+           "Tag",
+           "TagAndHEAD"
+          ],
+          "type": "string"
+         },
+         "secretRef": {
+          "properties": {
+           "name": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "name"
+          ],
+          "type": "object"
+         }
+        },
+        "required": [
+         "secretRef"
+        ],
+        "type": "object"
+       }
+      },
+      "required": [
+       "interval",
+       "url"
+      ],
+      "type": "object",
+      "x-kubernetes-validations": [
+       {
+        "message": "serviceAccountName can only be set when provider is 'azure' or 'aws'",
+        "rule": "!has(self.serviceAccountName) || (has(self.provider) && (self.provider == 'azure' || self.provider == 'aws'))"
+       }
+      ]
+     },
+     "status": {
+      "default": {
+       "observedGeneration": -1
+      },
+      "properties": {
+       "artifact": {
+        "properties": {
+         "digest": {
+          "pattern": "^[a-z0-9]+(?:[.+_-][a-z0-9]+)*:[a-zA-Z0-9=_-]+$",
+          "type": "string"
+         },
+         "lastUpdateTime": {
+          "format": "date-time",
+          "type": "string"
+         },
+         "metadata": {
+          "additionalProperties": {
+           "type": "string"
+          },
+          "type": "object"
+         },
+         "path": {
+          "type": "string"
+         },
+         "revision": {
+          "type": "string"
+         },
+         "size": {
+          "format": "int64",
+          "type": "integer"
+         },
+         "url": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "digest",
+         "lastUpdateTime",
+         "path",
+         "revision",
+         "url"
+        ],
+        "type": "object"
+       },
+       "conditions": {
+        "items": {
+         "properties": {
+          "lastTransitionTime": {
+           "format": "date-time",
+           "type": "string"
+          },
+          "message": {
+           "maxLength": 32768,
+           "type": "string"
+          },
+          "observedGeneration": {
+           "format": "int64",
+           "minimum": 0,
+           "type": "integer"
+          },
+          "reason": {
+           "maxLength": 1024,
+           "minLength": 1,
+           "pattern": "^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$",
+           "type": "string"
+          },
+          "status": {
+           "enum": [
+            "True",
+            "False",
+            "Unknown"
+           ],
+           "type": "string"
+          },
+          "type": {
+           "maxLength": 316,
+           "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$",
+           "type": "string"
+          }
+         },
+         "required": [
+          "lastTransitionTime",
+          "message",
+          "reason",
+          "status",
+          "type"
+         ],
+         "type": "object"
+        },
+        "type": "array"
+       },
+       "includedArtifacts": {
+        "items": {
+         "properties": {
+          "digest": {
+           "pattern": "^[a-z0-9]+(?:[.+_-][a-z0-9]+)*:[a-zA-Z0-9=_-]+$",
+           "type": "string"
+          },
+          "lastUpdateTime": {
+           "format": "date-time",
+           "type": "string"
+          },
+          "metadata": {
+           "additionalProperties": {
+            "type": "string"
+           },
+           "type": "object"
+          },
+          "path": {
+           "type": "string"
+          },
+          "revision": {
+           "type": "string"
+          },
+          "size": {
+           "format": "int64",
+           "type": "integer"
+          },
+          "url": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "digest",
+          "lastUpdateTime",
+          "path",
+          "revision",
+          "url"
+         ],
+         "type": "object"
+        },
+        "type": "array"
+       },
+       "lastHandledReconcileAt": {
+        "type": "string"
+       },
+       "observedGeneration": {
+        "format": "int64",
+        "type": "integer"
+       },
+       "observedIgnore": {
+        "type": "string"
+       },
+       "observedInclude": {
+        "items": {
+         "properties": {
+          "fromPath": {
+           "type": "string"
+          },
+          "repository": {
+           "properties": {
+            "name": {
+             "type": "string"
+            }
+           },
+           "required": [
+            "name"
+           ],
+           "type": "object"
+          },
+          "toPath": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "repository"
+         ],
+         "type": "object"
+        },
+        "type": "array"
+       },
+       "observedRecurseSubmodules": {
+        "type": "boolean"
+       },
+       "observedSparseCheckout": {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       "sourceVerificationMode": {
+        "type": "string"
+       }
+      },
+      "type": "object"
+     }
+    },
+    "type": "object",
+    "x-kubernetes-group-version-kind": [
+     {
+      "group": "source.toolkit.fluxcd.io",
+      "kind": "GitRepository",
+      "version": "v1"
+     }
+    ]
+   },
+   "io.fluxcd.toolkit.source.v1.GitRepositoryList": {
+    "properties": {
+     "apiVersion": {
+      "type": "string"
+     },
+     "items": {
+      "items": {
+       "$ref": "#/components/schemas/io.fluxcd.toolkit.source.v1.GitRepository"
+      },
+      "type": "array"
+     },
+     "kind": {
+      "type": "string"
+     },
+     "metadata": {
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ListMeta"
+       }
+      ]
+     }
+    },
+    "required": [
+     "items"
+    ],
+    "type": "object",
+    "x-kubernetes-group-version-kind": [
+     {
+      "group": "source.toolkit.fluxcd.io",
+      "kind": "GitRepositoryList",
+      "version": "v1"
+     }
+    ]
+   }
+  }
+ }
+}

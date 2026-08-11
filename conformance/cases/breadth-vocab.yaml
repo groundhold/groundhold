@@ -3111,7 +3111,7 @@ cases:
     vocab:
       - capability: capability.cluster.namespace
         version: 0.1
-        stateful: false
+        stateful: true
         attributes:
           security.podSecurity: { kind: string, enum: [restricted, baseline, privileged] }
     contract:
@@ -3149,7 +3149,7 @@ cases:
     vocab:
       - capability: capability.cluster.namespace
         version: 0.1
-        stateful: false
+        stateful: true
         attributes:
           security.podSecurity: { kind: string, enum: [restricted, baseline, privileged] }
     contract:
@@ -4472,7 +4472,7 @@ cases:
     vocab:
       - capability: capability.ai.speech
         version: 0.1
-        stateful: false
+        stateful: true
         attributes:
           location.region: { kind: string }
           encryption.customerManagedKeys: { kind: bool }
@@ -4531,7 +4531,7 @@ cases:
     vocab:
       - capability: capability.ai.speech
         version: 0.1
-        stateful: false
+        stateful: true
         attributes:
           retention.maximum: { kind: duration }
     contract:
@@ -4571,7 +4571,7 @@ cases:
     vocab:
       - capability: capability.ai.speech
         version: 0.1
-        stateful: false
+        stateful: true
         attributes:
           retention.maximum: { kind: duration }
     contract:
@@ -5139,3 +5139,154 @@ cases:
             replicas.minimum: "cpu > 70% ? 5 : 2"
     expect:
       error: candidate
+
+  # D719 — a refusal that can be acted on, and a run that finds every mistake.
+  - name: unknown-capability-types-are-all-named-with-their-nearest-known-types
+    description: >
+      D719: a contract carrying TWO unknown capability types is refused ONCE,
+      naming both, each with the closest known types. The loader stopped at the
+      first one before, so a field report from a second tester cost one run per
+      mistake — and it named what was wrong without naming what is right, over a
+      CLOSED vocabulary it was holding. `errorContains` is what makes this a
+      cross-implementation case rather than an exit code: the two implementations
+      must explain the refusal identically, or they are two tools.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e719, environment: production, version: 1 }
+      capabilities:
+        - id: fw
+          type: capability.network.firewall
+        - id: det
+          type: capability.security.detection
+        - id: db
+          type: capability.database.relational
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: e719
+      capabilities:
+        db:
+          attributes:
+            service.managed: true
+    expect:
+      error: contract
+      errorContains:
+        - "2 unknown capability types"
+        - "capability.network.firewall"
+        - "capability.security.detection"
+        - "closest known types: capability.security.threatdetection"
+        - "the vocabulary is closed and has 57 types"
+
+  # D728 — two evidence bars, because verify and audit ask different questions.
+  - name: verify-design-and-runtime-bars-are-separate
+    description: >
+      D728: `verify` compares the contract with the CANDIDATE, before anything
+      exists, so it can never hold provider evidence; `audit` judges recorded
+      reality, where provider evidence is the point. One field served both, and a
+      field report measured the corner: demanding measurement made verify
+      unpassable (130 unknown of 146), while accepting `static` let a hard
+      security constraint be satisfied by the document's own word — 127 of their
+      131 hard constraints wanted "declaration before, measurement after" and
+      there was no way to say it. The two-bar form says it: this contract passes
+      verify on the candidate's declaration while its runtime bar demands a
+      provider reading that audit will enforce.
+    vocab:
+      - capability: capability.network.private
+        version: 0.1
+        stateful: true
+        attributes:
+          egress.restricted: { kind: bool }
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: d728, environment: production, version: 1 }
+      capabilities:
+        - id: net
+          type: capability.network.private
+      constraints:
+        hard:
+          - id: c-egress
+            subject: net
+            path: egress.restricted
+            op: equals
+            value: true
+            verify: { design: static, runtime: provider-api }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: d728
+      capabilities:
+        net:
+          attributes:
+            egress.restricted: true
+    expect:
+      executable: true
+      verdicts:
+        c-egress: satisfied
+
+  - name: verify-design-bar-may-not-exceed-the-runtime-bar
+    description: >
+      D728: a constraint that demands probe evidence before it ships and accepts a
+      config read forever after abandons the guarantee at the moment it starts
+      mattering. Refused at load, in both implementations.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: d728b, environment: production, version: 1 }
+      capabilities:
+        - id: net
+          type: capability.network.private
+      constraints:
+        hard:
+          - id: c-bad
+            subject: net
+            path: egress.restricted
+            op: equals
+            value: true
+            verify: { design: probe, runtime: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: d728b
+      capabilities:
+        net:
+          attributes:
+            egress.restricted: true
+    expect:
+      error: contract
+      errorContains:
+        - "stronger than verify.runtime"
+
+  - name: verify-refuses-both-spellings-of-the-same-bar
+    description: >
+      D728: `method` and `design`/`runtime` are one thing written two ways, and a
+      set with two homes has no home. Writing both is refused rather than one
+      silently winning.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: d728c, environment: production, version: 1 }
+      capabilities:
+        - id: net
+          type: capability.network.private
+      constraints:
+        hard:
+          - id: c-both
+            subject: net
+            path: egress.restricted
+            op: equals
+            value: true
+            verify: { method: static, design: static, runtime: provider-api }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: d728c
+      capabilities:
+        net:
+          attributes:
+            egress.restricted: true
+    expect:
+      error: contract
+      errorContains:
+        - "one bar or two, never both spellings"

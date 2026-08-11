@@ -92,6 +92,20 @@ func buildRoleRules(perms []string) ([]map[string]any, error) {
 		if r == "" || v == "" {
 			return nil, fmt.Errorf("permission %q is not <group>/<resource>:<verb>", p)
 		}
+		// The core API group is spelled "core" here, never blank. RBAC's own YAML
+		// writes it as the empty string, so `/nodes:get` is the natural thing to
+		// declare and it USED to be accepted — it wrote the correct rule, and then
+		// observe read it back as "core/nodes:get", because the reverse mapping has
+		// exactly one spelling. The two could never agree, so converge planned the
+		// same update on every run, forever, on a cluster nobody had touched (D509).
+		// Refuse it the way a malformed grant principal is refused: name the form
+		// that works rather than guess, since guessing is what made the loop.
+		if g == "" {
+			return nil, fmt.Errorf("permission %q leaves the API group blank — spell the "+
+				"core group %q (RBAC's own empty string is not the spelling observations "+
+				"use, and a value that does not round-trip can never converge)",
+				p, "core/"+r+":"+v)
+		}
 		if g == "core" {
 			g = ""
 		}
@@ -191,7 +205,7 @@ func buildRole(attrs map[string]any) ([]map[string]any, error) {
 func (d *Driver) Claim(service, capability, environment, providerID string) provider.CreateResult {
 	// a mapped service claims via its mapping's object path — the same one-time
 	// label stamp, driven by the mapping's scope/GVK rather than a hand-coded case.
-	if m := d.mappingFor(service); m != nil {
+	if m, _ := d.serviceMapping(service, forRead); m != nil { // Claim is a read-shaped write of our own label
 		ns, name, err := m.parseProviderID(providerID)
 		if err != nil {
 			return provider.CreateResult{Status: "failed", Reason: err.Error()}

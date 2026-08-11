@@ -323,3 +323,61 @@ cases:
             - cloudfunctions.operations.get
             - run.services.getIamPolicy
             - run.services.setIamPolicy
+
+  # D852. The operand a contract uses to name a caller, and the permissions it costs.
+  # The PRIVATE case above pins that a function with no invokers declares neither
+  # AddPermission nor GetPolicy; this one pins that declaring a caller adds exactly
+  # those two, and nothing about a Function URL — the grants are resource-policy
+  # statements, not exposure.
+  - name: plan-emits-lambda-permissions-for-declared-invokers
+    impl: go
+    description: >
+      A private function that names an invoker declares lambda:AddPermission (the
+      grant) and lambda:GetPolicy (the reconcile READS the live policy, so a grant
+      dropped from the candidate can be withdrawn rather than merely un-added).
+      No CreateFunctionUrlConfig: naming a caller is not exposing a URL.
+    plan:
+      at: "2026-08-05T10:00:00Z"
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: fninv, environment: test, version: 1 }
+        capabilities:
+          - id: fn
+            type: capability.function.serverless
+        constraints:
+          hard:
+            - id: c-private
+              subject: fn
+              path: network.publicExposure
+              op: equals
+              value: false
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: fninv
+        capabilities:
+          fn:
+            provider: aws
+            service: lambda
+            attributes:
+              location.region: eu-central-1
+              network.publicExposure: false
+            implementation:
+              image_uri: 123456789012.dkr.ecr.eu-central-1.amazonaws.com/fn:sha
+              role_arn: arn:aws:iam::123456789012:role/fn-exec
+              invokers:
+                - service: scheduler.amazonaws.com
+                  source_arn: arn:aws:scheduler:eu-central-1:123456789012:schedule/default/sync
+    expect:
+      actions:
+        a-create-fn:
+          operation: create
+          requiredPermissions:
+            - iam:PassRole
+            - lambda:AddPermission
+            - lambda:CreateFunction
+            - lambda:GetFunction
+            - lambda:GetFunctionUrlConfig
+            - lambda:GetPolicy

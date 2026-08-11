@@ -741,8 +741,14 @@ func (d *Driver) reconcileAKSAddon(capability, environment, pid string) provider
 		return provider.ReconcileResult{Status: "failed",
 			Reason: "aks cluster " + cluster + " stands in provisioningState " + state + " — the addon enable did not land cleanly"}
 	case "Succeeded":
-		if enabled, _ := aksAddonReadEnabled(doc, profileKey); enabled {
+		switch aksAddonReadState(doc, profileKey) {
+		case aksAddonOn:
 			return provider.ReconcileResult{Status: "succeeded", ProviderID: pid}
+		case aksAddonUnreadable:
+			// D801: an unreadable profile is not a failed enable.
+			return provider.ReconcileResult{Status: "unknown",
+				Reason: "the addon profile for " + addon + " on cluster " + cluster +
+					" is present but not readable — cannot tell whether the enable landed"}
 		}
 		return provider.ReconcileResult{Status: "failed",
 			Reason: "addon " + addon + " is not enabled on cluster " + cluster + " — the enable did not land"}

@@ -45,7 +45,12 @@ func kafkaVersionFor(protocol string) (string, error) {
 	}
 	switch strings.SplitN(ver, ".", 2)[0] {
 	case "3":
-		return "3.5.1", nil
+		// D883: MSK rejects the general-purpose (Standard) broker types this driver
+		// provisions — kafka.m5.large — for kafka 3.5.1: "Standard instance types are not
+		// supported for Kafka version 3.5.1". 3.6.0 is the lowest version AWS still pairs
+		// with them, so kafka/3 maps there; proven by a real CreateClusterV2 that got past
+		// this validation. A live cluster is ~20 minutes, so the fix rides the version map.
+		return "3.6.0", nil
 	case "2":
 		return "2.8.1", nil
 	default:
@@ -151,26 +156,30 @@ func (p MSKPlan) createBody(capability, environment string) map[string]any {
 	}
 	encAtRest := map[string]any{}
 	if p.CMEK {
-		encAtRest["DataVolumeKMSKeyId"] = p.KmsKeyId
+		encAtRest["dataVolumeKMSKeyId"] = p.KmsKeyId
 	}
+	// D879: kafka (MSK) is restJson1 and every CreateClusterV2 member carries a camelCase
+	// locationName. The PascalCase body AWS would ignore field-for-field, then reject the
+	// request for a missing clusterName/provisioned — the same golden-hidden defect as
+	// apigateway (D878), here in the send direction.
 	return map[string]any{
-		"ClusterName": p.Cluster,
-		"Provisioned": map[string]any{
-			"KafkaVersion":        p.KafkaVersion,
-			"NumberOfBrokerNodes": p.Brokers,
-			"BrokerNodeGroupInfo": map[string]any{
-				"InstanceType":   "kafka.m5.large",
-				"ClientSubnets":  subnets,
-				"SecurityGroups": sgs,
-				"StorageInfo":    map[string]any{"EbsStorageInfo": map[string]any{"VolumeSize": 100}},
+		"clusterName": p.Cluster,
+		"provisioned": map[string]any{
+			"kafkaVersion":        p.KafkaVersion,
+			"numberOfBrokerNodes": p.Brokers,
+			"brokerNodeGroupInfo": map[string]any{
+				"instanceType":   "kafka.m5.large",
+				"clientSubnets":  subnets,
+				"securityGroups": sgs,
+				"storageInfo":    map[string]any{"ebsStorageInfo": map[string]any{"volumeSize": 100}},
 			},
-			"EncryptionInfo": map[string]any{
-				"EncryptionInTransit": map[string]any{"ClientBroker": "TLS", "InCluster": true},
-				"EncryptionAtRest":    encAtRest,
+			"encryptionInfo": map[string]any{
+				"encryptionInTransit": map[string]any{"clientBroker": "TLS", "inCluster": true},
+				"encryptionAtRest":    encAtRest,
 			},
-			"EnhancedMonitoring": "DEFAULT",
+			"enhancedMonitoring": "DEFAULT",
 		},
-		"Tags": map[string]any{
+		"tags": map[string]any{
 			"groundhold-capability":  sanitizeTag(capability),
 			"groundhold-environment": sanitizeTag(environment),
 		},

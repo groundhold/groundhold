@@ -86,6 +86,35 @@ capabilities:
 	return c, cand, led, ledgerPath
 }
 
+// absentFake 404s the providerId: it emits the resource.absent marker with a nil error
+// (the D521 pattern), the way real drivers report a bound resource that is gone.
+type absentFake struct{ *provider.Fake }
+
+func (absentFake) Observe(service, capability, providerID string) ([]provider.Observation, []string, error) {
+	return []provider.Observation{{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"}},
+		[]string{"resource not found — nothing at this providerId"}, nil
+}
+
+// TestAdoptRefusesAbsentResource pins D957: adopting a providerId where NOTHING exists
+// must REFUSE, not report "adopted". Without the gate every declared attribute misses the
+// (absent) observation and becomes declared-intent, no reasons accumulate, and adopt binds
+// a contract to a phantom — then the next converge CREATES the resource instead of taking
+// one over, and the operator believed brownfield infra was already under contract. The
+// strongest "cannot confirm" (wholly absent) must be the firmest refusal.
+func TestAdoptRefusesAbsentResource(t *testing.T) {
+	c, cand, led, ledgerPath := intentFixture(t)
+	report, _ := verify.Verify(c, cand, nil)
+	prov := absentFake{Fake: &provider.Fake{}}
+	res, code := Run(c, cand, report, map[string]string{"store": "fake:gone"},
+		prov, led, ledgerPath, "2026-07-25T11:00:00Z", "")
+	if code == 0 {
+		t.Fatalf("adopting an absent resource must refuse, got adopted: %+v", res)
+	}
+	if !strings.Contains(strings.Join(res.Reasons, " "), "nothing to adopt") {
+		t.Fatalf("refusal must say there is nothing to adopt, got %v", res.Reasons)
+	}
+}
+
 // TestAdoptRecordsNonObservableAsIntent pins F-LC3 part 3: a NON-OBSERVABLE
 // declared attribute (cost.monthly — the driver never emits it) is adopted with
 // the candidate's own provenance (declared, NOT measured), never refused. The

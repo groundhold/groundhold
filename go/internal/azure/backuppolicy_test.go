@@ -41,8 +41,10 @@ func TestBuildBackupPolicyHonors(t *testing.T) {
 	if p.VaultName != "bv-prod" || p.ResourceGroup != "rg1" || p.DatasourceType != "Microsoft.Compute/disks" {
 		t.Fatalf("operands not carried: %+v", p)
 	}
-	if p.DataStoreType != "VaultStore" || p.BackupType != "Incremental" {
-		t.Fatalf("defaults wrong: %+v", p)
+	// D949: a disk policy's field-verified default is OperationalStore+Incremental —
+	// the cloud 400s VaultStore for a disk datasource.
+	if p.DataStoreType != "OperationalStore" || p.BackupType != "Incremental" {
+		t.Fatalf("disk defaults wrong: %+v", p)
 	}
 	if !backupPolicyOurs(p.Name, "prod", "dr-plan") {
 		t.Fatalf("name %q must carry ownership marker", p.Name)
@@ -77,6 +79,49 @@ func TestBuildBackupPolicyHourlyOverride(t *testing.T) {
 	}
 	if p.Interval != "PT6H" {
 		t.Fatalf("6h must map to PT6H, got %q", p.Interval)
+	}
+}
+
+// TestBackupPolicyDatasourceDefaults pins D949: the (dataStoreType, backupType) a
+// DataProtection policy needs is datasource-specific — the cloud 400s a mismatch (a disk
+// policy is rejected with VaultStore, a Postgres policy with Incremental; field
+// 2026-08-08). The old code hardcoded VaultStore+Incremental for every datasource, a body
+// uncreatable for both documented workloads, and a golden test blessed it (the D934
+// shape). So an unpinned store/type is DERIVED from the datasource, and a datasource we
+// have not field-verified refuses rather than emit a guess the cloud may reject.
+func TestBackupPolicyDatasourceDefaults(t *testing.T) {
+	derive := func(ds string, over map[string]any) (BackupPolicyPlan, error) {
+		impl := map[string]any{"backupVaultName": "bv-prod", "resource_group": "rg1", "datasourceType": ds}
+		for k, v := range over {
+			impl[k] = v
+		}
+		return BuildBackupPolicy("prod", "dr-plan", backupPolicyAttrs(), impl, 1)
+	}
+	for _, c := range []struct{ ds, store, btype string }{
+		{"Microsoft.Compute/disks", "OperationalStore", "Incremental"},
+		{"Microsoft.ContainerService/managedClusters", "OperationalStore", "Incremental"},
+		{"Microsoft.DBforPostgreSQL/flexibleServers", "VaultStore", "Full"},
+	} {
+		p, err := derive(c.ds, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", c.ds, err)
+		}
+		if p.DataStoreType != c.store || p.BackupType != c.btype {
+			t.Fatalf("%s default = %s+%s, want %s+%s", c.ds, p.DataStoreType, p.BackupType, c.store, c.btype)
+		}
+	}
+	// A datasource with no verified default refuses rather than emit a cloud-rejected body.
+	if _, err := derive("Microsoft.Storage/storageAccounts/blobServices", nil); err == nil {
+		t.Fatal("unverified datasource must refuse a defaulted store/type")
+	}
+	// An explicit operand is honored (and overrides the derived default).
+	p, err := derive("Microsoft.Compute/disks", map[string]any{"dataStoreType": "VaultStore", "backupType": "Full"})
+	if err != nil || p.DataStoreType != "VaultStore" || p.BackupType != "Full" {
+		t.Fatalf("explicit operands must win: %+v %v", p, err)
+	}
+	// A bad backupType operand refuses.
+	if _, err := derive("Microsoft.Compute/disks", map[string]any{"backupType": "Sideways"}); err == nil {
+		t.Fatal("bad backupType must refuse")
 	}
 }
 

@@ -127,7 +127,13 @@ func (d *Driver) observeGKEWorkloadIdentity(capability, providerID string) ([]pr
 	}
 	member := wiMember(poolProject, namespace, serviceAccount)
 	if !memberInRole(pol, wiRole, member) {
-		return nil, []string{"workload identity binding not present on the GSA — nothing to observe"}, nil
+		return []provider.Observation{
+			// F-LC3 (D802): a BOUND resource the API authoritatively 404s is GONE. An
+			// empty return leaves the last good observations standing as the freshest
+			// word, so posture reads managed-ok and audit stays satisfied about a
+			// resource that does not exist (D513/D518, fixed here last).
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"workload identity binding not present on the GSA — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
 		{Path: "workload.namespace", Value: namespace, Derivation: "measured"},
@@ -231,7 +237,7 @@ func (d *Driver) discoverGKEWorkloadIdentity(region string) ([]provider.Discover
 				}
 				diags = append(diags, od...)
 				out = append(out, provider.Discovered{
-					ProviderID: pid, ResourceType: "capability.identity.podidentity", Observations: obs})
+					ProviderID: pid, ResourceType: "capability.identity.podidentity", Observations: provider.WithoutAbsence(obs)})
 			}
 		}
 	}

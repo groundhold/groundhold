@@ -65,3 +65,27 @@ func TestProbeRefusesUnconsentedIntrusiveMeasurement(t *testing.T) {
 			res.Measurements)
 	}
 }
+
+// D697: the three statuses, from the only thing that decides them — what the run
+// produced. A unit test rather than only conformance cases, because `classify` is
+// where the collapse lived and it is cheap to hold it directly.
+func TestProbeThatMeasuredNothingIsNotProbed(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		measurements, failures int
+		wantStatus             string
+		wantExit               int
+	}{
+		{"all measured", 2, 0, "probed", 0},
+		{"some measured, some failed", 1, 1, "partial", 2},
+		{"everything failed", 0, 3, "unmeasured", 2},
+		{"the driver returned nothing at all", 0, 0, "unmeasured", 2},
+	} {
+		status, exit := classify(tc.measurements, tc.failures)
+		if status != tc.wantStatus || exit != tc.wantExit {
+			t.Errorf("%s: got (%q, %d), want (%q, %d) — a run that established nothing "+
+				"must not be readable as a success by exit code alone",
+				tc.name, status, exit, tc.wantStatus, tc.wantExit)
+		}
+	}
+}

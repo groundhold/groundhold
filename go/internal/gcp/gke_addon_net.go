@@ -170,7 +170,7 @@ func (d *Driver) createGKEAddon(environment, capability string,
 			Reason: fmt.Sprintf("cluster %q not found in %s — the addon's operand cluster must exist; refusing to toggle an addon on a nonexistent cluster",
 				plan.ClusterName, plan.Location)}
 	}
-	if enabled, _ := plan.Spec.readEnabled(doc.AddonsConfig); enabled {
+	if plan.Spec.readState(doc.AddonsConfig) == addonOn {
 		return provider.CreateResult{ProviderID: pid, Status: "succeeded"} // idempotent — already enabled
 	}
 
@@ -219,14 +219,30 @@ func (d *Driver) observeGKEAddon(capability, providerID string) ([]provider.Obse
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"cluster not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"cluster not found — bound resource is gone (will re-create)"}, nil
 	}
 	spec := gkeAddonRegistry[addon] // validated by splitGKEAddonProviderID
-	enabled, present := spec.readEnabled(doc.AddonsConfig)
-	if !present || !enabled {
-		return nil, []string{fmt.Sprintf("addon %q is not enabled on cluster %q — nothing to observe", addon, cluster)}, nil
+	switch spec.readState(doc.AddonsConfig) {
+	case addonUnreadable:
+		// D801/D306: a config block we cannot parse is not an addon that is off. Refuse
+		// to answer rather than report the estate as quieter than it is.
+		return nil, nil, fmt.Errorf("addon %q on cluster %q: the addonsConfig block is "+
+			"present but not readable — refusing to report it as disabled", addon, cluster)
+	case addonAbsent, addonOff:
+		return []provider.Observation{
+			// D802: an addon that is OFF (or was never configured) is a bound subject
+			// that is not there. Saying nothing left posture reading managed-ok from the
+			// last observation taken while it was still on.
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{fmt.Sprintf("addon %q is not enabled on cluster %q — bound resource is gone (will re-create)", addon, cluster)}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: location, Derivation: "measured"},
 		{Path: "addon.name", Value: addon, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
@@ -275,10 +291,16 @@ func (d *Driver) deleteGKEAddon(capability, environment, providerID string) prov
 	if !found {
 		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // cluster gone — the flag is gone with it
 	}
-	if enabled, present := spec.readEnabled(doc.AddonsConfig); present && !enabled {
-		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // already disabled — idempotent
-	} else if !present {
-		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // never enabled — idempotent
+	switch spec.readState(doc.AddonsConfig) {
+	case addonOff, addonAbsent:
+		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // already off — idempotent
+	case addonUnreadable:
+		// D801: this used to be folded into "never enabled — idempotent", so a delete
+		// answered SUCCEEDED about a control whose state nobody could read.
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "the addonsConfig block for " + addon + " is present but not readable — " +
+				"cannot tell whether the addon is on, and will not report a removal that " +
+				"may not have happened"}
 	}
 
 	opName, st, body, e := d.setAddon(project, location, cluster, spec, false)
@@ -331,7 +353,13 @@ func (d *Driver) discoverGKEAddon(region string) ([]provider.Discovered, []strin
 			continue // another location — not this sweep
 		}
 		for name, spec := range gkeAddonRegistry {
-			if enabled, present := spec.readEnabled(c.AddonsConfig); !present || !enabled {
+			switch spec.readState(c.AddonsConfig) {
+			case addonUnreadable:
+				// D801/D513: an unreadable block is neither reported nor claimed absent.
+				diags = append(diags, c.Name+"/"+name+": the addonsConfig block is present "+
+					"but not readable — the addon is neither reported nor called absent")
+				continue
+			case addonAbsent, addonOff:
 				continue
 			}
 			pid := gkeAddonProviderID(d.Project, c.Location, c.Name, name)
@@ -342,7 +370,7 @@ func (d *Driver) discoverGKEAddon(region string) ([]provider.Discovered, []strin
 			}
 			diags = append(diags, odiags...)
 			out = append(out, provider.Discovered{
-				ProviderID: pid, ResourceType: "capability.cluster.addon", Observations: obs})
+				ProviderID: pid, ResourceType: "capability.cluster.addon", Observations: provider.WithoutAbsence(obs)})
 		}
 	}
 	return out, diags, nil

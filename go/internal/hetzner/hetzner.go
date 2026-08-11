@@ -53,6 +53,15 @@ func NewDriver(scope string) *Driver {
 
 func (d *Driver) Name() string { return "hetzner" }
 
+// D732: this driver OBSERVES and never authors — every write verb below returns
+// notImplemented. Without saying so, `provider.CanAuthor` returned its permissive
+// default, the compiler planned a create, the plan SEALED, and only apply discovered
+// there was nothing to write. D177 built the witness concept for exactly this and said
+// why: emitting a create for a service the driver refuses at apply is a lie in the plan.
+func init() {
+	provider.RegisterWitnessPredicate("hetzner", func(service string) bool { return true })
+}
+
 func (d *Driver) base() string {
 	if d.BaseURL != "" {
 		return d.BaseURL

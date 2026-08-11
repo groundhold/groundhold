@@ -6,8 +6,10 @@
 // Data Protection) and NOT the older Microsoft.RecoveryServices/vaults/backupPolicies:
 // the DataProtection plane is the modern, workload-UNIFORM Backup Center model — one
 // declarative policyRules array (a ScheduleBasedTrigger carrying the cadence + a
-// Retention rule carrying the lifecycle) that reads the same across disks, blobs and
-// databases. RecoveryServices is the legacy per-workload plane (separate AzureIaasVM
+// Retention rule carrying the lifecycle) that reads the same across disks and
+// databases. (Blob backup is DataProtection too but uses a DISTINCT operational-backup
+// rule shape — no schedule rule — so it is not built here; an honest gap.)
+// RecoveryServices is the legacy per-workload plane (separate AzureIaasVM
 // vs AzureFileShare vs AzureWorkload schemas, imperative sub-clients, no cross-
 // workload policy shape) — it would force a workload-specific driver per datasource
 // and could not reverse-map cleanly. DataProtection's policyRules map DIRECTLY onto
@@ -195,6 +197,27 @@ type BackupPolicyPlan struct {
 	BackupType     string // operand — Incremental (default) | Full
 }
 
+// backupDefaultsFor returns the (dataStoreType, backupType) a DataProtection policy
+// requires for a datasource when the operator did not pin them. The pair is
+// datasource-specific and the cloud 400s a mismatch (field 2026-08-08 against a live
+// DataProtection vault, D949): a disk policy MUST be OperationalStore+Incremental
+// (VaultStore -> BMSUserErrorInvalidInput), a Postgres flexible-server policy MUST be
+// VaultStore+Full (Incremental -> 400). ok=false for a datasource never confronted with
+// the real API, so the caller refuses rather than emit the old one-size default the
+// cloud rejects (the D934 golden-green shape: a default a golden test blessed but the
+// cloud 400s for the very workload it documents).
+func backupDefaultsFor(datasourceType string) (store, backupType string, ok bool) {
+	switch datasourceType {
+	case "Microsoft.Compute/disks",
+		"Microsoft.ContainerService/managedClusters":
+		return "OperationalStore", "Incremental", true
+	case "Microsoft.DBforPostgreSQL/flexibleServers":
+		return "VaultStore", "Full", true
+	default:
+		return "", "", false
+	}
+}
+
 // BuildBackupPolicy maps capability.backup.plan attributes + impl operands to a
 // DataProtection backup policy. Every error is a preflight refusal apply surfaces
 // before any mutation — never a silently dropped attribute.
@@ -308,13 +331,33 @@ func BuildBackupPolicy(environment, capability string,
 	if p.DatasourceType == "" || !strings.Contains(p.DatasourceType, "/") {
 		return BackupPolicyPlan{}, fmt.Errorf(
 			"capability.backup.plan requires implementation.datasourceType (the workload the policy protects, " +
-				"e.g. \"Microsoft.Compute/disks\" or \"Microsoft.Storage/storageAccounts/blobServices\")")
+				"e.g. \"Microsoft.Compute/disks\" or \"Microsoft.DBforPostgreSQL/flexibleServers\")")
 	}
 
-	// --- optional operands with honest defaults ---
+	// --- store + backup type: datasource-specific, field-verified defaults (D949) ---
+	// The accepted body is datasource-specific and the cloud 400s a mismatch, so the store
+	// and backup type are DERIVED from the datasource unless the operator pins them, and a
+	// datasource we have not confronted with the real API refuses rather than emit the old
+	// hardcoded VaultStore+Incremental — a body uncreatable for BOTH documented workloads.
 	p.DataStoreType, _ = impl["dataStoreType"].(string)
-	if p.DataStoreType == "" {
-		p.DataStoreType = "VaultStore" // the durable tier; the general default
+	p.BackupType, _ = impl["backupType"].(string)
+	if p.DataStoreType == "" || p.BackupType == "" {
+		store, backupType, ok := backupDefaultsFor(p.DatasourceType)
+		if !ok {
+			return BackupPolicyPlan{}, fmt.Errorf(
+				"no field-verified DataProtection store/backupType default for datasource %q — the accepted "+
+					"(dataStoreType, backupType) pair is datasource-specific and Azure 400s a mismatch, so pin "+
+					"BOTH implementation.dataStoreType and implementation.backupType explicitly (field-verified: "+
+					"Microsoft.Compute/disks and Microsoft.ContainerService/managedClusters => "+
+					"OperationalStore+Incremental; Microsoft.DBforPostgreSQL/flexibleServers => VaultStore+Full)",
+				p.DatasourceType)
+		}
+		if p.DataStoreType == "" {
+			p.DataStoreType = store
+		}
+		if p.BackupType == "" {
+			p.BackupType = backupType
+		}
 	}
 	switch p.DataStoreType {
 	case "VaultStore", "OperationalStore", "ArchiveStore":
@@ -322,9 +365,11 @@ func BuildBackupPolicy(environment, capability string,
 		return BackupPolicyPlan{}, fmt.Errorf(
 			"implementation.dataStoreType %q is not one of VaultStore|OperationalStore|ArchiveStore", p.DataStoreType)
 	}
-	p.BackupType, _ = impl["backupType"].(string)
-	if p.BackupType == "" {
-		p.BackupType = "Incremental"
+	switch p.BackupType {
+	case "Incremental", "Full":
+	default:
+		return BackupPolicyPlan{}, fmt.Errorf(
+			"implementation.backupType %q is not one of Incremental|Full", p.BackupType)
 	}
 
 	if !backupPolicyNameOK.MatchString(p.Name) {

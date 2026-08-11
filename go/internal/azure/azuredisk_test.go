@@ -291,9 +291,19 @@ func TestAzureDiskNameIsDeterministicAndScoped(t *testing.T) {
 }
 
 func TestClassifyAzureDiskChange(t *testing.T) {
+	// D823: both encryption paths were pinned "immutable" here. encryption.atRest cannot
+	// differ at all (a managed disk is always encrypted), so destroying the disk reaches a
+	// state the replacement also has — the request is unmet and the data is gone.
+	// encryption.customerManagedKeys was a claim about Azure that Microsoft's own procedure
+	// contradicts: a disk encryption set can be attached to an EXISTING disk with the VM
+	// stopped.
+	for _, path := range []string{"encryption.atRest", "encryption.customerManagedKeys"} {
+		if class, why := classifyAzureDiskChange(path); class != "unsupported" || why == "" {
+			t.Errorf("%s classified %q/%q, want unsupported with a reason", path, class, why)
+		}
+	}
 	for _, path := range []string{
 		"location.region", "availability.class",
-		"encryption.atRest", "encryption.customerManagedKeys",
 	} {
 		class, why := classifyAzureDiskChange(path)
 		if class != "immutable" {

@@ -252,6 +252,9 @@ func (d *Driver) observeSNS(capability, providerID string) ([]provider.Observati
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := d.sameAccount(account); err != nil {
+		return nil, nil, err
+	}
 	arn := snsARN(region, account, name)
 	st, resp, err := d.snsPost(region, encodeForm(map[string]string{
 		"Action": "GetTopicAttributes", "Version": snsVersion, "TopicArn": arn}))
@@ -259,7 +262,11 @@ func (d *Driver) observeSNS(capability, providerID string) ([]provider.Observati
 		return nil, nil, err
 	}
 	if st == http.StatusNotFound || strings.Contains(rdsErrCode(resp), "NotFound") {
-		return nil, []string{"topic not found — nothing to observe"}, nil
+		// F-LC3 (D521): a BOUND resource the API says is GONE. A diagnostic
+		// alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"topic not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("GetTopicAttributes: HTTP %d", st)
@@ -269,7 +276,10 @@ func (d *Driver) observeSNS(capability, providerID string) ([]provider.Observati
 		return nil, nil, fmt.Errorf("GetTopicAttributes: unparseable attributes")
 	}
 
-	var obs []provider.Observation
+	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
+	}
 	var diags []string
 	obs = append(obs,
 		provider.Observation{Path: "location.region", Value: region, Derivation: "measured"},
@@ -281,10 +291,8 @@ func (d *Driver) observeSNS(capability, providerID string) ([]provider.Observati
 	kms := tattrs["KmsMasterKeyId"]
 	obs = append(obs, provider.Observation{Path: "encryption.atRest",
 		Value: kms != "", Derivation: "measured"})
-	if kms != "" && kms != snsAWSManagedKey {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
-			Value: true, Derivation: "measured"})
-	}
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+		Value: kms != "" && kms != snsAWSManagedKey, Derivation: "measured"})
 	// publicExposure: the topic resource Policy. No Policy attribute at all means
 	// the default owner-only policy (not public). A present-but-unparseable policy
 	// is a diagnostic, never a default-safe false.
@@ -396,6 +404,9 @@ func (d *Driver) updateSNS(capability, environment, providerID string,
 	if err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
+	if err := d.sameAccount(account); err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
 	arn := snsARN(region, account, name)
 	tags, found, rerr := d.snsListTags(region, arn)
 	if rerr != nil {
@@ -482,6 +493,9 @@ func (d *Driver) snsUpdateAttr(region, arn, name, value, pid, what string) *prov
 func (d *Driver) deleteSNS(capability, environment, providerID string) provider.CreateResult {
 	region, account, name, err := splitSNSProviderID(providerID)
 	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if err := d.sameAccount(account); err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	arn := snsARN(region, account, name)

@@ -44,6 +44,13 @@ type CreateResult struct {
 type OutputSpec struct {
 	Name string `json:"name"`
 	Kind string `json:"kind"`
+	// Conditional (D774) marks an output that EXISTS ONLY IN SOME CONFIGURATIONS —
+	// a Lambda's functionUrl is there when the function has a URL and absent when it
+	// does not, which for a function declaring `network.publicExposure: false` is the
+	// CORRECT state. The registry already described these as conditional in prose while
+	// the observe loop treated every declared output as mandatory, so a deliberately
+	// private function was reported as a driver that could not read its own outputs.
+	Conditional bool `json:"conditional,omitempty"`
 	// Sample (D289) is a FORMAT-PLAUSIBLE stand-in used ONLY by `preflight`
 	// to judge the REST of a capability's operands while a referenced value
 	// does not exist yet. Drivers validate operand SHAPE (an ARN prefix, an
@@ -97,6 +104,46 @@ const OperandPrefix = "implementation."
 // found, so the marker toggles both ways and a recreate self-heals. A read
 // ERROR stays a returned error (unknown → blocks), never an absence.
 const ResourceAbsentPath = "resource.absent"
+
+// WithoutAbsence strips the absence marker from an observation set bound for a
+// DISCOVERY record. Discovery enumerates what exists, so everything it returns is
+// present by construction and the marker carries no information there — and a
+// discovery record is a metadata-only vocabulary the drivers' own gates enforce.
+// The observe path that reads ONE bound resource is where the marker means
+// something; the reverse-mapping code is shared by both, so the filter belongs at
+// the discovery boundary rather than inside every reader.
+//
+// Found by migrating the second driver (D518): D513 put the marker in the shared
+// k8s mapped read, and k8s discovery reuses it, so the marker rode into discovery
+// records. Azure's discovery gate refused the same thing on the next driver; k8s
+// had no such gate, which is exactly why it did not.
+// IsAbsent reports whether an observation set says the resource is GONE.
+//
+// Discovery enumerates what EXISTS, so a record must not be emitted for a
+// resource whose read just said it does not. Some discoverers tested this
+// indirectly — "no observations means not provisioned" — which was true only
+// while an absent resource produced silence. The marker made silence impossible,
+// so the indirect test stopped working and two posture discoverers started
+// enumerating resources that were not there (D521). Ask directly.
+func IsAbsent(obs []Observation) bool {
+	for _, o := range obs {
+		if o.Path == ResourceAbsentPath {
+			gone, _ := o.Value.(bool)
+			return gone
+		}
+	}
+	return false
+}
+
+func WithoutAbsence(obs []Observation) []Observation {
+	out := obs[:0:0]
+	for _, o := range obs {
+		if o.Path != ResourceAbsentPath {
+			out = append(out, o)
+		}
+	}
+	return out
+}
 
 // DeclaredIntentSource (F-LC3) marks an observation adopt recorded for a
 // NON-OBSERVABLE declared attribute — intent taken on the candidate's own
@@ -226,11 +273,21 @@ var awsClaimPerms = map[string][]string{
 	"acm":                    {"tag:TagResources", "acm:AddTagsToCertificate"},
 	"cloudwatch":             {"tag:TagResources", "cloudwatch:TagResource"},
 	"backupvault":            {"tag:TagResources", "backup:TagResource"},
-	"apigateway":             {"tag:TagResources", "apigateway:TagResource"},
-	"cloudfront":             {"tag:TagResources", "cloudfront:TagResource"},
-	"vpc":                    {"tag:TagResources", "ec2:CreateTags", "sts:GetCallerIdentity"},
-	"vpngateway":             {"tag:TagResources", "ec2:CreateTags", "sts:GetCallerIdentity"},
-	"kms":                    {"tag:TagResources", "kms:TagResource", "sts:GetCallerIdentity"},
+	// apigateway declares the RGT stamp ALONE, and the omission is deliberate (D846).
+	// API Gateway does not authorize by operation name: its IAM actions are HTTP VERBS,
+	// so there is no `apigateway:TagResource` to grant — the tag write is `PUT /tags/{arn}`
+	// (v1) or `POST /v2/tags/{arn}` (v2). Which of the two RGT calls through for an HTTP
+	// API's ARN is not derivable from anything readable here, and a claim targets an
+	// EXISTING resource, so its preflight runs in the resource's context where an implicit
+	// deny is authoritative: naming both verbs would REFUSE an operator who granted the
+	// right one. Declaring less is the honest half — a missing entry degrades to a denial
+	// at the call, which names the action AWS wanted, while a wrong one cannot be granted
+	// at all.
+	"apigateway": {"tag:TagResources"},
+	"cloudfront": {"tag:TagResources", "cloudfront:TagResource"},
+	"vpc":        {"tag:TagResources", "ec2:CreateTags", "sts:GetCallerIdentity"},
+	"vpngateway": {"tag:TagResources", "ec2:CreateTags", "sts:GetCallerIdentity"},
+	"kms":        {"tag:TagResources", "kms:TagResource", "sts:GetCallerIdentity"},
 	// describe-to-resolve-ARN services: RGT stamp + the service tag action + the
 	// read that resolves the ARN (the pid carries no taggable ARN).
 	"ecs":                {"tag:TagResources", "ecs:TagResource", "ecs:DescribeServices"},
@@ -898,8 +955,15 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			// read (409-continue ownership + delete pre-read). Granted roles are a
 			// separate authorization concern (no IAM policy permission here).
 			switch operation {
-			case "create", "adopt":
+			case "create":
 				return sortedDedup([]string{"iam.serviceAccounts.create", "iam.serviceAccounts.get"})
+			case "adopt":
+				// D868: adopt OBSERVES before it binds (internal/adopt), and observe now
+				// reads the account's OWN IAM policy for `trust.principals` — who may pick
+				// this identity up. A read the code makes and the preflight does not name is
+				// a permission the operator learns about from a 403.
+				return sortedDedup([]string{"iam.serviceAccounts.create", "iam.serviceAccounts.get",
+					"iam.serviceAccounts.getIamPolicy"})
 			case "update":
 				return sortedDedup([]string{"iam.serviceAccounts.get", "iam.serviceAccounts.update"})
 			case "delete":
@@ -954,7 +1018,7 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			// Cloud Router and BGP are opaque impl — no vpnTunnels/routers permissions.
 			switch operation {
 			case "create", "adopt":
-				return sortedDedup([]string{"compute.vpnGateways.insert", "compute.vpnGateways.get",
+				return sortedDedup([]string{"compute.vpnGateways.create", "compute.vpnGateways.get",
 					"compute.regionOperations.get"})
 			case "update":
 				return sortedDedup([]string{"compute.vpnGateways.get"})
@@ -1146,12 +1210,26 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 				}
 				return sortedDedup(p)
 			case "update":
+				// DeleteBucketPolicy is the PRIVATE transition: updateS3 PUTs the public
+				// policy when plan.Public and DELETEs it otherwise. Unlike replication —
+				// where one action authorises both directions, as the comment above says —
+				// S3 has a separate delete action, and only the put was declared, so the
+				// going-private half of a hardening update was the undeclared one (D848).
 				return sortedDedup([]string{"s3:GetBucketTagging",
 					"s3:PutBucketVersioning", "s3:PutBucketPublicAccessBlock",
-					"s3:PutBucketPolicy", "s3:PutLifecycleConfiguration",
+					"s3:PutBucketPolicy", "s3:DeleteBucketPolicy", "s3:PutLifecycleConfiguration",
 					"s3:PutEncryptionConfiguration", "s3:PutReplicationConfiguration"})
 			case "delete":
-				return []string{"s3:DeleteBucket", "s3:GetBucketTagging"}
+				// GetBucketObjectLockConfiguration is the pre-delete guard
+				// (refuseIfObjectLockCompliance): a bucket in COMPLIANCE mode must not be
+				// walked into, and a read that gives no answer REFUSES the delete as
+				// ambiguous — correctly. Undeclared, that refusal is what an operator
+				// granted exactly this list got on EVERY bucket delete, with the reason
+				// naming an ambiguous object-lock read rather than the missing grant.
+				// AWS authorizes the GetObjectLockConfiguration operation with an action
+				// spelled differently (D850).
+				return sortedDedup([]string{"s3:DeleteBucket", "s3:GetBucketTagging",
+					"s3:GetBucketObjectLockConfiguration"})
 			}
 		case "rds":
 			// D86. DescribeDBInstances is the quiet read (409 ownership + the
@@ -1170,14 +1248,24 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			// instance(s). Same RDS API family as the instance driver.
 			switch operation {
 			case "create", "adopt":
+				// D853: createAurora also builds the two DERIVED groups the cluster
+				// needs — a DB subnet group and a cluster parameter group — reading
+				// each back before it writes. None of the four was declared, and they
+				// run BEFORE the cluster exists, so the denial landed on a create that
+				// had already made half its scaffolding.
 				return sortedDedup([]string{"rds:CreateDBCluster", "rds:CreateDBInstance",
-					"rds:DescribeDBClusters", "rds:DescribeDBInstances", "rds:AddTagsToResource"})
+					"rds:DescribeDBClusters", "rds:DescribeDBInstances", "rds:AddTagsToResource",
+					"rds:CreateDBSubnetGroup", "rds:DescribeDBSubnetGroups",
+					"rds:CreateDBClusterParameterGroup", "rds:ModifyDBClusterParameterGroup"})
 			case "update":
 				return sortedDedup([]string{"rds:ModifyDBCluster", "rds:ModifyDBInstance",
 					"rds:DescribeDBClusters"})
 			case "delete":
+				// D853: deleteAurora removes the derived groups it created with the
+				// cluster. Undeclared, the cluster went and its scaffolding stayed.
 				return sortedDedup([]string{"rds:DeleteDBCluster", "rds:DeleteDBInstance",
-					"rds:DescribeDBClusters"})
+					"rds:DescribeDBClusters", "rds:DeleteDBSubnetGroup",
+					"rds:DeleteDBClusterParameterGroup"})
 			}
 		case "cloudtrail":
 			// Audit trail (capability.audit.trail). Create is a composite (CreateTrail +
@@ -1250,8 +1338,11 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			case "update":
 				return []string{"ecs:DescribeServices", "ecs:UpdateService"}
 			case "delete":
+				// D853: the delete reads the CLUSTER's tags to prove ownership before
+				// removing it — the pre-read that stands between a delete and someone
+				// else's cluster, and nothing declared it.
 				return sortedDedup([]string{"ecs:DeleteService",
-					"ecs:DeleteCluster", "ecs:DescribeServices"})
+					"ecs:DeleteCluster", "ecs:DescribeServices", "ecs:DescribeClusters"})
 			}
 		case "apprunner":
 			// Second workload.container backend (App Runner, Cloud Run twin). The
@@ -1293,9 +1384,30 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 				if public {
 					p = append(p, "lambda:AddPermission", "lambda:CreateFunctionUrlConfig")
 				}
+				// D852: declared callers are resource-policy statements the create
+				// writes and RECONCILES, so it reads the policy first. This is the
+				// operand the table can finally see (permAttrs) — which is exactly what
+				// keeps a private function WITHOUT invokers free of both, as its own
+				// conformance case pins.
+				if _, hasInvokers := attrs["impl:invokers"]; hasInvokers {
+					p = append(p, "lambda:AddPermission", "lambda:GetPolicy")
+				}
 				return sortedDedup(p)
 			case "update":
-				return sortedDedup([]string{"lambda:GetFunction", "lambda:UpdateFunctionConfiguration"})
+				// updateLambda patches the configuration, then the CODE, then moves the
+				// exposure either way: ensureLambdaExposure creates the Function URL and
+				// grants anonymous invoke, removeLambdaExposure deletes both. Only the
+				// first two were declared (D848). Unlike D846's apigateway case — three
+				// verbs of which at most ONE is ever needed, where naming all three would
+				// refuse an operator who granted the right one — every action here is
+				// required WHEN ITS BRANCH RUNS, and which branch runs depends on the
+				// change-set this operand-blind table cannot see. A superset of
+				// required-when-applicable actions refuses early; the alternative fails
+				// after the lease.
+				return sortedDedup([]string{"lambda:GetFunction",
+					"lambda:UpdateFunctionConfiguration", "lambda:UpdateFunctionCode",
+					"lambda:CreateFunctionUrlConfig", "lambda:AddPermission",
+					"lambda:DeleteFunctionUrlConfig", "lambda:RemovePermission"})
 			case "delete":
 				return sortedDedup([]string{"lambda:DeleteFunction", "lambda:GetFunction"})
 			}
@@ -1309,8 +1421,16 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 				return sortedDedup([]string{"eks:CreateCluster", "eks:DescribeCluster",
 					"eks:CreateNodegroup", "eks:DescribeNodegroup", "eks:TagResource", "iam:PassRole"})
 			case "update":
+				// The node-group roll is part of an update, not a separate action
+				// (D248): once the control plane is bumped, updateEKS lists the managed
+				// node groups, reads each one's version and rolls the stale ones. Those
+				// three were undeclared, so an operator granted the four below, passed
+				// the preflight, and lost the grant AFTER the control-plane upgrade —
+				// which cannot be undone — leaving the skew the driver's own comment
+				// calls "a half-upgraded cluster" (D848).
 				return sortedDedup([]string{"eks:UpdateClusterConfig",
-					"eks:UpdateClusterVersion", "eks:DescribeCluster", "eks:DescribeUpdate"})
+					"eks:UpdateClusterVersion", "eks:DescribeCluster", "eks:DescribeUpdate",
+					"eks:ListNodegroups", "eks:DescribeNodegroup", "eks:UpdateNodegroupVersion"})
 			case "delete":
 				return sortedDedup([]string{"eks:DeleteCluster", "eks:DeleteNodegroup",
 					"eks:DescribeCluster", "eks:DescribeNodegroup"})
@@ -1347,14 +1467,20 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			// configuration set + event destination (bounce/complaint -> SNS).
 			// GetEmailIdentity is the ownership pre-read every mutation makes.
 			switch operation {
+			// PutEmailIdentityConfigurationSetAttributes makes the set the identity's
+			// DEFAULT, which is what attachSESConfigSet does on BOTH paths (D746) — and
+			// it was declared on neither, so the step that decides where bounces go was
+			// the one nothing asked permission for (D848).
 			case "create", "adopt":
 				return sortedDedup([]string{"ses:CreateEmailIdentity", "ses:GetEmailIdentity",
 					"ses:PutEmailIdentityDkimAttributes", "ses:CreateConfigurationSet",
 					"ses:CreateConfigurationSetEventDestination",
+					"ses:PutEmailIdentityConfigurationSetAttributes",
 					"ses:GetConfigurationSetEventDestinations", "ses:TagResource"})
 			case "update":
 				return sortedDedup([]string{"ses:GetEmailIdentity",
 					"ses:PutEmailIdentityDkimAttributes", "ses:GetConfigurationSetEventDestinations",
+					"ses:PutEmailIdentityConfigurationSetAttributes",
 					"ses:CreateConfigurationSetEventDestination", "ses:DeleteConfigurationSetEventDestination"})
 			case "delete":
 				return sortedDedup([]string{"ses:DeleteEmailIdentity",
@@ -1388,8 +1514,15 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			// declared for the certify battery; the driver classifies changes unsupported.
 			switch operation {
 			case "create", "adopt":
+				// ListInferenceProfiles is the create-ADOPTION branch (D252): when the
+				// name already exists, createBedrock lists the profiles to find the one
+				// carrying our name and tags and BINDS it. Undeclared, that list is
+				// denied and the branch falls through to unknown — "not resolvably
+				// ours" — which blames foreign ownership for a missing grant and sends
+				// the operator looking for somebody else's resource (D849).
 				return sortedDedup([]string{"bedrock:CreateInferenceProfile",
-					"bedrock:GetInferenceProfile", "bedrock:TagResource"})
+					"bedrock:GetInferenceProfile", "bedrock:ListInferenceProfiles",
+					"bedrock:TagResource"})
 			case "update":
 				return []string{"bedrock:GetInferenceProfile"}
 			case "delete":
@@ -1460,15 +1593,20 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			// ListTagsForResource is the ownership read (tags live off the ARN).
 			switch operation {
 			case "create", "adopt":
+				// D853: the cache subnet group is derived scaffolding the create builds
+				// and reads back first, exactly as Aurora's is.
 				return sortedDedup([]string{"elasticache:CreateReplicationGroup",
 					"elasticache:DescribeReplicationGroups", "elasticache:AddTagsToResource",
-					"elasticache:ListTagsForResource"})
+					"elasticache:ListTagsForResource", "elasticache:CreateCacheSubnetGroup",
+					"elasticache:DescribeCacheSubnetGroups"})
 			case "update":
 				return sortedDedup([]string{"elasticache:DescribeReplicationGroups",
 					"elasticache:ModifyReplicationGroup"})
 			case "delete":
+				// D853: the delete removes the derived cache subnet group too.
 				return sortedDedup([]string{"elasticache:DeleteReplicationGroup",
-					"elasticache:DescribeReplicationGroups", "elasticache:ListTagsForResource"})
+					"elasticache:DescribeReplicationGroups", "elasticache:ListTagsForResource",
+					"elasticache:DeleteCacheSubnetGroup"})
 			}
 		case "elasticache-serverless":
 			// Second cache.keyvalue backend (ElastiCache Serverless, pay-per-use).
@@ -1500,7 +1638,10 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 				p := []string{"ec2:CreateVpc", "ec2:CreateSubnet",
 					"ec2:CreateTags", "ec2:DescribeVpcs"}
 				if flow {
-					p = append(p, "ec2:CreateFlowLogs", "iam:PassRole")
+					// D727: the create READS the delivery role's trust policy before
+					// handing it work, so it can refuse instead of building a flow log
+					// that reports ACTIVE and delivers nothing.
+					p = append(p, "ec2:CreateFlowLogs", "iam:PassRole", "iam:GetRole")
 				}
 				if road, _ := attrs["egress.internet"].(string); road == "nat" {
 					p = append(p, "ec2:CreateInternetGateway", "ec2:AttachInternetGateway",
@@ -1893,7 +2034,12 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			// tolerates. Delete removes the OAC we own, so it needs the OAC verbs too.
 			switch operation {
 			case "create", "adopt":
-				return sortedDedup([]string{"cloudfront:CreateDistributionWithTags",
+				// The call is CreateDistributionWithTags (POST /distribution?WithTags), but
+				// AWS publishes no IAM action of that name — the authorization is
+				// `cloudfront:CreateDistribution` plus `cloudfront:TagResource`, both below.
+				// The neighbouring `CreateStreamingDistributionWithTags` IS an action, which
+				// is why the wrong name read as right (D846).
+				return sortedDedup([]string{"cloudfront:CreateDistribution",
 					"cloudfront:GetDistribution", "cloudfront:ListTagsForResource", "cloudfront:TagResource",
 					"cloudfront:CreateOriginAccessControl", "lambda:AddPermission"})
 			case "update":
@@ -1970,7 +2116,10 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			_, rotating := attrs["rotation.period"]
 			switch operation {
 			case "create", "adopt":
-				p := []string{"kms:CreateKey", "kms:TagResource",
+				// D853: the create looks for an EXISTING key carrying our tags before
+				// making a second one (ListKeys). Undeclared, that search fails and the
+				// create's own adoption path cannot run.
+				p := []string{"kms:CreateKey", "kms:TagResource", "kms:ListKeys",
 					"kms:DescribeKey", "kms:GetKeyRotationStatus"}
 				if rotating {
 					p = append(p, "kms:EnableKeyRotation")
@@ -2829,8 +2978,14 @@ var ErrNoResourceSurface = errors.New("no resource-level permission surface")
 // back to the project check; any other error means the surface could not be
 // read (missing resource, network) and the permissions are inconclusive, NEVER
 // denied.
+// D720: `unattested` is the resource-level twin of the account-level channel. A
+// simulator can answer a question we asked incompletely — AWS reports the condition
+// keys its policies needed and we did not supply — and such a verdict must not block
+// an apply. Without this channel the only honest options were to drop the action
+// (silently "granted", so --require-preflight reports certainty it does not have) or
+// to fail the whole group. Providers with no such notion return nil.
 type ResourcePreflighter interface {
-	CheckResourcePermissions(service, providerID string, permissions []string) (denied []string, err error)
+	CheckResourcePermissions(service, providerID string, permissions []string) (denied, unattested []string, err error)
 }
 
 // Fake is fully deterministic: same keys, same ids, same outcomes.
@@ -2859,7 +3014,9 @@ type Fake struct {
 	// ResourceDenied are reported as authoritatively denied; NoResourceSurface
 	// services return ErrNoResourceSurface (executor falls back to project);
 	// ResourcePreflightErr makes the resource check itself fail (inconclusive).
+	AdoptAsProviderID    map[string]string // D723: create adopts this id instead of creating
 	ResourceDenied       map[string]bool
+	ResourceUnattested   map[string]bool // D720: resource-level inconclusive
 	NoResourceSurface    map[string]bool
 	ResourcePreflightErr bool
 }
@@ -2884,20 +3041,24 @@ func (f *Fake) CheckPermissions(project string, permissions []string) (denied, u
 }
 
 // CheckResourcePermissions: deterministic resource-level stand-in (D80).
-func (f *Fake) CheckResourcePermissions(service, providerID string, permissions []string) ([]string, error) {
+func (f *Fake) CheckResourcePermissions(service, providerID string, permissions []string) ([]string, []string, error) {
 	if f.NoResourceSurface[service] {
-		return nil, ErrNoResourceSurface
+		return nil, nil, ErrNoResourceSurface
 	}
 	if f.ResourcePreflightErr {
-		return nil, fmt.Errorf("injected resource preflight failure")
+		return nil, nil, fmt.Errorf("injected resource preflight failure")
 	}
-	var denied []string
+	var denied, unattested []string
 	for _, p := range permissions {
-		if f.ResourceDenied[p] {
+		switch {
+		case f.ResourceDenied[p]:
 			denied = append(denied, p)
+		case f.ResourceUnattested[p]:
+			// D720: a resource-level verdict the provider could not stand behind.
+			unattested = append(unattested, p)
 		}
 	}
-	return denied, nil
+	return denied, unattested, nil
 }
 
 func (f *Fake) Validate(service, capability, environment string,
@@ -2945,6 +3106,12 @@ func (f *Fake) Create(service, capability, environment string,
 	case f.FailKeys[key]:
 		return CreateResult{OperationID: "fake-op-" + key,
 			Status: "failed", Reason: "injected failure"}
+	}
+	if pid := f.AdoptAsProviderID[key]; pid != "" {
+		// D723: model a driver whose create-adoption scan bound an EXISTING resource
+		// instead of creating one — the shape that let a replacement return the
+		// identity it was about to delete.
+		return CreateResult{ProviderID: pid, OperationID: "fake-op-" + key, Status: "succeeded"}
 	}
 	outs := map[string]any{
 		"id":               "fake:" + key,
@@ -3087,6 +3254,64 @@ type Discoverer interface {
 	List(region string) ([]Discovered, []string, error)
 }
 
+// SweepAll runs one discovery sweep per service token, in the order given, and
+// applies the rule every Discoverer owes its caller: a service that fails becomes a
+// DIAGNOSTIC so one unreadable kind cannot hide the rest — but if EVERY sweep
+// failed, nothing was read, and zero resources must not be handed back as an empty
+// estate (D621, D642).
+//
+// The rule lived in four hand-written loops, each guarded by a different
+// precondition: AWS checked for a region, Azure for a subscription GUID, GCP for a
+// credential, and k8s for nothing at all. None of those is reachability. A dead
+// network, an expired credential or a wrong API-server address left every sweep
+// failing and every driver returning `nil` error — `discover` exited 0 with
+// `"resources": []`, which is the input `adopt` and `posture` are told to take.
+//
+// The preconditions stay where they are: they name the missing thing precisely,
+// which a count of failures cannot. This is the floor underneath them.
+//
+// D873: a PARTIAL failure is the dangerous one. When SOME sweeps fail and others
+// succeed, the resources found are real but the estate is only partly read — and until
+// now that returned err=nil with the failures buried in diagnostics, so the scope was
+// recorded COMPLETE. posture then reported `shadowLowerBound=false` on a capability whose
+// sweep wholly failed: an affirmative claim of exactness (D650/D803) about resources it
+// never saw. The `rec` recorder is the fix: a failed sweep notes incompleteness through
+// the SAME channel a truncated page does (ListingCompleteness), because the consequence
+// is identical — the count is a lower bound. rec may be nil (Note is nil-safe); the
+// cloud drivers pass their own recorder, and k8s gained one for exactly this.
+func SweepAll(tokens []string, sweep func(token string) ([]Discovered, []string, error), rec *ListingRecord) ([]Discovered, []string, error) {
+	var out []Discovered
+	var diags []string
+	failed := 0
+	for _, tok := range tokens {
+		found, ds, err := sweep(tok)
+		if err != nil {
+			failed++
+			diags = append(diags, err.Error())
+			// The token, not the error text: the note feeds an informational reason and
+			// must stay deterministic (the error detail is already in diags).
+			rec.Note("discovery sweep '"+tok+"' did not complete", nil)
+			continue
+		}
+		out = append(out, found...)
+		diags = append(diags, ds...)
+	}
+	if len(tokens) > 0 && failed == len(tokens) {
+		return nil, diags, fmt.Errorf(
+			"discovery could not reach the provider: all %d service sweeps failed, "+
+				"so nothing was read — this is not an empty estate. First failure: %s",
+			failed, firstDiag(diags))
+	}
+	return out, diags, nil
+}
+
+func firstDiag(diags []string) string {
+	if len(diags) == 0 {
+		return "(no diagnostic recorded)"
+	}
+	return diags[0]
+}
+
 // Enumerator is an OPTIONAL driver capability: list the CRAWLABLE SCOPES of a
 // provider — projects/regions for clouds, namespaces for a cluster — so the gentle
 // crawl (D141) can fan out when a pairing declares no explicit scope. Strictly
@@ -3133,6 +3358,24 @@ type Claimer interface {
 // mutation semantics.
 type ProgressReporter interface {
 	SetProgress(report func(phase string))
+}
+
+// FieldReclaimer (D699) is an OPTIONAL driver capability, for a provider whose write
+// can be REFUSED because another manager owns a field we declare — Kubernetes
+// server-side apply, which 409s rather than stomping a live controller.
+//
+// Failing closed there is right by default. But `kubectl label` is the most common way
+// a real cluster drifts, and after one, converge could never correct that field again:
+// the repair was permanently blocked and the operator was told to "release it first"
+// with no supported way to do so. The executor sets this per action, from consent the
+// COMPILER sealed into the plan — so granting it after sealing yields a different plan
+// hash rather than quietly changing what an existing plan does.
+//
+// What it permits is narrow by construction: an apply patch carries exactly the fields
+// the mapping declares, so forcing it takes those and nothing else. It is never a
+// blanket force.
+type FieldReclaimer interface {
+	SetFieldReclaim(allowed bool)
 }
 
 // LROBudgeter reports a driver's ceiling for a long-running operation — the deadline

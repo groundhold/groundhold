@@ -27,7 +27,7 @@ attributes:
     mappings:
       gcp.filestore: instance location (zone/region)
       aws.efs: provider region (mount targets span its AZs)
-      azure.files: the enclosing storage account's location
+      azure.azurefiles: the enclosing storage account's location
 
   protocol:
     kind: protocol
@@ -38,7 +38,7 @@ attributes:
     mappings:
       gcp.filestore: NFSv3 (fileShares) — SMB refused
       aws.efs: NFSv4.1 — SMB refused
-      azure.files: SMB 3.x or NFS 4.1 (NFS needs a Premium FileStorage account)
+      azure.azurefiles: SMB 3.x or NFS 4.1 (NFS needs a Premium FileStorage account)
 
   availability.class:
     kind: string
@@ -49,7 +49,7 @@ attributes:
     mappings:
       gcp.filestore: tier BASIC/ZONAL=zonal, ENTERPRISE/REGIONAL=regional
       aws.efs: OneZone storage class=zonal, Standard (multi-AZ)=regional
-      azure.files: LRS=zonal, ZRS (zone-redundant)=regional
+      azure.azurefiles: LRS=zonal, ZRS (zone-redundant)=regional
 
   encryption.atRest:
     kind: bool
@@ -59,7 +59,7 @@ attributes:
     mappings:
       gcp.filestore: always encrypted at rest (CMEK optional)
       aws.efs: Encrypted (default true)
-      azure.files: storage-account encryption (always on)
+      azure.azurefiles: storage-account encryption (always on)
 
   encryption.customerManagedKeys:
     kind: bool
@@ -72,7 +72,7 @@ attributes:
     mappings:
       gcp.filestore: kmsKeyName
       aws.efs: KmsKeyId (a customer key, with Encrypted=true)
-      azure.files: storage-account Key Vault encryption (keySource=Microsoft.Keyvault)
+      azure.azurefiles: storage-account Key Vault encryption (keySource=Microsoft.Keyvault)
 
   service.managed:
     kind: bool

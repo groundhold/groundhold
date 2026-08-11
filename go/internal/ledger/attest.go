@@ -34,6 +34,36 @@ type IntegrityReport struct {
 	Signatures SignatureFacts `json:"signatures"`
 	Snapshot   *SnapshotFacts `json:"snapshot,omitempty"`
 	Anchor     *AnchorFacts   `json:"anchor,omitempty"`
+	// Coverage (D576) states what this report structurally CANNOT establish, in the
+	// same spirit as the unsigned/archivedBase counts: facts about the window, not a
+	// verdict.
+	Coverage *CoverageFacts `json:"coverage,omitempty"`
+}
+
+// CoverageFacts names the limit of a chain-only check. A hash chain protects an
+// event through the link its SUCCESSOR holds, so the LAST event is unprotected by
+// construction — rewriting it leaves every remaining link consistent. Only an
+// external anchor taken beforehand detects it (THREAT_MODEL: "per-capability hash
+// chain + a positional/manifest tail anchor (external)"). Measured, not theorised:
+// `attest` exits 0 on a ledger whose final event body was edited, while
+// `anchor --check` against an anchor taken before the edit exits 5.
+type CoverageFacts struct {
+	Tip string `json:"tip,omitempty"`
+}
+
+// stampCoverage fills the coverage note. An empty tail has no tip to leave
+// uncovered, and a caveat that cannot apply is noise (D537).
+func (r *IntegrityReport) stampCoverage() {
+	if r.TailEvents <= 0 {
+		return
+	}
+	r.Coverage = &CoverageFacts{
+		Tip: "the LAST tail event is not covered by the chain — a hash chain protects " +
+			"an event through the link its successor holds, and the final one has none. " +
+			"Rewriting it leaves every remaining link consistent and this check clean. " +
+			"Compare against an anchor stored off-host (`anchor --check <anchor.json>`) " +
+			"to cover it.",
+	}
 }
 
 // SignatureFacts counts PRESENCE and SELF-CONSISTENCY, never trust —
@@ -67,19 +97,31 @@ type Signer struct {
 // LedgerIdMatches) — the receipt is the emitter's claim, the checks are
 // this run's facts (adversarial review).
 type SnapshotFacts struct {
-	Present               bool   `json:"present"`
+	Present bool `json:"present"`
+	// Unreadable (D708): the sidecar EXISTS and could not be read. Distinct from
+	// absent, which is this struct being nil — an attestation that cannot parse a
+	// snapshot must not read as one attesting a ledger that has none.
+	Unreadable            bool   `json:"unreadable,omitempty"`
+	UnreadableReason      string `json:"unreadableReason,omitempty"`
 	BaseEvents            int    `json:"baseEvents"`
 	ReceiptMode           string `json:"receiptMode,omitempty"` // what verifiedUnder SAYS: filesystem | trust
 	SignaturePresent      bool   `json:"signaturePresent"`
 	SignatureSelfVerifies bool   `json:"signatureSelfVerifies"` // checked NOW, against its own key
 	LedgerIdMatches       bool   `json:"ledgerIdMatches"`
+	// Archive states whether the file this snapshot folded away is still the file
+	// it pinned (D646). attest makes FACTS and exits 0; `repair` turns a bad one
+	// into a verdict.
+	Archive ArchiveIntegrity `json:"archive"`
 }
 
 // AnchorFacts: presence is decoration without a positional check, so
 // Status is the POSITIONAL result of re-checking the anchor against the
 // live ledger (adversarial review): absent | verified | truncated | diverged.
 type AnchorFacts struct {
-	Status       string `json:"status"` // verified | truncated | diverged
+	// verified | truncated | diverged | unreadable (D709)
+	Status string `json:"status"`
+	// Reason carries WHY an unreadable anchor could not be read.
+	Reason       string `json:"reason,omitempty"`
 	Events       int    `json:"events"`
 	Head         string `json:"head,omitempty"`
 	SnapshotHash string `json:"snapshotHash,omitempty"`
@@ -92,7 +134,9 @@ type AnchorFacts struct {
 // as EnvelopePresentButInvalid, never as self-verified — attest never
 // launders tamper into a coverage number.
 func Attest(path, generatedAt string) (*IntegrityReport, error) {
-	led, err := ReplayFile(path)
+	// D617: an attestation of a ledger that is not there used to be a clean
+	// IntegrityReport at exit 0.
+	led, err := ReplayExisting(path)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +151,14 @@ func Attest(path, generatedAt string) (*IntegrityReport, error) {
 	rep.Signatures = tailSignatureFacts(path, led.LedgerId())
 	rep.Signatures.ArchivedBase = led.BaseEvents
 
-	if snap, err := LoadSnapshotFile(SnapshotPath(path)); err == nil && snap != nil {
+	snap, snapState, snapErr := SnapshotStateOf(path)
+	if snapState == SnapshotUnreadable {
+		// D708: the sidecar exists and could not be read. Leaving rep.Snapshot nil
+		// reads as "this ledger has no snapshot" — an attestation, whose whole job is
+		// to be evidence, quietly omitting a compaction it could not parse.
+		rep.Snapshot = &SnapshotFacts{Unreadable: true, UnreadableReason: snapErr.Error()}
+	}
+	if snapState == SnapshotPresent {
 		sf := &SnapshotFacts{Present: true, BaseEvents: snap.BaseEvents,
 			SignaturePresent: snap.Sig != nil,
 			LedgerIdMatches:  snap.LedgerId == led.LedgerId(),
@@ -117,14 +168,23 @@ func Attest(path, generatedAt string) (*IntegrityReport, error) {
 		if snap.VerifiedUnder != nil {
 			sf.ReceiptMode = snap.VerifiedUnder.Mode
 		}
+		sf.Archive = CheckArchive(path, snap)
 		rep.Snapshot = sf
 	}
-	if a, err := LoadAnchorFile(AnchorPath(path)); err == nil && a != nil {
+	a, anchorState, anchorErr := AnchorStateOf(path)
+	if anchorState == AnchorUnreadable {
+		// D709: distinct from absent, which is Status "absent" below. An attestation
+		// that could not parse the anchor must not read as one attesting a ledger
+		// that never had it.
+		rep.Anchor = &AnchorFacts{Status: "unreadable", Reason: anchorErr.Error()}
+	}
+	if anchorState == AnchorPresent {
 		chk := CheckAnchor(led, a)
 		rep.Anchor = &AnchorFacts{Status: chk.Status, Events: a.Events,
 			Head: a.Head, SnapshotHash: a.SnapshotHash,
 			PinsTrust: a.Trust != nil}
 	}
+	rep.stampCoverage() // D576: say what a chain-only check cannot establish
 	return rep, nil
 }
 

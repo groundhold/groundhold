@@ -122,7 +122,9 @@ func BuildOpenSearch(environment, capability string,
 	if ev, ok := impl["engine_version"].(string); ok && ev != "" {
 		p.EngineVersion = ev
 	}
-	if n, ok := implInt(impl, "instance_count"); ok {
+	if n, ok, err := implIntOperand(impl, "instance_count", "implementation"); err != nil {
+		return OpenSearchPlan{}, err
+	} else if ok {
 		p.InstanceCount = n
 	}
 	// a private domain is placed in a VPC — subnets/security groups are topology.
@@ -141,14 +143,65 @@ func BuildOpenSearch(environment, capability string,
 	return p, nil
 }
 
-func implInt(impl map[string]any, key string) (int, bool) {
-	switch v := impl[key].(type) {
-	case float64:
-		return int(v), true
-	case int:
-		return v, true
+// implInt reads a whole-number operand. D674: it returned (0, false) for a value
+// that is PRESENT and unreadable, exactly as for one that is absent — so a caller
+// with a default silently used the default. Measured on the load balancer, whose
+// operands decide the public front door:
+//
+//	operand port=8443    -> listener Port=8443  TargetPort=8080
+//	operand port="8443"  -> listener Port=80    TargetPort=8080
+//
+// and the two candidates HASH IDENTICALLY, because the canonical form renders every
+// number as a string (NUMSTR). One sealed identity, two different front doors, and
+// preflight said `{"ready": true}` for both.
+//
+// `present` now distinguishes the two, so a caller can default on absence and
+// refuse on an unreadable value. The old two-value signature is kept for the sites
+// that already refuse when the operand is missing.
+func implIntPresent(impl map[string]any, key string) (val int, ok bool, present bool) {
+	raw, present := impl[key]
+	if !present || raw == nil {
+		return 0, false, false
 	}
-	return 0, false
+	switch v := raw.(type) {
+	case float64:
+		// D695: `int(v)` alone truncated. `period_seconds: 60.5` became 60 and passed
+		// a "must be a multiple of 60" check the author's own value fails — the D674
+		// shape exactly: a value the loader could not honestly read, silently built
+		// as a different one. A fractional operand is unreadable, not rounded.
+		if v != float64(int64(v)) {
+			return 0, false, true
+		}
+		return int(v), true, true
+	case int:
+		return v, true, true
+	case int64:
+		// yaml.v3 hands back int64 once a literal exceeds int's range on the platform;
+		// without this arm such an operand read as unreadable and refused by name.
+		return int(v), true, true
+	}
+	return 0, false, true
+}
+
+// implIntOperand is the reading a caller with a DEFAULT must use: an absent operand
+// leaves the default alone, a present-but-unreadable one refuses by name.
+func implIntOperand(impl map[string]any, key, where string) (int, bool, error) {
+	v, ok, present := implIntPresent(impl, key)
+	if !present {
+		return 0, false, nil
+	}
+	if !ok {
+		return 0, false, fmt.Errorf(
+			"%s.%s must be a whole number, got %T (%v) — refusing rather than "+
+				"falling back to a default, which would build a different resource "+
+				"than the candidate declares (D674)", where, key, impl[key], impl[key])
+	}
+	return v, true, nil
+}
+
+func implInt(impl map[string]any, key string) (int, bool) {
+	v, ok, _ := implIntPresent(impl, key)
+	return v, ok
 }
 
 func implStrings(impl map[string]any, key string) []string {

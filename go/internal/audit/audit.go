@@ -11,11 +11,14 @@ package audit
 
 import (
 	"fmt"
+	"groundhold/internal/perr"
 	"sort"
 
 	"groundhold/internal/contract"
 	"groundhold/internal/ledger"
 	"groundhold/internal/scalars"
+	"groundhold/internal/verify"
+	"groundhold/internal/vocab"
 )
 
 type Verdict struct {
@@ -31,7 +34,12 @@ type Verdict struct {
 }
 
 type Result struct {
-	Status     string    `json:"status"` // clean | violations-found
+	Status string `json:"status"` // clean | violations-found
+	// Code (D624): `spec/errors.md` states the coverage rule — "every JSON-emitting
+	// verb carries `code`" — and this report had none, so a caller was pushed back
+	// to regexing prose the same document declares unparseable. The condition has a
+	// published code; naming it is all that was missing.
+	Code       perr.Code `json:"code,omitempty"`
 	Verdicts   []Verdict `json:"verdicts"`
 	Violations int       `json:"violations"` // hard: violated + unknown + unverifiable (all block, #1)
 	// Events is always present: an empty list on a failing world SAYS
@@ -42,7 +50,7 @@ type Result struct {
 // Run audits every constraint with a subject and a comparable op.
 // evalClock gates staleness exactly like the compiler does (D46).
 func Run(c *contract.Contract, led *ledger.Ledger, ledgerPath, at string,
-	record bool) (*Result, error) {
+	record bool, vocabs map[string]vocab.Vocabulary) (*Result, error) {
 	clock, err := ledger.ParseTs(at)
 	if err != nil {
 		return nil, fmt.Errorf("bad --at: %v", err)
@@ -56,8 +64,13 @@ func Run(c *contract.Contract, led *ledger.Ledger, ledgerPath, at string,
 	})
 
 	for _, cn := range ordered {
-		if cn.Subject == "" || cn.Expected == nil {
-			continue // budget/presence forms are not audit material yet
+		isPresence := cn.Op == "exists" || cn.Op == "absent"
+		if cn.Subject == "" || (cn.Expected == nil && !isPresence) {
+			// D964: presence forms (exists/absent) carry no Expected value but ARE
+			// audit material — a hard `absent` that recorded reality violates must
+			// not be silently dropped into a clean verdict. Only the budget/objective
+			// forms (an Objective, no operand) are still out of scope here.
+			continue
 		}
 		v := Verdict{Constraint: cn.ID, Capability: cn.Subject,
 			Path: cn.Path, Severity: cn.Severity}
@@ -68,7 +81,7 @@ func Run(c *contract.Contract, led *ledger.Ledger, ledgerPath, at string,
 		// config read) AND retains a probe measurement that a later observe
 		// would otherwise erase from the single-slot projection.
 		rec, sel, reason := latestSufficient(
-			led.ObservationsBySource[cn.Subject][cn.Path], cn.VerifyMethod, clock)
+			led.ObservationsBySource[cn.Subject][cn.Path], cn.RuntimeMethod, clock)
 		if sel != "" {
 			v.Verdict, v.Reason = sel, reason
 		} else {
@@ -81,13 +94,35 @@ func Run(c *contract.Contract, led *ledger.Ledger, ledgerPath, at string,
 				v.Verdict = "unknown"
 				v.Reason = "observation is stale — re-observe first"
 			default:
+				if isPresence {
+					// D964: a fresh sufficient observation means the attribute is
+					// PRESENT — exists→satisfied, absent→violated. A missing or stale
+					// observation cannot PROVE absence, so it stays unknown above and
+					// blocks a hard constraint; audit never certifies absence it did
+					// not see.
+					if cn.Op == "exists" {
+						v.Verdict = "satisfied"
+						v.Reason = fmt.Sprintf("path %s is present", cn.Path)
+					} else {
+						v.Verdict = "violated"
+						v.Reason = fmt.Sprintf(
+							"path %s is present — the constraint requires it absent", cn.Path)
+					}
+					break
+				}
 				sc, perr := scalars.Parse(rec.Value)
 				if perr != nil {
 					v.Verdict = "unverifiable"
 					v.Reason = "observation unparseable"
 					break
 				}
-				okOp, cerr := scalars.Operators[cn.Op](sc, cn.Expected)
+				// D660: a SET attribute (unordered:true) must compare order-
+				// independently against recorded reality, exactly as verify does for
+				// the candidate — canonicalize BOTH the observation and the operand,
+				// or `not-equals` reports SATISFIED against the very forbidden set.
+				lhs := verify.SortIfUnordered(sc, cn.Subject, cn.Path, c, vocabs)
+				rhs := verify.SortIfUnordered(cn.Expected, cn.Subject, cn.Path, c, vocabs)
+				okOp, cerr := scalars.Operators[cn.Op](lhs, rhs)
 				if cerr != nil {
 					v.Verdict = "unverifiable"
 					v.Reason = "observation incomparable with the required value"
@@ -135,8 +170,45 @@ func Run(c *contract.Contract, led *ledger.Ledger, ledgerPath, at string,
 	}
 	if res.Violations > 0 {
 		res.Status = "violations-found"
+		res.Code = auditCode(res.Verdicts)
 	}
 	return res, nil
+}
+
+// auditCode names WHY the audit is blocking, from the verdicts themselves (D624).
+// An `unknown` verdict means the evidence is missing or stale — the operator's next
+// step is `observe --record`, which is what observation-required publishes. Anything
+// else that blocks is a constraint the world genuinely fails.
+// HardOnly is the ONE place "which verdicts decide" is answered (D755). Run returns
+// every constraint's verdict with its severity, and two callers had to know that soft is
+// advisory: the exit code, which knew, and posture's class fold, which did not — so an
+// advisory violation rendered as drift with the sentence "a hard constraint is violated",
+// and an advisory PASS rendered as managed-ok, whose published meaning is that every hard
+// verdict is satisfied. A set with two homes has no home (D311).
+func HardOnly(vs []Verdict) []Verdict {
+	out := make([]Verdict, 0, len(vs))
+	for _, v := range vs {
+		if v.Severity == "hard" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func auditCode(vs []Verdict) perr.Code {
+	blocking := false
+	for _, v := range HardOnly(vs) {
+		switch v.Verdict {
+		case "unknown", "unverifiable":
+			return perr.ObservationRequired
+		case "violated":
+			blocking = true
+		}
+	}
+	if blocking {
+		return perr.NotExecutable
+	}
+	return ""
 }
 
 // emit appends one violation.detected / violation.resolved — knowledge
@@ -195,7 +267,7 @@ func latestSufficient(bySource map[string]ledger.ObsRecord, method string,
 	var best ledger.ObsRecord
 	found, sufficient, future := false, false, false
 	for src, r := range bySource {
-		if sourceRank(src) < need {
+		if evidenceRank(src, r.Derivation) < need {
 			continue
 		}
 		sufficient = true
@@ -250,4 +322,35 @@ func sourceRank(source string) int {
 	default:
 		return 0
 	}
+}
+
+// evidenceRank is sourceRank corrected by what the reading actually WITNESSED (D722).
+//
+// The ladder used to key on source alone, so a provider-api read ranked 1 whether it
+// measured the property or merely reported the setting the resource stores. That is
+// the whole difference `Derivation` was introduced to record: `config-intent` means
+// the resource HOLDS this value and does not itself enforce it. Measured in the field:
+// `egress.restricted: true, derivation: config-intent` ruled a hard constraint
+// SATISFIED on a network whose security groups allowed everything outbound — the tool
+// carried the marker and threw it away at the one moment it decided anything.
+//
+// A config-intent reading is evidence at the STATIC bar and no higher: an author who
+// wrote `verify: {method: static}` accepted the document's own word, and one who asked
+// for provider-api or probe asked for something this reading is not. It does not
+// become false — it becomes `unknown`, which on a hard constraint blocks, which is
+// what the reporter asked for in preference to a sealed plan resting on a declaration.
+// D759 puts `platform-invariant` at the same bar as config-intent, deliberately. It is
+// tempting to rank a provider guarantee HIGH — it cannot be otherwise, after all — and
+// the record says otherwise: D752, D753 and D754 were each an author asserting a
+// platform guarantee that was not one ("GCP vaults are immutable by construction", "one
+// write region is across zones", "every Fargate service is regional"). All three were
+// wrong, and all three would have ranked at the provider-api bar under the generous
+// reading. Nothing about THIS resource was read, so the static bar is what it earns; the
+// new value buys honest PROVENANCE, not more trust.
+func evidenceRank(source, derivation string) int {
+	r := sourceRank(source)
+	if (derivation == "config-intent" || derivation == "platform-invariant") && r > 0 {
+		return 0
+	}
+	return r
 }

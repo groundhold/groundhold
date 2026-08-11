@@ -13,22 +13,43 @@ jobs:
       - name: build groundhold
         run: cd go && go build -o ../bin/groundhold-go ./cmd/groundhold
       - name: verify the candidate against the contract
+        # D659: the report is written FIRST and the exit code is the step's own.
+        # This used to end in `| tee verify-report.json`, and a pipeline's status is
+        # its LAST command — GitHub's default shell is `bash -e {0}` with no
+        # `pipefail`, so `tee` always succeeded and the gate could not fail. A pull
+        # request violating a hard residency constraint merged green.
         run: |
           bin/groundhold-go verify contracts/prod.contract.yaml \
             candidates/prod.candidate.yaml --vocab spec/vocab --json \
-            | tee verify-report.json
+            > verify-report.json
+          cat verify-report.json
       - name: forecast the sealed plan (advisory)
         if: always()
         run: |
+          # --at is REQUIRED: a safety clock must not default to the epoch and make
+          # stale observations look fresh. In CI it is simply now, and the same stamp
+          # is reused by forecast so both read the world at one instant.
+          AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           bin/groundhold-go plan contracts/prod.contract.yaml \
             candidates/prod.candidate.yaml --vocab spec/vocab \
-            --ledger state/prod.jsonl > plan.json || {
+            --ledger state/prod.jsonl --at "$AT" > plan.json || {
               code=$?
-              # exit 2 with "nothing to change" means converged — OK for CI
-              [ $code -eq 2 ] && exit 0 || exit $code
+              # D659: exit 2 is a FAMILY, not a verdict. spec/errors.md gives it to
+              # nothing-to-change, not-executable, consent-required,
+              # adoption-mismatch and provider-permission-denied — this used to
+              # treat all of them as "converged", so a violated hard constraint
+              # left the job green. Route on the `code` field, which is what it is
+              # for; anything else re-raises.
+              if [ "$code" -eq 2 ] && \
+                 grep -q '"code": *"nothing-to-change"' plan.json; then
+                echo "converged: nothing to change"
+                exit 0
+              fi
+              cat plan.json
+              exit $code
             }
           bin/groundhold-go forecast plan.json candidates/prod.candidate.yaml \
-            --ledger state/prod.jsonl
+            --ledger state/prod.jsonl --at "$AT"
 
   survey-drift:
     runs-on: ubuntu-latest

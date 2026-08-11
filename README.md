@@ -12,10 +12,13 @@
 **Status: private, pre-release (`v0.x`, experimental). Build quiet, launch loud.**
 An honest self-assessment — what is proven vs merely built vs designed — lives in
 [`docs/MATURITY.md`](docs/MATURITY.md): the verification core is proven and
-adversarially hardened; execution has closed the loop against two real clouds
-(GCP author-run, AWS at one external pilot that filed 36 findings) while Azure
-is golden-tested only; there has been one pilot, no external security audit and
-no production record.
+adversarially hardened; execution has closed the loop against ALL THREE clouds —
+GCP author-run, AWS at one external pilot that filed 36 findings, and Azure once
+(2026-07-24, a VNet end to end, which is a floor and not a claim). The Kubernetes
+driver is schema-driven and has never run against a real cluster. There has been
+one pilot, no external security audit, and one production incident that groundhold
+contributed to (2026-07-26 — it did not cause a bad deploy, it removed the signal
+that would have surfaced one).
 ## TL;DR — see it work in 60 seconds, no cloud account
 
 Grab a binary — no toolchain, no clone — from
@@ -23,7 +26,9 @@ Grab a binary — no toolchain, no clone — from
 then:
 
 ```sh
-gh release download v0.1.4 --repo groundhold/groundhold --pattern 'groundhold_linux_amd64'
+gh release download v0.1.4 --repo groundhold/groundhold \
+  --pattern 'groundhold_linux_amd64' --pattern 'SHA256SUMS'
+sha256sum -c SHA256SUMS --ignore-missing
 chmod +x groundhold_linux_amd64
 ```
 
@@ -36,8 +41,9 @@ exists this becomes a one-liner that never goes stale:
 `curl -Lo groundhold …/releases/latest/download/groundhold_linux_amd64`.
 
 Every release carries `SHA256SUMS`, a CycloneDX SBOM and `BUILDINFO.txt` for a
-reproducible rebuild — verify a download with
-`sha256sum -c SHA256SUMS --ignore-missing`. A keyless SLSA build-provenance
+reproducible rebuild; the checksums cover all three (D680), and the download above
+fetches the sums file so the verification line has something to read — following
+the old snippet literally left `sha256sum: SHA256SUMS: No such file or directory`. A keyless SLSA build-provenance
 attestation is produced only once this repository is public: GitHub does not make
 one retrievable for a private repository on a free plan, so the release notes
 claim it only after the workflow has confirmed it exists (D354).
@@ -203,14 +209,15 @@ recorded binding rather than guessed from the file you just edited.
 
 Groundhold talks to provider APIs directly. Credential handling is a
 **deliberately narrow adapter, not the cloud SDK credential chains** — there is
-no `gcloud`/`aws`/`az` shell-out and no tool coupling. What that means in
-practice per cloud:
+no `gcloud`/`aws`/`az`/`kubectl` shell-out and no tool coupling. What that means
+in practice per provider:
 
-| Cloud | Where credentials come from |
+| Provider | Where credentials come from |
 |-------|------------------------------|
 | **AWS** | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` (env only — `~/.aws/credentials` and `AWS_PROFILE` are **not** read). Region from `AWS_REGION`, falling back to `AWS_DEFAULT_REGION`. |
 | **GCP** | In order: `GROUNDHOLD_GCP_ACCESS_TOKEN` (a ready token) → `GROUNDHOLD_GCP_KEY_FILE` (a `service_account` key JSON **only** — no federation configs, no user credentials) → the GCE metadata server. Not ADC. |
 | **Azure** | `GROUNDHOLD_AZURE_ACCESS_TOKEN`, an AAD bearer token. A full client-credentials exchange is a later addition. |
+| **Kubernetes** | A kubeconfig context — the same file `kubectl` reads — with STATIC auth only: a bearer token or a client certificate. `exec` / auth-provider plugins (`gke-gcloud-auth-plugin`, `aws eks get-token`, oidc) are refused loudly rather than shelled out to, for the same reason as the clouds: authentication must not depend on ambient tooling. |
 
 So an engineer arriving with a working cloud CLI exports a short-lived token
 rather than pointing at a profile:
@@ -491,6 +498,15 @@ declared structural gap instead of a third mapping.
 **Not a Terraform generator** (D39). The compiler targets the Sealed Plan IR and
 the executor speaks provider APIs; `.tf.json` is at most an optional export,
 never on the execution path.
+
+## Support
+
+Maintainer-led, best-effort, **no SLA** — except security, where
+`SECURITY.md` commits to a 72-hour acknowledgement of a private
+advisory. Bug reports are welcome in any shape, but a report reduced to
+a failing conformance case is the one that gets fixed fastest, because
+it arrives already true. `CONTRIBUTING.md` explains why that is the
+mechanism rather than a formality.
 
 ## License
 

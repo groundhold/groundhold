@@ -284,25 +284,28 @@ func (d *Driver) observeOpenSearchServerless(capability, providerID string) ([]p
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"collection not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"collection not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		// a serverless collection ALWAYS encrypts at rest and in transit — structural
 		// guarantees (config-intent), not read fields.
-		{Path: "encryption.atRest", Value: true, Derivation: "config-intent"},
-		{Path: "encryption.inTransit", Value: true, Derivation: "config-intent"},
+		{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"},
+		{Path: "encryption.inTransit", Value: true, Derivation: "platform-invariant"},
 		// regional (multi-AZ) by construction.
-		{Path: "availability.class", Value: "regional", Derivation: "config-intent"},
+		{Path: "availability.class", Value: "regional", Derivation: "platform-invariant"},
 	}
 	var diags []string
 	// CMK is measured: kmsKeyArn is "auto" for an AWS-owned key, a key ARN for a CMK.
-	if c.KmsKeyArn != "" && !strings.EqualFold(c.KmsKeyArn, "auto") {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: true, Derivation: "measured"})
-	} else if c.KmsKeyArn != "" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: false, Derivation: "measured"})
-	}
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+		Value: c.KmsKeyArn != "" && !strings.EqualFold(c.KmsKeyArn, "auto"), Derivation: "measured"})
 	// public exposure is in the owned network policy, not the collection detail — read it.
 	public, perr := d.networkPolicyPublic(region, aossNetPolicyName(name))
 	if perr != nil {
@@ -475,7 +478,7 @@ func (d *Driver) discoverOpenSearchServerless(region string) ([]provider.Discove
 			diags = append(diags, c.Name+": "+dg)
 		}
 		found = append(found, provider.Discovered{
-			ProviderID: pid, ResourceType: "capability.search.index", Observations: obs})
+			ProviderID: pid, ResourceType: "capability.search.index", Observations: provider.WithoutAbsence(obs)})
 	}
 	return found, diags, nil
 }

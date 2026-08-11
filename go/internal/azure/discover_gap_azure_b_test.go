@@ -53,8 +53,8 @@ func azGapBServer(t *testing.T, sawBearer *bool) *httptest.Server {
 					{"id":"/subscriptions/` + testSub + `/resourceGroups/rg2/providers/Microsoft.Portal/dashboards/fardash","name":"fardash","location":"eastus"}
 				]}`))
 			case strings.Contains(p, "/dashboards/heredash"):
-				_, _ = w.Write([]byte(`{"location":"westeurope","properties":{"lenses":{"0":{"parts":` +
-					`{"0":{"metadata":{"inputs":[{"value":{"chart":{"metrics":[{"name":"Requests"}]}}}]}}}}}}}`))
+				_, _ = w.Write([]byte(`{"location":"westeurope","properties":{"lenses":[{"parts":` +
+					`[{"metadata":{"inputs":[{"value":{"chart":{"metrics":[{"name":"Requests"}]}}}]}}]}]}}`))
 
 			// --- availability webtests (regional) ---
 			case strings.HasSuffix(p, "/providers/Microsoft.Insights/webtests") &&
@@ -64,8 +64,10 @@ func azGapBServer(t *testing.T, sawBearer *bool) *httptest.Server {
 					{"id":"/subscriptions/` + testSub + `/resourceGroups/rg2/providers/Microsoft.Insights/webtests/farwt","name":"farwt","location":"eastus"}
 				]}`))
 			case strings.Contains(p, "/webtests/herewt"):
+				// D902b: Azure returns the URL inside the WebTest XML, not a structured
+				// Request field (which comes back null) — the fixture mirrors that.
 				_, _ = w.Write([]byte(`{"location":"westeurope","properties":{"Frequency":300,` +
-					`"Request":{"RequestUrl":"https://example.com/health"}}}`))
+					`"Configuration":{"WebTest":"<WebTest Name=\"herewt\"><Items><Request Method=\"GET\" Url=\"https://example.com/health\" /></Items></WebTest>"}}}`))
 
 			// --- scheduled query rules (regional) ---
 			case strings.HasSuffix(p, "/providers/Microsoft.Insights/scheduledQueryRules") &&

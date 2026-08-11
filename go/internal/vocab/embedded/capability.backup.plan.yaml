@@ -51,8 +51,9 @@ attributes:
       coercion. The exact cron the driver programs is implementation detail (the
       operand implementation.scheduleExpression); the PROMISE is this frequency.
     mappings:
-      aws.backup: Backup plan Rule ScheduleExpression (cron), derived from the cadence
-      gcp.backupdr: backup plan schedule (the rule's recurrence)
+      aws.backupplan: Backup plan Rule ScheduleExpression (cron), derived from the cadence
+      gcp.backupplan: backup plan schedule (the rule's recurrence)
+      azure.backuppolicy: the repeating-schedule ISO interval, reduced to the vocabulary frequency
 
   retention.duration:
     kind: duration
@@ -63,8 +64,11 @@ attributes:
       recovery point LONGER than this — the vault lock always wins upward; this is the
       plan's intended lifecycle, not a guarantee against a stronger vault lock.
     mappings:
-      aws.backup: Rule Lifecycle.DeleteAfterDays
-      gcp.backupdr: backup rule retention period
+      aws.backupplan: Rule Lifecycle.DeleteAfterDays
+      gcp.backupplan: backup rule retention period
+      # D545: read from the driver.
+      azure.backuppolicy: >
+        the first lifecycle rule's deleteAfter ISO-8601 duration, converted to hours
 
   copy.crossRegion:
     kind: bool
@@ -73,8 +77,11 @@ attributes:
       copy action) for multi-region DR. When true, the destination is
       copy.destinationRegion (and the destination vault ARN is an operand).
     mappings:
-      aws.backup: presence of a Rule CopyAction with a destination vault in another region
-      gcp.backupdr: cross-region backup copy configuration
+      aws.backupplan: presence of a Rule CopyAction with a destination vault in another region
+      gcp.backupplan: cross-region backup copy configuration
+      azure.backuppolicy: >
+        const FALSE, measured — cross-region restore is a property of the VAULT, not
+        of the policy, so the policy can never report it true
 
   copy.destinationRegion:
     kind: string
@@ -85,15 +92,16 @@ attributes:
       contract must be able to constrain this region to an approved (e.g. EU) set.
       Absent when copy.crossRegion is false.
     mappings:
-      aws.backup: region parsed from the CopyAction DestinationBackupVaultArn
-      gcp.backupdr: the copy rule's destination location
+      aws.backupplan: region parsed from the CopyAction DestinationBackupVaultArn
+      gcp.backupplan: the copy rule's destination location
 
   location.region:
     kind: string
     description: Region the plan (and the primary recovery points it creates) live in.
     mappings:
-      aws.backup: derived from the provider region
-      gcp.backupdr: the backup plan location
+      aws.backupplan: derived from the provider region
+      gcp.backupplan: the backup plan location
+      azure.backuppolicy: the VAULT's region (a policy has none of its own)
 
   service.managed:
     kind: bool

@@ -69,8 +69,8 @@ func (d *Driver) createAzureDashboard(environment, capability string,
 type azureDashDoc struct {
 	Tags       map[string]string `json:"tags"`
 	Properties struct {
-		Lenses map[string]struct {
-			Parts map[string]struct {
+		Lenses []struct {
+			Parts []struct {
 				Metadata struct {
 					Inputs []struct {
 						Value struct {
@@ -101,7 +101,11 @@ func (d *Driver) observeAzureDashboard(capability, providerID string) ([]provide
 		return nil, nil, fmt.Errorf("dashboards.get: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"dashboard not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"dashboard not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("dashboards.get: HTTP %d", st)
@@ -125,6 +129,8 @@ func (d *Driver) observeAzureDashboard(capability, providerID string) ([]provide
 		}
 	}
 	return []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "dashboard.metrics", Value: metrics, Derivation: "measured"},
 		{Path: "dashboard.widgetCount", Value: float64(count), Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},

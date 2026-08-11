@@ -78,7 +78,11 @@ func (d *Driver) observeAPIM(capability, providerID string) ([]provider.Observat
 		return nil, nil, fmt.Errorf("service.get: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"apim service not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"apim service not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("service.get: HTTP %d", st)
@@ -87,7 +91,9 @@ func (d *Driver) observeAPIM(capability, providerID string) ([]provider.Observat
 	if json.Unmarshal(resp, &doc) != nil {
 		return nil, nil, &armReadError{Op: "service.get", Cause: "body", Status: st}
 	}
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		// an APIM service is an HTTP gateway.
 		{Path: "protocol", Value: "http", Derivation: "config-intent"},
@@ -123,21 +129,8 @@ func (d *Driver) deleteAPIM(capability, environment, providerID string) provider
 		return provider.CreateResult{Status: "failed",
 			Reason: "apim service tags do not match — refusing to delete a resource that is not ours"}
 	}
-	dst, dresp, de := d.doARM("DELETE", url, nil)
-	if de != nil {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("delete outcome unknown: %v", de)}
-	}
-	if dst == http.StatusNotFound {
-		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
-	}
-	if dst >= 500 {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("delete HTTP %d (server error) — reconcile", dst)}
-	}
-	if dst < 200 || dst >= 300 {
-		if r := provider.MutationResult(dst, azErrCode(dresp), nil, providerID, "delete"); r != nil {
-			return *r
-		}
-		return provider.CreateResult{ProviderID: providerID, Status: "failed", Reason: fmt.Sprintf("delete HTTP %d: %s", dst, mutDetailAz(dresp))}
-	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// D984: route the delete through deleteAndConfirm (D971) — APIM DELETE returns
+	// 202 Accepted (a long-running delete); concluding succeeded here tombstoned a
+	// service still live. The helper polls to a confirmed 404, unknown on timeout.
+	return *d.deleteAndConfirm(url, providerID, "api management")
 }

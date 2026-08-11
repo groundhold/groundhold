@@ -83,7 +83,11 @@ func gapDiscoverServerA(t *testing.T, rec *capture) *httptest.Server {
 					`"BackupVaultArn":"arn:aws:backup:eu-central-1:000000000000:backup-vault:pv-vault-1"}]}`))
 			case strings.HasPrefix(path, "/backup-vaults/"):
 				_, _ = w.Write([]byte(`{"BackupVaultArn":"arn:aws:backup:eu-central-1:000000000000:backup-vault:pv-vault-1",` +
-					`"EncryptionKeyArn":"arn:aws:kms:eu-central-1:000000000000:key/xyz","Locked":true,"MinRetentionDays":30}`))
+					`"EncryptionKeyArn":"arn:aws:kms:eu-central-1:000000000000:key/xyz","Locked":true,` +
+					// D724: a COMPLIANCE vault has a lock date in the past. Without one
+					// this fixture described an admin-deletable vault while asserting
+					// immutable WORM — the defect, encoded in a third place.
+					`"LockDate":1600000000,"MinRetentionDays":30}`))
 
 			// ---- CloudFront (REST-XML, global) ----
 			case path == "/2020-05-31/distribution":

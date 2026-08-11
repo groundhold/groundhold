@@ -253,7 +253,13 @@ func (d *Driver) observeBackupPolicy(capability, providerID string) ([]provider.
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"backup policy not found — nothing to observe"}, nil
+		return []provider.Observation{
+			// F-LC3 (D802): a BOUND resource the API authoritatively 404s is GONE. An
+			// empty return leaves the last good observations standing as the freshest
+			// word, so posture reads managed-ok and audit stays satisfied about a
+			// resource that does not exist (D513/D518, fixed here last).
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"backup policy not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs, diags := d.backupPolicyObservations(rg, vault, doc)
 	return obs, diags, nil
@@ -421,7 +427,7 @@ func (d *Driver) discoverBackupPolicy(region string) ([]provider.Discovered, []s
 			out = append(out, provider.Discovered{
 				ProviderID:   pid,
 				ResourceType: "capability.backup.plan",
-				Observations: obs,
+				Observations: provider.WithoutAbsence(obs),
 			})
 		}
 	}

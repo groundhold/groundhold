@@ -91,22 +91,57 @@ func (s gkeAddonSpec) configFragment(enable bool) map[string]any {
 	return map[string]any{s.field: map[string]any{s.toggle: val}}
 }
 
-// readEnabled reverse-reads the addon's enablement from a cluster addonsConfig,
-// normalizing the toggle polarity. present=false means the field is absent or
-// not a bool — the caller must NOT treat that as "disabled" blindly.
-func (s gkeAddonSpec) readEnabled(addonsConfig map[string]any) (enabled, present bool) {
-	sub, ok := addonsConfig[s.field].(map[string]any)
-	if !ok {
-		return false, false
+// addonState is what a cluster's config actually tells us about one addon. It replaces
+// a pair of booleans whose false/false meant three different things at once (D801).
+type addonState int
+
+const (
+	addonAbsent     addonState = iota // no config block at all — the addon is not configured
+	addonOn                           // configured and on
+	addonOff                          // configured and off
+	addonUnreadable                   // a block we cannot interpret — never silently "absent"
+)
+
+// readState reverse-reads one addon's enablement from a cluster addonsConfig,
+// normalizing the toggle polarity.
+//
+// D801: the previous version returned (enabled, present) and reported present=false when
+// the toggle key was missing from an EXISTING block. That reading is wrong on this API in
+// the most common case there is. Google serializes JSON the proto3 way, which OMITS
+// fields holding their default value — so an addon that is ON through a `disabled` toggle
+// comes back as an EMPTY OBJECT:
+//
+//	"httpLoadBalancing": {}          <- disabled:false omitted; the addon is ENABLED
+//
+// Read as "not present", that made an enabled addon invisible to discover, and made
+// delete answer "never enabled — nothing to do" about a control that was still on.
+//
+// An absent toggle is therefore FALSE, and the polarity decides what false means. A
+// missing BLOCK is a real absence. A block we cannot parse is neither, and says so.
+func (s gkeAddonSpec) readState(addonsConfig map[string]any) addonState {
+	raw, exists := addonsConfig[s.field]
+	if !exists {
+		return addonAbsent
 	}
-	v, ok := sub[s.toggle].(bool)
+	sub, ok := raw.(map[string]any)
 	if !ok {
-		return false, false
+		return addonUnreadable
+	}
+	val, exists := sub[s.toggle]
+	if !exists {
+		val = false // proto3 JSON omits the default
+	}
+	v, ok := val.(bool)
+	if !ok {
+		return addonUnreadable
 	}
 	if s.toggle == "disabled" {
-		return !v, true
+		v = !v
 	}
-	return v, true
+	if v {
+		return addonOn
+	}
+	return addonOff
 }
 
 // gkeAddonCanonicalNames lists the registry keys (sorted) for error messages.

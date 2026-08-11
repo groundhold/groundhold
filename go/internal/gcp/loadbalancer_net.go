@@ -72,7 +72,13 @@ func (d *Driver) observeLoadBalancer(capability, providerID string) ([]provider.
 		return nil, nil, fmt.Errorf("forwardingRules.get: %v", err)
 	}
 	if status == http.StatusNotFound {
-		return nil, []string{"forwarding rule not found — nothing to observe"}, nil
+		return []provider.Observation{
+			// F-LC3 (D802): a BOUND resource the API authoritatively 404s is GONE. An
+			// empty return leaves the last good observations standing as the freshest
+			// word, so posture reads managed-ok and audit stays satisfied about a
+			// resource that does not exist (D513/D518, fixed here last).
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"forwarding rule not found — bound resource is gone (will re-create)"}, nil
 	}
 	if status != http.StatusOK {
 		return nil, nil, fmt.Errorf("forwardingRules.get: HTTP %d", status)
@@ -312,7 +318,7 @@ func (d *Driver) discoverLoadBalancers(region string) ([]provider.Discovered, []
 			out = append(out, provider.Discovered{
 				ProviderID:   lbProviderID(d.Project, scope, fr.Name),
 				ResourceType: "capability.network.loadbalancer",
-				Observations: obs,
+				Observations: provider.WithoutAbsence(obs),
 			})
 		}
 	}

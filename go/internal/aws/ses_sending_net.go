@@ -71,6 +71,11 @@ type sesIdentity struct {
 		Key   string `json:"Key"`
 		Value string `json:"Value"`
 	} `json:"Tags"`
+	// D746: the identity's DEFAULT configuration set. A configuration set governs a
+	// message when the sender names it per send OR when it is the identity's default —
+	// so without this, whether bounces are captured depends on the application, and is
+	// not a fact about the infrastructure at all.
+	ConfigurationSetName string `json:"ConfigurationSetName"`
 }
 
 func (id sesIdentity) tagMap() map[string]string {
@@ -296,7 +301,7 @@ func (d *Driver) ensureSESComposite(region, pid string, plan SESSendingPlan) pro
 
 	// (3) the BOUNCE+COMPLAINT event destination (idempotent: skip if already present).
 	if dests, found, derr := d.getEventDestinations(region, plan.ConfigurationSetName); derr == nil && found && hasBounceComplaintSNS(dests) {
-		return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
+		return d.attachSESConfigSet(region, pid, plan)
 	}
 	edBody := []byte(jsonBody(map[string]any{
 		"EventDestinationName": "bounces",
@@ -312,7 +317,7 @@ func (d *Driver) ensureSESComposite(region, pid string, plan SESSendingPlan) pro
 		return provider.CreateResult{ProviderID: pid, Status: "unknown",
 			Reason: fmt.Sprintf("identity + configuration set exist but the bounce event destination outcome is unknown — reconcile: %v", err)}
 	case st == http.StatusOK || st == http.StatusCreated || sesIsAlreadyExists(st, body):
-		return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
+		return d.attachSESConfigSet(region, pid, plan)
 	default:
 		return provider.CreateResult{ProviderID: pid, Status: "unknown",
 			Reason: fmt.Sprintf("identity + configuration set exist but the bounce event destination could not be attached "+
@@ -339,10 +344,16 @@ func (d *Driver) observeSESSending(capability, providerID string) ([]provider.Ob
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"identity not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"identity not found — bound resource is gone (will re-create)"}, nil
 	}
 	dkim := id.DkimAttributes.SigningEnabled && id.DkimAttributes.Status == "SUCCESS"
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "authentication.dkim", Value: dkim, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
@@ -351,13 +362,33 @@ func (d *Driver) observeSESSending(capability, providerID string) ([]provider.Ob
 	// bounce.tracked lives on the configuration set, keyed by a name recoverable from
 	// the pid (capability + domain). An unreadable event-destination list is UNKNOWN:
 	// omit the attribute with a diagnostic rather than fabricate "not tracked".
+	// D746: a configuration set with the right destinations captures nothing unless
+	// something routes messages THROUGH it. AWS applies one when the sender names it in
+	// the message, or when it is the identity's DEFAULT set. This read the destinations
+	// alone, so a set nothing pointed at reported `bounce.tracked: true` — and the
+	// vocabulary's promise for that attribute is "a failed demand returns to the record,
+	// never the void".
 	configSet := sesConfigSetName(capability, domain)
 	dests, csFound, csErr := d.getEventDestinations(region, configSet)
-	if csErr != nil {
+	switch {
+	case csErr != nil:
 		diags = append(diags, "bounce.tracked not derivable ("+csErr.Error()+") — omitted rather than fabricated")
-	} else {
+	case !csFound || !hasBounceComplaintSNS(dests):
 		obs = append(obs, provider.Observation{
-			Path: "bounce.tracked", Value: csFound && hasBounceComplaintSNS(dests), Derivation: "measured"})
+			Path: "bounce.tracked", Value: false, Derivation: "measured"})
+	case id.ConfigurationSetName == configSet:
+		// The identity routes every message through the set that captures bounces —
+		// an infrastructure guarantee, which is what this attribute claims to be.
+		obs = append(obs, provider.Observation{
+			Path: "bounce.tracked", Value: true, Derivation: "measured"})
+	default:
+		// The destinations are right and nothing routes to them by default. Capture
+		// then depends on every send naming the set — application behaviour, which no
+		// infrastructure read can see. Neither true nor false is earned (D725, D743).
+		diags = append(diags, "bounce.tracked not observed: the configuration set "+
+			configSet+" captures bounces and complaints, but it is not the identity's "+
+			"default set — whether a message passes through it depends on each send "+
+			"naming it, which this tool cannot observe")
 	}
 	// sending.productionAccess — a MANUAL-GATE. OBSERVED from SESv2 GetAccount
 	// (ProductionAccessEnabled): true means the account is OUT of the sandbox. This is
@@ -580,7 +611,35 @@ func (d *Driver) discoverSESSending(region string) ([]provider.Discovered, []str
 		}
 		diags = append(diags, od...)
 		found = append(found, provider.Discovered{
-			ProviderID: pid, ResourceType: "capability.email.sending", Observations: obs})
+			ProviderID: pid, ResourceType: "capability.email.sending", Observations: provider.WithoutAbsence(obs)})
 	}
 	return found, diags, nil
+}
+
+// attachSESConfigSet makes the configuration set the identity's DEFAULT (D746).
+//
+// The create built a set that captures bounces and complaints, and stopped there. AWS
+// applies a configuration set to a message when the sender names it per send OR when it
+// is the identity's default — so without this step the capture depended on every caller
+// remembering a header, and `bounce.tracked` claimed an infrastructure guarantee that
+// infrastructure had not made. The set and its destination were both ours; only the link
+// between them and the identity was missing, which is D740's shape one service over.
+func (d *Driver) attachSESConfigSet(region, pid string, plan SESSendingPlan) provider.CreateResult {
+	body := []byte(jsonBody(map[string]any{"ConfigurationSetName": plan.ConfigurationSetName}))
+	st, resp, err := d.sesDo("PUT", region,
+		sesIdentitiesPath+"/"+plan.Domain+"/configuration-set", body)
+	switch {
+	case err != nil:
+		return provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("identity, configuration set and bounce destination exist "+
+				"but associating the set with the identity is unknown — until it is, "+
+				"capture depends on every send naming the set; reconcile: %v", err)}
+	case st == http.StatusOK || st == http.StatusCreated:
+		return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
+	default:
+		return provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("identity, configuration set and bounce destination exist "+
+				"but the set is NOT the identity's default (HTTP %d: %s) — bounces are "+
+				"captured only for sends that name it; reconcile", st, sesErr(resp))}
+	}
 }

@@ -63,11 +63,20 @@ func azErrMessage(body []byte) string {
 		Error struct {
 			Message string `json:"message"`
 		} `json:"error"`
+		// D929: not every ARM error wraps itself in "error" — a managedClusters
+		// (AKS) 400 and others carry {"code","message"} at the TOP LEVEL, so the
+		// wrapped-only read returned "" and the driver reported "no error code or
+		// message" for a failure the body explained in full. Fall back to the
+		// top-level message.
+		Message string `json:"message"`
 	}
 	if json.Unmarshal(body, &e) != nil {
 		return ""
 	}
 	m := strings.TrimSpace(e.Error.Message)
+	if m == "" {
+		m = strings.TrimSpace(e.Message)
+	}
 	if len(m) > 200 {
 		m = m[:200] + "…"
 	}

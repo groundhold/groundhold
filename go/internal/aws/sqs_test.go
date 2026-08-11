@@ -8,6 +8,10 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func sqsAttrs() map[string]any {
@@ -265,6 +269,7 @@ func TestSQSFIFOChangeIsReplacement(t *testing.T) {
 // honesty harness and the happy-path unit tests.
 func sqsServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	deleted := false
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			body, _ := io.ReadAll(r.Body)
@@ -274,6 +279,13 @@ func sqsServer(t *testing.T) *httptest.Server {
 					`<QueueUrl>https://sqs.eu-central-1.amazonaws.com/000000000000/q</QueueUrl>` +
 					`</CreateQueueResult></CreateQueueResponse>`))
 			case "ListQueueTags":
+				if deleted {
+					// the queue has finished deleting — the delete's poll-to-absence (D982)
+					// confirms NonExistentQueue.
+					w.WriteHeader(400)
+					_, _ = w.Write([]byte(`<ErrorResponse><Error><Code>AWS.SimpleQueueService.NonExistentQueue</Code></Error></ErrorResponse>`))
+					return
+				}
 				_, _ = w.Write([]byte(`<ListQueueTagsResponse><ListQueueTagsResult>` +
 					`<Tag><Key>groundhold-capability</Key><Value>orders</Value></Tag>` +
 					`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag>` +
@@ -283,6 +295,7 @@ func sqsServer(t *testing.T) *httptest.Server {
 					`<Attribute><Name>SqsManagedSseEnabled</Name><Value>true</Value></Attribute>` +
 					`</GetQueueAttributesResult></GetQueueAttributesResponse>`))
 			case "DeleteQueue":
+				deleted = true
 				_, _ = w.Write([]byte(`<DeleteQueueResponse></DeleteQueueResponse>`))
 			default:
 				w.WriteHeader(404)
@@ -385,6 +398,36 @@ func TestDeleteSQSForeignRefused(t *testing.T) {
 	res := d.deleteSQS("orders", "prod", "sqs:eu-central-1:000000000000:orders-x")
 	if res.Status != "failed" {
 		t.Fatalf("delete of a foreign queue must be refused, got %+v", res)
+	}
+}
+
+// TestDeleteSQSAsyncNotGoneIsUnknown pins D982: a queue delete the provider ACCEPTS
+// but that stays present (DeleteQueue is eventually-consistent, up to ~60s) must
+// report unknown — never a terminal "succeeded" that tombstones a queue still live
+// with in-flight messages.
+func TestDeleteSQSAsyncNotGoneIsUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			switch queryAction(body) {
+			case "ListQueueTags": // never gone — owned, still present
+				_, _ = w.Write([]byte(`<ListQueueTagsResponse><ListQueueTagsResult>` +
+					`<Tag><Key>groundhold-capability</Key><Value>orders</Value></Tag>` +
+					`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag>` +
+					`</ListQueueTagsResult></ListQueueTagsResponse>`))
+			case "DeleteQueue":
+				_, _ = w.Write([]byte(`<DeleteQueueResponse></DeleteQueueResponse>`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	defer srv.Close()
+	d := sqsTestDriver(t, srv)
+	d.PollInterval = time.Millisecond
+	d.PollTimeout = 5 * time.Millisecond // the queue never goes NonExistent → times out fast
+	res := d.deleteSQS("orders", "prod", "sqs:eu-central-1:000000000000:orders-x")
+	if res.Status != "unknown" {
+		t.Fatalf("an accepted-but-still-deleting queue must be unknown (keep the handle), got %+v", res)
 	}
 }
 
@@ -556,12 +599,131 @@ func TestMetamorphicSQSRoundTrip(t *testing.T) {
 			} else if gotRet != c.wantRetention {
 				t.Errorf("retention round-trip broke: want %v observed %v", c.wantRetention, gotRet)
 			}
-			_, hasCMEK := got["encryption.customerManagedKeys"]
-			if hasCMEK != c.cmek {
-				t.Errorf("cmek presence round-trip broke: want %v observed %v", c.cmek, hasCMEK)
+			if got["encryption.customerManagedKeys"] != c.cmek {
+				t.Errorf("cmek round-trip broke: want %v observed %v", c.cmek, got["encryption.customerManagedKeys"])
 			}
 			if c.retention != "" && got["retention.minimum"] != "3600s" {
 				t.Errorf("retention round-trip broke: observed %v", got["retention.minimum"])
+			}
+		})
+	}
+}
+
+func sqsRole(_ *http.Request, body []byte) certifynet.Role {
+	switch queryAction(body) {
+	case "ListQueueTags", "GetQueueAttributes", "GetQueueUrl", "ListQueues":
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingSQS enrols SQS in the D391 gate — the mirror of SNS. CreateQueue is
+// idempotent by NAME, so binding the queue that already exists (and carries our tags) is
+// the property; the untagged and foreign cases already have tests, the OURS case did not.
+func TestAdoptsExistingSQS(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/sqs",
+		Classify: sqsRole,
+		ExistingServer: func() *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					body, _ := io.ReadAll(r.Body)
+					switch queryAction(body) {
+					case "CreateQueue":
+						_, _ = w.Write([]byte(`<CreateQueueResponse></CreateQueueResponse>`))
+					case "ListQueueTags":
+						_, _ = w.Write([]byte(`<ListQueueTagsResponse><ListQueueTagsResult>` +
+							`<Tag><Key>groundhold-capability</Key><Value>orders</Value></Tag>` +
+							`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag>` +
+							`</ListQueueTagsResult></ListQueueTagsResponse>`))
+					default:
+						_, _ = w.Write([]byte(`<Response></Response>`))
+					}
+				}))
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.SQSBaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("sqs", "orders", "prod", sqsAttrs(), nil, "orders", 1)
+		},
+		AllowedMutations: 4, // name-idempotent CreateQueue + attribute convergence
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
+
+// D745: a redrive policy NAMES a dead-letter queue. It does not mean the queue exists —
+// delete the DLQ and the policy stays behind, over-limit messages are dropped instead of
+// captured, and `reliability.deadLetter` reported true. A reliability control naming a
+// queue that is not there is the same shape as a firewall protecting nothing.
+func TestDeadLetterRequiresTheTargetToExist(t *testing.T) {
+	const policy = `{"deadLetterTargetArn":"arn:aws:sqs:eu-central-1:000000000000:jobs-dlq","maxReceiveCount":5}`
+	cases := []struct {
+		name       string
+		policy     string
+		targetGone bool
+		targetErr  bool
+		want       any // nil => withheld
+	}{
+		{"no redrive policy at all", "", false, false, false},
+		{"policy and the target stands", policy, false, false, true},
+		{"policy naming a queue that was deleted", policy, true, false, false},
+		{"target unreadable — neither answer is earned", policy, false, true, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				body := string(b)
+				isTarget := strings.Contains(body, "jobs-dlq")
+				switch {
+				case isTarget && c.targetErr:
+					w.WriteHeader(500)
+					_, _ = w.Write([]byte(`<ErrorResponse><Error><Code>InternalError</Code></Error></ErrorResponse>`))
+				case isTarget && c.targetGone:
+					w.WriteHeader(400)
+					_, _ = w.Write([]byte(`<ErrorResponse><Error><Code>AWS.SimpleQueueService.NonExistentQueue</Code></Error></ErrorResponse>`))
+				case isTarget:
+					_, _ = w.Write([]byte(`<GetQueueAttributesResponse><GetQueueAttributesResult>` +
+						`<Attribute><Name>QueueArn</Name><Value>arn:aws:sqs:eu-central-1:000000000000:jobs-dlq</Value></Attribute>` +
+						`</GetQueueAttributesResult></GetQueueAttributesResponse>`))
+				default:
+					attr := ""
+					if c.policy != "" {
+						attr = `<Attribute><Name>RedrivePolicy</Name><Value>` +
+							strings.ReplaceAll(c.policy, `"`, "&quot;") + `</Value></Attribute>`
+					}
+					_, _ = w.Write([]byte(`<GetQueueAttributesResponse><GetQueueAttributesResult>` +
+						`<Attribute><Name>QueueArn</Name><Value>arn:aws:sqs:eu-central-1:000000000000:jobs</Value></Attribute>` +
+						attr + `</GetQueueAttributesResult></GetQueueAttributesResponse>`))
+				}
+			}))
+			defer srv.Close()
+			t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+			t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+			d := NewDriver("eu-central-1")
+			d.SQSBaseURL = srv.URL
+			d.Account = "000000000000"
+
+			obs, _, err := d.Observe("sqs", "jobs", "sqs:eu-central-1:000000000000:jobs")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got any
+			for _, o := range obs {
+				if o.Path == "reliability.deadLetter" {
+					got = o.Value
+				}
+			}
+			if got != c.want {
+				t.Fatalf("reliability.deadLetter = %v, want %v — a policy names a queue; "+
+					"it does not make one exist", got, c.want)
 			}
 		})
 	}

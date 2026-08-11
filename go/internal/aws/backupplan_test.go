@@ -267,14 +267,16 @@ func TestHonestyHarnessBackupPlan(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 	pid := "backupplan:eu-central-1:plan-abc"
 	p := &certifynet.Probe{
-		// AssertTransient left false — D237 TODO: this driver's create/delete ladder
-		// still maps 429/503/403 to terminal failed (and drops the providerId); it must
-		// route through provider.MutationResult before the transient invariant can lock.
 		Name:            "aws/backupplan",
 		AssertTransient: true, // D237: create/delete route through provider.MutationResult
 		Classify:        backupPlanRole,
 		OwnerTagValue:   "archive",
-		DeterministicID: false, // the BackupPlanId is server-assigned (D29)
+		DeterministicID: false,              // the BackupPlanId is server-assigned (D29)
+		GoneCode:        "ResourceNotFound", // this service's own not-found code (D522)
+		// F-LC3 (D523): hand-wired.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("backupplan", "archive", "backupplan:eu-central-1:plan-abc")
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newHonestyDriver(happyURL, rt)
 		},
@@ -319,5 +321,68 @@ func TestBackupAvailabilityClassIsInstructive(t *testing.T) {
 	_, verr := BuildBackupVault("prod", "archive", va, nil, 1)
 	if verr == nil || !strings.Contains(verr.Error(), "RESOURCE being protected") {
 		t.Fatalf("vault refusal must teach too, got: %v", verr)
+	}
+}
+
+// D733: a backup plan with rules but NO selections backs up nothing — this driver's own
+// header says so, and its create is a composite for that reason. Observe reported the
+// cadence and retention of such a plan as measured, and the vocabulary says
+// `schedule.frequency` "determines the Recovery Point Objective". So a hard RPO
+// constraint read satisfied on a plan protecting zero resources, which is the whole
+// content of a recovery control.
+func TestBackupPlanWithNoSelectionsReportsNoCadence(t *testing.T) {
+	cases := []struct {
+		name        string
+		selections  string
+		status      int
+		wantCadence bool
+	}{
+		{"a plan that protects something", `{"BackupSelectionsList":[{"SelectionId":"sel-1"}]}`, 200, true},
+		{"a plan that protects nothing", `{"BackupSelectionsList":[]}`, 200, false},
+		{"selections unreadable", `{"__type":"AccessDenied"}`, 403, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.Contains(r.URL.Path, "/selections"):
+					if c.status != 200 {
+						w.WriteHeader(c.status)
+					}
+					_, _ = w.Write([]byte(c.selections))
+				case strings.HasPrefix(r.URL.Path, "/tags/"):
+					_, _ = w.Write([]byte(`{"Tags":{"groundhold-capability":"daily","groundhold-environment":"prod"}}`))
+				default:
+					_, _ = w.Write([]byte(`{"BackupPlan":{"Rules":[{"ScheduleExpression":"cron(0 5 ? * * *)",` +
+						`"Lifecycle":{"DeleteAfterDays":30},"TargetBackupVaultName":"v"}]},` +
+						`"BackupPlanArn":"arn:aws:backup:eu-central-1:000000000000:backup-plan:p"}`))
+				}
+			}))
+			defer srv.Close()
+			t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+			t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+			d := NewDriver("eu-central-1")
+			d.BackupBaseURL = srv.URL
+			d.Account = "000000000000"
+
+			obs, diags, err := d.observeBackupPlan("daily", "backupplan:eu-central-1:plan-abc")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var hasCadence bool
+			for _, o := range obs {
+				if o.Path == "schedule.frequency" {
+					hasCadence = true
+				}
+			}
+			if hasCadence != c.wantCadence {
+				t.Fatalf("schedule.frequency present = %v, want %v — a cadence is a promise "+
+					"about resources, and this plan names %s", hasCadence, c.wantCadence, c.name)
+			}
+			if !c.wantCadence && len(diags) == 0 {
+				t.Fatal("withholding the cadence without saying why is the silence this " +
+					"project treats as its own defect")
+			}
+		})
 	}
 }

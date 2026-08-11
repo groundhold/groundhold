@@ -55,7 +55,7 @@
       {
         "path": "encryption.atRest",
         "value": true,
-        "derivation": "config-intent"
+        "derivation": "platform-invariant"
       },
       {
         "path": "service.managed",

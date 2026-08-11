@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func chfAttrs() map[string]any {
@@ -87,6 +90,13 @@ type cfFake struct {
 }
 
 func newCFFake() *cfFake { return &cfFake{seen: map[string]int{}} }
+
+// seedOurs plants a rule at our deterministic name carrying OUR ownership marker — the
+// estate a re-converge meets (D411).
+func (f *cfFake) seedOurs(capability, environment string) {
+	f.rule = &cfRuleDoc{Name: "changes-prod-x", State: "ENABLED",
+		Description: awsOwnerMarker(capability, environment)}
+}
 
 func (f *cfFake) seedForeign() {
 	f.rule = &cfRuleDoc{Name: "changes-prod-x", State: "ENABLED",
@@ -211,7 +221,10 @@ func TestCreateObserveDeleteChangeFeed(t *testing.T) {
 	}
 	// observing a deleted feed is a clean "nothing to observe".
 	obs, diags, err = d.observeChangeFeed("changes", res.ProviderID)
-	if err != nil || len(obs) != 0 || len(diags) == 0 {
+	// Corrected with D520: this asserted SILENCE for an absent bound resource,
+	// which is the defect F-LC3 exists to prevent — the compile sees an empty set,
+	// plans nothing, and converge reports a world that no longer contains it.
+	if err != nil || !absentMarked(obs) || len(diags) == 0 {
 		t.Fatalf("observe after delete: obs=%v diags=%v err=%v", obs, diags, err)
 	}
 }
@@ -261,4 +274,44 @@ func TestChangeFeedProviderIDRoundTrip(t *testing.T) {
 			t.Errorf("%q should not parse", bad)
 		}
 	}
+}
+
+func chfRole(req *http.Request, _ []byte) certifynet.Role {
+	switch req.Header.Get("X-Amz-Target") {
+	case "AWSEvents.DescribeRule", "AWSEvents.ListTargetsByRule", "AWSEvents.ListRules":
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingChangeFeed enrols changefeed in the D391 gate. It already had the
+// strongest defence — an ownership PRE-READ before PutRule, precisely because PutRule is
+// an UPSERT and would silently overwrite a foreign rule at our name. The foreign case had
+// a test; the OURS case, which every re-converge takes, did not.
+func TestAdoptsExistingChangeFeed(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/changefeed",
+		Classify: chfRole,
+		ExistingServer: func() *httptest.Server {
+			f := newCFFake()
+			f.seedOurs("changes", "prod")
+			return f.server(t)
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.EventBridgeBaseURL = happyURL
+			d.PollInterval = time.Millisecond
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("changefeed", "changes", "prod", chfAttrs(), nil, "k", 1)
+		},
+		AllowedMutations: 2, // PutRule (the upsert) + PutTargets, onto the adopted rule
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

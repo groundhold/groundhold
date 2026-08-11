@@ -215,7 +215,11 @@ func (d *Driver) observeDefender(capability, providerID string) ([]provider.Obse
 		return nil, nil, sr
 	}
 	if !sf {
-		return nil, []string{"Defender VirtualMachines plan not found — nothing to observe"}, nil
+		// F-LC3 (D521): a BOUND resource the API says is GONE. A diagnostic
+		// alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"Defender VirtualMachines plan not found — bound resource is gone (will re-create)"}, nil
 	}
 	containers, cf, cr := d.getDefenderPricing(sub, defenderPlanContainers)
 	if cr != nil {
@@ -227,6 +231,8 @@ func (d *Driver) observeDefender(capability, providerID string) ([]provider.Obse
 	}
 	standard := func(p defenderPricing) bool { return strings.EqualFold(p.Properties.PricingTier, "Standard") }
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: "global", Derivation: "measured"},
 		{Path: "detection.enabled", Value: standard(servers), Derivation: "measured"},
 		{Path: "protection.kubernetes", Value: cf && standard(containers), Derivation: "measured"},
@@ -323,13 +329,13 @@ func (d *Driver) discoverDefender(region string) ([]provider.Discovered, []strin
 	if err != nil {
 		return nil, nil, fmt.Errorf("defender: %v", err)
 	}
-	if len(obs) == 0 {
+	if len(obs) == 0 || provider.IsAbsent(obs) {
 		return nil, diags, nil // Defender not readable/absent — nothing to discover
 	}
 	return []provider.Discovered{{
 		ProviderID:   pid,
 		ResourceType: "capability.security.threatdetection",
-		Observations: obs,
+		Observations: provider.WithoutAbsence(obs),
 	}}, diags, nil
 }
 

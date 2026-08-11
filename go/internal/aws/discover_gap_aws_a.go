@@ -13,6 +13,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"groundhold/internal/provider"
@@ -61,7 +62,7 @@ func (d *Driver) discoverACM(region string) ([]provider.Discovered, []string, er
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.certificate.tls",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -82,10 +83,13 @@ func (d *Driver) discoverAPIGateway(region string) ([]provider.Discovered, []str
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("apigateway GetApis: HTTP %d: %s", st, apigwErr(body))
 	}
+	// restJson1 camelCase wire names (D878): a PascalCase Items/ApiId parses every
+	// entry to an empty ApiId, and the loop below skips them — discovery would report
+	// ZERO apis on a real account that has them, the dangerous false-absence direction.
 	var r struct {
 		Items []struct {
-			ApiId string `json:"ApiId"`
-		} `json:"Items"`
+			ApiId string `json:"apiId"`
+		} `json:"items"`
 	}
 	if err := json.Unmarshal(body, &r); err != nil {
 		return nil, nil, readBody("apigateway GetApis", st)
@@ -108,7 +112,7 @@ func (d *Driver) discoverAPIGateway(region string) ([]provider.Discovered, []str
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.apigateway.http",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -157,7 +161,7 @@ func (d *Driver) discoverBackupVaults(region string) ([]provider.Discovered, []s
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.backup.vault",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -206,7 +210,7 @@ func (d *Driver) discoverCloudFront(region string) ([]provider.Discovered, []str
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.cdn.distribution",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -249,7 +253,7 @@ func (d *Driver) discoverCloudWatchDashboards(region string) ([]provider.Discove
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.monitoring.dashboard",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -260,20 +264,43 @@ func (d *Driver) discoverCloudWatchDashboards(region string) ([]provider.Discove
 // Scope=Local returns ONLY customer-managed policy ARNs (AWS-managed policies are not
 // this capability), and observeCustomPolicy reverse-maps each (the flat action set).
 func (d *Driver) discoverCustomPolicies(region string) ([]provider.Discovered, []string, error) {
-	st, body, err := d.iamPost(encodeForm(map[string]string{
-		"Action": "ListPolicies", "Version": iamVersion, "Scope": "Local"}))
-	if err != nil {
-		return nil, nil, fmt.Errorf("iam ListPolicies: %v", err)
-	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("iam ListPolicies: HTTP %d: %s", st, rdsErrCode(body))
-	}
+	// D809: FOLLOW the pages. ListPolicies answers 100 at a time and says so with
+	// IsTruncated + Marker; reading the first page and stopping made an account with 140
+	// customer policies look like an account with 100 — and every policy past the
+	// hundredth invisible to a verb whose whole job is to show what is there.
 	var r struct {
-		Arns []string `xml:"ListPoliciesResult>Policies>member>Arn"`
+		Arns        []string `xml:"ListPoliciesResult>Policies>member>Arn"`
+		IsTruncated bool     `xml:"ListPoliciesResult>IsTruncated"`
+		Marker      string   `xml:"ListPoliciesResult>Marker"`
 	}
-	if err := xml.Unmarshal(body, &r); err != nil {
-		return nil, nil, fmt.Errorf("iam ListPolicies: %w", err)
+	var arns []string
+	marker := ""
+	for {
+		form := map[string]string{
+			"Action": "ListPolicies", "Version": iamVersion, "Scope": "Local"}
+		if marker != "" {
+			form["Marker"] = marker
+		}
+		st, body, err := d.iamPost(encodeForm(form))
+		if err != nil {
+			return nil, nil, fmt.Errorf("iam ListPolicies: %v", err)
+		}
+		if st != http.StatusOK {
+			return nil, nil, fmt.Errorf("iam ListPolicies: HTTP %d: %s", st, rdsErrCode(body))
+		}
+		r.Arns = nil
+		r.IsTruncated = false
+		r.Marker = ""
+		if err := xml.Unmarshal(body, &r); err != nil {
+			return nil, nil, fmt.Errorf("iam ListPolicies: %w", err)
+		}
+		arns = append(arns, r.Arns...)
+		if !r.IsTruncated || r.Marker == "" {
+			break
+		}
+		marker = r.Marker
 	}
+	r.Arns = arns
 	var out []provider.Discovered
 	var diags []string
 	for _, arn := range r.Arns {
@@ -292,7 +319,7 @@ func (d *Driver) discoverCustomPolicies(region string) ([]provider.Discovered, [
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.authorization.role",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -306,24 +333,45 @@ func (d *Driver) discoverEFS(region string) ([]provider.Discovered, []string, er
 	if err != nil {
 		return nil, nil, fmt.Errorf("efs: %v", err)
 	}
-	st, body, err := d.efsDo("GET", region, efsPath+"/file-systems", "")
-	if err != nil {
-		return nil, nil, fmt.Errorf("efs DescribeFileSystems: %v", err)
+	// D817: FOLLOW the pages. DescribeFileSystems answers TEN file systems at a time by
+	// default — the smallest default page in the AWS surface this driver touches — and
+	// hands back a NextMarker (botocore efs/2015-02-01: input Marker, output NextMarker).
+	type efsFS struct {
+		FileSystemId string `json:"FileSystemId"`
 	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("efs DescribeFileSystems: HTTP %d: %s", st, efsErr(body))
-	}
-	var r struct {
-		FileSystems []struct {
-			FileSystemId string `json:"FileSystemId"`
-		} `json:"FileSystems"`
-	}
-	if err := json.Unmarshal(body, &r); err != nil {
-		return nil, nil, readBody("efs DescribeFileSystems", st)
+	var fileSystems []efsFS
+	marker := ""
+	for page := 0; ; page++ {
+		if page >= maxAWSListPages {
+			return nil, nil, fmt.Errorf("efs DescribeFileSystems: more than %d pages", maxAWSListPages)
+		}
+		path := efsPath + "/file-systems"
+		if marker != "" {
+			path += "?Marker=" + url.QueryEscape(marker)
+		}
+		st, body, err := d.efsDo("GET", region, path, "")
+		if err != nil {
+			return nil, nil, fmt.Errorf("efs DescribeFileSystems: %v", err)
+		}
+		if st != http.StatusOK {
+			return nil, nil, fmt.Errorf("efs DescribeFileSystems: HTTP %d: %s", st, efsErr(body))
+		}
+		var r struct {
+			FileSystems []efsFS `json:"FileSystems"`
+			NextMarker  string  `json:"NextMarker"`
+		}
+		if err := json.Unmarshal(body, &r); err != nil {
+			return nil, nil, readBody("efs DescribeFileSystems", st)
+		}
+		fileSystems = append(fileSystems, r.FileSystems...)
+		if r.NextMarker == "" {
+			break
+		}
+		marker = r.NextMarker
 	}
 	var out []provider.Discovered
 	var diags []string
-	for _, fs := range r.FileSystems {
+	for _, fs := range fileSystems {
 		if fs.FileSystemId == "" {
 			continue
 		}
@@ -339,7 +387,7 @@ func (d *Driver) discoverEFS(region string) ([]provider.Discovered, []string, er
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.storage.filesystem",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -382,7 +430,7 @@ func (d *Driver) discoverEventBridgeSchedulers(region string) ([]provider.Discov
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.scheduler.cron",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -397,22 +445,48 @@ func (d *Driver) discoverKinesis(region string) ([]provider.Discovered, []string
 	if err != nil {
 		return nil, nil, fmt.Errorf("kinesis: %v", err)
 	}
-	st, body, err := d.kinesisCall(region, "ListStreams", "{}")
-	if err != nil {
-		return nil, nil, fmt.Errorf("kinesis ListStreams: %v", err)
-	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("kinesis ListStreams: HTTP %d: %s", st, ecsErr(body))
-	}
-	var r struct {
-		StreamNames []string `json:"StreamNames"`
-	}
-	if err := json.Unmarshal(body, &r); err != nil {
-		return nil, nil, readBody("kinesis ListStreams", st)
+	// D818: FOLLOW the pages. ListStreams says HasMoreStreams and hands back a NextToken
+	// (botocore kinesis/2013-12-02). The legacy shape has no token and restarts from
+	// ExclusiveStartStreamName; both are sent, so an older endpoint pages too.
+	var streams []string
+	token, lastName := "", ""
+	for page := 0; ; page++ {
+		if page >= maxAWSListPages {
+			return nil, nil, fmt.Errorf("kinesis ListStreams: more than %d pages", maxAWSListPages)
+		}
+		req := "{}"
+		if token != "" || lastName != "" {
+			b, _ := json.Marshal(struct {
+				NextToken                string `json:"NextToken,omitempty"`
+				ExclusiveStartStreamName string `json:"ExclusiveStartStreamName,omitempty"`
+			}{token, lastName})
+			req = string(b)
+		}
+		st, body, err := d.kinesisCall(region, "ListStreams", req)
+		if err != nil {
+			return nil, nil, fmt.Errorf("kinesis ListStreams: %v", err)
+		}
+		if st != http.StatusOK {
+			return nil, nil, fmt.Errorf("kinesis ListStreams: HTTP %d: %s", st, ecsErr(body))
+		}
+		var r struct {
+			StreamNames    []string `json:"StreamNames"`
+			HasMoreStreams bool     `json:"HasMoreStreams"`
+			NextToken      string   `json:"NextToken"`
+		}
+		if err := json.Unmarshal(body, &r); err != nil {
+			return nil, nil, readBody("kinesis ListStreams", st)
+		}
+		streams = append(streams, r.StreamNames...)
+		if !r.HasMoreStreams || len(r.StreamNames) == 0 {
+			break
+		}
+		token = r.NextToken
+		lastName = r.StreamNames[len(r.StreamNames)-1]
 	}
 	var out []provider.Discovered
 	var diags []string
-	for _, name := range r.StreamNames {
+	for _, name := range streams {
 		if name == "" {
 			continue
 		}
@@ -428,7 +502,7 @@ func (d *Driver) discoverKinesis(region string) ([]provider.Discovered, []string
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.streaming.pipe",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

@@ -45,7 +45,11 @@ attributes:
       refused in v0 — a heavier setup, never faked.
     mappings:
       aws.dynamodb: single-region table (regional); global tables (multi-regional, refused v0)
-      azure.cosmos: single write region (regional); multi-region (refused v0)
+      azure.cosmos: >
+        locations[].isZoneRedundant — TRUE is regional; a non-zone-redundant account
+        gets no value (this enum has none that fits) and a diagnostic instead. "Single
+        write region" was the old wording, and it conflated one region with
+        across-zones (D753). multi-region is refused in v0.
       gcp.firestore: regional location (regional); nam5/eur3 (multi-regional, refused v0)
 
   encryption.customerManagedKeys:

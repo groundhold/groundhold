@@ -15,9 +15,8 @@ Exit codes:
 import json
 import sys
 
-import yaml
 
-from groundholdlib import canonical, render
+from groundholdlib import canonical, render, yamlcompat
 from groundholdlib.contract import load_contract, load_candidate, ContractError
 from groundholdlib.plan import load_plan
 from groundholdlib.scenario import run_scenario
@@ -35,8 +34,16 @@ def main(argv: list[str]) -> int:
     if cmd == "hash":
         # D34: identity of the semantic model, kind-detected from the doc
         try:
+            # D608: yamlcompat, not yaml.safe_load. PyYAML resolves YAML 1.1; the
+            # whole point of yamlcompat is to resolve scalars the way go-yaml does.
+            # These two call sites used the 1.1 loader, so a DiscoveryDocument (hashed
+            # straight from this dict) and every scenario document were read by a
+            # DIFFERENT loader than the four kinds around them: `note: yes` hashed as
+            # a bool here and a string in the runtime, and a scenario step keyed
+            # `yes:` resolved to True on one side and "yes" on the other, giving
+            # stale-vs-fresh from the same file.
             with open(argv[2]) as f:
-                doc = yaml.safe_load(f)
+                doc = yamlcompat.safe_load(f)
             kind = doc.get("kind") if isinstance(doc, dict) else None
             if kind == "InfrastructureContract":
                 print(canonical.hash_contract(load_contract(argv[2])))
@@ -60,7 +67,7 @@ def main(argv: list[str]) -> int:
         # D37: deterministic concurrency scenario engine
         try:
             with open(argv[2]) as f:
-                doc = yaml.safe_load(f)
+                doc = yamlcompat.safe_load(f)  # D608: not PyYAML's 1.1 resolution
             results = run_scenario(doc)
         except (ContractError, OSError) as e:
             print(f"scenario error: {e}", file=sys.stderr)

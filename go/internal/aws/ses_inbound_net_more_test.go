@@ -3,8 +3,13 @@ package aws
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 // This file rounds out ses_inbound_net.go coverage: sesInbIsAlreadyExists and
@@ -118,4 +123,50 @@ func TestEnsureSESInboundActive_NoActivateSucceedsWithoutSettingActive(t *testin
 			t.Fatalf("activate=false must not call SetActiveReceiptRuleSet: %v", f.order)
 		}
 	}
+}
+
+func sesInbRole(_ *http.Request, body []byte) certifynet.Role {
+	if v, err := url.ParseQuery(string(body)); err == nil {
+		a := v.Get("Action")
+		if strings.HasPrefix(a, "Describe") || strings.HasPrefix(a, "List") {
+			return certifynet.RoleRead
+		}
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingSESInbound enrols ses-inbound in the D391 gate. The rule set and
+// rule are NAME-addressed, so the existing pair is bound and repaired in place — the
+// per-driver test pins the exact call order (UpdateReceiptRule, never a Create); the
+// gate pins the identity and that the repair stays a repair.
+func TestAdoptsExistingSESInbound(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	attrs, impl := sesInbCandidate()
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/ses-inbound",
+		Classify: sesInbRole,
+		ExistingServer: func() *httptest.Server {
+			f := newFakeSESInb()
+			f.ruleSetExists, f.ruleExists = true, true
+			f.scanEnabled, f.hasS3 = false, false // stale shape, to be repaired
+			f.active = ""
+			return f.handler(t, nil)
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver(sesInbRegion)
+			d.HTTP = &http.Client{Transport: rt}
+			d.SESBaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.PollInterval = 0
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("ses-inbound", sesInbCap, "prod", attrs, impl, "k", 1)
+		},
+		PID:              sesInboundProviderID(sesInbRegion, sesInbRuleSet, sesInbRuleNm),
+		AllowedMutations: 2, // UpdateReceiptRule + SetActiveReceiptRuleSet
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

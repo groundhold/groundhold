@@ -126,7 +126,7 @@ func TestReconcileCloudTrail_Absent(t *testing.T) {
 // ---- backupvault ----------------------------------------------------------
 
 func TestReconcileBackupVault(t *testing.T) {
-	srv := bkvServer(t, "archive", true, 90) // GET vault found, ListTags owner=archive
+	srv := bkvServer(t, "archive", true, 90, 0) // GET vault found, ListTags owner=archive
 	defer srv.Close()
 	d := bkvDriver(t, srv)
 

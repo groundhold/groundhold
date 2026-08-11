@@ -255,21 +255,46 @@ func (d *Driver) observeASM(capability, providerID string) ([]provider.Observati
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"secret not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"secret not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		{Path: "encryption.atRest", Value: true, Derivation: "measured"},
 	}
 	// CMEK iff a KmsKeyId is set to a NON-default key. Secrets Manager returns
 	// the default key's id (aws/secretsmanager) or a customer key ARN.
-	if k := docm.KmsKeyId; k != "" && k != asmDefaultKeyAlias &&
-		!strings.HasSuffix(k, ":alias/aws/secretsmanager") && k != "aws/secretsmanager" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
-			Value: true, Derivation: "measured"})
-	}
+	k := docm.KmsKeyId
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+		Value: k != "" && k != asmDefaultKeyAlias &&
+			!strings.HasSuffix(k, ":alias/aws/secretsmanager") && k != "aws/secretsmanager",
+		Derivation: "measured"})
 	var diags []string
+	// D756: DeletedDate was DECODED and never read — found by the fixture-coverage
+	// sweep, which is the only reason anyone looked. A secret scheduled for deletion
+	// still answers DescribeSecret, so every observation above stays true and nothing
+	// said that GetSecretValue already refuses it: "you can't perform this operation on
+	// the secret because it was marked for deletion". converge reported converged and
+	// posture green over a secret the application could no longer read, for the whole
+	// recovery window.
+	//
+	// The marker is NOT resource.absent: the secret exists, and a re-create under the
+	// same name is refused by AWS while the window runs. This driver's own reconcile
+	// already treats the twin state on a KMS key as TERMINAL-FAILED; observe now at
+	// least says it out loud.
+	if !isNilLike(docm.DeletedDate) {
+		diags = append(diags, fmt.Sprintf("the secret is SCHEDULED FOR DELETION (%v) — it "+
+			"still answers DescribeSecret, but GetSecretValue refuses it, so anything "+
+			"reading this secret is already broken. Restore it (RestoreSecret) or bind a "+
+			"new one; a re-create under the same name is refused while the recovery "+
+			"window runs", docm.DeletedDate))
+	}
 	policy, polErr := d.getASMPolicy(region, name)
 	switch {
 	case polErr != nil:
@@ -426,4 +451,18 @@ func (d *Driver) updateASM(capability, environment, providerID string,
 		}
 	}
 	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+}
+
+// isNilLike reports whether an `any` decoded from JSON carries no value. DeletedDate
+// arrives as a number (epoch seconds) when present and is absent otherwise (D756).
+func isNilLike(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return true
+	case string:
+		return t == ""
+	case float64:
+		return t == 0
+	}
+	return false
 }

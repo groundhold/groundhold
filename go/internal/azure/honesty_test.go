@@ -50,6 +50,10 @@ func TestHonestyHarnessAzureBlob(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "assets",
 		DeterministicID: true, // account + container names are chosen
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("blob", "assets", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -108,6 +112,10 @@ func TestHonestyHarnessAzureContainerApp(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "api",
 		DeterministicID: true,
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("containerapps", "api", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -164,6 +172,10 @@ func TestHonestyHarnessAzureFlex(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "db",
 		DeterministicID: true,
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("flexpostgres", "db", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -195,8 +207,15 @@ func TestHonestyHarnessAzureFlex(t *testing.T) {
 }
 
 func flexHarnessFake() *httptest.Server {
+	deleted := false
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			// once deleted, the server is GONE — the ARM delete's 202 poll-to-absence
+			// (D971) must be able to confirm a 404.
+			if deleted && r.Method == "GET" {
+				w.WriteHeader(404)
+				return
+			}
 			switch r.Method {
 			case "PUT":
 				w.WriteHeader(202)
@@ -205,6 +224,7 @@ func flexHarnessFake() *httptest.Server {
 				_, _ = w.Write([]byte(`{"location":"eastus","tags":{"groundhold-capability":"db","groundhold-environment":"prod"},` +
 					`"properties":{"state":"Ready","version":"16","network":{"publicNetworkAccess":"Disabled"},"highAvailability":{"mode":"ZoneRedundant"}}}`))
 			case "DELETE":
+				deleted = true
 				w.WriteHeader(202)
 			default:
 				w.WriteHeader(404)
@@ -242,6 +262,10 @@ func TestHonestyHarnessAzureServiceBus(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "orders",
 		DeterministicID: true,
+		// F-LC3 (D523): hand-wired — the providerId comes from the delete op.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("servicebusqueue", "orders", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -280,6 +304,10 @@ func TestHonestyHarnessAzureRedis(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "sessions",
 		DeterministicID: true, // the cache name is chosen
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("rediscache", "sessions", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -318,6 +346,10 @@ func TestHonestyHarnessAzureKeyVault(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "dbcreds",
 		DeterministicID: true, // the vault name is chosen
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("keyvault", "dbcreds", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -356,6 +388,10 @@ func TestHonestyHarnessAzureVNet(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "backbone",
 		DeterministicID: true, // the vnet name is chosen, pid known before create
+		// F-LC3 (D517): first Azure service migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("vnet", "backbone", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -395,6 +431,10 @@ func TestHonestyHarnessAzureDNS(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "apex",
 		DeterministicID: true, // the zone name is the domain (chosen)
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("dnszone", "apex", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -433,6 +473,10 @@ func TestHonestyHarnessAzureRole(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "reader", // content-addressed: no tag to poison (foreign-tag n/a)
 		DeterministicID: true,     // the assignment name is a deterministic GUID
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("roleassignment", "reader", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -471,6 +515,10 @@ func TestHonestyHarnessAzureCustomRole(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "viewer", // content-addressed by deterministic GUID (foreign-tag n/a)
 		DeterministicID: true,
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("customroledef", "viewer", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -509,6 +557,10 @@ func TestHonestyHarnessAzureAlert(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "cpu",
 		DeterministicID: true, // the metricAlert name is a chosen slug+hash
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("metricalert", "cpu", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -547,6 +599,10 @@ func TestHonestyHarnessAzureDashboard(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "golden",
 		DeterministicID: true, // the dashboard name is a chosen slug+hash
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("portaldash", "golden", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -585,6 +641,10 @@ func TestHonestyHarnessAzureWebtest(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "api",
 		DeterministicID: true, // the webtest name is a chosen slug+hash
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("webtest", "api", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -623,6 +683,10 @@ func TestHonestyHarnessAzureScheduledQuery(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "errors",
 		DeterministicID: true, // the rule name is a chosen slug+hash
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("scheduledquery", "errors", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -661,6 +725,10 @@ func TestHonestyHarnessACR(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "images",
 		DeterministicID: true, // the registry name is a deterministic hash
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("acr", "images", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -721,6 +789,10 @@ func TestHonestyHarnessAzureManagedIdentity(t *testing.T) {
 		Classify:        armRole, // PUT synchronous opaque; GET read
 		OwnerTagValue:   "runner",
 		DeterministicID: true, // the identity name is chosen, pid known before create
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("managedidentity", "runner", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -760,6 +832,10 @@ func TestHonestyHarnessAzureKey(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "datakey",
 		DeterministicID: true, // vault + key names are chosen
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("keyvaultkey", "datakey", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -821,6 +897,10 @@ func TestHonestyHarnessAzureDisk(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "orders-data",
 		DeterministicID: true, // the disk name is a deterministic hash
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("azdisk", "orders-data", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL
@@ -890,6 +970,10 @@ func TestHonestyHarnessAzureVMSS(t *testing.T) {
 		Classify:        armRole,
 		OwnerTagValue:   "web-fleet",
 		DeterministicID: true, // the scale-set name is a deterministic hash
+		// F-LC3 (D518): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("azvmss", "web-fleet", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver(testSub)
 			d.BaseURL = happyURL

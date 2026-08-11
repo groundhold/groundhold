@@ -24,8 +24,10 @@ resource:
 
 schema:
   source: "argoproj.io/v1alpha1 Application CRD (spec.versions[].schema)"
-  mappedSurface: ""   # drift-guard PENDING CRD schema vendoring — a live-cluster
-                      # read emits a loud "drift UNCHECKED" diagnostic until pinned.
+  # Authored against testdata/argocd-application-openapi.json — a VERBATIM recording
+  # from a live API server with `description` stripped (the fingerprint excludes it by
+  # construction, and the live-cluster gate proves the hash is unchanged). D511.
+  mappedSurface: sha256:98f90c75c4bf09ae398079427891cf7ce1cc8a0ad4e557cf17e5546a6a445851
 
 lenses:
   - k8s.gitops.argocdStatus

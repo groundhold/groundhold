@@ -86,3 +86,46 @@ func TestAppliedSummaryIsDeterministic(t *testing.T) {
 		t.Errorf("succeeded actions are not sorted: %q", first)
 	}
 }
+
+// D529, from the field: a create whose outcome was UNKNOWN printed "0 of 1 actions
+// applied — nothing was changed", and the Lambda had been created. The partner
+// checked AWS by hand (a habit their own outage taught them), saw the function, and
+// wrote: "'nothing was changed' is a stronger claim than the evidence the run had.
+// If the outcome of the action is UNKNOWN then the number of applied actions is
+// unknown too." Someone who reads it and retries blind gets a duplicate.
+//
+// Their framing is the invariant this project already holds everywhere else —
+// three states, not two: applied / not applied / NOT KNOWN — and the third must
+// not be dressed as the second. D29 says the same thing about a verdict; this is
+// the summary line saying the opposite.
+func TestAppliedSummaryDoesNotClaimNothingChangedWhenAnOutcomeIsUnknown(t *testing.T) {
+	got := appliedSummary(`{"outcomes":{"a-create-pilot-raport":"unknown"}}`)
+	if len(got) == 0 {
+		t.Fatal("no summary")
+	}
+	if strings.Contains(got[0], "nothing was changed") {
+		t.Errorf("first line = %q — the run does not KNOW whether the action landed, "+
+			"so it may not report the world as untouched", got[0])
+	}
+	if !strings.Contains(got[0], "UNKNOWN") {
+		t.Errorf("first line = %q — an unknown outcome must be named as unknown", got[0])
+	}
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "MAY have changed") {
+		t.Errorf("summary = %q — it must say the world may have changed", joined)
+	}
+}
+
+// The mixed case: something definitely landed AND something is unknown. Both
+// facts have to survive; leading with the confirmed change must not swallow the
+// uncertainty behind it.
+func TestAppliedSummaryKeepsBothConfirmedAndUnknown(t *testing.T) {
+	got := appliedSummary(`{"outcomes":{"a-create-db":"succeeded","a-create-fn":"unknown"}}`)
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "HAS changed") {
+		t.Errorf("summary = %q — the confirmed apply is missing", joined)
+	}
+	if !strings.Contains(joined, "UNKNOWN") {
+		t.Errorf("summary = %q — the unknown action is missing", joined)
+	}
+}

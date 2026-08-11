@@ -19,6 +19,11 @@ const matrixHeader = `# Cross-cloud capability parity matrix — GENERATED, DO N
 #   fulfilled: [tokens]  — one or more SERVICE tokens fulfil the capability (D76)
 #   gap: {class, reason} — the cloud STRUCTURALLY cannot fulfil it (a fact about
 #                          the cloud; class is from a closed set)
+#   fulfilledOutsideTheClouds: [provider/service]
+#                        — the capability IS built, by a provider that is not one of the
+#                          three clouds (today: the Kubernetes driver). The cloud cells
+#                          still read honestly; this stops unbuilt from being read as
+#                          "groundhold has not built this" when it has (D502).
 #   unbuilt: true        — DERIVED: no token, no declared gap (a fact about groundhold —
 #                          a driver could be written; the cloud is not the blocker)
 #
@@ -29,7 +34,23 @@ const matrixHeader = `# Cross-cloud capability parity matrix — GENERATED, DO N
 // BuildMatrixYAML renders the deterministic parity matrix. caps maps each cloud to
 // its (serviceToken -> capabilityTYPE) map; vocabTypes is every capability TYPE in
 // spec/vocab (so a TYPE no cloud fulfils still gets an honest all-unbuilt row).
+// BuildMatrixYAML with the non-cloud providers folded in. `outside` maps a capability
+// TYPE to the "provider/service" tokens that fulfil it OFF the three clouds — today,
+// the Kubernetes driver's mappings.
+//
+// D502: the matrix stays cross-CLOUD (Kubernetes is a substrate that runs on them, not
+// a fourth cloud), but `unbuilt: true` is defined by this file's own header as a fact
+// about GROUNDHOLD — "no token, no declared gap". Three capabilities were reported
+// unbuilt on all three clouds while shipping in the k8s driver: cluster.namespace,
+// compute.quota and gitops.application. A generated artifact that crosses the export
+// boundary was under-claiming what the project builds, and it would have regenerated
+// wrong forever, because the generator had never been told the driver exists.
 func BuildMatrixYAML(caps map[string]map[string]string, vocabTypes []string) string {
+	return BuildMatrixYAMLWith(caps, vocabTypes, nil)
+}
+
+func BuildMatrixYAMLWith(caps map[string]map[string]string, vocabTypes []string,
+	outside map[string][]string) string {
 	var b strings.Builder
 	b.WriteString(matrixHeader)
 	b.WriteString("version: \"0.1\"\n")
@@ -58,6 +79,12 @@ func BuildMatrixYAML(caps map[string]map[string]string, vocabTypes []string) str
 					b.WriteString("      unbuilt: true\n")
 				}
 			}
+		}
+		if o := outside[typ]; len(o) > 0 {
+			sorted := append([]string(nil), o...)
+			sort.Strings(sorted)
+			b.WriteString("    fulfilledOutsideTheClouds: [" +
+				strings.Join(sorted, ", ") + "]\n")
 		}
 	}
 	return b.String()

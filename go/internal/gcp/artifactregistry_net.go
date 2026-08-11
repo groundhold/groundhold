@@ -264,7 +264,7 @@ func (d *Driver) applyARPublic(plan ARRepoPlan, pid string) *provider.CreateResu
 	}
 	base := fmt.Sprintf("%s/projects/%s/locations/%s/repositories/%s",
 		d.arBase(), d.Project, plan.Region, plan.RepoID)
-	st, body, err := d.call("POST", base+":getIamPolicy", nil)
+	st, body, err := d.call("GET", base+":getIamPolicy", nil)
 	if err != nil || st != http.StatusOK {
 		r := provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: "repository created; getIamPolicy for public grant failed — reconcile"}
 		return &r
@@ -292,7 +292,7 @@ func (d *Driver) applyARPublic(plan ARRepoPlan, pid string) *provider.CreateResu
 func (d *Driver) readARPublic(project, region, repoID string) (public bool, err error) {
 	const op = "repositories.getIamPolicy"
 	base := fmt.Sprintf("%s/projects/%s/locations/%s/repositories/%s", d.arBase(), project, region, repoID)
-	st, body, cerr := d.call("POST", base+":getIamPolicy", nil)
+	st, body, cerr := d.call("GET", base+":getIamPolicy", nil)
 	if cerr != nil {
 		return false, readTransport(op, cerr)
 	}
@@ -330,9 +330,15 @@ func (d *Driver) observeARRepo(capability, providerID string) ([]provider.Observ
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"registry not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"registry not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "immutable.tags", Value: doc.DockerConfig.ImmutableTags, Derivation: "measured"},
 		{Path: "encryption.customerManagedKeys", Value: doc.KmsKeyName != "", Derivation: "measured"},

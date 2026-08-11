@@ -34,6 +34,22 @@ func TestBuildUpdateRequestGolden(t *testing.T) {
 	}
 }
 
+// D950: a MySQL PITR patch must spell it binaryLogEnabled, not
+// pointInTimeRecoveryEnabled (which the API rejects for MySQL).
+func TestBuildUpdateRPOMySQL(t *testing.T) {
+	current := parse(t, `{"databaseVersion":"MYSQL_8_0","settings":{
+	  "settingsVersion":"3","backupConfiguration":{"enabled":true}}}`)
+	req, err := BuildUpdateRequest("p", "n", []string{"recovery.rpo"},
+		map[string]any{"recovery.rpo": "5m"}, nil, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bc := req.Body["settings"].(map[string]any)["backupConfiguration"].(map[string]any)
+	if bc["binaryLogEnabled"] != true || bc["pointInTimeRecoveryEnabled"] != nil {
+		t.Errorf("MySQL rpo patch must be binaryLogEnabled only, got %v", bc)
+	}
+}
+
 func TestBuildUpdateRefusals(t *testing.T) {
 	current := parse(t, `{"settings": {"settingsVersion": "7"}}`)
 	// unpatchable path

@@ -5,6 +5,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 // s3Server routes path-style S3 sub-resource calls (the driver uses path-style
@@ -16,6 +19,10 @@ func s3Server(t *testing.T, createStatus int, createErrCode string) *httptest.Se
 	tagged := false
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "HEAD" && r.URL.RawQuery == "" { // HeadBucket (D520)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			q := r.URL.RawQuery
 			switch {
 			case r.Method == "PUT" && q == "":
@@ -88,6 +95,10 @@ func TestCreateS3HappyPath(t *testing.T) {
 func TestCreateS3TaggingFailKeepsPid(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "HEAD" && r.URL.RawQuery == "" { // HeadBucket (D520)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			switch {
 			case r.Method == "PUT" && r.URL.RawQuery == "":
 				w.WriteHeader(200) // bucket created
@@ -180,6 +191,10 @@ func TestCreateS3ReplicationHappyPath(t *testing.T) {
 func TestObserveS3Replication(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "HEAD" && r.URL.RawQuery == "" { // HeadBucket (D520)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			switch r.URL.RawQuery {
 			case "replication":
 				_, _ = w.Write([]byte(`<ReplicationConfiguration>` +
@@ -244,6 +259,10 @@ func TestCreateS3ObjectLockHappyPath(t *testing.T) {
 	gotLockPut := false
 	srv := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "HEAD" && r.URL.RawQuery == "" { // HeadBucket (D520)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			q := r.URL.RawQuery
 			switch {
 			case r.Method == "PUT" && q == "":
@@ -285,6 +304,10 @@ func TestCreateS3ObjectLockHappyPath(t *testing.T) {
 func TestObserveS3ObjectLock(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "HEAD" && r.URL.RawQuery == "" { // HeadBucket (D520)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			switch r.URL.RawQuery {
 			case "object-lock":
 				_, _ = w.Write([]byte(`<ObjectLockConfiguration>` +
@@ -321,13 +344,16 @@ func TestObserveS3ObjectLock(t *testing.T) {
 	}
 }
 
-// classifyS3Change: WORM is a create-time foundation, not an in-place patch.
+// classifyS3Change: enabling WORM is a create-time foundation. D824 split the FLOOR out of
+// that case — PutObjectLockConfiguration re-PUTs the DefaultRetention on an object-locked
+// bucket, so pinning "immutable" here pinned destroying a bucket and every object in it to
+// lengthen a retention period AWS raises in place.
 func TestClassifyS3ObjectLockImmutable(t *testing.T) {
-	for _, path := range []string{"retention.minimum", "retention.locked"} {
-		kind, reason := classifyS3Change(path, nil, nil)
-		if kind != "immutable" {
-			t.Fatalf("%s: want immutable, got %q (%s)", path, kind, reason)
-		}
+	if kind, reason := classifyS3Change("retention.locked", nil, nil); kind != "immutable" {
+		t.Fatalf("retention.locked: want immutable, got %q (%s)", kind, reason)
+	}
+	if kind, reason := classifyS3Change("retention.minimum", nil, nil); kind != "unsupported" || reason == "" {
+		t.Fatalf("retention.minimum: want unsupported with a reason, got %q (%s)", kind, reason)
 	}
 }
 
@@ -352,4 +378,113 @@ func TestSplitS3ProviderID(t *testing.T) {
 			t.Errorf("accepted malformed s3 id %q", bad)
 		}
 	}
+}
+
+// s3ExistingOursServer: the bucket already exists in OUR account and already carries our
+// ownership tags — the case the comment above records as "covered live". Live coverage
+// ended when the pilot paused (2026-07-24), so it is covered here now.
+func s3ExistingOursServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "HEAD" && r.URL.RawQuery == "" { // HeadBucket (D520)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			q := r.URL.RawQuery
+			switch {
+			case r.Method == "PUT" && q == "":
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte("<Error><Code>BucketAlreadyOwnedByYou</Code></Error>"))
+			case r.Method == "GET" && q == "tagging":
+				_, _ = w.Write([]byte(`<Tagging><TagSet>` +
+					`<Tag><Key>groundhold-capability</Key><Value>assets</Value></Tag>` +
+					`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag>` +
+					`</TagSet></Tagging>`))
+			case r.Method == "GET" && q == "versioning":
+				_, _ = w.Write([]byte(`<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>`))
+			case r.Method == "GET" && q == "replication":
+				w.WriteHeader(404)
+				_, _ = w.Write([]byte("<Error><Code>ReplicationConfigurationNotFoundError</Code></Error>"))
+			case r.Method == "GET" && q == "policyStatus":
+				w.WriteHeader(404)
+				_, _ = w.Write([]byte("<Error><Code>NoSuchBucketPolicy</Code></Error>"))
+			case r.Method == "PUT":
+				// configuration writes onto a bucket we already own (tags, PAB,
+				// versioning) — convergence onto an adopted bucket, not a duplicate.
+				w.WriteHeader(200)
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+}
+
+func s3Role(req *http.Request, _ []byte) certifynet.Role {
+	if req.Method == http.MethodGet {
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingS3 enrols S3 in the D391 gate. S3 adopts reactively: the PUT is
+// answered BucketAlreadyOwnedByYou, and only a TAGS-MATCH bucket may resume to success
+// (an untagged one is not provably ours — both adversarial reviews called auto-adopting
+// it a silent-takeover hole). The bucket is name-addressed, so the load-bearing proof
+// here is the pid, and the mutation allowance covers the configuration writes that
+// converge an adopted bucket rather than creating anything.
+func TestAdoptsExistingS3(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:           "aws/s3",
+		Classify:       s3Role,
+		ExistingServer: func() *httptest.Server { return s3ExistingOursServer(t) },
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.S3BaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("s3", "assets", "prod", s3Attrs(), nil, "assets", 1)
+		},
+		AllowedMutations: 8, // the refused PUT + convergence writes onto the adopted bucket
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
+
+// TestRefusesForeignDeleteS3 enrols s3 in the D439 gate. An untagged bucket is NOT
+// provably ours (D82) and a bucket delete takes its contents; the existing review test
+// asserts the refusal, this asserts it as a class and counts the wire.
+func TestRefusesForeignDeleteS3(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ForeignProbe{
+		Name:     "aws/s3",
+		Classify: s3Role,
+		ForeignServer: func() *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodGet && r.URL.RawQuery == "tagging" {
+						_, _ = w.Write([]byte(`<Tagging><TagSet>` +
+							`<Tag><Key>groundhold-capability</Key><Value>someone-else</Value></Tag>` +
+							`</TagSet></Tagging>`))
+						return
+					}
+					w.WriteHeader(200)
+				}))
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.S3BaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			return d
+		},
+		Delete: func(pr provider.Provider) provider.CreateResult {
+			return pr.Delete("s3", "assets", "prod", "s3:eu-central-1:pv-assets-abcd1234", "k")
+		},
+	}
+	certifynet.CertifyDeleteRefusesForeign(t, p)
 }

@@ -61,7 +61,7 @@ func TestResourcePermissionsGCSAuthoritativeDenial(t *testing.T) {
 	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
 	d := NewDriver("acme-prod")
 	d.GcsBaseURL = srv.URL
-	denied, err := d.CheckResourcePermissions("gcs", "gcs:acme-prod:the-bucket",
+	denied, _, err := d.CheckResourcePermissions("gcs", "gcs:acme-prod:the-bucket",
 		[]string{"storage.buckets.get", "storage.buckets.delete"})
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +78,7 @@ func TestResourcePermissionsCloudRunPost(t *testing.T) {
 	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
 	d := NewDriver("acme-prod")
 	d.RunBaseURL = srv.URL
-	denied, err := d.CheckResourcePermissions("cloudrun",
+	denied, _, err := d.CheckResourcePermissions("cloudrun",
 		"cloudrun:acme-prod:europe-central2:web-1",
 		[]string{"run.services.get", "run.services.delete"})
 	if err != nil {
@@ -95,7 +95,7 @@ func TestResourcePermissionsPubSubPost(t *testing.T) {
 	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
 	d := NewDriver("acme-prod")
 	d.PubSubBaseURL = srv.URL
-	denied, err := d.CheckResourcePermissions("pubsub-topic", "pubsub:acme-prod:the-topic",
+	denied, _, err := d.CheckResourcePermissions("pubsub-topic", "pubsub:acme-prod:the-topic",
 		[]string{"pubsub.topics.get", "pubsub.topics.delete"})
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +109,7 @@ func TestResourcePermissionsPubSubPost(t *testing.T) {
 func TestResourcePermissionsCloudSQLHasNoSurface(t *testing.T) {
 	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
 	d := NewDriver("acme-prod")
-	_, err := d.CheckResourcePermissions("cloudsql", "acme-prod:europe-west1:db-1",
+	_, _, err := d.CheckResourcePermissions("cloudsql", "acme-prod:europe-west1:db-1",
 		[]string{"cloudsql.instances.delete"})
 	if !errors.Is(err, provider.ErrNoResourceSurface) {
 		t.Fatalf("cloud sql must report no resource surface, got %v", err)
@@ -125,7 +125,7 @@ func TestResourcePermissionsUnreadableIsErrorNotDenial(t *testing.T) {
 	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
 	d := NewDriver("acme-prod")
 	d.GcsBaseURL = srv.URL
-	denied, err := d.CheckResourcePermissions("gcs", "gcs:acme-prod:the-bucket",
+	denied, _, err := d.CheckResourcePermissions("gcs", "gcs:acme-prod:the-bucket",
 		[]string{"storage.buckets.delete"})
 	if err == nil {
 		t.Fatal("an unreadable surface must return an error (inconclusive), not a denial")
@@ -147,7 +147,7 @@ func TestResourcePermissionsMalformed200IsError(t *testing.T) {
 	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
 	d := NewDriver("acme-prod")
 	d.GcsBaseURL = srv.URL
-	denied, err := d.CheckResourcePermissions("gcs", "gcs:acme-prod:the-bucket",
+	denied, _, err := d.CheckResourcePermissions("gcs", "gcs:acme-prod:the-bucket",
 		[]string{"storage.buckets.get", "storage.buckets.delete"})
 	if err == nil {
 		t.Fatal("a malformed 200 must be an error, not all-denied")
@@ -162,7 +162,7 @@ func TestResourcePermissionsCrossProjectRefused(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
 	d := NewDriver("acme-prod") // pinned project acme-prod
-	if _, err := d.CheckResourcePermissions("gcs", "gcs:other-proj:the-bucket",
+	if _, _, err := d.CheckResourcePermissions("gcs", "gcs:other-proj:the-bucket",
 		[]string{"storage.buckets.delete"}); err == nil {
 		t.Fatal("a cross-project providerId must be refused")
 	}

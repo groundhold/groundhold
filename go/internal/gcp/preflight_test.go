@@ -32,6 +32,49 @@ func crmServer(t *testing.T, deny map[string]bool) *httptest.Server {
 		}))
 }
 
+// TestCheckPermissionsScopedElsewhereIsUnattestedNotBlocking (D917): a permission not valid
+// for a PROJECT resource (billing.*) makes projects.testIamPermissions 400 the WHOLE request.
+// The check must peel that permission off (unattested — the project surface cannot vouch for a
+// billing-account permission), still attest the project-scoped ones, and NOT fail closed.
+func TestCheckPermissionsScopedElsewhereIsUnattestedNotBlocking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Permissions []string `json:"permissions"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		for _, p := range body.Permissions {
+			if strings.HasPrefix(p, "billing.") {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":{"code":400,"message":"Permission ` + p + ` is not valid for this resource.","status":"INVALID_ARGUMENT"}}`))
+				return
+			}
+		}
+		granted := []string{}
+		granted = append(granted, body.Permissions...)
+		_ = json.NewEncoder(w).Encode(map[string]any{"permissions": granted})
+	}))
+	defer srv.Close()
+	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
+	d := NewDriver("acme-prod")
+	d.CRMBaseURL = srv.URL
+	denied, unattested, err := d.CheckPermissions("acme-prod",
+		[]string{"billing.budgets.create", "resourcemanager.projects.get"})
+	if err != nil {
+		t.Fatalf("a billing permission must not make the whole preflight fail closed: %v", err)
+	}
+	if len(denied) != 0 {
+		t.Fatalf("nothing was denied, got %v", denied)
+	}
+	if len(unattested) != 1 || unattested[0] != "billing.budgets.create" {
+		t.Fatalf("the billing permission must be unattested (scoped off the project), got %v", unattested)
+	}
+	// and an all-billing request attests nothing, blocks nothing
+	_, un2, err := d.CheckPermissions("acme-prod", []string{"billing.budgets.create", "billing.budgets.delete"})
+	if err != nil || len(un2) != 2 {
+		t.Fatalf("all-billing preflight: err=%v unattested=%v", err, un2)
+	}
+}
+
 func TestCheckPermissionsAllHeld(t *testing.T) {
 	srv := crmServer(t, nil)
 	defer srv.Close()

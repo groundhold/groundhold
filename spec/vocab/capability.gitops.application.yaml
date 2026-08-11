@@ -59,7 +59,8 @@ attributes:
       (D53).
     mappings:
       k8s.argocd: spec.source.repoURL
-      k8s.flux: spec.sourceRef (the GitRepository name; URL resolution is a future lens)
+      k8s.flux: spec.sourceRef -> GitRepository.spec.url (the ref is RESOLVED; a name
+        is not provenance and is not comparable with ArgoCD's URL — D551)
 
   service.managed:
     kind: bool

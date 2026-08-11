@@ -85,8 +85,15 @@ func TestClassifyPubSubQueueChange(t *testing.T) {
 	if cls, _ := d.ClassifyChange("pubsub-queue", "reliability.deadLetter", false, true, nil); cls != "mutable" {
 		t.Fatalf("reliability.deadLetter must be mutable (patchable in place), got %q", cls)
 	}
-	if cls, _ := d.ClassifyChange("pubsub-queue", "delivery.guarantee", "at-least-once", "exactly-once", nil); cls != "immutable" {
-		t.Fatalf("delivery.guarantee must be immutable, got %q", cls)
+	// D834: this pinned "immutable" for the exact transition Google updates in place —
+	// `gcloud pubsub subscriptions update` carries --enable-exactly-once-delivery and no
+	// ordering flag at all. The old expectation pinned replacing a subscription, and its
+	// undelivered backlog with it.
+	if cls, why := d.ClassifyChange("pubsub-queue", "delivery.guarantee", "at-least-once", "exactly-once", nil); cls != "unsupported" || why == "" {
+		t.Fatalf("delivery.guarantee must be unsupported with a reason, got %q/%q", cls, why)
+	}
+	if cls, _ := d.ClassifyChange("pubsub-queue", "ordering.enabled", false, true, nil); cls != "immutable" {
+		t.Fatalf("ordering.enabled must stay immutable, got %q", cls)
 	}
 	if cls, _ := d.ClassifyChange("pubsub-queue", "network.publicExposure", false, true, nil); cls != "unsupported" {
 		t.Fatalf("exposure must be unsupported (not wired this slice), got %q", cls)

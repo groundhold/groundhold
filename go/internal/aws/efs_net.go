@@ -217,9 +217,15 @@ func (d *Driver) observeEFS(capability, providerID string) ([]provider.Observati
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"file system not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"file system not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		{Path: "encryption.atRest", Value: fs.Encrypted, Derivation: "measured"},
@@ -232,10 +238,22 @@ func (d *Driver) observeEFS(capability, providerID string) ([]provider.Observati
 	} else {
 		obs = append(obs, provider.Observation{Path: "availability.class", Value: "regional", Derivation: "measured"})
 	}
+	var diags []string
+	// D800: an encrypted file system always reports a KMS key — the account-default
+	// aws/elasticfilesystem one when the customer brought none — so "a key id is present" is not
+	// "the customer brought a key". Trace it to KMS (DescribeKey -> KeyManager), the way
+	// the RDS driver in this same package already does; an unreadable trace is a
+	// diagnostic, never a false BYOK.
 	if fs.KmsKeyId != "" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: true, Derivation: "measured"})
+		if customer, kerr := d.kmsKeyIsCustomerManaged(region, fs.KmsKeyId); kerr == nil {
+			obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+				Value: customer, Derivation: "measured"})
+		} else {
+			diags = append(diags, "encryption.customerManagedKeys not observed on the file system's "+
+				"KMS key: "+kerr.Error()+" — probe/reconcile")
+		}
 	}
-	return obs, nil, nil
+	return obs, diags, nil
 }
 
 func (d *Driver) deleteEFS(capability, environment, providerID string) provider.CreateResult {
@@ -278,5 +296,20 @@ func (d *Driver) deleteEFS(capability, environment, providerID string) provider.
 		}
 		return provider.CreateResult{Status: "failed", Reason: fmt.Sprintf("delete HTTP %d (%s)", st, efsErr(resp))}
 	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// ---- poll to absence (D968 class, D975) ----
+	// The delete is async: the file system enters "deleting", not gone. Reporting
+	// succeeded here tombstones a data-bearing file system still live. Poll to a
+	// confirmed FileSystemNotFound as createEFS polls to available; unknown on
+	// timeout keeps the handle.
+	deadline := d.Now().Add(d.PollTimeout)
+	for {
+		if _, found, rerr := d.describeEFS(region, "FileSystemId="+id); rerr == nil && !found {
+			return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // confirmed gone
+		}
+		if d.Now().After(deadline) {
+			return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+				Reason: "file system still deleting at poll timeout — reconcile via DescribeFileSystems"}
+		}
+		time.Sleep(d.PollInterval)
+	}
 }

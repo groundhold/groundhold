@@ -106,18 +106,32 @@ func (d *Driver) observeGCPImage(capability, providerID string) ([]provider.Obse
 	if err != nil {
 		return nil, nil, err
 	}
+	// D466 — the project boundary. 39 of 44 GCP deletes already guard it; these
+	// families did not, and the label check is not a substitute: our capability +
+	// environment labels are IDENTICAL in every project we manage, so a providerId
+	// naming another project passes it. sameProject is a no-op when nothing is
+	// pinned (observe/discover), a refusal when apply/converge pinned one.
+	if err := d.sameProject(project); err != nil {
+		return nil, nil, err
+	}
 	doc, found, rerr := d.getGCPImage(project, name)
 	if rerr != nil {
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"image not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"image not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		// Compute Engine encrypts every image; a fact about the platform rather than
 		// a reading of this resource, so config-intent rather than measured.
-		{Path: "encryption.atRest", Value: true, Derivation: "config-intent"},
+		{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"},
 		{Path: "encryption.customerManagedKeys",
 			Value:      doc.ImageEncryptionKey != nil && doc.ImageEncryptionKey.KmsKeyName != "",
 			Derivation: "measured"},
@@ -189,7 +203,7 @@ func (d *Driver) discoverGCPImages(region string) ([]provider.Discovered, []stri
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.compute.image",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

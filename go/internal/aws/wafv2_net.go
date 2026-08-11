@@ -7,6 +7,7 @@ package aws
 
 import (
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"net/http"
 	"strings"
@@ -64,22 +65,65 @@ type wafSummary struct {
 // authoritative "does not exist".
 func (d *Driver) wafListByName(name string) (wafSummary, bool, error) {
 	const op = "ListWebACLs"
-	st, resp, err := d.wafCall("ListWebACLs", jsonBody(map[string]any{"Scope": "CLOUDFRONT", "Limit": 100}))
-	if err != nil || st != http.StatusOK {
-		return wafSummary{}, false, readTransport(op, err)
+	// D870: EVERY page. `ListWebACLs` takes a NextMarker and returns one — the service
+	// model says so even though botocore ships no paginator entry for it, which is why
+	// the D866 ratchet could not see this one. A name missed on page one becomes a FACT
+	// at both callers: observe emits resource-absent (measured) for a live security
+	// control, and delete reports success while the WebACL stands and keeps filtering.
+	marker := ""
+	for page := 0; ; page++ {
+		if page >= maxAWSListPages {
+			return wafSummary{}, false, fmt.Errorf(
+				"%s: more than %d pages — refusing to call this name absent on a sweep "+
+					"that did not finish", op, maxAWSListPages)
+		}
+		req := map[string]any{"Scope": "CLOUDFRONT", "Limit": 100}
+		if marker != "" {
+			req["NextMarker"] = marker
+		}
+		s, more, ferr := d.wafListPage(op, req, name)
+		if ferr != nil {
+			return wafSummary{}, false, ferr
+		}
+		if s != nil {
+			return *s, true, nil
+		}
+		if more == "" {
+			// Every page read, the name on none of them: NOW an absence is a fact.
+			return wafSummary{}, false, nil
+		}
+		marker = more
+	}
+}
+
+// wafListPage reads ONE page of ListWebACLs, returning the match if this page holds it
+// and the marker for the next page otherwise.
+func (d *Driver) wafListPage(op string, req map[string]any, name string) (*wafSummary, string, error) {
+	st, resp, err := d.wafCall("ListWebACLs", jsonBody(req))
+	// D521: this read `err != nil || st != StatusOK` and handed BOTH to
+	// readTransport, which dereferences err.Error() — so every HTTP error
+	// response (err nil, status not 200) panicked the process. The third
+	// instance of this exact shape; the absence probe is what reaches it.
+	if err != nil {
+		return nil, "", readTransport(op, err)
+	}
+	if st != http.StatusOK {
+		return nil, "", readHTTP(op, st, awsErrCode(resp))
 	}
 	var out struct {
-		WebACLs []wafSummary `json:"WebACLs"`
+		WebACLs    []wafSummary `json:"WebACLs"`
+		NextMarker string       `json:"NextMarker"`
 	}
 	if json.Unmarshal(resp, &out) != nil {
-		return wafSummary{}, false, readBody(op, st)
+		return nil, "", readBody(op, st)
 	}
 	for _, s := range out.WebACLs {
 		if s.Name == name {
-			return s, true, nil
+			match := s
+			return &match, "", nil
 		}
 	}
-	return wafSummary{}, false, nil
+	return nil, out.NextMarker, nil
 }
 
 type wafACL struct {
@@ -205,7 +249,11 @@ func (d *Driver) observeWAF(capability, providerID string) ([]provider.Observati
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"WebACL not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"WebACL not found — bound resource is gone (will re-create)"}, nil
 	}
 	acl, gerr := d.wafGet(name, s.Id)
 	if gerr != nil {
@@ -227,12 +275,37 @@ func (d *Driver) observeWAF(capability, providerID string) ([]provider.Observati
 	if !prevention {
 		mode = "detection"
 	}
-	return []provider.Observation{
+	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		{Path: "policy.mode", Value: mode, Derivation: "measured"},
-		{Path: "managed.ruleset", Value: managed, Derivation: "measured"},
+		// D765: bot.protection stays keyed on the RULE GROUP, because that is what the
+		// vocabulary says it means — "is managed bot mitigation on". managed.ruleset's
+		// own words are different and decide this entry: "am I PROTECTED by the managed
+		// baseline". A WebACL protecting zero resources protects nobody, whatever its
+		// rules say, and the field measured exactly that on a live estate: a firewall
+		// with sensible rules, the wrong scope, ResourceArns: [] — indistinguishable in
+		// the console, in the code and in the contract from one that works.
 		{Path: "bot.protection", Value: bot, Derivation: "measured"},
-	}, nil, nil
+	}
+	var diags []string
+	switch protects, readable := d.wafProtectsSomething(s.ARN); {
+	case !readable:
+		diags = append(diags, "managed.ruleset not observed: no distribution listing came "+
+			"back, so whether this WebACL protects anything is unknown — an unattached "+
+			"firewall and an unread one are not the same answer")
+	case managed && !protects:
+		obs = append(obs, provider.Observation{Path: "managed.ruleset",
+			Value: false, Derivation: "measured"})
+		diags = append(diags, "managed.ruleset is FALSE despite the managed rule group "+
+			"being present: no CloudFront distribution in this account names this WebACL, "+
+			"so it protects nothing")
+	default:
+		obs = append(obs, provider.Observation{Path: "managed.ruleset",
+			Value: managed, Derivation: "measured"})
+	}
+	return obs, diags, nil
 }
 
 func (d *Driver) deleteWAF(capability, environment, providerID string) provider.CreateResult {
@@ -273,4 +346,37 @@ func (d *Driver) deleteWAF(capability, environment, providerID string) provider.
 		return provider.CreateResult{Status: "failed", Reason: fmt.Sprintf("delete HTTP %d (%s)", st, wafErr(resp))}
 	}
 	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+}
+
+// wafProtectsSomething answers whether any CloudFront distribution in this account names
+// this WebACL (D765). A CLOUDFRONT-scope ACL cannot be asked — ListResourcesForWebACL is
+// regional-only — so the association lives on the distribution, and the only way to know
+// is to look there.
+//
+// Returns (protects, readable). readable=false is "we could not tell": a listing that
+// failed, was denied, or came back unparseable is never "protects nothing", because the
+// difference between an unattached firewall and an unread one is the whole question.
+func (d *Driver) wafProtectsSomething(aclARN string) (protects, readable bool) {
+	if aclARN == "" {
+		return false, false
+	}
+	st, body, _, err := d.cfDo("GET", cloudFrontPath+"/distribution", "")
+	if err != nil || st != http.StatusOK {
+		return false, false
+	}
+	var r struct {
+		Summaries []struct {
+			WebACLId string `xml:"WebACLId"`
+		} `xml:"Items>DistributionSummary"`
+	}
+	if xml.Unmarshal(body, &r) != nil {
+		return false, false
+	}
+	for _, s := range r.Summaries {
+		// CloudFront reports the ACL's ARN in WebACLId for WAFv2.
+		if s.WebACLId != "" && s.WebACLId == aclARN {
+			return true, true
+		}
+	}
+	return false, true
 }

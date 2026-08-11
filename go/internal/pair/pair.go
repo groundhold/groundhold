@@ -128,6 +128,26 @@ type Registry struct {
 }
 
 // Validate refuses an unpairable provider (OAuth deferred, D141) and a malformed ref.
+// StampPairedAt records WHEN the pairing was registered, and records nothing when
+// there is no clock to record. D588: `pair` takes no `--at`, so the CLI handed it the
+// evaluation-time default — the epoch — and `connections` published a credential
+// reference "registered" on 1 January 1970. Nothing reads the field, so no decision
+// turned on it; it was simply untrue, in a document an auditor reads.
+//
+// Same rule D230 applies to a suggested command's echoed `--at`: a value the operator
+// did not supply is OMITTED, never defaulted. An empty pairedAt says "not recorded",
+// which is what happened; the epoch says "1970", which did not.
+func (c *Connection) StampPairedAt(at string) {
+	if at == "" || at == epochRFC3339 {
+		c.PairedAt = ""
+		return
+	}
+	c.PairedAt = at
+}
+
+// epochRFC3339 is the zero clock every unset --at collapses to.
+const epochRFC3339 = "1970-01-01T00:00:00Z"
+
 func (c Connection) Validate() error {
 	if !pairableProviders[c.Provider] {
 		pairable := make([]string, 0, len(pairableProviders))

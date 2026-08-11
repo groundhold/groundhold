@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"groundhold/internal/provider"
@@ -21,19 +22,11 @@ func (d *Driver) List(region string) ([]provider.Discovered, []string, error) {
 	if region == "" {
 		return nil, nil, fmt.Errorf("aws discovery requires a region")
 	}
-	var out []provider.Discovered
-	var diags []string
 	reg := d.serviceDiscoverers()
-	for _, tok := range d.DiscoverableServices() { // sorted, deterministic
-		found, ds, err := reg[tok](region)
-		if err != nil {
-			diags = append(diags, err.Error())
-			continue
-		}
-		out = append(out, found...)
-		diags = append(diags, ds...)
-	}
-	return out, diags, nil
+	// D642: shared sweep loop — a service that fails is a diagnostic, but ALL of
+	// them failing means the provider was never reached.
+	return provider.SweepAll(d.DiscoverableServices(), // sorted, deterministic
+		func(tok string) ([]provider.Discovered, []string, error) { return reg[tok](region) }, d.trunc)
 }
 
 // serviceDiscoverers maps each SERVICE token (the D76 dispatch key) to its
@@ -152,7 +145,7 @@ func (d *Driver) discoverS3(region string) ([]provider.Discovered, []string, err
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.storage.object",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -187,21 +180,41 @@ func (d *Driver) s3BucketRegion(signRegion, bucket string) (region string, ok bo
 // capability.database.relational. DescribeDBInstances is region-scoped, so
 // every instance it returns is in this region.
 func (d *Driver) discoverRDS(region string) ([]provider.Discovered, []string, error) {
-	st, body, err := d.rdsPost(region, rdsSimpleBody("DescribeDBInstances", nil))
-	if err != nil {
-		return nil, nil, fmt.Errorf("rds DescribeDBInstances: %v", err)
-	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("rds DescribeDBInstances: HTTP %d: %s", st, awsErrCode(body))
+	// D812: FOLLOW the pages. DescribeDBInstances answers 100 at a time and hands back
+	// a Marker.
+	type rdsInst struct {
+		Identifier string `xml:"DBInstanceIdentifier"`
 	}
 	var r struct {
-		Instances []struct {
-			Identifier string `xml:"DBInstanceIdentifier"`
-		} `xml:"DescribeDBInstancesResult>DBInstances>DBInstance"`
+		Instances []rdsInst `xml:"DescribeDBInstancesResult>DBInstances>DBInstance"`
+		Marker    string    `xml:"DescribeDBInstancesResult>Marker"`
 	}
-	if err := xml.Unmarshal(body, &r); err != nil {
-		return nil, nil, fmt.Errorf("rds DescribeDBInstances: %w", err)
+	var instances []rdsInst
+	rdsMarker := ""
+	for {
+		extra := map[string]string(nil)
+		if rdsMarker != "" {
+			extra = map[string]string{"Marker": rdsMarker}
+		}
+		st, body, err := d.rdsPost(region, rdsSimpleBody("DescribeDBInstances", extra))
+		if err != nil {
+			return nil, nil, fmt.Errorf("rds DescribeDBInstances: %v", err)
+		}
+		if st != http.StatusOK {
+			return nil, nil, fmt.Errorf("rds DescribeDBInstances: HTTP %d: %s", st, awsErrCode(body))
+		}
+		r.Instances = nil
+		r.Marker = ""
+		if err := xml.Unmarshal(body, &r); err != nil {
+			return nil, nil, fmt.Errorf("rds DescribeDBInstances: %w", err)
+		}
+		instances = append(instances, r.Instances...)
+		if r.Marker == "" {
+			break
+		}
+		rdsMarker = r.Marker
 	}
+	r.Instances = instances
 	var out []provider.Discovered
 	var diags []string
 	for _, inst := range r.Instances {
@@ -220,7 +233,7 @@ func (d *Driver) discoverRDS(region string) ([]provider.Discovered, []string, er
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.database.relational",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -234,22 +247,45 @@ func (d *Driver) discoverDynamoDB(region string) ([]provider.Discovered, []strin
 	if err != nil {
 		return nil, nil, fmt.Errorf("dynamodb: %v", err)
 	}
-	st, body, err := d.dynamoCall(region, "ListTables", "{}")
-	if err != nil {
-		return nil, nil, fmt.Errorf("dynamodb ListTables: %v", err)
-	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("dynamodb ListTables: HTTP %d", st)
-	}
-	var r struct {
-		TableNames []string `json:"TableNames"`
-	}
-	if err := json.Unmarshal(body, &r); err != nil {
-		return nil, nil, readBody("ListTables", st)
+	// D818: FOLLOW the pages. ListTables answers 100 table names at a time, and its
+	// continuation is the NAME of the last one: LastEvaluatedTableName comes back and
+	// ExclusiveStartTableName asks for the rest (botocore dynamodb/2012-08-10).
+	var tables []string
+	start := ""
+	for page := 0; ; page++ {
+		if page >= maxAWSListPages {
+			return nil, nil, fmt.Errorf("dynamodb ListTables: more than %d pages", maxAWSListPages)
+		}
+		req := "{}"
+		if start != "" {
+			b, _ := json.Marshal(struct {
+				ExclusiveStartTableName string `json:"ExclusiveStartTableName"`
+			}{start})
+			req = string(b)
+		}
+		st, body, err := d.dynamoCall(region, "ListTables", req)
+		if err != nil {
+			return nil, nil, fmt.Errorf("dynamodb ListTables: %v", err)
+		}
+		if st != http.StatusOK {
+			return nil, nil, fmt.Errorf("dynamodb ListTables: HTTP %d", st)
+		}
+		var r struct {
+			TableNames             []string `json:"TableNames"`
+			LastEvaluatedTableName string   `json:"LastEvaluatedTableName"`
+		}
+		if err := json.Unmarshal(body, &r); err != nil {
+			return nil, nil, readBody("ListTables", st)
+		}
+		tables = append(tables, r.TableNames...)
+		if r.LastEvaluatedTableName == "" {
+			break
+		}
+		start = r.LastEvaluatedTableName
 	}
 	var out []provider.Discovered
 	var diags []string
-	for _, tbl := range r.TableNames {
+	for _, tbl := range tables {
 		pid := dynamoProviderID(region, account, tbl)
 		obs, odiags, err := d.observeDynamoDB("", pid)
 		if err != nil {
@@ -262,7 +298,7 @@ func (d *Driver) discoverDynamoDB(region string) ([]provider.Discovered, []strin
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.database.nosql",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -276,25 +312,48 @@ func (d *Driver) discoverElastiCache(region string) ([]provider.Discovered, []st
 	if err != nil {
 		return nil, nil, fmt.Errorf("elasticache: %v", err)
 	}
-	st, body, err := d.ecachePost(region, encodeForm(map[string]string{
-		"Action": "DescribeReplicationGroups", "Version": elastiCacheVersion}))
-	if err != nil {
-		return nil, nil, fmt.Errorf("elasticache DescribeReplicationGroups: %v", err)
+	// D818: FOLLOW the pages, and here that is the ONLY honest option. ElastiCache's
+	// Describe* family signals "there is more" with a bare <Marker>, which is the same
+	// field S3 ECHOES back from the request — so the shared detector cannot recognise it
+	// without risking a false "incomplete" everywhere else. What the transport cannot
+	// see, the sweep must do itself.
+	type ecacheGroup struct {
+		ID string `xml:"ReplicationGroupId"`
 	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("elasticache DescribeReplicationGroups: HTTP %d: %s", st, rdsErrCode(body))
-	}
-	var r struct {
-		Groups []struct {
-			ID string `xml:"ReplicationGroupId"`
-		} `xml:"DescribeReplicationGroupsResult>ReplicationGroups>ReplicationGroup"`
-	}
-	if err := xml.Unmarshal(body, &r); err != nil {
-		return nil, nil, fmt.Errorf("elasticache DescribeReplicationGroups: %w", err)
+	var groups []ecacheGroup
+	marker := ""
+	for page := 0; ; page++ {
+		if page >= maxAWSListPages {
+			return nil, nil, fmt.Errorf("elasticache DescribeReplicationGroups: more than %d pages", maxAWSListPages)
+		}
+		form := map[string]string{
+			"Action": "DescribeReplicationGroups", "Version": elastiCacheVersion}
+		if marker != "" {
+			form["Marker"] = marker
+		}
+		st, body, err := d.ecachePost(region, encodeForm(form))
+		if err != nil {
+			return nil, nil, fmt.Errorf("elasticache DescribeReplicationGroups: %v", err)
+		}
+		if st != http.StatusOK {
+			return nil, nil, fmt.Errorf("elasticache DescribeReplicationGroups: HTTP %d: %s", st, rdsErrCode(body))
+		}
+		var r struct {
+			Groups []ecacheGroup `xml:"DescribeReplicationGroupsResult>ReplicationGroups>ReplicationGroup"`
+			Marker string        `xml:"DescribeReplicationGroupsResult>Marker"`
+		}
+		if err := xml.Unmarshal(body, &r); err != nil {
+			return nil, nil, fmt.Errorf("elasticache DescribeReplicationGroups: %w", err)
+		}
+		groups = append(groups, r.Groups...)
+		if r.Marker == "" {
+			break
+		}
+		marker = r.Marker
 	}
 	var out []provider.Discovered
 	var diags []string
-	for _, g := range r.Groups {
+	for _, g := range groups {
 		if g.ID == "" {
 			continue
 		}
@@ -310,7 +369,7 @@ func (d *Driver) discoverElastiCache(region string) ([]provider.Discovered, []st
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.cache.keyvalue",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -320,20 +379,38 @@ func (d *Driver) discoverElastiCache(region string) ([]provider.Discovered, []st
 // capability.messaging.topic. ListTopics returns ARNs the providerId is
 // parsed from directly (region+account+name).
 func (d *Driver) discoverSNS(region string) ([]provider.Discovered, []string, error) {
-	st, body, err := d.snsPost(region, encodeForm(map[string]string{
-		"Action": "ListTopics", "Version": snsVersion}))
-	if err != nil {
-		return nil, nil, fmt.Errorf("sns ListTopics: %v", err)
-	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("sns ListTopics: HTTP %d", st)
-	}
+	// D810: FOLLOW the pages (the D809 rule, applied to the next batch). ListTopics
+	// answers 100 at a time and hands back a NextToken.
 	var r struct {
-		Arns []string `xml:"ListTopicsResult>Topics>member>TopicArn"`
+		Arns      []string `xml:"ListTopicsResult>Topics>member>TopicArn"`
+		NextToken string   `xml:"ListTopicsResult>NextToken"`
 	}
-	if err := xml.Unmarshal(body, &r); err != nil {
-		return nil, nil, fmt.Errorf("sns ListTopics: %w", err)
+	var arns []string
+	token := ""
+	for {
+		form := map[string]string{"Action": "ListTopics", "Version": snsVersion}
+		if token != "" {
+			form["NextToken"] = token
+		}
+		st, body, err := d.snsPost(region, encodeForm(form))
+		if err != nil {
+			return nil, nil, fmt.Errorf("sns ListTopics: %v", err)
+		}
+		if st != http.StatusOK {
+			return nil, nil, fmt.Errorf("sns ListTopics: HTTP %d", st)
+		}
+		r.Arns = nil
+		r.NextToken = ""
+		if err := xml.Unmarshal(body, &r); err != nil {
+			return nil, nil, fmt.Errorf("sns ListTopics: %w", err)
+		}
+		arns = append(arns, r.Arns...)
+		if r.NextToken == "" {
+			break
+		}
+		token = r.NextToken
 	}
+	r.Arns = arns
 	var out []provider.Discovered
 	var diags []string
 	for _, arn := range r.Arns {
@@ -355,7 +432,7 @@ func (d *Driver) discoverSNS(region string) ([]provider.Discovered, []string, er
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.messaging.topic",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -365,20 +442,37 @@ func (d *Driver) discoverSNS(region string) ([]provider.Discovered, []string, er
 // capability.messaging.queue. ListQueues returns URLs the account and name
 // are parsed from (.../<account>/<name>).
 func (d *Driver) discoverSQS(region string) ([]provider.Discovered, []string, error) {
-	st, body, err := d.sqsPost(region, encodeForm(map[string]string{
-		"Action": "ListQueues", "Version": sqsVersion}))
-	if err != nil {
-		return nil, nil, fmt.Errorf("sqs ListQueues: %v", err)
-	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("sqs ListQueues: HTTP %d", st)
-	}
+	// D810: FOLLOW the pages. ListQueues answers 1000 at a time with a NextToken.
 	var r struct {
-		URLs []string `xml:"ListQueuesResult>QueueUrl"`
+		URLs      []string `xml:"ListQueuesResult>QueueUrl"`
+		NextToken string   `xml:"ListQueuesResult>NextToken"`
 	}
-	if err := xml.Unmarshal(body, &r); err != nil {
-		return nil, nil, fmt.Errorf("sqs ListQueues: %w", err)
+	var urls []string
+	token := ""
+	for {
+		form := map[string]string{"Action": "ListQueues", "Version": sqsVersion}
+		if token != "" {
+			form["NextToken"] = token
+		}
+		st, body, err := d.sqsPost(region, encodeForm(form))
+		if err != nil {
+			return nil, nil, fmt.Errorf("sqs ListQueues: %v", err)
+		}
+		if st != http.StatusOK {
+			return nil, nil, fmt.Errorf("sqs ListQueues: HTTP %d", st)
+		}
+		r.URLs = nil
+		r.NextToken = ""
+		if err := xml.Unmarshal(body, &r); err != nil {
+			return nil, nil, fmt.Errorf("sqs ListQueues: %w", err)
+		}
+		urls = append(urls, r.URLs...)
+		if r.NextToken == "" {
+			break
+		}
+		token = r.NextToken
 	}
+	r.URLs = urls
 	var out []provider.Discovered
 	var diags []string
 	for _, u := range r.URLs {
@@ -401,7 +495,7 @@ func (d *Driver) discoverSQS(region string) ([]provider.Discovered, []string, er
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.messaging.queue",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -483,19 +577,37 @@ func arnLastSegment(arn string) string {
 // is not representable by that id, so it becomes a diagnostic, never a
 // fabricated/empty resource.
 func (d *Driver) discoverECS(region string) ([]provider.Discovered, []string, error) {
-	st, body, err := d.ecsCall(region, "ListClusters", "{}")
-	if err != nil {
-		return nil, nil, fmt.Errorf("ecs ListClusters: %v", err)
-	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("ecs ListClusters: HTTP %d: %s", st, ecsErr(body))
-	}
+	// D812: FOLLOW the pages. ListClusters answers 100 at a time with nextToken.
 	var lc struct {
 		ClusterArns []string `json:"clusterArns"`
+		NextToken   string   `json:"nextToken"`
 	}
-	if err := json.Unmarshal(body, &lc); err != nil {
-		return nil, nil, readBody("ecs ListClusters", st)
+	var clusterArns []string
+	ecsToken := ""
+	for {
+		req := "{}"
+		if ecsToken != "" {
+			req = `{"nextToken":` + strconv.Quote(ecsToken) + `}`
+		}
+		st, body, err := d.ecsCall(region, "ListClusters", req)
+		if err != nil {
+			return nil, nil, fmt.Errorf("ecs ListClusters: %v", err)
+		}
+		if st != http.StatusOK {
+			return nil, nil, fmt.Errorf("ecs ListClusters: HTTP %d: %s", st, ecsErr(body))
+		}
+		lc.ClusterArns = nil
+		lc.NextToken = ""
+		if err := json.Unmarshal(body, &lc); err != nil {
+			return nil, nil, readBody("ecs ListClusters", st)
+		}
+		clusterArns = append(clusterArns, lc.ClusterArns...)
+		if lc.NextToken == "" {
+			break
+		}
+		ecsToken = lc.NextToken
 	}
+	lc.ClusterArns = clusterArns
 	var out []provider.Discovered
 	var diags []string
 	for _, cArn := range lc.ClusterArns {
@@ -544,7 +656,7 @@ func (d *Driver) discoverECS(region string) ([]provider.Discovered, []string, er
 			out = append(out, provider.Discovered{
 				ProviderID:   pid,
 				ResourceType: "capability.workload.container",
-				Observations: obs,
+				Observations: provider.WithoutAbsence(obs),
 			})
 		}
 	}
@@ -587,7 +699,7 @@ func (d *Driver) discoverVPC(region string) ([]provider.Discovered, []string, er
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.network.private",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -600,23 +712,45 @@ func (d *Driver) discoverVPC(region string) ([]provider.Discovered, []string, er
 // other sweeps are); a truncated list is a shared limitation, not a per-call
 // fabricated absence.
 func (d *Driver) discoverIAM(region string) ([]provider.Discovered, []string, error) {
-	st, body, err := d.iamPost(encodeForm(map[string]string{
-		"Action": "ListRoles", "Version": iamVersion}))
-	if err != nil {
-		return nil, nil, fmt.Errorf("iam ListRoles: %v", err)
-	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("iam ListRoles: HTTP %d: %s", st, rdsErrCode(body))
+	// D812: FOLLOW the pages. ListRoles answers 100 at a time with IsTruncated + Marker,
+	// and roles are what a tester counts by hand when they go looking for what is outside
+	// the contract.
+	type iamRole struct {
+		RoleName string `xml:"RoleName"`
+		Arn      string `xml:"Arn"`
 	}
 	var r struct {
-		Roles []struct {
-			RoleName string `xml:"RoleName"`
-			Arn      string `xml:"Arn"`
-		} `xml:"ListRolesResult>Roles>member"`
+		Roles       []iamRole `xml:"ListRolesResult>Roles>member"`
+		IsTruncated bool      `xml:"ListRolesResult>IsTruncated"`
+		Marker      string    `xml:"ListRolesResult>Marker"`
 	}
-	if err := xml.Unmarshal(body, &r); err != nil {
-		return nil, nil, fmt.Errorf("iam ListRoles: %w", err)
+	var roles []iamRole
+	marker := ""
+	for {
+		form := map[string]string{"Action": "ListRoles", "Version": iamVersion}
+		if marker != "" {
+			form["Marker"] = marker
+		}
+		st, body, err := d.iamPost(encodeForm(form))
+		if err != nil {
+			return nil, nil, fmt.Errorf("iam ListRoles: %v", err)
+		}
+		if st != http.StatusOK {
+			return nil, nil, fmt.Errorf("iam ListRoles: HTTP %d: %s", st, rdsErrCode(body))
+		}
+		r.Roles = nil
+		r.IsTruncated = false
+		r.Marker = ""
+		if err := xml.Unmarshal(body, &r); err != nil {
+			return nil, nil, fmt.Errorf("iam ListRoles: %w", err)
+		}
+		roles = append(roles, r.Roles...)
+		if !r.IsTruncated || r.Marker == "" {
+			break
+		}
+		marker = r.Marker
 	}
+	r.Roles = roles
 	var out []provider.Discovered
 	var diags []string
 	for _, role := range r.Roles {
@@ -641,7 +775,7 @@ func (d *Driver) discoverIAM(region string) ([]provider.Discovered, []string, er
 			out = append(out, provider.Discovered{
 				ProviderID:   pid,
 				ResourceType: "capability.identity.serviceaccount",
-				Observations: obs,
+				Observations: provider.WithoutAbsence(obs),
 			})
 		}
 		// grants: this role's attached managed policies. Per-role isolation — an
@@ -686,7 +820,7 @@ func (d *Driver) discoverRoleGrants(roleName string) ([]provider.Discovered, []s
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.authorization.grant",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags
@@ -697,20 +831,46 @@ func (d *Driver) discoverRoleGrants(roleName string) ([]provider.Discovered, []s
 // DescribeSecret + the resource policy and NEVER GetSecretValue — the secret
 // VALUE is structurally out of reach (D53). Existence + metadata only.
 func (d *Driver) discoverSecrets(region string) ([]provider.Discovered, []string, error) {
-	st, body, err := d.asmCall(region, "ListSecrets", "{}")
-	if err != nil {
-		return nil, nil, fmt.Errorf("secretsmanager ListSecrets: %v", err)
-	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("secretsmanager ListSecrets: HTTP %d: %s", st, ecsErr(body))
-	}
+	// D811: FOLLOW the pages. ListSecrets answers 100 at a time with a NextToken, and a
+	// secret is exactly the kind of thing an estate has many of.
 	var r struct {
 		SecretList []struct {
 			Name string `json:"Name"`
 		} `json:"SecretList"`
+		NextToken string `json:"NextToken"`
 	}
-	if err := json.Unmarshal(body, &r); err != nil {
-		return nil, nil, readBody("secretsmanager ListSecrets", st)
+	var names []string
+	token := ""
+	for {
+		req := "{}"
+		if token != "" {
+			req = `{"NextToken":` + strconv.Quote(token) + `}`
+		}
+		st, body, err := d.asmCall(region, "ListSecrets", req)
+		if err != nil {
+			return nil, nil, fmt.Errorf("secretsmanager ListSecrets: %v", err)
+		}
+		if st != http.StatusOK {
+			return nil, nil, fmt.Errorf("secretsmanager ListSecrets: HTTP %d: %s", st, ecsErr(body))
+		}
+		r.SecretList = nil
+		r.NextToken = ""
+		if err := json.Unmarshal(body, &r); err != nil {
+			return nil, nil, readBody("secretsmanager ListSecrets", st)
+		}
+		for _, sec := range r.SecretList {
+			names = append(names, sec.Name)
+		}
+		if r.NextToken == "" {
+			break
+		}
+		token = r.NextToken
+	}
+	r.SecretList = r.SecretList[:0]
+	for _, n := range names {
+		r.SecretList = append(r.SecretList, struct {
+			Name string `json:"Name"`
+		}{Name: n})
 	}
 	var out []provider.Discovered
 	var diags []string
@@ -730,7 +890,7 @@ func (d *Driver) discoverSecrets(region string) ([]provider.Discovered, []string
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.secret",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -745,20 +905,40 @@ func (d *Driver) discoverCloudWatch(region string) ([]provider.Discovered, []str
 	if err != nil {
 		return nil, nil, fmt.Errorf("cloudwatch: %v", err)
 	}
-	st, body, err := d.cwPost(region, encodeForm(map[string]string{
-		"Action": "DescribeAlarms", "Version": cwVersion, "AlarmTypes.member.1": "MetricAlarm"}))
-	if err != nil {
-		return nil, nil, fmt.Errorf("cloudwatch DescribeAlarms: %v", err)
-	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("cloudwatch DescribeAlarms: HTTP %d: %s", st, rdsErrCode(body))
-	}
+	// D810: FOLLOW the pages. DescribeAlarms answers 100 at a time with a NextToken,
+	// and an account with more alarms than that reported the first hundred as all of
+	// them — a sweep whose whole job is to say what is out there.
 	var r struct {
-		Names []string `xml:"DescribeAlarmsResult>MetricAlarms>member>AlarmName"`
+		Names     []string `xml:"DescribeAlarmsResult>MetricAlarms>member>AlarmName"`
+		NextToken string   `xml:"DescribeAlarmsResult>NextToken"`
 	}
-	if err := xml.Unmarshal(body, &r); err != nil {
-		return nil, nil, fmt.Errorf("cloudwatch DescribeAlarms: %w", err)
+	var names []string
+	token := ""
+	for {
+		form := map[string]string{
+			"Action": "DescribeAlarms", "Version": cwVersion, "AlarmTypes.member.1": "MetricAlarm"}
+		if token != "" {
+			form["NextToken"] = token
+		}
+		st, body, err := d.cwPost(region, encodeForm(form))
+		if err != nil {
+			return nil, nil, fmt.Errorf("cloudwatch DescribeAlarms: %v", err)
+		}
+		if st != http.StatusOK {
+			return nil, nil, fmt.Errorf("cloudwatch DescribeAlarms: HTTP %d: %s", st, rdsErrCode(body))
+		}
+		r.Names = nil
+		r.NextToken = ""
+		if err := xml.Unmarshal(body, &r); err != nil {
+			return nil, nil, fmt.Errorf("cloudwatch DescribeAlarms: %w", err)
+		}
+		names = append(names, r.Names...)
+		if r.NextToken == "" {
+			break
+		}
+		token = r.NextToken
 	}
+	r.Names = names
 	var out []provider.Discovered
 	var diags []string
 	for _, name := range r.Names {
@@ -777,7 +957,7 @@ func (d *Driver) discoverCloudWatch(region string) ([]provider.Discovered, []str
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.monitoring.alert",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -792,21 +972,40 @@ func (d *Driver) discoverECR(region string) ([]provider.Discovered, []string, er
 	if err != nil {
 		return nil, nil, fmt.Errorf("ecr: %v", err)
 	}
-	st, body, err := d.ecrCall(region, "DescribeRepositories", "{}")
-	if err != nil {
-		return nil, nil, fmt.Errorf("ecr DescribeRepositories: %v", err)
-	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("ecr DescribeRepositories: HTTP %d: %s", st, ecsErr(body))
+	// D812: FOLLOW the pages. DescribeRepositories answers 100 at a time with nextToken.
+	type ecrRepo struct {
+		RepositoryName string `json:"repositoryName"`
 	}
 	var r struct {
-		Repositories []struct {
-			RepositoryName string `json:"repositoryName"`
-		} `json:"repositories"`
+		Repositories []ecrRepo `json:"repositories"`
+		NextToken    string    `json:"nextToken"`
 	}
-	if err := json.Unmarshal(body, &r); err != nil {
-		return nil, nil, readBody("ecr DescribeRepositories", st)
+	var repos []ecrRepo
+	token := ""
+	for {
+		req := "{}"
+		if token != "" {
+			req = `{"nextToken":` + strconv.Quote(token) + `}`
+		}
+		st, body, err := d.ecrCall(region, "DescribeRepositories", req)
+		if err != nil {
+			return nil, nil, fmt.Errorf("ecr DescribeRepositories: %v", err)
+		}
+		if st != http.StatusOK {
+			return nil, nil, fmt.Errorf("ecr DescribeRepositories: HTTP %d: %s", st, ecsErr(body))
+		}
+		r.Repositories = nil
+		r.NextToken = ""
+		if err := json.Unmarshal(body, &r); err != nil {
+			return nil, nil, readBody("ecr DescribeRepositories", st)
+		}
+		repos = append(repos, r.Repositories...)
+		if r.NextToken == "" {
+			break
+		}
+		token = r.NextToken
 	}
+	r.Repositories = repos
 	var out []provider.Discovered
 	var diags []string
 	for _, repo := range r.Repositories {
@@ -825,7 +1024,7 @@ func (d *Driver) discoverECR(region string) ([]provider.Discovered, []string, er
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.registry.image",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

@@ -85,6 +85,7 @@ func BuildCreateRequest(project, environment, capability string,
 		"settings": settings,
 	}
 	ipConfig := map[string]any{}
+	haveRPO := false
 
 	// deterministic iteration
 	paths := make([]string, 0, len(attrs))
@@ -162,10 +163,10 @@ func BuildCreateRequest(project, environment, capability string,
 					"recovery.rpo beyond PITR bounds (transaction log " +
 						"retention is at most 7 days)")
 			}
-			settings["backupConfiguration"] = map[string]any{
-				"enabled":                    true,
-				"pointInTimeRecoveryEnabled": true,
-			}
+			// The backupConfiguration is assembled AFTER the loop: the PITR
+			// mechanism is engine-specific (see below) and databaseVersion may
+			// not be set yet.
+			haveRPO = true
 		case "encryption.atRest":
 			if raw != true {
 				// GCP encrypts at rest unconditionally; "unencrypted"
@@ -212,6 +213,26 @@ func BuildCreateRequest(project, environment, capability string,
 	}
 	if body["databaseVersion"] == nil {
 		return Request{}, fmt.Errorf("engine.protocol is required")
+	}
+
+	// recovery.rpo -> point-in-time recovery, but the MECHANISM is engine-specific
+	// and the two spellings are MUTUALLY EXCLUSIVE at the API (field 2026-08-08, D950):
+	// a MySQL instance rejects pointInTimeRecoveryEnabled ("Point-in-time recovery can
+	// only be enabled for Postgres and SQL Server instances", 400) — its PITR is
+	// binaryLogEnabled; a Postgres instance rejects binaryLogEnabled ("Binary log can
+	// only be enabled for MySQL instances", 400). The old body sent
+	// pointInTimeRecoveryEnabled for EVERY engine, so it was uncreatable for MySQL —
+	// the flagship engine (CLAUDE.md's first real-cloud run) — while the golden test
+	// only exercised Postgres and stayed green.
+	if haveRPO {
+		dv, _ := body["databaseVersion"].(string)
+		backup := map[string]any{"enabled": true}
+		if strings.HasPrefix(dv, "MYSQL_") {
+			backup["binaryLogEnabled"] = true
+		} else {
+			backup["pointInTimeRecoveryEnabled"] = true
+		}
+		settings["backupConfiguration"] = backup
 	}
 
 	// implementation block (D26): provider detail

@@ -7,6 +7,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func cwLogFilterAttrs() map[string]any {
@@ -138,4 +141,38 @@ func TestCreateObserveDeleteCWLogFilter(t *testing.T) {
 	if del := d.deleteCWLogFilter("errors", "prod", res.ProviderID); del.Status != "succeeded" {
 		t.Fatalf("delete: %+v", del)
 	}
+}
+
+// TestAdoptsExistingCWLogFilter enrols cwlogfilter in the D391 gate. PutMetricFilter is
+// an UPSERT keyed by (log group, filter name) and the providerId is deterministic, so a
+// re-run rewrites the filter in place — there is nothing to duplicate.
+func TestAdoptsExistingCWLogFilter(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		Name:           "aws/cwlogfilter",
+		Classify:       cwLogsTargetRole,
+		ExistingServer: func() *httptest.Server { return cwLogFilterServer(t) },
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.LogsBaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("cwlogfilter", "errors", "prod", cwLogFilterAttrs(), cwLogFilterImpl(), "errors", 1)
+		},
+		AllowedMutations: 1, // the upsert itself
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
+
+func cwLogsTargetRole(req *http.Request, _ []byte) certifynet.Role {
+	tgt := req.Header.Get("X-Amz-Target")
+	switch tgt[strings.LastIndex(tgt, ".")+1:] {
+	case "DescribeMetricFilters", "DescribeLogGroups", "ListTagsForResource":
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
 }

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,7 +32,7 @@ const (
 
 // closedOps is the whole operator set at v0.1. Growing it is a spec change with a
 // conformance case + a DESIGN entry (invariant #5) — never an ad-hoc addition.
-var closedOps = map[string]bool{"copy": true, "const": true, "quantity-int": true}
+var closedOps = map[string]bool{"copy": true, "const": true, "quantity-int": true, "resolve-ref": true}
 
 type Mapping struct {
 	Mapping    string             `yaml:"mapping"`
@@ -67,13 +68,30 @@ type resourceProfile struct {
 }
 
 // attrMap is one HUMAN-authored semantic binding.
+// refSpec (D551) declares a SECOND read: the mapped object names another object,
+// and the attribute's real value lives there. Flux's Kustomization carries
+// spec.sourceRef.name; the repo URL is on the GitRepository it names. Declaring the
+// hop keeps it in the mapping document (reviewable, fingerprintable) instead of
+// hiding it in Go, and keeps the closed-op discipline: one more NAMED op, not an
+// expression language (invariant #4).
+type refSpec struct {
+	Group     string `yaml:"group"`
+	Version   string `yaml:"version"`
+	Kind      string `yaml:"kind"`
+	Plural    string `yaml:"plural"`
+	Scope     string `yaml:"scope"`
+	Namespace string `yaml:"namespace"` // optional field path holding the referent's ns
+	Field     string `yaml:"field"`     // what to read FROM the referent
+}
+
 type attrMap struct {
-	Field      string `yaml:"field"`
-	Op         string `yaml:"op"`
-	Type       string `yaml:"type"`
-	Value      any    `yaml:"value"`
-	Derivation string `yaml:"derivation"`
-	Change     string `yaml:"change"`
+	Field      string   `yaml:"field"`
+	Ref        *refSpec `yaml:"ref"`
+	Op         string   `yaml:"op"`
+	Type       string   `yaml:"type"`
+	Value      any      `yaml:"value"`
+	Derivation string   `yaml:"derivation"`
+	Change     string   `yaml:"change"`
 }
 
 // loadMapping parses + validates a mapping document. It refuses an unknown algebra
@@ -99,10 +117,26 @@ func loadMapping(data []byte) (*Mapping, error) {
 	}
 	for path, a := range m.Attributes {
 		if !closedOps[a.Op] {
-			return nil, fmt.Errorf("attribute %s: op %q is not in the closed set (copy, const, quantity-int) — a richer op is a spec change, not an ad-hoc addition; conditional semantics belong in a NAMED LENS", path, a.Op)
+			return nil, fmt.Errorf("attribute %s: op %q is not in the closed set (copy, const, quantity-int, resolve-ref) — a richer op is a spec change, not an ad-hoc addition; conditional semantics belong in a NAMED LENS", path, a.Op)
 		}
 		if a.Op != "const" && a.Field == "" {
 			return nil, fmt.Errorf("attribute %s: op %s requires a field path", path, a.Op)
+		}
+		if a.Op == "resolve-ref" {
+			if a.Ref == nil {
+				return nil, fmt.Errorf("attribute %s: op resolve-ref requires a ref block "+
+					"naming the referent's group/version/kind/plural/scope and its field", path)
+			}
+			if a.Ref.Version == "" || a.Ref.Kind == "" || a.Ref.Plural == "" || a.Ref.Field == "" {
+				return nil, fmt.Errorf("attribute %s: ref requires version, kind, plural and field "+
+					"— a hop the document does not fully name cannot be reviewed or fingerprinted", path)
+			}
+			if a.Ref.Scope != "Namespaced" && a.Ref.Scope != "Cluster" {
+				return nil, fmt.Errorf("attribute %s: ref.scope %q must be Namespaced or Cluster", path, a.Ref.Scope)
+			}
+		} else if a.Ref != nil {
+			return nil, fmt.Errorf("attribute %s: op %s carries a ref block it will never read "+
+				"— a declaration nothing acts on is a false statement about the mapping", path, a.Op)
 		}
 		if a.Derivation == "" {
 			return nil, fmt.Errorf("attribute %s: derivation is required (measured | config-intent | ...)", path)
@@ -190,6 +224,26 @@ func (m *Mapping) buildProviderID(namespace, name string) string {
 // observeMapped is the generic reverse-map: GET the object, apply each attribute's
 // closed op. It reproduces a hand-coded observe exactly; the differential test pins
 // that. It emits no value it cannot resolve (never a fabricated fact).
+// redactURLUserinfo drops any user:pass@ from an observed URL value before it becomes an
+// observation. A URL's userinfo is a CREDENTIAL — an ArgoCD/Flux repoURL can carry an
+// inline git token (https://user:ghp_xxx@github.com/...) — and is never
+// capability-semantic. Observations are persisted to the ledger and republished by
+// export/console, and unlike a mutation Reason they are never scrubbed downstream, so the
+// strip happens here at the emit (D991). A non-string, a non-URL, or a URL with no
+// userinfo is returned unchanged (only strings that parse as a URL WITH userinfo change).
+func redactURLUserinfo(v any) any {
+	s, ok := v.(string)
+	if !ok {
+		return v
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.User == nil {
+		return v
+	}
+	u.User = nil
+	return u.String()
+}
+
 func (d *Driver) observeMapped(m *Mapping, providerID string) ([]provider.Observation, []string, error) {
 	ns, name, err := m.parseProviderID(providerID)
 	if err != nil {
@@ -206,7 +260,16 @@ func (d *Driver) observeMapped(m *Mapping, providerID string) ([]provider.Observ
 		return nil, nil, fmt.Errorf("%s.get: unreadable (transport or permission) — not an observation", m.Resource.Plural)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{m.Resource.Kind + " not found — nothing to observe"}, nil
+		// F-LC3: a BOUND resource the API server authoritatively 404s is GONE, and
+		// the provider contract reserves one way to say so. This used to return a
+		// bare diagnostic and NO observation — precisely what leaves a binding a
+		// no-op forever: converge re-observes, learns nothing, and reports the world
+		// as matching while the resource does not exist. Measured on a real cluster
+		// (D513): five governance objects deleted with kubectl, converge CONVERGED.
+		return []provider.Observation{
+				{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+			}, []string{m.Resource.Kind + " not found — bound resource is gone (will re-create)"},
+			nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("%s.get: HTTP %d", m.Resource.Plural, st)
@@ -215,7 +278,12 @@ func (d *Driver) observeMapped(m *Mapping, providerID string) ([]provider.Observ
 	if json.Unmarshal(body, &obj) != nil {
 		return nil, nil, fmt.Errorf("%s.get: unreadable", m.Resource.Plural)
 	}
-	var obs []provider.Observation
+	// Present: toggle the absence marker back OFF, so a stale "gone" reading from
+	// an earlier observe cannot linger after a re-create and plan a second one.
+	// The marker has to swing both ways or it is a one-way latch (F-LC3).
+	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
+	}
 	diags := append([]string(nil), driftDiags...)
 	// Lenses run FIRST (conditional semantics), then the closed ops — so a
 	// hand-coded twin that emits its conditional facts before its literals is
@@ -236,7 +304,18 @@ func (d *Driver) observeMapped(m *Mapping, providerID string) ([]provider.Observ
 				return nil, nil, err
 			}
 			if ok {
-				obs = append(obs, provider.Observation{Path: path, Value: v, Derivation: a.Derivation})
+				obs = append(obs, provider.Observation{Path: path, Value: redactURLUserinfo(v), Derivation: a.Derivation})
+			}
+		case "resolve-ref":
+			v, diag, err := d.resolveRefValue(m, obj, ns, a)
+			if err != nil {
+				return nil, nil, err
+			}
+			if diag != "" {
+				diags = append(diags, diag)
+			}
+			if v != nil {
+				obs = append(obs, provider.Observation{Path: path, Value: redactURLUserinfo(v), Derivation: a.Derivation})
 			}
 		case "quantity-int":
 			v, ok, err := mapping.ResolveField(obj, a.Field)

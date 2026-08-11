@@ -213,7 +213,11 @@ func (d *Driver) observeSCC(capability, providerID string) ([]provider.Observati
 		return nil, nil, er
 	}
 	if !ef {
-		return nil, []string{"SCC event-threat-detection not found — nothing to observe"}, nil
+		// F-LC3 (D521): a BOUND resource the API says is GONE. A diagnostic
+		// alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"SCC event-threat-detection not found — bound resource is gone (will re-create)"}, nil
 	}
 	container, cf, cr := d.getSCCService(scopeType, scopeID, sccModuleContainerThreat)
 	if cr != nil {
@@ -224,6 +228,8 @@ func (d *Driver) observeSCC(capability, providerID string) ([]provider.Observati
 		return nil, nil, vr
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: "global", Derivation: "measured"},
 		{Path: "detection.enabled", Value: event.EffectiveEnablementState == "ENABLED", Derivation: "measured"},
 		{Path: "protection.kubernetes", Value: cf && container.EffectiveEnablementState == "ENABLED", Derivation: "measured"},
@@ -326,12 +332,12 @@ func (d *Driver) discoverSCC(region string) ([]provider.Discovered, []string, er
 	if err != nil {
 		return nil, nil, fmt.Errorf("scc: %v", err)
 	}
-	if len(obs) == 0 {
+	if len(obs) == 0 || provider.IsAbsent(obs) {
 		return nil, diags, nil // SCC not provisioned — nothing to discover
 	}
 	return []provider.Discovered{{
 		ProviderID:   pid,
 		ResourceType: "capability.security.threatdetection",
-		Observations: obs,
+		Observations: provider.WithoutAbsence(obs),
 	}}, diags, nil
 }

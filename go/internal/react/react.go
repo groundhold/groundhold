@@ -13,6 +13,7 @@ package react
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -32,6 +33,14 @@ type Event struct {
 // fields — the payload's data never enters any document, so a forged or replayed
 // event can at worst trigger one paced, read-only re-list of an already-paired
 // scope.
+// ErrNothingToReactTo marks a WELL-FORMED frame that carries no resource coordinate
+// — a watch BOOKMARK or ERROR. D591: these used to return the same error as a
+// document nothing could parse, so a stream consumer routing on the outcome could not
+// tell "a routine frame, nothing to do" from "I could not understand this event and
+// dropped it". The second means the real-time path is losing changes, which is the
+// failure react exists to prevent; they must not read alike.
+var ErrNothingToReactTo = errors.New("frame carries no resource coordinate")
+
 func ParseEvent(raw []byte) (Event, error) {
 	var e Event
 	if json.Unmarshal(raw, &e) == nil && e.Kind == "groundhold/test-event/v0" {
@@ -76,6 +85,14 @@ func ParseEvent(raw []byte) (Event, error) {
 			Scope:    wk.Object.Metadata.Namespace,
 			Hint:     wk.Type + " " + wk.Object.Kind + "/" + wk.Object.Metadata.Name,
 		}, nil
+	}
+	// A watch frame we DO recognise as watch-shaped, carrying no resource to re-list
+	// (BOOKMARK, ERROR), is nothing to react to — not a parse failure (D591).
+	// Only the frame types that carry no resource BY DEFINITION are benign. An
+	// ADDED/MODIFIED/DELETED without an object is malformed, not routine, and calling
+	// it benign would drop a real change as if it were a bookmark.
+	if wk.Type == "BOOKMARK" || wk.Type == "ERROR" {
+		return Event{}, fmt.Errorf("%w: watch %s frame", ErrNothingToReactTo, wk.Type)
 	}
 	return Event{}, fmt.Errorf("unrecognised event envelope (expected groundhold/test-event/v0, an AWS EventBridge event, or a Kubernetes watch event)")
 }

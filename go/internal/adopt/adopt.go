@@ -59,8 +59,13 @@ func Run(c *contract.Contract, cand *contract.Candidate,
 	report *verify.Report, mapping map[string]string,
 	prov provider.Provider, led *ledger.Ledger, ledgerPath, at,
 	discoveryHash string) (*Result, int) {
+	// D619: the exit comes from the code, not from a literal repeated at every
+	// refusal. This helper hardcoded 2 for every code, so `adopt` emitted
+	// structural-error at 2 while the published table says 1 and `apply` said 3 —
+	// one code, three exits, and no caller able to branch on either.
 	refuse := func(code perr.Code, reasons ...string) (*Result, int) {
-		return &Result{Status: "refused", Code: code, Reasons: reasons}, 2
+		return &Result{Status: "refused", Code: code, Reasons: reasons},
+			perr.ExitFor(code)
 	}
 	if !report.Executable {
 		return refuse(perr.NotExecutable,
@@ -163,6 +168,20 @@ func Run(c *contract.Contract, cand *contract.Candidate,
 			byPath[o.Path] = o.Value
 		}
 		observations[capID] = byPath
+		// D957: an authoritatively ABSENT resource (the driver 404s and emits the
+		// resource.absent marker with a nil error, the D521 pattern) is the STRONGEST
+		// "cannot confirm" — there is nothing at this providerId to take over. Without this
+		// gate every declared attribute misses byPath and lands in the "declared intent"
+		// bucket below, no reasons accumulate, and adopt reports "adopted" for a phantom —
+		// the next converge would then silently CREATE the resource, not take one over. The
+		// more complete the failure, the firmer the refusal (a single attribute mismatch
+		// already refuses below). Mirrors the discovery sweeps that gate on provider.IsAbsent.
+		if provider.IsAbsent(obs) {
+			reasons = append(reasons, fmt.Sprintf(
+				"%s: no resource exists at the candidate's providerId — there is nothing to "+
+					"adopt (a converge would create it, not take it over)", capID))
+			continue
+		}
 		for path, pv := range cand.Capabilities[capID] {
 			if pv.Scalar == nil {
 				continue
@@ -304,18 +323,39 @@ func Run(c *contract.Contract, cand *contract.Candidate,
 	// fresh replay that has the new bindings folded — the original `led`
 	// still lacks them, so its BoundServices() would hand observe an empty
 	// service and a real driver refuses (no default).
-	if _, err := observe.Run(res.Bindings, prov, at, 0, w.Led,
-		ledgerPath, true); err != nil {
+	obsRes, err := observe.Run(res.Bindings, prov, at, 0, w.Led, ledgerPath, true)
+	if err != nil {
 		return refuse(perr.LedgerCorrupted, "bindings written but observation recording "+
 			"failed: "+err.Error())
 	}
 	res.Events = append(res.Events, "observation.recorded")
+	// D556: the driver's own account of what it could NOT read. D555 tells the
+	// operator an attribute went unconfirmed; this tells them why, which is the
+	// difference between knowing something is unverified and knowing what to fix
+	// ("billing export is not enabled", "the referenced GitRepository does not
+	// exist"). It was returned here all along and dropped into `_`.
+	res.Notes = append(res.Notes, obsRes.Diagnostics...)
 
 	// F-LC3 part 3: record the NON-OBSERVABLE declared attributes as
 	// declared-intent — one observation.recorded per capability, provenance
 	// preserved (basis), source DeclaredIntentSource so the audit lattice and the
 	// compiler treat it as intent, never measured reality.
 	if len(intents) > 0 {
+		// D555: say what was NOT confirmed. The ledger already carries the honest
+		// provenance (DeclaredIntentSource / the candidate's own basis), but the
+		// human-facing result said only "adopted" — so a capability confirmed
+		// against reality and one taken on faith read identically, and the quiet
+		// one is the one worth knowing about. Measured on a live cluster: the same
+		// adoption REFUSED `adoption-mismatch` while the attribute was readable and
+		// succeeded in silence once it was not. This is the Notes channel D322
+		// opened, applied to the case it did not cover.
+		for _, ia := range intents {
+			res.Notes = append(res.Notes, fmt.Sprintf(
+				"%s.%s: recorded as declared intent (%s) — the provider emitted no value "+
+					"for it, so this declaration was NOT confirmed against reality",
+				ia.cap, ia.path, ia.basis))
+		}
+		sort.Strings(res.Notes)
 		byCap := map[string][]intentAttr{}
 		capOrder := make([]string, 0)
 		for _, ia := range intents {
@@ -405,8 +445,13 @@ func targetOf(cand *contract.Candidate, prov provider.Provider,
 // resource can be re-adopted.
 func Unadopt(capability string, led *ledger.Ledger, ledgerPath,
 	environment, at string) (*Result, int) {
+	// D619: the exit comes from the code, not from a literal repeated at every
+	// refusal. This helper hardcoded 2 for every code, so `adopt` emitted
+	// structural-error at 2 while the published table says 1 and `apply` said 3 —
+	// one code, three exits, and no caller able to branch on either.
 	refuse := func(code perr.Code, reasons ...string) (*Result, int) {
-		return &Result{Status: "refused", Code: code, Reasons: reasons}, 2
+		return &Result{Status: "refused", Code: code, Reasons: reasons},
+			perr.ExitFor(code)
 	}
 	bound := led.BoundProviderIDs()
 	pid := bound[capability]
@@ -419,10 +464,16 @@ func Unadopt(capability string, led *ledger.Ledger, ledgerPath,
 	// the binding would make the ledger forget a live, groundhold-owned resource
 	// (a future discover then sees it as a shadow). Retire/delete it instead.
 	if !led.AdoptedCapabilities()[capability] {
+		// D730: this said "retire or delete a created resource" and there is no
+		// `retire` verb — the refusal routed a reader (and an agent) at nothing, while
+		// the thing that works went unnamed. Teaching the next action IS the job of a
+		// refusal here; naming a door that does not exist is worse than naming none.
 		return refuse(perr.BindingConflict, fmt.Sprintf(
 			"%s: bound to %s but NOT adopted (groundhold created it) — unadopt "+
-				"reverses an adoption; retire or delete a created resource, "+
-				"never abandon it", capability, pid))
+				"reverses an adoption. To withdraw a resource groundhold created, set "+
+				"state: retired on the capability in the contract and re-plan; that "+
+				"compiles a pinned delete. Removing the capability from the contract "+
+				"does not delete anything, deliberately", capability, pid))
 	}
 	// F5 (D192): mirror adopt's D29 gate — releasing a binding with an
 	// operation still in flight orphans its receipt (nothing left to resume
@@ -444,6 +495,22 @@ func Unadopt(capability string, led *ledger.Ledger, ledgerPath,
 	runID := hex.EncodeToString(seed[:])[:12]
 	res := &Result{Status: "unadopted", RunID: runID,
 		Bindings: map[string]string{}, Events: []string{}}
+	// D573: "removes the binding, never the resource" is true and reads as leaving
+	// no trace. If the resource was CLAIMED, one stays — the ownership marker — and
+	// the operator meets it a verb later, not now. Measured on a live cluster: after
+	// unadopt, the next converge planned a create and the driver refused with "a
+	// Role already exists at this name and its labels are not ours". That refusal is
+	// correct (ownership is per CAPABILITY, D462) and nothing connected it to this
+	// run. Only for a CLAIMED capability: warning about a marker groundhold never
+	// wrote would be the same kind of false statement (D555).
+	if led.ClaimedCapabilities()[capability] {
+		res.Notes = append(res.Notes, fmt.Sprintf(
+			"%s: the binding is gone but the ownership marker groundhold stamped on %s "+
+				"STAYS — the resource is untouched by design. A later create at that "+
+				"name refuses (\"labels are not ours\") because ownership is recorded "+
+				"per capability; re-adopt it instead, or clear the marker yourself.",
+			capability, pid))
+	}
 	w := &ledger.Writer{Path: ledgerPath, Led: led, Env: environment,
 		Clock: clock, Actor: "groundhold-adopt", Events: &res.Events}
 	caps := []string{capability}

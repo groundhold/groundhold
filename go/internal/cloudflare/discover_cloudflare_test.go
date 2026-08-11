@@ -10,6 +10,18 @@ import (
 	"groundhold/internal/provider"
 )
 
+// dnsOnly keeps just the DNS records from a discovery result, so the DNS-focused tests
+// count DNS behaviour independent of the per-zone capability.security.waf added in D874.
+func dnsOnly(in []provider.Discovered) []provider.Discovered {
+	var out []provider.Discovered
+	for _, f := range in {
+		if f.ResourceType == "capability.dns.record" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 func testDriver(t *testing.T, srv *httptest.Server) *Driver {
 	t.Helper()
 	return &Driver{
@@ -72,6 +84,7 @@ func TestListDiscoversDNSRecords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	found = dnsOnly(found)
 	if len(diags) != 0 {
 		t.Fatalf("unexpected diags: %v", diags)
 	}
@@ -141,6 +154,7 @@ func TestListRegionFiltersByZoneName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	found = dnsOnly(found)
 	if len(found) != 2 {
 		t.Fatalf("matching zone filter must discover both records, got %d", len(found))
 	}
@@ -222,6 +236,7 @@ func TestListZoneRecordFailureIsDiagnostic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	found = dnsOnly(found)
 	if len(found) != 1 || found[0].ProviderID != "dns:zoneOK:r1" {
 		t.Fatalf("the healthy zone's record must still be discovered, got %+v", found)
 	}
@@ -269,6 +284,7 @@ func TestListFollowsPagination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	found = dnsOnly(found)
 	if len(found) != 2 {
 		t.Fatalf("want two records across two pages, got %d: %+v", len(found), found)
 	}

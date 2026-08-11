@@ -349,12 +349,31 @@ func (d *Driver) observeS3(capability, providerID string) ([]provider.Observatio
 	if err != nil {
 		return nil, nil, err
 	}
+	// F-LC3 (D520): does the bucket EXIST? This read never asked. It went straight
+	// to emitting region/managed/encryption/durability — four facts derived from the
+	// providerId string and a constant, two of them marked "measured" — so a DELETED
+	// bucket observed as a healthy one and converge agreed with it. That is worse
+	// than the silence D513 found: silence plans nothing, this fabricates a world.
+	if st, _, err := d.s3Do("HEAD", region, bucket, "", ""); err == nil && st == http.StatusNotFound {
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"bucket not found — bound resource is gone (will re-create)"}, nil
+	}
 	var obs []provider.Observation
 	var diags []string
 	obs = append(obs,
+		// Present (or unreadable — an error is never an absence): clear the marker.
+		provider.Observation{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		provider.Observation{Path: "location.region", Value: region, Derivation: "measured"},
 		provider.Observation{Path: "service.managed", Value: true, Derivation: "measured"},
-		provider.Observation{Path: "encryption.atRest", Value: true, Derivation: "config-intent"}, // S3 always encrypts
+		// encryption.atRest is emitted BELOW, from the GetBucketEncryption read this
+		// observer already makes (D729). It used to be asserted here unconditionally as
+		// config-intent — true, because S3 encrypts every object, but a statement about
+		// the SERVICE rather than a reading of this bucket. After D722 that meant a
+		// hard constraint asking for provider-api evidence on the three buckets that
+		// actually hold data could never be satisfied, while the same attribute was
+		// MEASURED for queues, topics and secrets. A field report named that spread as
+		// the worst possible one, and it was: the call was already being made.
 		// F16-C: an S3 bucket is regional (multi-AZ) by construction — single-zone is
 		// refused at create. Emitting it lets a bound-bucket reconcile confirm the
 		// declared durability instead of refusing "durability.class: no observation".
@@ -460,20 +479,52 @@ func (d *Driver) observeS3(capability, providerID string) ([]provider.Observatio
 		} else {
 			cmek := false
 			for _, r := range enc.Rules {
-				if r.ByDefault.SSEAlgorithm == "aws:kms" && r.ByDefault.KMSMasterKeyID != "" {
+				// D985: a key id is not enough — the AWS-managed `aws/s3` key also
+				// answers SSEAlgorithm=aws:kms with a key id, and it is NOT a customer
+				// key. Exclude the managed alias, as every other AWS driver does
+				// (isAWSManagedKMSKey), so an aws/s3-encrypted bucket does not report a
+				// BYOK control it does not have.
+				if r.ByDefault.SSEAlgorithm == "aws:kms" && r.ByDefault.KMSMasterKeyID != "" &&
+					!isAWSManagedKMSKey(r.ByDefault.KMSMasterKeyID, "s3") {
 					cmek = true
 					break
 				}
 			}
-			if cmek {
-				obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+			// The encryption config was read as part of this GET; whether a customer
+			// key is in force is a MEASURED fact either way. Emit it unconditionally —
+			// staying silent on cmek==false is a false-clean (D1003): a contract
+			// demanding customerManagedKeys:true would pass VACUOUSLY over an
+			// SSE-S3 / aws-managed-key bucket with nothing to contradict it.
+			obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+				Value: cmek, Derivation: "measured"})
+			// D729: a default-encryption rule IS this bucket's own configuration, read
+			// from the provider. Same call, same response, one more fact.
+			if len(enc.Rules) > 0 {
+				obs = append(obs, provider.Observation{Path: "encryption.atRest",
 					Value: true, Derivation: "measured"})
+			} else {
+				obs = append(obs, provider.Observation{Path: "encryption.atRest",
+					Value: true, Derivation: "platform-invariant"})
+				diags = append(diags, "encryption.atRest is config-intent: this bucket has "+
+					"no default-encryption rule, so the value rests on S3 encrypting every "+
+					"object as a platform guarantee rather than on anything read here")
 			}
 		}
 	} else if err == nil && (st == http.StatusNotFound || awsErrCode(body) == "ServerSideEncryptionConfigurationNotFoundError") {
-		// no explicit default encryption — SSE-S3 baseline, not a CMEK; absent
+		// no explicit default encryption — SSE-S3 baseline, not a CMEK. This is a
+		// definitive read (the API said the config does not exist), so cmek is a
+		// MEASURED false, not an absence (D1003) — a customerManagedKeys:true
+		// contract must be contradicted, never pass vacuously.
+		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+			Value: false, Derivation: "measured"})
+		// D729: the platform guarantee still holds, and it is not a reading.
+		obs = append(obs, provider.Observation{Path: "encryption.atRest",
+			Value: true, Derivation: "platform-invariant"})
 	} else {
 		diags = append(diags, "encryption.customerManagedKeys not observed: "+s3ReadWhy("GetBucketEncryption", st, body, err))
+		// The read failed, so nothing about encryption was witnessed. Withhold rather
+		// than assert the platform guarantee as though it had been measured (D729).
+		diags = append(diags, "encryption.atRest not observed: "+s3ReadWhy("GetBucketEncryption", st, body, err))
 	}
 	// replication (CRR): GetBucketReplication reverse-maps replication.enabled; a
 	// 404 / ReplicationConfigurationNotFoundError is a definitive "no replica".
@@ -579,7 +630,15 @@ func classifyS3Change(path string, desired any, impl map[string]any) (string, st
 	case "location.region":
 		return "immutable", "an S3 bucket's region is fixed at creation — a change is a replacement"
 	case "durability.class":
-		return "immutable", "durability class is fixed at bucket creation — a change is a replacement"
+		// D833: a general-purpose S3 bucket is regional, always — observe emits exactly
+		// that constant, and the builder's own refusal for "single-zone" explains why. So a
+		// replacement reaches the SAME durability class the original had: the contract is
+		// still unsatisfied and every object in the bucket is gone. That is the D823
+		// contradiction on the resource where it costs most.
+		return "unsupported", "a general-purpose S3 bucket is regional (multi-AZ) by " +
+			"construction — no other durability class can be honored, and replacing the " +
+			"bucket would produce another regional one (=single-zone and =multi-regional " +
+			"cannot be honored)"
 	case "versioning.enabled":
 		return "mutable", ""
 	case "retention.maximum":
@@ -596,16 +655,25 @@ func classifyS3Change(path string, desired any, impl map[string]any) (string, st
 		return "mutable", ""
 	case "encryption.atRest":
 		return "unsupported", "S3 always encrypts objects at rest (SSE-S3 baseline) — nothing to patch"
-	case "retention.minimum", "retention.locked":
-		// S3 Object Lock enablement is create-time-only (the CreateBucket header)
-		// and irreversible. The DefaultRetention days CAN be re-PUT on an already-
-		// object-locked bucket, but enabling/disabling WORM cannot — and a COMPLIANCE
-		// bucket forbids SHORTENING the floor even by the account root. Rather than a
-		// mutable-without-a-safe-updater gap (the aurora/budgets trap), WORM is
-		// treated as a foundation: a change is a replacement of the stateful bucket
-		// (consented via allow_replace_stateful), never a silent in-place patch.
+	case "retention.locked":
+		// S3 Object Lock enablement is create-time-only (the CreateBucket header) and
+		// irreversible, so this one is a genuine impossibility.
 		return "immutable", "S3 Object Lock (WORM) is enabled at bucket birth and " +
-			"irreversible (a COMPLIANCE floor cannot even be shortened) — a change is a replacement"
+			"irreversible — turning it off is a replacement"
+	case "retention.minimum":
+		// D824: this shared a case with retention.locked, and the comment above it already
+		// said the quiet part — "The DefaultRetention days CAN be re-PUT on an already-
+		// object-locked bucket". D821 read that as a deliberate policy choice and left it;
+		// D822 settled that the test is not whether the prose is honest but what the verdict
+		// makes the tool DO, and this one destroys a bucket and every object in it to
+		// lengthen a retention floor that PutObjectLockConfiguration re-PUTs. A COMPLIANCE
+		// floor still cannot be SHORTENED — which is a reason to refuse that direction, not
+		// a reason to delete the data.
+		return "unsupported", "in-place retention-floor change is not wired for S3 in this " +
+			"slice — AWS does support raising it (PutObjectLockConfiguration re-PUTs the " +
+			"DefaultRetention on an object-locked bucket; a COMPLIANCE floor cannot be " +
+			"shortened), so this is a gap in groundhold rather than a reason to replace the " +
+			"bucket and its objects"
 	case "service.managed":
 		return "unsupported", "platform/projection property — nothing to patch"
 	default:
@@ -832,6 +900,16 @@ func (d *Driver) deleteS3(capability, environment, providerID string) provider.C
 		return provider.CreateResult{Status: "failed",
 			Reason: "bucket tags do not match — refusing to delete a resource that is not ours"}
 	}
+	// D469 — the compliance hold, refused UP FRONT. The GCS twin has always read
+	// retentionPolicy.isLocked and refused before trying; S3 went straight to the
+	// DELETE and translated whatever came back, so the same situation reached the
+	// operator as "bucket is not empty" or a raw HTTP error. AWS would have refused
+	// too — this is not about damage, it is about which sentence the operator reads,
+	// and about D47's rule that protection is never auto-lifted being applied on one
+	// cloud and not its twin.
+	if r := d.refuseIfObjectLockCompliance(region, bucket); r != nil {
+		return *r
+	}
 	st, dbody, err := d.s3Do("DELETE", region, bucket, "/", "")
 	if err != nil {
 		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
@@ -859,4 +937,47 @@ func (d *Driver) deleteS3(capability, environment, providerID string) provider.C
 			Reason: fmt.Sprintf("delete: HTTP %d (%s)", st, awsErrCode(dbody))}
 	}
 	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+}
+
+// refuseIfObjectLockCompliance mirrors the GCS lock check (gcs_net.go): a bucket whose
+// Object Lock default retention is in COMPLIANCE mode is under a WORM hold nothing lifts,
+// including us. GOVERNANCE is deliberately NOT a refusal — it is bypassable by design and
+// observe already reverse-maps it to retention.locked=false, so refusing on it would
+// claim a hold that is not there.
+//
+// An unreadable or unparseable configuration is `unknown`, never "not locked": reading a
+// zero value out of a garbled body and deleting on it is the same ambiguity the GCS twin
+// refuses, and this is the verb where being wrong is not recoverable.
+func (d *Driver) refuseIfObjectLockCompliance(region, bucket string) *provider.CreateResult {
+	st, body, err := d.s3Do("GET", region, bucket, "/?object-lock", "")
+	switch {
+	case err != nil:
+		return &provider.CreateResult{Status: "unknown",
+			Reason: "pre-delete object-lock read gave no answer — refusing an ambiguous " +
+				"delete: " + err.Error()}
+	case st == http.StatusNotFound || awsErrCode(body) == "ObjectLockConfigurationNotFoundError":
+		return nil // not object-lock-enabled — nothing to hold the delete
+	case st != http.StatusOK:
+		return &provider.CreateResult{Status: "unknown",
+			Reason: fmt.Sprintf("pre-delete object-lock read: HTTP %d (%s) — refusing an "+
+				"ambiguous delete", st, awsErrCode(body))}
+	}
+	var olc struct {
+		Enabled string `xml:"ObjectLockEnabled"`
+		Rule    struct {
+			DefaultRetention struct {
+				Mode string `xml:"Mode"`
+			} `xml:"DefaultRetention"`
+		} `xml:"Rule"`
+	}
+	if xml.Unmarshal(body, &olc) != nil {
+		return &provider.CreateResult{Status: "unknown",
+			Reason: "pre-delete object-lock read unparseable — refusing an ambiguous delete"}
+	}
+	if olc.Enabled == "Enabled" && olc.Rule.DefaultRetention.Mode == "COMPLIANCE" {
+		return &provider.CreateResult{Status: "failed",
+			Reason: "bucket Object Lock is in COMPLIANCE mode — deletion is blocked by a " +
+				"compliance hold, never auto-lifted"}
+	}
+	return nil
 }

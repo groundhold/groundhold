@@ -31,10 +31,24 @@ attributes:
       Asset feed, a storage queue for Event Grid). The feed's core semantic:
       WHERE the changes go, so `react` (or any consumer) can pull them and act.
       A feed with no reachable target captures nothing anyone can use.
+    # D539: derived by reading each driver's observe, not from memory.
+    mappings:
+      aws.changefeed: >
+        the EventBridge rule's first target ARN (ListTargetsByRule targets[0].Arn)
+      azure.changefeed: >
+        the Event Grid subscription's StorageQueue destination, composed from
+        properties.destination.properties.resourceId + queueName. A destination of
+        any OTHER endpointType is NOT this attribute and the driver says so rather
+        than inventing a target string
+      gcp.assetfeed: the Cloud Asset feed's `topic` (a Pub/Sub topic name)
 
   service.managed:
     kind: bool
     description: A managed cloud change feed vs a self-operated log tailer.
+    mappings:
+      aws.changefeed: const true — a rule groundhold authored
+      azure.changefeed: const true
+      gcp.assetfeed: const true
 
 # Deliberately absent in v0.1 (add only when a real contract needs them):
 #   - feed.coverage / event-pattern filters (which resource types or API calls

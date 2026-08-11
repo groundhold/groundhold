@@ -18,6 +18,15 @@ func gapBServer(t *testing.T, rec *capture) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			// D765: a CLOUDFRONT-scope WebACL protects something only if a distribution
+			// names it; this fake's ACL is associated, so discovery sees a firewall that
+			// actually guards its edge.
+			if r.Method == "GET" && strings.Contains(r.URL.Path, "/distribution") {
+				_, _ = w.Write([]byte(`<DistributionList><Items><DistributionSummary>` +
+					`<Id>E1</Id><WebACLId>arn:aws:wafv2:us-east-1:000000000000:global/webacl/cf-waf/id-123` +
+					`</WebACLId></DistributionSummary></Items></DistributionList>`))
+				return
+			}
 			path := r.URL.Path
 			target := r.Header.Get("X-Amz-Target")
 			var body string
@@ -59,7 +68,7 @@ func gapBServer(t *testing.T, rec *capture) *httptest.Server {
 					`"EncryptionInfo":{"EncryptionInTransit":{"ClientBroker":"TLS"},"EncryptionAtRest":{"DataVolumeKMSKeyId":""}}}}]}`))
 
 			// ---- OpenSearch (REST-JSON) ----
-			case r.Method == http.MethodGet && path == openSearchPath+"/domain":
+			case r.Method == http.MethodGet && path == openSearchAccountPath+"/domain":
 				_, _ = w.Write([]byte(`{"DomainNames":[{"DomainName":"logs","EngineType":"OpenSearch"}]}`))
 			case r.Method == http.MethodGet && strings.HasPrefix(path, openSearchPath+"/domain/"):
 				_, _ = w.Write([]byte(`{"DomainStatus":{"DomainName":"logs",` +
@@ -118,6 +127,7 @@ func gapBDriver(t *testing.T, srv *httptest.Server) *Driver {
 	d.Route53BaseURL = srv.URL
 	d.EC2BaseURL = srv.URL
 	d.WAFBaseURL = srv.URL
+	d.CloudFrontBaseURL = srv.URL // D765: associations live on the distribution
 	return d
 }
 

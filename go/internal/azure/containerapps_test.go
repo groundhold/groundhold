@@ -128,3 +128,49 @@ func TestDeleteContainerAppForeignRefused(t *testing.T) {
 		t.Fatalf("foreign app must refuse delete, got %+v", res)
 	}
 }
+
+// D940: the same dead-code guard left the managed environment orphaned — a succeeded
+// container-app delete must fall through to delete its driver-created environment.
+func TestDeleteContainerAppReclaimsManagedEnvironment(t *testing.T) {
+	var deletes []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case "PUT":
+			w.WriteHeader(201)
+			_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded"}}`))
+		case "GET":
+			_, _ = w.Write([]byte(`{"location":"eastus",` +
+				`"tags":{"groundhold-capability":"api","groundhold-environment":"prod"},` +
+				`"properties":{"provisioningState":"Succeeded",` +
+				`"configuration":{"ingress":{"external":true,"allowInsecure":false}},` +
+				`"template":{"scale":{"minReplicas":2}}}}`))
+		case "DELETE":
+			deletes = append(deletes, r.URL.Path)
+			w.WriteHeader(200)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	d := vnetTestDriver(t, srv)
+
+	res := d.createContainerApp("prod", "api", acaAttrs(), acaImpl(), 1)
+	if res.Status != "succeeded" || res.ProviderID == "" {
+		t.Fatalf("create: %+v", res)
+	}
+	if del := d.deleteContainerApp("api", "prod", res.ProviderID); del.Status != "succeeded" {
+		t.Fatalf("delete: %+v", del)
+	}
+	sawApp, sawEnv := false, false
+	for _, p := range deletes {
+		if strings.Contains(p, "/containerApps/") {
+			sawApp = true
+		}
+		if strings.Contains(p, "/managedEnvironments/") {
+			sawEnv = true
+		}
+	}
+	if !sawApp || !sawEnv {
+		t.Errorf("D940: managed-environment cleanup unreached — app=%v env=%v deletes=%v", sawApp, sawEnv, deletes)
+	}
+}

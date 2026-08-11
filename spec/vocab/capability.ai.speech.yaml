@@ -39,7 +39,12 @@
 
 capability: capability.ai.speech
 version: 0.1
-stateful: false
+stateful: true   # D836. One bit for a type three clouds realise differently. An Azure
+                 # AI Speech ACCOUNT holds what retention.maximum measures — the audio and
+                 # transcripts this vocabulary exists to bound — so deleting one destroys
+                 # personal data. A GCP recognizer is closer to configuration, and AWS has
+                 # no resource at all; the flag cannot say that, and the honest reading of a
+                 # single bit is the cloud where a delete costs the most.
 
 attributes:
 

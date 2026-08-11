@@ -86,7 +86,11 @@ func (d *Driver) observeContainerAppsJob(capability, providerID string) ([]provi
 		return nil, nil, fmt.Errorf("jobs.get: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"container apps job not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"container apps job not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("jobs.get: HTTP %d", st)
@@ -95,7 +99,9 @@ func (d *Driver) observeContainerAppsJob(capability, providerID string) ([]provi
 	if json.Unmarshal(resp, &doc) != nil {
 		return nil, nil, &armReadError{Op: "jobs.get", Cause: "body", Status: st}
 	}
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
 	if doc.Location != "" {
@@ -138,21 +144,8 @@ func (d *Driver) deleteContainerAppsJob(capability, environment, providerID stri
 		return provider.CreateResult{Status: "failed",
 			Reason: "job tags do not match — refusing to delete a resource that is not ours"}
 	}
-	dst, dresp, de := d.doARM("DELETE", url, nil)
-	if de != nil {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("delete outcome unknown: %v", de)}
-	}
-	if dst == http.StatusNotFound {
-		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
-	}
-	if dst >= 500 {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("delete HTTP %d (server error) — reconcile", dst)}
-	}
-	if dst < 200 || dst >= 300 {
-		if r := provider.MutationResult(dst, azErrCode(dresp), nil, providerID, "delete"); r != nil {
-			return *r
-		}
-		return provider.CreateResult{ProviderID: providerID, Status: "failed", Reason: fmt.Sprintf("delete HTTP %d: %s", dst, mutDetailAz(dresp))}
-	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// D984: route the delete through deleteAndConfirm (D971) — a Container Apps job
+	// DELETE returns 202 Accepted (async); concluding succeeded here tombstoned a
+	// billable job still live. The helper polls to a confirmed 404, unknown on timeout.
+	return *d.deleteAndConfirm(url, providerID, "container apps job")
 }

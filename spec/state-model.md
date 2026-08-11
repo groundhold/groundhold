@@ -170,6 +170,43 @@ mutation without a coordinator. Mutation events (`apply.*`,
 currently active lease for every affected capability; the backend rejects
 stale tokens — a paused-and-resumed worker cannot write history.
 
+### Mutation type registry (closed set — D599)
+
+```
+apply.started    apply.finished    apply.failed    binding.updated
+```
+
+Every other type in the event registry is NON-mutating: it takes no lease and is
+appended with no fencing token. `ownership.claimed` is an authorship stamp (§1),
+the four `converge.*` markers are run-scoped lifecycle (D229), the `lease.*`
+family is coordination with its own rules, and observations, violations and
+receipts are knowledge. A mutating type left out of this set would be appended
+with no lease and no token — a silent fail-open in D29 — so both implementations
+publish the split as an explicit PAIR of sets that must cover the event registry
+exactly, and a gate compares all three artefacts.
+
+Agreeing on the event-type registry is not sufficient and D338 was not the end of
+it: D599 found the two implementations holding the same 21 types and disagreeing
+about whether `ownership.claimed` is one of these four.
+
+**One mutation, one lease (D633).** A fencing token is a per-capability counter, so
+two leases over disjoint capability sets can carry the same number. A mutation must
+therefore be covered by a SINGLE lease: every affected capability must be under the
+same lease, not merely under some lease whose token happens to match. Without that, a
+holder of `{a, b}` could write into `{b, c}` the moment an unrelated worker acquired
+`{c}` and was handed the same token. Lease identity is a fold-time fact — recomputed on
+every replay, never carried on the wire — so this changes no token arithmetic and no
+existing document.
+
+**Leases are cooperative, not authorising.** Actor identity is self-asserted (see
+SECURITY.md), and no lease verb consults it: any writer inside the trust boundary can
+renew, release or break any lease. The fence defends against STALENESS — a
+paused-and-resumed worker cannot write history — never against impersonation. What
+those interferences can do is bounded in the safe direction: a foreign renewal or
+release can only DENY (the holder's next mutation refuses as stale); none of them lets
+a writer append under another's fence. The real boundaries are the write path itself
+and event signatures (§8).
+
 **Breaking a lease requires reconciliation**: every `operation.receipt`
 recorded under the lease must reach a terminal status (or be explicitly
 adopted by the breaker) before `lease.broken` is accepted. Cloud
@@ -215,7 +252,7 @@ capability: orders-db
 path: network.publicExposure
 value: false
 source: provider-api        # provider-api | probe | manual
-derivation: measured        # config-intent | measured (D44) — evidence
+derivation: measured        # config-intent | measured | platform-invariant (D44/D759)
                             # quality, mirroring candidate provenance (D5)
 observedAt: "2026-07-11T09:00:00Z"
 ttlSeconds: 3600
@@ -401,9 +438,12 @@ verified prefix plus an audit index into archived history.
 - The snapshot document carries every projection the replay
   reconstructs, the chain position (`baseEvents`, `baseHead`), the
   ledger identity (D134), the content hash of the file it archived
-  (`archive.sha256` — a swapped or truncated archive is detectable,
-  not deniable) and `previousSnapshotHash` (audit reconstruction
-  follows hashes, never filenames). With `--sign-key` armed it carries
+  (`archive.sha256`) and `previousSnapshotHash` (audit reconstruction
+  follows hashes, never filenames). `attest` reports whether the
+  archive still matches that hash, `repair` turns a mismatch into a
+  verdict and `export` refuses to stream from it (D646); the snapshot
+  does not get to nominate WHICH file satisfies its own hash — only
+  the directory may differ. With `--sign-key` armed it carries
   a detached signature (domain `groundhold/snapshot/v1`, message binds
   the ledger identity); under `--trust` an unsigned snapshot REFUSES —
   otherwise compaction would be a signature-stripping laundry.
@@ -417,6 +457,18 @@ verified prefix plus an audit index into archived history.
 - Capsules refuse for capabilities whose chain begins in the archive
   (a capsule is the subchain from genesis) — emit from the archive
   file instead.
+- What a snapshot family proves without a key is CONSISTENT, not
+  AUTHENTIC (D646). The sidecar, the archive and the tail are checked
+  against each other, which catches truncation, bit rot, a partial
+  copy and single-field tampering — every one of those leaves the
+  family disagreeing with itself. It does not catch an attacker with
+  write access to the directory: they can re-fold, recompute the
+  chain and rewrite every co-located hash, because all of those
+  documents are theirs to author. Authenticity needs a witness the
+  attacker does not hold — an anchor copied OFF-HOST (which also arms
+  trust, D135) or `--sign-key`/`--trust`. State this to operators
+  plainly rather than implying the sidecar defends itself.
+
 - Crash recovery: the snapshot activates BEFORE the file moves, so the
   one interruptible window fails LOUD on the next replay (chain
   mismatch naming the pending archive step) — never a silently-empty

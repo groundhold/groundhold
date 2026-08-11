@@ -4,8 +4,10 @@
 # proof the GitOps witness is vendor-agnostic — Flux and ArgoCD are peers, neither
 # privileged, and a third controller (Fleet, Jenkins X) is just another mapping.
 # Flux is condition-based: the lens reads status.conditions (Ready/Reconciling) and
-# projects them onto the neutral sync/health enums. source.repoURL maps to the
-# sourceRef NAME (URL resolution across the GitRepository object is a future lens).
+# projects them onto the neutral sync/health enums. source.repoURL RESOLVES the
+# sourceRef to the GitRepository it names and reads that object's spec.url (D551) —
+# the ArgoCD twin emits a URL, so this one must too or the neutral capability is not
+# portable and the attribute stops being provenance.
 # Observe-only: groundhold witnesses Flux, never authors the Kustomization.
 mapping: v0.1
 fieldpath: groundhold/fieldpath/v1
@@ -24,7 +26,14 @@ resource:
 
 schema:
   source: "kustomize.toolkit.fluxcd.io/v1 Kustomization CRD (spec.versions[].schema)"
-  mappedSurface: ""   # drift-guard PENDING CRD schema vendoring (loud diagnostic until pinned).
+  # Authored against testdata/flux-kustomization-openapi.json — a VERBATIM recording
+  # from a live API server with `description` stripped (the fingerprint excludes it by
+  # construction, and the live-cluster gate proves the hash is unchanged). D511.
+  # Since D551 the surface spans TWO documents: this CRD and the GitRepository CRD
+  # (testdata/flux-gitrepository-openapi.json), because source.repoURL reads a field
+  # over there. A hop whose remote half is unfingerprinted would let that field drift
+  # under a pin claiming to cover the attribute.
+  mappedSurface: sha256:d28da26b8dd4d9d6ece8f0fe191321e2021684d95daf3ebab6e6624c93f7a910
 
 lenses:
   - k8s.gitops.fluxStatus
@@ -32,7 +41,15 @@ lenses:
 attributes:
   source.repoURL:
     field: spec.sourceRef.name
-    op: copy
+    op: resolve-ref
+    ref:
+      group: source.toolkit.fluxcd.io
+      version: v1
+      kind: GitRepository
+      plural: gitrepositories
+      scope: Namespaced
+      namespace: spec.sourceRef.namespace
+      field: spec.url
     type: string
     derivation: measured
   service.managed:

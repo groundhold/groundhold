@@ -131,19 +131,29 @@ func (d *Driver) observeSecret(capability, providerID string) ([]provider.Observ
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"secret not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"secret not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
-		{Path: "encryption.atRest", Value: true, Derivation: "config-intent"},
+		{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"},
 	}
 	var diags []string
 	// residency: only a userManaged single-region replica is an honest region.
 	if um := doc.Replication.UserManaged; um != nil && len(um.Replicas) == 1 {
 		obs = append(obs, provider.Observation{Path: "location.region", Value: um.Replicas[0].Location, Derivation: "measured"})
-		if um.Replicas[0].CustomerManagedEncryption != nil && um.Replicas[0].CustomerManagedEncryption.KmsKeyName != "" {
-			obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: true, Derivation: "measured"})
-		}
+		// D1003: on a single-replica user-managed secret the CMK field is read
+		// reliably from the main GET, so no customer key is a MEASURED FALSE, not an
+		// absence — emit the boolean so a hard constraint cannot pass vacuously. The
+		// else (auto/multi-replica) shape does NOT read CMK, so it stays omitted
+		// (genuinely unknown) rather than a false claim.
+		cmk := um.Replicas[0].CustomerManagedEncryption
+		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: cmk != nil && cmk.KmsKeyName != "", Derivation: "measured"})
 	} else {
 		diags = append(diags, "location.region not observed: automatic or multi-replica replication carries no single-region residency guarantee")
 	}
@@ -199,7 +209,7 @@ func (d *Driver) deleteSecret(capability, environment, providerID string) provid
 func (d *Driver) readSecretPublic(name string) (public bool, err error) {
 	const op = "secrets.getIamPolicy"
 	url := fmt.Sprintf("%s/projects/%s/secrets/%s:getIamPolicy", d.secretBase(), d.Project, name)
-	st, body, cerr := d.call("POST", url, nil)
+	st, body, cerr := d.call("GET", url, nil)
 	if cerr != nil {
 		return false, readTransport(op, cerr)
 	}
@@ -227,7 +237,7 @@ func (d *Driver) readSecretPublic(name string) (public bool, err error) {
 // setSecretPublic grants allUsers the secretAccessor role (append-only RMW).
 func (d *Driver) setSecretPublic(name string) (unknown bool, err error) {
 	getURL := fmt.Sprintf("%s/projects/%s/secrets/%s:getIamPolicy", d.secretBase(), d.Project, name)
-	st, body, e := d.call("POST", getURL, nil)
+	st, body, e := d.call("GET", getURL, nil)
 	if e != nil {
 		return true, fmt.Errorf("getIamPolicy outcome unknown: %v", e)
 	}
@@ -264,7 +274,7 @@ func (d *Driver) setSecretPublic(name string) (unknown bool, err error) {
 // MUTATING setIamPolicy response was lost (D29), never "failed".
 func (d *Driver) setSecretPrivate(name string) (unknown bool, err error) {
 	getURL := fmt.Sprintf("%s/projects/%s/secrets/%s:getIamPolicy", d.secretBase(), d.Project, name)
-	st, body, e := d.call("POST", getURL, nil)
+	st, body, e := d.call("GET", getURL, nil)
 	if e != nil {
 		return true, fmt.Errorf("getIamPolicy outcome unknown: %v", e)
 	}

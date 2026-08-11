@@ -23,6 +23,13 @@ import tempfile
 
 import yaml
 
+# D600: floors for the suite's own size. They are deliberately far below the real
+# counts — this is a floor against the subject VANISHING (a moved directory, a glob
+# that stops matching, a filter that excludes everything), not a second place to
+# maintain the exact totals, which docs already publish and a gate already checks.
+MIN_CASE_FILES = 20
+MIN_CASES = 100
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ref"))
 from groundholdlib import canonical  # noqa: E402
 from groundholdlib.contract import load_contract, load_candidate, ContractError  # noqa: E402
@@ -363,6 +370,32 @@ def run_plan_case_cli(case: dict, impl: list[str]) -> list[str]:
         if "next" in expect:
             failures += _check_next(refusal.get("next"), expect["next"])
         return failures
+    # D826: a THIRD plan outcome, which had no expectation shape and therefore no case.
+    # A capability whose change the driver cannot honour in place is neither a refusal
+    # (exit 2 with a "plan refused:" banner and a JSON refusal) nor a clean plan (exit 0):
+    # the compiler emits a full SealedPlan carrying `blocked`, covers the other
+    # capabilities, and exits 2. Nothing pinned that, so the shape could have changed
+    # under us silently.
+    if "blocked" in expect:
+        failures = []
+        if proc.returncode != 2:
+            failures.append(f"exit code: expected 2, got {proc.returncode}; "
+                            f"stderr: {proc.stderr!r}")
+        try:
+            doc = json.loads(proc.stdout)["plan"]
+        except (json.JSONDecodeError, KeyError) as e:
+            return failures + [f"stdout is not a plan: {e}"]
+        got = sorted(b.get("capability") for b in doc.get("blocked") or [])
+        want = sorted(expect["blocked"])
+        if got != want:
+            failures.append(f"blocked: expected {want}, got {got}")
+        for b in doc.get("blocked") or []:
+            if not (b.get("reason") or "").strip():
+                failures.append(f"blocked {b.get('capability')}: carries no reason")
+        if doc.get("actions"):
+            failures.append(f"a blocked plan must carry no actions, got "
+                            f"{[a.get('id') for a in doc['actions']]}")
+        return failures
     if proc.returncode != 0:
         return [f"exit code: expected 0, got {proc.returncode}; "
                 f"stderr: {proc.stderr!r}"]
@@ -648,6 +681,145 @@ def run_progress_case_cli(case: dict, impl: list[str]) -> list[str]:
         return fails
 
 
+def identify_impl(impl, declared: str | None) -> bool:
+    """Which implementation is behind --impl? Returns True for the Go runtime.
+
+    D605: this used to be `any("groundhold-go" in part for part in impl)` — a guess
+    from the FILE NAME. 282 of 518 cases are Go-only, and a Go binary under any other
+    name silently dropped all of them:
+
+        $ cp bin/groundhold-go /tmp/renamed-cli
+        $ python3 conformance/run.py --impl /tmp/renamed-cli
+        236/236 conformance cases passed (cli: /tmp/renamed-cli, 282 skipped)
+
+    A green verdict over 45% of the suite. The skip count is printed, and "236/236
+    passed" is what a reader takes away. So ASK the implementation instead of guessing
+    from its path (D317), and refuse when the answer is neither — choosing a subset in
+    silence is the failure being fixed.
+    """
+    if impl is None:
+        return False
+    if declared:
+        if declared not in ("go", "ref"):
+            print(f"conformance: --impl-kind must be 'go' or 'ref', got {declared!r}",
+                  file=sys.stderr)
+            sys.exit(2)
+        return declared == "go"
+    try:
+        proc = subprocess.run(impl + ["--version"], capture_output=True, text=True,
+                              timeout=30)
+    except Exception as e:  # noqa: BLE001 — any failure to ask is a refusal
+        print(f"conformance: could not ask {' '.join(impl)} what it is: {e}",
+              file=sys.stderr)
+        sys.exit(2)
+    out = (proc.stdout + proc.stderr).lower()
+    if proc.returncode == 0 and out.startswith("groundhold ") and "reference" not in out:
+        return True
+    if "reference implementation" in out:
+        return False
+    print(f"conformance: {' '.join(impl)} did not identify itself as either "
+          "implementation (`--version` said "
+          f"{(proc.stdout + proc.stderr).strip()[:60]!r}).\n"
+          "Refusing rather than guessing: guessing wrong silently skips the 282 "
+          "Go-only cases and still prints a green tally (D605). Pass --impl-kind "
+          "go|ref if you know.", file=sys.stderr)
+    sys.exit(2)
+
+
+def find_misnested_expectations(node, where: str, path: str = "") -> list[str]:
+    """Every `expect` in a case document must be reachable by the runner that
+    dispatches it — that is, a sibling of a verb key, never the child of one.
+
+    Checked structurally rather than per verb, because the failure is silent by
+    construction: the runner asks for a key that is not there, gets `{}`, and asserts
+    what remains (usually just "exit 0").
+    """
+    out = []
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k != "expect" and isinstance(v, dict) and "expect" in v:
+                out.append(f"{where}: {path}/{k} carries a NESTED expect — "
+                           "the runner reads expect as a sibling of the verb, so "
+                           "every assertion inside it is silently discarded")
+            out += find_misnested_expectations(v, where, f"{path}/{k}")
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            out += find_misnested_expectations(v, where, f"{path}[{i}]")
+    return out
+
+
+def find_missing_required_expectations(doc, where: str) -> list[str]:
+    """A suite may DECLARE the expectation keys its cases must carry, at file level:
+
+        requireExpect: [reachability]
+
+    D605: three cases named "...-has-nothing-to-probe" asserted only `exit` and
+    `status`. The runner compares a field only when the case mentions it, so a probe
+    that reported "reachable" over ZERO derived targets — a private Cloud Run
+    announced as publicly reachable, the inverse of the property the file defends —
+    passed all three. The absence IS the assertion (`reachability: null`), and a suite
+    whose whole subject is one field should not be able to forget it.
+    """
+    required = doc.get("requireExpect") or []
+    if not required:
+        return []
+    out = []
+    for case in doc.get("cases", []):
+        seen = set()
+
+        def collect(node):
+            if isinstance(node, dict):
+                if isinstance(node.get("expect"), dict):
+                    seen.update(node["expect"].keys())
+                for v in node.values():
+                    collect(v)
+            elif isinstance(node, list):
+                for v in node:
+                    collect(v)
+
+        collect(case)
+        for key in required:
+            if key not in seen:
+                out.append(f"{where}: case {case.get('name')!r} asserts nothing about "
+                           f"{key!r}, which this suite declares every case must state "
+                           f"(use `{key}: null` to assert the field is absent)")
+    return out
+
+
+def run_raw_hash_case_cli(case: dict, impl) -> list[str]:
+    """Hash a VERBATIM document — the bytes as written, never round-tripped.
+
+    D608: every other case shape carries its document as a YAML mapping, which the
+    harness re-emits with safe_dump before either implementation sees it. That makes
+    the PARSER untestable: `note:` (an empty scalar) arrives as None and is written
+    back as `note: null`, so the one thing under test — how each side RESOLVES the
+    ambiguous form — never happens. The reference read it as "" and the runtime as
+    null, giving one file two document identities, and no case could express that.
+
+    CLI only: the library entry point takes a parsed tree, which is precisely the
+    round-trip this shape exists to avoid.
+    """
+    if impl is None:
+        return []
+    expect = case.get("expect") or {}
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "doc.yaml")
+        with open(path, "w") as f:
+            f.write(case["documentRaw"])
+        proc = subprocess.run(impl + ["hash", path], capture_output=True, text=True)
+        if "error" in expect:
+            if proc.returncode == 0:
+                return [f"expected a {expect['error']} error, the document hashed to "
+                        f"{proc.stdout.strip()!r}"]
+            return []
+        if proc.returncode != 0:
+            return [f"hash failed: {proc.stderr.strip()[:200]!r}"]
+        got = proc.stdout.strip()
+        if "hash" in expect and got != expect["hash"]:
+            return [f"hash: expected {expect['hash']}, got {got}"]
+        return []
+
+
 def run_show_case_cli(case: dict, impl: list[str]) -> list[str]:
     """D89 plan preview: `show <plan.json>` renders a saved plan to deterministic
     text. Asserts the render byte-for-byte against a golden, and that no severity
@@ -678,6 +850,9 @@ def run_show_case_cli(case: dict, impl: list[str]) -> list[str]:
         if tok.lower() in proc.stdout.lower():
             fails.append(f"render contains forbidden token {tok!r} "
                          "(no severity words / composite risk score)")
+    return fails
+
+
 def run_runs_case_cli(case: dict, impl: list[str]) -> list[str]:
     """D231: `runs --ledger --at` lists every run in a seeded ledger with its
     derived state. Asserts the run count, per-state counts, and the ORDER
@@ -1245,6 +1420,13 @@ def run_signing_case_cli(case: dict, impl: list[str]) -> list[str]:
                 elif proc.returncode == 0:
                     with open(apath, "w") as f:
                         f.write(proc.stdout)
+                    # D601: `anchor` prints the document; the RUNTIME reads it from
+                    # the co-located path (ledger.AnchorPath = "<ledger>.anchor"), and
+                    # that is where `attest` looks for the anchor fact it reports. The
+                    # harness wrote only its own copy, so an anchored ledger looked
+                    # unanchored to every verb that has no --check flag.
+                    with open(lpath + ".anchor", "w") as f:
+                        f.write(proc.stdout)
                 continue
             if "anchorCheck" in step:
                 sa = step["anchorCheck"] or {}
@@ -1652,6 +1834,19 @@ def run_observe_case_cli(case: dict, impl: list[str]) -> list[str]:
     return failures
 
 
+def _check_error_text(text: str, expect: dict) -> list[str]:
+    """D719: assert what a refusal SAYS, not only that it refused.
+
+    `error: contract` proves an exit code. It cannot see whether the two
+    implementations explain the refusal the same way — and a refusal whose advice
+    differs between them is two tools. Cases opt in with `errorContains`.
+    """
+    missing = [w for w in (expect.get("errorContains") or []) if w not in text]
+    if missing:
+        return [f"refusal text missing {missing!r}; got {text!r}"]
+    return []
+
+
 def run_case_library(case: dict) -> list[str]:
     expect = case["expect"]
     expected_error = expect.get("error")  # contract | candidate | None
@@ -1662,7 +1857,7 @@ def run_case_library(case: dict) -> list[str]:
             contract = load_contract(cpath)
         except ContractError as e:
             if expected_error == "contract":
-                return []
+                return _check_error_text(str(e), expect)
             return [f"unexpected contract load error: {e}"]
         if expected_error == "contract":
             return ["expected contract load error, document loaded"]
@@ -1698,7 +1893,7 @@ def run_case_cli(case: dict, impl: list[str]) -> list[str]:
             failures.append(
                 f"stderr: expected {expected_error!r} error prefix, "
                 f"got {proc.stderr!r}")
-        return failures
+        return failures + _check_error_text(proc.stderr, expect)
 
     if proc.returncode not in (0, 2):
         return [f"exit code: expected 0 or 2, got {proc.returncode}; "
@@ -1816,6 +2011,8 @@ def dispatch_case(case: dict, impl) -> list[str]:
     elif "scenario" in case:
         return (run_scenario_case_cli(case, impl) if impl
                 else run_scenario_case_library(case))
+    elif "documentRaw" in case:
+        return run_raw_hash_case_cli(case, impl)
     elif "document" in case:
         return (run_hash_case_cli(case, impl) if impl
                 else run_hash_case_library(case))
@@ -1833,16 +2030,38 @@ def main() -> int:
             return 1
         impl = shlex.split(argv[i + 1])
 
-    is_go = impl is not None and any("groundhold-go" in part for part in impl)
+    impl_kind = None
+    if "--impl-kind" in argv:
+        i = argv.index("--impl-kind")
+        if i + 1 >= len(argv):
+            print("--impl-kind requires go|ref", file=sys.stderr)
+            return 1
+        impl_kind = argv[i + 1]
+
+    is_go = identify_impl(impl, impl_kind)
 
     # Collect the work-list first (deterministic file+case order), separating
     # skips from cases to run. Each case is independent (own tempdir/subprocess),
     # so the CLI modes fan out over a thread pool — the wall-clock cost is
     # subprocess-bound, and 200+ sequential subprocesses dominated the gate.
     work, skipped = [], 0
-    for path in sorted(glob.glob(os.path.join(os.path.dirname(__file__), "cases", "*.yaml"))):
+    case_files = sorted(glob.glob(
+        os.path.join(os.path.dirname(__file__), "cases", "*.yaml")))
+    # D600: this suite is the project's source of truth, and it had no floor — with
+    # conformance/cases/ moved away it printed "0/0 conformance cases passed" and
+    # exited 0, so `make check` reported "all gates passed" having verified nothing.
+    # A gate that finds nothing passes (D328), here at the top of the pyramid.
+    if len(case_files) < MIN_CASE_FILES:
+        print(f"conformance: found {len(case_files)} case files under "
+              f"conformance/cases/, expected at least {MIN_CASE_FILES} — refusing to "
+              "report a green suite over a subject that is not there", file=sys.stderr)
+        return 2
+    misnested = []
+    for path in case_files:
         with open(path) as f:
             doc = yaml.safe_load(f)
+        misnested += find_misnested_expectations(doc, os.path.basename(path))
+        misnested += find_missing_required_expectations(doc, os.path.basename(path))
         for case in doc.get("cases", []):
             # cases for components that exist in one implementation only
             # (D24: compiler onward is Go-only)
@@ -1850,6 +2069,19 @@ def main() -> int:
                 skipped += 1
                 continue
             work.append(case)
+
+    # D601: an `expect` block written one level too deep is READ BY NOTHING, and the
+    # case then asserts only that the verb exited 0. Four attest cases were in that
+    # shape, so a report with forged signature coverage (selfVerified 999, zero
+    # invalid envelopes, the anchor erased) passed the entire suite and every Go test.
+    # Refuse the run: a suite that silently drops assertions is worse than a red one.
+    if misnested:
+        for m in misnested:
+            print(f"conformance: {m}", file=sys.stderr)
+        print("An `expect` block must be a SIBLING of the verb key it applies to; "
+              "nested one level in, the runner never sees it and the case cannot "
+              "fail (D601).", file=sys.stderr)
+        return 2
 
     # GROUNDHOLD_JOBS overrides the worker count (=1 forces sequential, the audit
     # path for any suspected ordering effect). The library mode stays sequential
@@ -1885,6 +2117,11 @@ def main() -> int:
             print(f"PASS {name}")
 
     total = len(work)
+    if total < MIN_CASES:
+        print(f"conformance: only {total} cases were collected, expected at least "
+              f"{MIN_CASES} — a filter or a parse failure emptied the suite (D600)",
+              file=sys.stderr)
+        return 2
     mode = f"cli: {' '.join(impl)}" if impl else "library"
     skips = f", {skipped} skipped" if skipped else ""
     print(f"\n{total - failed}/{total} conformance cases passed ({mode}{skips})")

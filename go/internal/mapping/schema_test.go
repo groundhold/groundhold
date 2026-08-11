@@ -1,6 +1,11 @@
 package mapping
 
-import "testing"
+import (
+	"fmt"
+	"sort"
+	"strings"
+	"testing"
+)
 
 // The OpenAPI drift-walker is the provider-agnostic algebra the drift fingerprint
 // rests on (D175 mappedSurface, and the learn-from-API-contract direction). It is
@@ -101,4 +106,122 @@ func TestWalkSchemaPath(t *testing.T) {
 	if _, ok := WalkSchemaPath(root, schemas, []string{"spec", "nonexistent"}); ok {
 		t.Errorf("a path through a missing property must report absent")
 	}
+}
+
+// A real OpenAPI v3 server wraps a $ref in `allOf` whenever the property also
+// carries a description or a default — an annotated reference cannot be spelled
+// as a bare {"$ref": ...} because sibling keys next to $ref are ignored. This is
+// what kube-openapi emits for essentially every `metadata` and `spec` property.
+// Resolving only the bare form makes those paths read as ABSENT against every
+// real server while hand-written fixtures using the bare form pass (D509).
+func TestResolveRefUnwrapsAnAnnotatedReference(t *testing.T) {
+	schemas := map[string]any{
+		"ObjectMeta": map[string]any{
+			"properties": map[string]any{
+				"labels": map[string]any{
+					"type":                 "object",
+					"additionalProperties": map[string]any{"type": "string"},
+				},
+			},
+		},
+	}
+	root := map[string]any{
+		"properties": map[string]any{
+			// exactly the shape a live API server emits
+			"metadata": map[string]any{
+				"description": "Standard object's metadata.",
+				"default":     map[string]any{},
+				"allOf":       []any{map[string]any{"$ref": "#/components/schemas/ObjectMeta"}},
+			},
+		},
+	}
+	segs, err := ParseFieldPath(`metadata.labels["pod-security.kubernetes.io/enforce"]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, ok := WalkSchemaPath(root, schemas, segs)
+	if !ok {
+		t.Fatalf("annotated $ref did not resolve: the path reads as ABSENT, so every " +
+			"mapping traversing a described `metadata`/`spec` drifts against a real server")
+	}
+	if sig == "" {
+		t.Fatalf("resolved but produced an empty signature")
+	}
+}
+
+// The composite case must NOT be silently flattened: an allOf with more than one
+// member, or one that is not a plain reference, is a genuine composition this
+// walker does not model — reporting ABSENT (fail closed) is the honest answer.
+func TestResolveRefLeavesAGenuineCompositionAlone(t *testing.T) {
+	schemas := map[string]any{"A": map[string]any{"properties": map[string]any{"x": map[string]any{"type": "string"}}}}
+	node := map[string]any{"allOf": []any{
+		map[string]any{"$ref": "#/components/schemas/A"},
+		map[string]any{"properties": map[string]any{"y": map[string]any{"type": "string"}}},
+	}}
+	got := ResolveRef(node, schemas)
+	if _, ok := got["properties"]; ok {
+		t.Fatalf("a two-member allOf was flattened to one branch; composition is not modelled here")
+	}
+}
+
+// A union type (`oneOf`/`anyOf`) carries no top-level `type`, so a signature
+// built from type+format+enum alone reduces EVERY union to the same empty
+// string — indistinguishable from a node with no type at all, and from any
+// other union. Kubernetes uses unions for its most common scalars (Quantity is
+// oneOf[string,number]; IntOrString), so the drift guard's whole promise — "a
+// mapped field changed type/enum" — was unenforceable on exactly those fields
+// (D509).
+func TestTypeSigDistinguishesUnions(t *testing.T) {
+	quantity := map[string]any{"oneOf": []any{
+		map[string]any{"type": "string"}, map[string]any{"type": "number"}}}
+	other := map[string]any{"oneOf": []any{
+		map[string]any{"type": "string"}, map[string]any{"type": "boolean"}}}
+	typeless := map[string]any{"description": "no type at all"}
+
+	qs, os_, ts := TypeSig(quantity), TypeSig(other), TypeSig(typeless)
+	if qs == ts {
+		t.Errorf("a union signs identically to a typeless node (%q) — a field losing "+
+			"its union entirely would not read as drift", qs)
+	}
+	if qs == os_ {
+		t.Errorf("oneOf[string,number] and oneOf[string,boolean] share signature %q — "+
+			"a union changing member types would not read as drift", qs)
+	}
+	// member order is an encoding detail, not drift
+	swapped := map[string]any{"oneOf": []any{
+		map[string]any{"type": "number"}, map[string]any{"type": "string"}}}
+	if TypeSig(swapped) != qs {
+		t.Errorf("member order changed the signature: %q vs %q", TypeSig(swapped), qs)
+	}
+}
+
+// Pins are authored artefacts across every mapping; a signature change that
+// touches non-union nodes would invalidate all of them at once. Nodes without a
+// union must sign exactly as before.
+func TestTypeSigIsUnchangedWithoutAUnion(t *testing.T) {
+	for _, n := range []map[string]any{
+		{"type": "string"},
+		{"type": "string", "format": "date-time"},
+		{"type": "string", "enum": []any{"b", "a"}},
+		{},
+	} {
+		got := TypeSig(n)
+		want := strOf(n["type"]) + "|" + strOf(n["format"]) + "|" + enumOfForTest(n)
+		if got != want {
+			t.Errorf("signature of a union-free node changed: got %q, want %q", got, want)
+		}
+	}
+}
+
+func enumOfForTest(n map[string]any) string {
+	e, ok := n["enum"].([]any)
+	if !ok {
+		return ""
+	}
+	var out []string
+	for _, x := range e {
+		out = append(out, fmt.Sprintf("%v", x))
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
 }

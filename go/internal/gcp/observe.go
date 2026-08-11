@@ -136,7 +136,14 @@ func observeRPO(settings map[string]any, out *[]Observed, diags *[]string) {
 	if !hasEnabled || !enabled {
 		return
 	}
-	if pitr, _ := backup["pointInTimeRecoveryEnabled"].(bool); pitr {
+	// PITR has two engine-specific spellings, mutually exclusive per engine
+	// (D950): pointInTimeRecoveryEnabled (Postgres/SQL Server) and binaryLogEnabled
+	// (MySQL). Either means the data-loss window is far better than 24h and its VALUE
+	// needs a probe — a MySQL instance read only for pointInTimeRecoveryEnabled would
+	// be mis-reported as a plain 24h window.
+	pitr, _ := backup["pointInTimeRecoveryEnabled"].(bool)
+	binlog, _ := backup["binaryLogEnabled"].(bool)
+	if pitr || binlog {
 		*diags = append(*diags, "PITR enabled — recovery.rpo value "+
 			"requires a probe, not fabricated from config")
 		return

@@ -4,8 +4,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 // This file rounds out loadbalancer_net.go coverage: ensureListener (0%) — the
@@ -155,4 +160,52 @@ func TestClassifyLBChange_DefaultAndProjection(t *testing.T) {
 			t.Errorf("classifyLBChange(%q) carries no reason", tc.path)
 		}
 	}
+}
+
+func elbRole(_ *http.Request, body []byte) certifynet.Role {
+	if v, err := url.ParseQuery(string(body)); err == nil {
+		if strings.HasPrefix(v.Get("Action"), "Describe") {
+			return certifynet.RoleRead
+		}
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingLoadBalancer enrols loadbalancer in the D391 gate. An ALB is a
+// COMPOSITE — load balancer plus target group plus listener — so the property here is
+// partial: the standing pieces must be bound and only the MISSING piece created. That
+// makes a fixed mutation budget the wrong assertion; what the gate pins is the identity
+// bound, and the existing per-driver test pins that no CreateLoadBalancer or
+// CreateTargetGroup is re-issued.
+func TestAdoptsExistingLoadBalancer(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	attrs, impl := httpsLBCandidate()
+	p := &certifynet.ExistingProbe{
+		Name:     "aws/loadbalancer",
+		Classify: elbRole,
+		ExistingServer: func() *httptest.Server {
+			f := newFakeELB()
+			f.lbCreated = true
+			f.tgCreated = true
+			f.listenerCreated = true // the fully-standing estate: nothing left to do
+			f.tags = map[string]string{"groundhold-capability": lbCap, "groundhold-environment": "prod"}
+			return f.handler(t, nil)
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.ELBv2BaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			d.PollInterval = time.Millisecond
+			d.PollTimeout = 2 * time.Second
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("loadbalancer", lbCap, "prod", attrs, impl, "k", 1)
+		},
+		PID:              elbv2ProviderID("eu-central-1", lbTestName),
+		AllowedMutations: 2, // tag/attribute convergence onto the standing composite
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

@@ -3,7 +3,11 @@ package aws
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func awsAuthzAttrs() map[string]any {
@@ -69,6 +73,12 @@ func rolePolicyServer(t *testing.T) *httptest.Server {
 		func(w http.ResponseWriter, r *http.Request) {
 			_ = r.ParseForm()
 			switch r.PostForm.Get("Action") {
+			case "GetRole":
+				// D445: the detach now reads the ROLE's tags first — an attachment has no
+				// ownership surface of its own, but the role it modifies does. The fixture
+				// has to describe the role for the same reason every other ownership
+				// fixture describes its resource.
+				_, _ = w.Write([]byte(iamRoleXML("GetRole", "reader", "prod")))
 			case "AttachRolePolicy":
 				attached = r.PostForm.Get("PolicyArn")
 				_, _ = w.Write([]byte(`<AttachRolePolicyResponse></AttachRolePolicyResponse>`))
@@ -188,4 +198,55 @@ func TestBuildRolePolicyPrincipalOperand(t *testing.T) {
 		map[string]any{"principal": map[string]any{"$ref": map[string]any{}}}, 1); err == nil {
 		t.Fatal("a non-string principal operand must refuse")
 	}
+}
+
+// TestAdoptsExistingRolePolicy enrols rolepolicy in the D391 gate. This one is safe by
+// the API's own semantics: AttachRolePolicy on an ALREADY-attached policy is a no-op
+// success, so there is nothing to duplicate and no pre-read is needed — the driver says
+// so in its own comment. The gate turns that comment into an assertion: the create runs
+// against a role that already carries the policy, and must still bind the same pid.
+func TestAdoptsExistingRolePolicy(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	p := &certifynet.ExistingProbe{
+		// D525: AttachRolePolicy is idempotent on (role, policy) — the write can
+		// only ever land on exactly that attachment, so no pre-read is needed.
+		IdentityFromContent: true,
+		Name:                "aws/rolepolicy",
+		Classify:            iamQueryRole,
+		ExistingServer: func() *httptest.Server {
+			const arn = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+			return httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					body := make([]byte, r.ContentLength)
+					_, _ = r.Body.Read(body)
+					v, _ := url.ParseQuery(string(body))
+					switch v.Get("Action") {
+					case "AttachRolePolicy":
+						// already attached — AWS answers success, no second attachment
+						_, _ = w.Write([]byte(`<AttachRolePolicyResponse></AttachRolePolicyResponse>`))
+					case "ListAttachedRolePolicies":
+						_, _ = w.Write([]byte(`<ListAttachedRolePoliciesResponse><ListAttachedRolePoliciesResult>` +
+							`<AttachedPolicies><member><PolicyName>p</PolicyName><PolicyArn>` + arn +
+							`</PolicyArn></member></AttachedPolicies>` +
+							`</ListAttachedRolePoliciesResult></ListAttachedRolePoliciesResponse>`))
+					default:
+						w.WriteHeader(400)
+					}
+				}))
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.IAMBaseURL = happyURL
+			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("rolepolicy", "reader", "prod", awsAuthzAttrs(), nil, "reader", 1)
+		},
+		PID:              "aauth:app-runner:arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess",
+		AllowedMutations: 1, // the idempotent AttachRolePolicy
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

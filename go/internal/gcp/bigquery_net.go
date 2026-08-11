@@ -147,10 +147,16 @@ func (d *Driver) observeBigQuery(capability, providerID string) ([]provider.Obse
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"dataset not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"dataset not found — bound resource is gone (will re-create)"}, nil
 	}
 	obs := []provider.Observation{
-		{Path: "encryption.atRest", Value: true, Derivation: "config-intent"}, // BigQuery always encrypts
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
+		{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"}, // BigQuery always encrypts
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
 	if doc.Location != "" {
@@ -158,11 +164,11 @@ func (d *Driver) observeBigQuery(capability, providerID string) ([]provider.Obse
 			Value: strings.ToLower(doc.Location), Derivation: "measured"})
 	}
 	// a customer key is present iff the dataset carries a default KMS key; the
-	// Google-managed default does NOT satisfy the constraint — emit nothing then.
-	if doc.DefaultEncryptionConfiguration != nil && doc.DefaultEncryptionConfiguration.KmsKeyName != "" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
-			Value: true, Derivation: "measured"})
-	}
+	// Google-managed default does NOT satisfy the constraint. D1003: that is a
+	// MEASURED FALSE, never an absence — emit the boolean unconditionally so a hard
+	// customerManagedKeys constraint has a value to contradict, not a vacuous pass.
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+		Value: doc.DefaultEncryptionConfiguration != nil && doc.DefaultEncryptionConfiguration.KmsKeyName != "", Derivation: "measured"})
 	// network.publicExposure is deliberately NOT observed: a BigQuery dataset has no
 	// network exposure mode (the honest gap the builder refuses on create).
 	return obs, []string{"network.publicExposure not observed: BigQuery datasets have no network boundary (IAM-gated global endpoint)"}, nil

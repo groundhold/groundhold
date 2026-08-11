@@ -303,6 +303,10 @@ func TestHonestyHarnessGCEInstance(t *testing.T) {
 		Classify:        gcpOpRole,
 		OwnerTagValue:   "web",
 		DeterministicID: true, // the instance name is a chosen slug+hash (D43)
+		// F-LC3 (D519): migrated to the absence property.
+		ObserveAbsent: func(pr provider.Provider) ([]provider.Observation, []string, error) {
+			return pr.Observe("gce", "web", pid)
+		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			return newGcpHonestyDriver(happyURL, rt)
 		},

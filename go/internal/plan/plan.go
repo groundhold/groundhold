@@ -104,8 +104,16 @@ func LoadPlan(path string) (map[string]any, error) {
 	if err := requireHash(reads["candidateHash"], "reads.candidateHash"); err != nil {
 		return nil, err
 	}
+	// D533: `present but empty` is not `missing`. Heads are pinned per capability
+	// WITH AN ACTION, so a plan with no actions legitimately has none — and the
+	// compiler seals exactly such a plan on purpose when a capability is blocked or
+	// unverified (compiler.go: "actions == 0 with blocked/unverified present is NOT
+	// nothing to change"). Conflating the two made apply refuse an artefact its own
+	// compiler intends to produce: converged infrastructure exited 2, which a
+	// caller cannot tell from a real refusal. The invariant that DOES hold is
+	// checked below, against the actions.
 	heads, ok := reads["heads"].(map[string]any)
-	if !ok || len(heads) == 0 {
+	if !ok {
 		return nil, fmt.Errorf("reads.heads must pin a head per capability")
 	}
 	for cap, h := range heads {
@@ -126,9 +134,10 @@ func LoadPlan(path string) (map[string]any, error) {
 		return nil, fmt.Errorf("reads.toolchain must carry compiler and spec")
 	}
 
+	// D533: a converged plan writes nothing, and that is the point of it.
 	writesAny, ok := p["writes"].([]any)
-	if !ok || len(writesAny) == 0 {
-		return nil, fmt.Errorf("plan.writes must be a non-empty list of ids")
+	if !ok {
+		return nil, fmt.Errorf("plan.writes must be a list of ids")
 	}
 	writes := map[string]bool{}
 	for _, w := range writesAny {
@@ -143,9 +152,15 @@ func LoadPlan(path string) (map[string]any, error) {
 		writes[s] = true
 	}
 
+	// D533: same distinction. An absent or ill-typed `actions` is malformed; an
+	// EMPTY one is a converged plan, which `show`, `forecast` and `apply` must all
+	// accept — apply then does nothing, which is the honest outcome.
 	actions, ok := p["actions"].([]any)
-	if !ok || len(actions) == 0 {
-		return nil, fmt.Errorf("plan.actions must be a non-empty list")
+	if !ok {
+		return nil, fmt.Errorf("plan.actions must be a list")
+	}
+	if len(actions) > 0 && len(heads) == 0 {
+		return nil, fmt.Errorf("reads.heads must pin a head per capability with an action")
 	}
 	ids := map[string]bool{}
 	deps := map[string][]string{}
@@ -256,9 +271,10 @@ func LoadPlan(path string) (map[string]any, error) {
 		return nil, fmt.Errorf("action dependency graph has a cycle")
 	}
 
+	// D533: a converged plan has no actions, so it has no preconditions to pin.
 	pre, ok := p["preconditions"].([]any)
-	if !ok || len(pre) == 0 {
-		return nil, fmt.Errorf("plan.preconditions must be a non-empty list")
+	if !ok {
+		return nil, fmt.Errorf("plan.preconditions must be a list")
 	}
 	hasExecutable := false
 	for _, it := range pre {

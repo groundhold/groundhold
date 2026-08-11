@@ -16,14 +16,14 @@ cases:
         - publish: { signed: true }
         - publish: { signed: true, version: 2 }
         - anchorEmit: {}
-        - attest:
-            expect:
-              exit: 0
-              fields:
-                signatures.selfVerified: 2
-                signatures.unsigned: 0
-                signatures.envelopePresentButInvalid: 0
-                anchor.status: verified
+        - attest: {}
+          expect:
+            exit: 0
+            fields:
+              signatures.selfVerified: 2
+              signatures.unsigned: 0
+              signatures.envelopePresentButInvalid: 0
+              anchor.status: verified
 
   - name: attest-counts-an-invalid-envelope-as-invalid-not-signed
     description: >
@@ -36,13 +36,13 @@ cases:
         - publish: { signed: true }
         - publish: { signed: false, version: 2 }
         - tamperEventSig: { line: 1 }
-        - attest:
-            expect:
-              exit: 0
-              fields:
-                signatures.selfVerified: 0
-                signatures.envelopePresentButInvalid: 1
-                signatures.unsigned: 1
+        - attest: {}
+          expect:
+            exit: 0
+            fields:
+              signatures.selfVerified: 0
+              signatures.envelopePresentButInvalid: 1
+              signatures.unsigned: 1
 
   - name: attest-sees-compaction-and-scopes-to-the-tail
     description: >
@@ -57,18 +57,18 @@ cases:
         - publish: { signed: true, version: 2 }
         - snapshot: { signed: true }
         - publish: { signed: true, version: 3 }
-        - attest:
-            expect:
-              exit: 0
-              fields:
-                baseEvents: 2
-                tailEvents: 1
-                totalEvents: 3
-                signatures.archivedBase: 2
-                signatures.selfVerified: 1
-                snapshot.present: true
-                snapshot.signatureSelfVerifies: true
-                snapshot.ledgerIdMatches: true
+        - attest: {}
+          expect:
+            exit: 0
+            fields:
+              baseEvents: 2
+              tailEvents: 1
+              totalEvents: 3
+              signatures.archivedBase: 2
+              signatures.selfVerified: 1
+              snapshot.present: true
+              snapshot.signatureSelfVerifies: true
+              snapshot.ledgerIdMatches: true
 
   - name: attest-of-a-plain-unsigned-ledger-claims-nothing
     description: >
@@ -80,10 +80,10 @@ cases:
       steps:
         - publish: { signed: false }
         - publish: { signed: false, version: 2 }
-        - attest:
-            expect:
-              exit: 0
-              fields:
-                signatures.selfVerified: 0
-                signatures.unsigned: 2
-                signatures.envelopePresentButInvalid: 0
+        - attest: {}
+          expect:
+            exit: 0
+            fields:
+              signatures.selfVerified: 0
+              signatures.unsigned: 2
+              signatures.envelopePresentButInvalid: 0

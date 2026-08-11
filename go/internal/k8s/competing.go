@@ -49,18 +49,38 @@ type competeDoc struct {
 
 // CompetingManagers reports foreign continuous reconcilers owning the object.
 func (d *Driver) CompetingManagers(service, providerID string) ([]string, error) {
-	if err := d.requireService(service); err != nil {
+	// D550: this check is a READ and applies to every object the driver serves, so it
+	// asks the mapping registry the way Claim does — NOT the hand-coded dispatch gate,
+	// which is for writes and knows a smaller, staler set. Measured before the fix:
+	// six of ten mapped services failed here, for two different reasons — three on the
+	// gate ("unknown service") and three deeper, on kindInfo ("unknown rbac service"),
+	// which knows only the four RBAC kinds. Adoption of an existing object was
+	// therefore impossible for those six, and the error named a competing-reconciler
+	// check that never ran.
+	var path string
+	if m, err := d.serviceMapping(service, forRead); err != nil {
 		return nil, err
+	} else if m != nil {
+		namespace, name, err := m.parseProviderID(providerID)
+		if err != nil {
+			return nil, err
+		}
+		path = m.objectPath(namespace, name)
+	} else {
+		if err := d.requireService(service); err != nil {
+			return nil, err
+		}
+		ki, err := kindInfo(service)
+		if err != nil {
+			return nil, err
+		}
+		_, _, namespace, name, err := splitRBACProviderID(providerID, ki.Kind)
+		if err != nil {
+			return nil, err
+		}
+		path = ki.objPath(namespace, name)
 	}
-	ki, err := kindInfo(service)
-	if err != nil {
-		return nil, err
-	}
-	_, _, namespace, name, err := splitRBACProviderID(providerID, ki.Kind)
-	if err != nil {
-		return nil, err
-	}
-	st, body, err := d.call("GET", ki.objPath(namespace, name), nil)
+	st, body, err := d.call("GET", path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("read for competing-reconciler check failed: %w", err)
 	}

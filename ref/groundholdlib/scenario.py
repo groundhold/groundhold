@@ -73,8 +73,11 @@ def run_scenario(doc: Any) -> list[dict]:
     heads: dict[str, str] = {}
     decision_heads: dict[str, str] = {}
     step_hashes: dict[int, str] = {}
-    leases: dict[str, dict] = {}      # cap -> {token, expiry, ttl, ended}
+    leases: dict[str, dict] = {}      # cap -> {token, expiry, ttl, ended, seq}
     max_token: dict[str, int] = {}
+    # D633: a fold-time lease identity. Mirrors the Go runtime's leaseSeq; a dict so
+    # the nested commit() closures can increment it.
+    state: dict[str, int] = {"leaseSeq": 0}
     pending: dict[str, set] = {}      # cap -> operation ids
     results: list[dict] = []
 
@@ -141,7 +144,7 @@ def run_scenario(doc: Any) -> list[dict]:
 
         # 2. rules (D29)
         rejected, extras, commit = _check_rules(
-            ev, a, caps, clock, leases, max_token, pending)
+            ev, a, caps, clock, leases, max_token, pending, state)
         if rejected is not None:
             results.append(rejected)
             continue
@@ -159,7 +162,7 @@ def run_scenario(doc: Any) -> list[dict]:
     return results
 
 
-def _check_rules(ev, a, caps, clock, leases, max_token, pending):
+def _check_rules(ev, a, caps, clock, leases, max_token, pending, state):
     """Returns (rejected_result | None, ok_extras, commit_fn)."""
     etype = ev["type"]
     body = a.get("body") or {}
@@ -178,9 +181,10 @@ def _check_rules(ev, a, caps, clock, leases, max_token, pending):
         token = max((max_token.get(c, 0) for c in caps), default=0) + 1
 
         def commit():
+            state["leaseSeq"] += 1
             for c in caps:
                 leases[c] = {"token": token, "expiry": clock + ttl,
-                             "ttl": ttl, "ended": False}
+                             "ttl": ttl, "ended": False, "seq": state["leaseSeq"]}
                 max_token[c] = token
         return (None, {"token": token}, commit)
 
@@ -220,10 +224,23 @@ def _check_rules(ev, a, caps, clock, leases, max_token, pending):
         tok = ev.get("fencingToken")
         if tok is None:
             return reject("mutation requires a fencing token (D29)")
+        # D633: ONE lease must cover the whole affected set. Tokens are per-capability
+        # counters, so two leases over disjoint capabilities both get token 1 — and a
+        # per-capability token check then let a holder of {a,b} mutate {b,c} the moment
+        # someone else acquired {c}. `seq` is a fold-time lease identity: recomputed on
+        # every replay, never on the wire, and it leaves token arithmetic untouched.
+        covering = None
         for c in caps:
             lease = leases.get(c)
             if not (_active(lease, clock) and lease["token"] == tok):
                 return reject(f"stale or missing fencing token on {c}")
+            if covering is None:
+                covering = lease["seq"]
+            elif lease["seq"] != covering:
+                return reject(
+                    f"the affected capabilities are held by DIFFERENT leases — {c} is "
+                    "under another lease that happens to carry the same token number; "
+                    "one mutation must be covered by ONE lease (D29)")
         return (None, {}, noop)
 
     if etype == "operation.receipt":

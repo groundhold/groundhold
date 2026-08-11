@@ -26,6 +26,18 @@ attributes:
       exposure posture an organization governs — a public load balancer is the
       front door reachable from the internet. AWS ALB `Scheme=internet-facing`,
       GCP `loadBalancingScheme=EXTERNAL*`, an Azure public frontend IP.
+    # D540: derived by reading each driver's reverse map, not from memory.
+    mappings:
+      aws.loadbalancer: >
+        the ELBv2 Scheme — `internet-facing` is true, `internal` is false
+      azure.loadbalancer: >
+        any frontendIPConfiguration carrying a publicIPAddress makes it true;
+        an all-private frontend set is false. Same rule for the Application
+        Gateway shape
+      gcp.loadbalancer: >
+        the forwarding rule's loadBalancingScheme — EXTERNAL / EXTERNAL_MANAGED
+        are internet-facing, INTERNAL* are not. Classic rules may omit the field
+        entirely, and an ABSENT scheme maps to public with a diagnostic saying so
 
   encryption.inTransit:
     kind: bool
@@ -35,10 +47,26 @@ attributes:
       configured. Whether the front door speaks encrypted. A public load balancer
       with no TLS listener is plaintext on the internet — the precise posture the
       broker's `enable_https` flag flips.
+    mappings:
+      aws.loadbalancer: >
+        true when any listener protocol is HTTPS/TLS; a listener set that is all
+        plaintext is false
+      azure.loadbalancer: >
+        an Application Gateway listener with Protocol=Https makes it true. The L4
+        load balancer has no protocol to read, so it reports FALSE as
+        config-intent, not as a measurement — a layer-4 balancer terminates
+        nothing
+      gcp.loadbalancer: >
+        the target proxy KIND: targetHttpsProxies / targetSslProxies are true,
+        the plaintext proxy kinds are false
 
   service.managed:
     kind: bool
     description: A managed cloud load balancer vs a self-operated proxy (haproxy/nginx).
+    mappings:
+      aws.loadbalancer: const true
+      azure.loadbalancer: const true
+      gcp.loadbalancer: const true
 
 # Deliberately absent in v0.1 (operational noise, not governance semantics):
 #   - the load-balancer TYPE (application / network / gateway) and instance sizing

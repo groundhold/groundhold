@@ -16,7 +16,7 @@ mismatch.
 ## Procedure
 
 1. **Have a discovery document.** From a read-only sweep:
-   `groundhold discover --provider <cloud> --region <r> > discover.json`.
+   `groundhold discover --provider <cloud> --region <r> --at <now> > discover.json`.
    Its `resources[].providerId` is the menu of what you can adopt.
 
 2. **Pick the resource and name the obligation.** The `--contract` is your
@@ -41,7 +41,9 @@ mismatch.
    confirm). With `--seed`, it exports + verifies into the console seed dir
    so the panel flips the row from `candidate` to `adopted`.
 
-4. **Trim the contract, then re-publish.** The generated constraints mirror
+4. **Trim the contract, then re-publish.** The script keeps the two documents
+   it generated beside the ledger — `<ledger-dir>/<contract>.contract.yaml` and
+   `.candidate.yaml`, and prints both paths. The generated constraints mirror
    everything groundhold observed. Reality is the first author, not the
    authority (see [onboard-existing]): drop the constraints that are
    accidents (tier, disk), keep the ones that are intent (residency,

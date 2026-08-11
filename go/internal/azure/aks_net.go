@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"groundhold/internal/perr"
 	"groundhold/internal/provider"
 )
 
@@ -175,8 +176,9 @@ func (d *Driver) createAKS(environment, capability string,
 	if !found && plan.AdoptByName {
 		return provider.CreateResult{Status: "failed",
 			Reason: fmt.Sprintf("implementation.clusterName=%q names a cluster to adopt, but no such cluster "+
-				"exists in %s — refusing to create one at an adoption name (run `groundhold discover` then "+
-				"`adopt`, or check the name)", plan.Name, rg)}
+				"exists in %s — refusing to create one at an adoption name (run `groundhold discover "+
+				"--provider azure --project %s --region <region> %s` then `adopt`, or check "+
+				"the name)", plan.Name, rg, d.Subscription, perr.AtNow)}
 	}
 
 	url, _ := d.armURL(rg, d.aksPath(plan.Name), aksAPIVersion)
@@ -238,10 +240,16 @@ func (d *Driver) observeAKS(capability, providerID string) ([]provider.Observati
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"cluster not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"cluster not found — bound resource is gone (will re-create)"}, nil
 	}
 
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
 	var diags []string
@@ -514,7 +522,7 @@ func (d *Driver) discoverAKS(region string) ([]provider.Discovered, []string, er
 			diags = append(diags, c.Name+": "+dg)
 		}
 		out = append(out, provider.Discovered{
-			ProviderID: pid, ResourceType: "capability.cluster.kubernetes", Observations: obs})
+			ProviderID: pid, ResourceType: "capability.cluster.kubernetes", Observations: provider.WithoutAbsence(obs)})
 	}
 	return out, diags, nil
 }

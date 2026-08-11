@@ -5,6 +5,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
 
 func secretAttrs() map[string]any {
@@ -150,4 +153,46 @@ func TestDeleteSecretForeignRefused(t *testing.T) {
 	if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
 		t.Fatalf("foreign secret must refuse delete, got %+v", res)
 	}
+}
+
+// TestAdoptsExistingSecret enrols secretmanager in the D391/D413 gate. A secret id is
+// deterministic; a re-converge against one that already exists must bind it rather than
+// fail, and the labels are what license the binding. Nothing here reads or writes the
+// secret VALUE — adoption binds the container, which is the whole point of keeping the
+// payload out of this driver's create path.
+func TestAdoptsExistingSecret(t *testing.T) {
+	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
+	p := &certifynet.ExistingProbe{
+		Name:     "gcp/secretmanager",
+		Classify: gcpRESTRole,
+		ExistingServer: func() *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == "POST" && strings.Contains(r.URL.RawQuery, "secretId="):
+						w.WriteHeader(http.StatusConflict)
+						_, _ = w.Write([]byte(`{"error":{"code":409,"message":"already exists"}}`))
+					case r.Method == "POST" && strings.HasSuffix(r.URL.Path, ":getIamPolicy"):
+						_, _ = w.Write([]byte(`{"etag":"abc","bindings":[]}`))
+					case r.Method == "GET":
+						_, _ = w.Write([]byte(`{"name":"projects/acme-prod/secrets/x",` +
+							`"labels":{"groundhold-capability":"dbcreds","groundhold-environment":"prod"},` +
+							`"replication":` + umReplica + `}`))
+					default:
+						w.WriteHeader(404)
+					}
+				}))
+		},
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("acme-prod")
+			d.HTTP = &http.Client{Transport: rt}
+			d.SecretBaseURL = happyURL
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("secretmanager", "dbcreds", "prod", secretAttrs(), secretImpl(), "k", 1)
+		},
+		AllowedMutations: 2, // the refused create + the IAM posture read/assert
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

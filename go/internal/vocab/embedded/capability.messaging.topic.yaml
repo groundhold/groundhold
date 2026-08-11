@@ -22,7 +22,8 @@ attributes:
     description: Provider-side encryption of any retained message data. Only true is meaningful.
     mappings:
       aws.sns: server-side encryption (KmsMasterKeyId)
-      gcp.pubsub: topic default encryption
+      gcp.pubsub-topic: topic default encryption
+      azure.servicebustopic: const true — Service Bus encrypts at rest unconditionally
 
   encryption.customerManagedKeys:
     kind: bool
@@ -32,7 +33,7 @@ attributes:
       (implementation.kms_key_id / kms_key_name), never a capability path.
     mappings:
       aws.sns: KmsMasterKeyId (a customer key)
-      gcp.pubsub: topic kmsKeyName
+      gcp.pubsub-topic: topic kmsKeyName
 
   location.region:
     kind: string
@@ -42,14 +43,18 @@ attributes:
       residency contract "satisfied" by a global topic would be a compliance lie.
     mappings:
       aws.sns: topic region
-      gcp.pubsub: messageStoragePolicy.allowedPersistenceRegions
+      gcp.pubsub-topic: messageStoragePolicy.allowedPersistenceRegions
+      azure.servicebustopic: the NAMESPACE's location (the entity has none of its own)
 
   network.publicExposure:
     kind: bool
     description: Whether any public/anonymous publish path exists.
     mappings:
       aws.sns: no Principal:"*" in the topic resource policy
-      gcp.pubsub: no allUsers/allAuthenticatedUsers IAM binding
+      gcp.pubsub-topic: no allUsers/allAuthenticatedUsers IAM binding
+      azure.servicebustopic: >
+        the namespace's publicNetworkAccess — Enabled is exposed, Disabled is not.
+        Again a namespace property: the queue/topic does not carry one
     note: >
       static verification proves configuration intent; an anonymous-publish probe
       proves the actual absence of a public path.
@@ -59,6 +64,8 @@ attributes:
     description: Managed service vs self-operated
 
   cost.monthly:
+    description: >-
+      Projected monthly cost of the topic — a projection, never a quote, and never read back from the provider (evidence: projection)
     kind: money
     evidence: projection      # D311: a forecast, never resource state
     verification: static against a pricing catalog; billing after deploy

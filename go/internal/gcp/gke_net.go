@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"groundhold/internal/perr"
 	"groundhold/internal/provider"
 )
 
@@ -209,9 +210,10 @@ func (d *Driver) createGKE(environment, capability string,
 	if found {
 		if !gkeOwned(c, capability, environment) {
 			return provider.CreateResult{Status: "failed",
-				Reason: "a cluster with this name exists and is not ours (labels do not match) — refusing to " +
-					"adopt it; to take over a foreign cluster run `groundhold discover` then `adopt` (the gated " +
-					"adoption flow), never a bare converge"}
+				Reason: fmt.Sprintf("a cluster with this name exists and is not ours (labels do not match) — "+
+					"refusing to adopt it; to take over a foreign cluster run `groundhold discover "+
+					"--provider gcp --project %s --region %s %s` then `adopt` (the gated "+
+					"adoption flow), never a bare converge", d.Project, plan.Location, perr.AtNow)}
 		}
 		if gkeHealthy(c) {
 			return provider.CreateResult{ProviderID: pid, Status: "succeeded"} // ours, already up
@@ -227,8 +229,9 @@ func (d *Driver) createGKE(environment, capability string,
 	if plan.AdoptByName {
 		return provider.CreateResult{Status: "failed",
 			Reason: fmt.Sprintf("implementation.clusterName=%q names a cluster to adopt, but no such cluster "+
-				"exists in %s — refusing to create one at an adoption name (check the name/location, or run "+
-				"`groundhold discover` then `adopt` first)", plan.Name, plan.Location)}
+				"exists in %s — refusing to create one at an adoption name (check the name/location, or "+
+				"run `groundhold discover --provider gcp --project %[3]s --region %[2]s %[4]s` then "+
+				"`adopt` first)", plan.Name, plan.Location, d.Project, perr.AtNow)}
 	}
 
 	url := fmt.Sprintf("%s/projects/%s/locations/%s/clusters", d.gkeBase(), d.Project, plan.Location)
@@ -340,10 +343,16 @@ func (d *Driver) observeGKE(capability, providerID string) ([]provider.Observati
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"cluster not found — nothing to observe"}, nil
+		// F-LC3 (D519): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"cluster not found — bound resource is gone (will re-create)"}, nil
 	}
 
 	obs := []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: gkeRegionOf(location), Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
@@ -598,7 +607,7 @@ func (d *Driver) discoverGKE(region string) ([]provider.Discovered, []string, er
 			diags = append(diags, cl.Name+": "+dg)
 		}
 		out = append(out, provider.Discovered{
-			ProviderID: pid, ResourceType: "capability.cluster.kubernetes", Observations: obs})
+			ProviderID: pid, ResourceType: "capability.cluster.kubernetes", Observations: provider.WithoutAbsence(obs)})
 	}
 	return out, diags, nil
 }

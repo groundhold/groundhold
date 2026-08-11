@@ -146,7 +146,7 @@ func TestCreateObserveBlobReplication(t *testing.T) {
 			case r.Method == "GET":
 				_, _ = w.Write([]byte(`{"location":"eastus","sku":{"name":"Standard_ZRS"},` +
 					`"tags":{"groundhold-capability":"assets","groundhold-environment":"prod"},` +
-					`"properties":{"provisioningState":"Succeeded","allowBlobPublicAccess":false}}`))
+					`"properties":{"provisioningState":"Succeeded","publicNetworkAccess":"Disabled"}}`))
 			default:
 				w.WriteHeader(404)
 			}
@@ -182,7 +182,7 @@ func blobArmFake(t *testing.T, tagCap string) *httptest.Server {
 			case "GET":
 				_, _ = w.Write([]byte(`{"location":"eastus","sku":{"name":"Standard_ZRS"},` +
 					`"tags":{"groundhold-capability":"` + tagCap + `","groundhold-environment":"prod"},` +
-					`"properties":{"provisioningState":"Succeeded","allowBlobPublicAccess":false}}`))
+					`"properties":{"provisioningState":"Succeeded","publicNetworkAccess":"Disabled"}}`))
 			case "DELETE":
 				w.WriteHeader(200)
 			default:
@@ -222,12 +222,17 @@ func TestCreateObserveDeleteBlob(t *testing.T) {
 // replacement paths, and the default "unsupported" fallback for anything else.
 func TestClassifyBlobChange(t *testing.T) {
 	cases := map[string]string{
-		"location.region":               "immutable",
-		"durability.class":              "immutable",
-		"retention.minimum":             "immutable",
-		"retention.locked":              "immutable",
-		"replication.enabled":           "immutable",
-		"replication.destinationRegion": "immutable",
+		"location.region": "immutable",
+		// D824: Microsoft publishes "Change how a storage account is replicated" — the
+		// redundancy is editable, so a replacement destroys every blob for nothing.
+		"durability.class": "unsupported",
+		// D824: an unlocked policy can be shortened or lengthened, a locked one extended.
+		"retention.minimum": "unsupported",
+		"retention.locked":  "immutable",
+		// D824: object replication is a policy Azure applies to accounts that already
+		// exist, so replacing a stateful account was never what it needed.
+		"replication.enabled":           "unsupported",
+		"replication.destinationRegion": "unsupported",
 		"versioning.enabled":            "unsupported",
 		"cost.monthly":                  "unsupported",
 	}
@@ -326,7 +331,7 @@ func TestCreateBlobRetentionLockedExercisesWORMLock(t *testing.T) {
 			// before the account PUT — must carry OUR tags or the create refuses.
 			_, _ = w.Write([]byte(`{"location":"eastus","sku":{"name":"Standard_ZRS"},` +
 				`"tags":{"groundhold-capability":"assets","groundhold-environment":"prod"},` +
-				`"properties":{"provisioningState":"Succeeded","allowBlobPublicAccess":false}}`))
+				`"properties":{"provisioningState":"Succeeded","publicNetworkAccess":"Disabled"}}`))
 		default:
 			w.WriteHeader(200)
 			_, _ = w.Write([]byte(`{"etag":"W/\"abc\"","properties":{"provisioningState":"Succeeded"}}`))
@@ -363,7 +368,7 @@ func TestCreateBlobRetentionLockedNoEtagIsUnknown(t *testing.T) {
 		case r.Method == "GET":
 			_, _ = w.Write([]byte(`{"location":"eastus","sku":{"name":"Standard_ZRS"},` +
 				`"tags":{"groundhold-capability":"assets","groundhold-environment":"prod"},` +
-				`"properties":{"provisioningState":"Succeeded","allowBlobPublicAccess":false}}`))
+				`"properties":{"provisioningState":"Succeeded","publicNetworkAccess":"Disabled"}}`))
 		default:
 			w.WriteHeader(200)
 			_, _ = w.Write([]byte(`{"etag":"W/\"abc\"","properties":{"provisioningState":"Succeeded"}}`))

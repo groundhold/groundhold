@@ -163,3 +163,110 @@ cases:
       actions:
         a-create-fn:
           operation: create
+
+  - name: bound-lambda-with-wired-env-replans-converged-not-stripped
+    impl: go
+    description: >
+      D961: a BOUND lambda whose env var is WIRED to a producer output
+      (environment.DATABASE_HOST = $ref aurora.writerEndpoint) was created with the
+      reference resolved — observe recorded the concrete value. A re-plan must fold
+      the $ref to the bound producer's fresh outputs.writerEndpoint (the D283 fold,
+      now applied to the UPDATE path, not just create) so the desired env MATCHES
+      the observation and the plan is a converged no-op. Before the fix the drift
+      classifier derived the desired env from the raw $ref, which the builder drops,
+      so it OMITTED the wired var and planned to STRIP it — a no-op converge silently
+      deleting a wired env var. Every operand is observed equal to its desired, so
+      nothing-to-change is the whole proof: any re-appearance of the strip is a
+      spurious update.
+    plan:
+      at: "2026-07-22T10:00:00Z"
+      bindings:
+        db: "aurora:eu-central-1:123456789012:db"
+        fn: "lambda:eu-central-1:123456789012:fn"
+      observations:
+        - { capability: db, path: service.managed, value: true,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-22T09:55:00Z", ttlSeconds: 900 }
+        - { capability: db, path: location.region, value: eu-central-1,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-22T09:55:00Z", ttlSeconds: 900 }
+        - { capability: db, path: outputs.writerEndpoint, value: db-writer.internal,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-22T09:55:00Z", ttlSeconds: 900 }
+        - { capability: fn, path: service.managed, value: true,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-22T09:55:00Z", ttlSeconds: 900 }
+        - { capability: fn, path: location.region, value: eu-central-1,
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-22T09:55:00Z", ttlSeconds: 900 }
+        - { capability: fn, path: implementation.vpcConfig,
+            value: "subnets=subnet-0aaa1111,subnet-0bbb2222;sgs=sg-0abc1234",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-22T09:55:00Z", ttlSeconds: 900 }
+        - { capability: fn, path: implementation.environment,
+            value: "DATABASE_HOST=db-writer.internal;LOG_LEVEL=info",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-22T09:55:00Z", ttlSeconds: 900 }
+        - { capability: fn, path: implementation.package,
+            value: "123456789012.dkr.ecr.eu-central-1.amazonaws.com/fn:sha",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-22T09:55:00Z", ttlSeconds: 900 }
+        - { capability: fn, path: implementation.role,
+            value: "arn:aws:iam::123456789012:role/fn-exec",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-22T09:55:00Z", ttlSeconds: 900 }
+        - { capability: fn, path: implementation.invokers, value: "",
+            source: provider-api, derivation: measured,
+            observedAt: "2026-07-22T09:55:00Z", ttlSeconds: 900 }
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: lve-d961, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+          - id: fn
+            type: capability.function.serverless
+        constraints:
+          hard:
+            - id: c-db-managed
+              subject: db
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+            - id: c-fn-managed
+              subject: fn
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: lve-d961
+        capabilities:
+          db:
+            provider: aws
+            service: aurora
+            attributes:
+              service.managed: true
+              location.region: eu-central-1
+          fn:
+            provider: aws
+            service: lambda
+            attributes:
+              service.managed: true
+              location.region: eu-central-1
+            implementation:
+              image_uri: 123456789012.dkr.ecr.eu-central-1.amazonaws.com/fn:sha
+              role_arn: arn:aws:iam::123456789012:role/fn-exec
+              security_groups: [sg-0abc1234]
+              subnets: [subnet-0aaa1111, subnet-0bbb2222]
+              environment:
+                LOG_LEVEL: info
+                DATABASE_HOST:
+                  $ref: { capability: db, output: writerEndpoint }
+    expect:
+      error: plan
+      code: nothing-to-change

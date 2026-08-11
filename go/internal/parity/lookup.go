@@ -28,6 +28,31 @@ func CanFulfil(caps map[string]map[string]string, cloud, capType string) Fulfilm
 	return Fulfilment{State: "unbuilt"}
 }
 
+// OutsideTheClouds maps a capability type to the non-cloud providers that fulfil it
+// ("k8s/namespace"), from the driver's own mappings (D622).
+//
+// This knowledge lived ONLY in the matrix generator's test, so `spec/parity.yaml`
+// carried `fulfilledOutsideTheClouds` and the `parity` VERB — the interface the help
+// text and the bake-off skill send a reader to — showed `unbuilt` for eight
+// capabilities the k8s driver ships. spec/parity.yaml's own header states the
+// misreading that marker exists to prevent ("this stops unbuilt from being read as
+// 'groundhold has not built this' when it has"), and the verb produced it anyway.
+//
+// The caller supplies the mappings so this package keeps no driver dependency.
+func OutsideTheClouds(mappings map[string]string) map[string][]string {
+	out := map[string][]string{}
+	for svc, capability := range mappings {
+		if capability == "" {
+			continue
+		}
+		out[capability] = append(out[capability], "k8s/"+svc)
+	}
+	for k := range out {
+		sort.Strings(out[k])
+	}
+	return out
+}
+
 // Clouds returns the fixed cloud order (for stable CLI/matrix output).
 func Clouds() []string { return append([]string(nil), clouds...) }
 

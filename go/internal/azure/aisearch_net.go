@@ -85,7 +85,11 @@ func (d *Driver) observeAISearch(capability, providerID string) ([]provider.Obse
 		return nil, nil, fmt.Errorf("searchServices.get: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"search service not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"search service not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("searchServices.get: HTTP %d", st)
@@ -94,25 +98,40 @@ func (d *Driver) observeAISearch(capability, providerID string) ([]provider.Obse
 	if json.Unmarshal(resp, &doc) != nil {
 		return nil, nil, &armReadError{Op: "searchServices.get", Cause: "body", Status: st}
 	}
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
-		{Path: "encryption.atRest", Value: true, Derivation: "config-intent"},
-		{Path: "encryption.inTransit", Value: true, Derivation: "config-intent"},
+		{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"},
+		{Path: "encryption.inTransit", Value: true, Derivation: "platform-invariant"},
 		{Path: "network.publicExposure", Value: doc.Properties.PublicNetworkAccess != "disabled", Derivation: "measured"},
 	}
 	if doc.Location != "" {
 		obs = append(obs, provider.Observation{Path: "location.region", Value: strings.ToLower(doc.Location), Derivation: "measured"})
 	}
-	// zone redundancy: Standard SKU with >=3 replicas.
+	// availability.class: >=3 replicas on a Standard service distribute across availability
+	// zones — but ONLY in a region that HAS them (D956). A region without availability zones
+	// cannot be zone-redundant at any replica count, so the regional claim is GATED on the
+	// region's AZ count (Microsoft.Resources locations — the same D948 helper flexpostgres D947
+	// and redis D948 apply at create; field 2026-08-08: northcentralus exposes 0 AZs, westeurope
+	// 3). AI Search exposes no zone field of its own, so the replica count is the strongest
+	// direct signal and the region's AZ count is the necessary precondition. Skip-loudly (D75):
+	// an inconclusive AZ read keeps the replica signal rather than downgrade on a read failure.
+	var diags []string
 	if doc.Sku.Name == "standard" && doc.Properties.ReplicaCount >= 3 {
-		obs = append(obs, provider.Observation{Path: "availability.class", Value: "regional", Derivation: "measured"})
+		region := strings.ReplaceAll(strings.ToLower(doc.Location), " ", "")
+		if zones, known := d.regionLogicalZones(region); known && len(zones) < 2 {
+			obs = append(obs, provider.Observation{Path: "availability.class", Value: "zonal", Derivation: "measured"})
+			diags = append(diags, "availability.class: region "+region+" exposes fewer than two "+
+				"availability zones, so >=3 replicas are not zone-redundant (zonal, not regional)")
+		} else {
+			obs = append(obs, provider.Observation{Path: "availability.class", Value: "regional", Derivation: "measured"})
+		}
 	} else {
 		obs = append(obs, provider.Observation{Path: "availability.class", Value: "zonal", Derivation: "measured"})
 	}
-	if doc.Properties.EncryptionWithCmk.Enforcement == "Enabled" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: true, Derivation: "measured"})
-	}
-	return obs, nil, nil
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: doc.Properties.EncryptionWithCmk.Enforcement == "Enabled", Derivation: "measured"})
+	return obs, diags, nil
 }
 
 func (d *Driver) deleteAISearch(capability, environment, providerID string) provider.CreateResult {
@@ -140,21 +159,9 @@ func (d *Driver) deleteAISearch(capability, environment, providerID string) prov
 		return provider.CreateResult{Status: "failed",
 			Reason: "search service tags do not match — refusing to delete a resource that is not ours"}
 	}
-	dst, dresp, de := d.doARM("DELETE", url, nil)
-	if de != nil {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("delete outcome unknown: %v", de)}
-	}
-	if dst == http.StatusNotFound {
-		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
-	}
-	if dst >= 500 {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("delete HTTP %d (server error) — reconcile", dst)}
-	}
-	if dst < 200 || dst >= 300 {
-		if r := provider.MutationResult(dst, azErrCode(dresp), nil, providerID, "delete"); r != nil {
-			return *r
-		}
-		return provider.CreateResult{ProviderID: providerID, Status: "failed", Reason: fmt.Sprintf("delete HTTP %d: %s", dst, mutDetailAz(dresp))}
-	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// D984: route the delete through deleteAndConfirm (D971) — a Search service DELETE
+	// returns 202 Accepted (async); concluding succeeded here tombstoned a service
+	// (with its indexes) still live. The helper polls to a confirmed 404, unknown on
+	// timeout.
+	return *d.deleteAndConfirm(url, providerID, "cognitive search")
 }

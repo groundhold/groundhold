@@ -47,6 +47,12 @@ attributes:
       gcp.vpc: no external LBs/addresses on member resources, no 0.0.0.0/0 ingress rules
       aws.vpc: no IGW route on the workload path AND no security group with a
         0.0.0.0/0 (or ::/0) ingress rule
+      k8s.netpol: a NetworkPolicy whose policyTypes include Ingress and whose
+        ingress[] rule list is EMPTY is default-deny, so ingress.public is false.
+        config-intent, not measured — the policy states the intent and no packet
+        was sent. A policy selecting only some pods (a non-empty podSelector)
+        still reports false but carries a diagnostic, because the namespace as a
+        whole is then not covered
     note: >
       static verification proves configuration intent; an outcome probe
       (external reachability scan) proves the actual absence of paths.

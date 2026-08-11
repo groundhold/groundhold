@@ -97,7 +97,11 @@ func (d *Driver) observeAzureKey(capability, providerID string) ([]provider.Obse
 		return nil, nil, fmt.Errorf("keys.get: %v", e)
 	}
 	if st == http.StatusNotFound {
-		return nil, []string{"key not found — nothing to observe"}, nil
+		// F-LC3 (D518): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"key not found — bound resource is gone (will re-create)"}, nil
 	}
 	if st != http.StatusOK {
 		return nil, nil, fmt.Errorf("keys.get: HTTP %d", st)
@@ -106,7 +110,9 @@ func (d *Driver) observeAzureKey(capability, providerID string) ([]provider.Obse
 	if json.Unmarshal(resp, &doc) != nil {
 		return nil, nil, &armReadError{Op: "keys.get", Cause: "body", Status: st}
 	}
+	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}

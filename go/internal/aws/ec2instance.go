@@ -275,11 +275,38 @@ func classifyEC2InstanceChange(path string) (string, string) {
 	case "availability.class":
 		return "immutable", "placement is fixed by the subnet the instance launched into — a change is a new machine"
 	case "network.publicExposure":
-		return "immutable", "the public-address association is made at launch on the primary interface — a change is a new machine, not a toggle"
+		// D821: this said "a change is a new machine, not a toggle". EC2 has the toggle:
+		// ModifyNetworkInterfaceAttribute takes AssociatePublicIpAddress, and
+		// AssociateAddress/DisassociateAddress attach and detach an elastic address on a
+		// RUNNING instance. Destroying a machine to change it loses instance-store data,
+		// the address and the uptime, for a change AWS makes in one call.
+		return "unsupported", "in-place exposure change is not wired for EC2 in this slice " +
+			"— AWS does support it (ModifyNetworkInterfaceAttribute AssociatePublicIpAddress, " +
+			"or AssociateAddress/DisassociateAddress for an elastic address), so this is a gap " +
+			"in groundhold, not a property of the instance: do it directly rather than replace " +
+			"the machine"
 	case "encryption.atRest":
-		return "immutable", "EBS encryption is a property of a volume at creation — an existing volume cannot be encrypted in place"
+		// D830: both halves of the old sentence are true ABOUT THE VOLUME, and the verdict
+		// destroyed the MACHINE. This sat one case above the one D829 corrected, and D829's
+		// detector could not see it because it never mentions a machine at all — it simply
+		// stops after the volume. Fixing a neighbour and leaving its twin is the failure
+		// D825 named, one entry later.
+		return "unsupported", "in-place encryption is not wired for EC2 in this slice — an " +
+			"existing EBS volume cannot be encrypted in place, so the VOLUME must be " +
+			"replaced (snapshot, CopySnapshot with encryption, AttachVolume); the INSTANCE " +
+			"need not be, and destroying it loses its id, addresses and instance-store data"
 	case "encryption.customerManagedKeys":
-		return "immutable", "the key encrypting a volume is fixed when the volume is created — re-keying is a new volume, and so a new machine"
+		// D829: the first half is true and the "and so" is not. Re-keying an EBS volume
+		// does mean a NEW VOLUME (snapshot, CopySnapshot with the new key, create) — and
+		// the instance stays where it is: DetachVolume and AttachVolume both exist, so the
+		// disk is swapped underneath a machine that keeps its id, its addresses and its
+		// instance-store data. Destroying the machine loses all three for a change that
+		// never asked for it.
+		return "unsupported", "in-place re-keying is not wired for EC2 in this slice — the " +
+			"VOLUME must be recreated (CreateSnapshot, CopySnapshot with the new key, then " +
+			"AttachVolume), but the INSTANCE does not: it keeps its id and its addresses " +
+			"while the disk is swapped, so this is a gap in groundhold rather than a reason " +
+			"to replace the machine"
 	case "service.managed":
 		return "unsupported", "platform/projection property — nothing to patch"
 	}

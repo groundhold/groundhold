@@ -124,9 +124,15 @@ func (d *Driver) observeEBSVolume(capability, providerID string) ([]provider.Obs
 		return nil, nil, rerr
 	}
 	if !found {
-		return nil, []string{"volume not found — nothing to observe"}, nil
+		// F-LC3 (D520): a BOUND resource the API authoritatively 404s is GONE.
+		// A diagnostic alone leaves the binding a no-op forever (D513).
+		return []provider.Observation{
+			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
+		}, []string{"volume not found — bound resource is gone (will re-create)"}, nil
 	}
 	return []provider.Observation{
+		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
+		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		// An EBS volume lives in exactly one availability zone, always — this is
@@ -174,7 +180,22 @@ func (d *Driver) deleteEBSVolume(capability, environment, providerID string) pro
 		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
 			Reason: fmt.Sprintf("delete outcome unknown: %v", e)}
 	case st == http.StatusOK:
-		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+		// ---- poll to absence (D968 class, D978) ----
+		// DeleteVolume is async: the volume enters "deleting", not gone. Reporting
+		// succeeded here tombstones data that may still be live if the teardown stalls.
+		// Poll describeEC2Volume to a confirmed absence; unknown on timeout keeps the
+		// handle.
+		deadline := d.Now().Add(d.PollTimeout)
+		for {
+			if _, found, rerr := d.describeEC2Volume(region, id); rerr == nil && !found {
+				return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // confirmed gone
+			}
+			if d.Now().After(deadline) {
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: "volume still deleting at poll timeout — reconcile via DescribeVolumes"}
+			}
+			time.Sleep(d.PollInterval)
+		}
 	case strings.Contains(ec2ErrCode(body), "NotFound"):
 		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // idempotent
 	case st >= 500:
@@ -221,7 +242,7 @@ func (d *Driver) discoverEBSVolumes(region string) ([]provider.Discovered, []str
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.storage.block",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil

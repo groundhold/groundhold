@@ -9,7 +9,6 @@ package azure
 import (
 	"regexp"
 	"sort"
-	"strconv"
 
 	"fmt"
 )
@@ -85,9 +84,13 @@ func BuildAzureDashboard(environment, capability string,
 }
 
 func (p AzureDashPlan) createBody(tags map[string]any) map[string]any {
-	parts := map[string]any{}
+	// D992: Microsoft.Portal/dashboards (2020-09-01-preview) wants `lenses` and `parts`
+	// as LISTS, not maps. The driver built them as maps ({"0": …}), which the golden
+	// httptest fixture accepted but the live API refuses with HTTP 400
+	// "Cannot deserialize the current JSON object … into type List" (field 2026-08-10).
+	parts := make([]any, 0, len(p.Metrics))
 	for i, m := range p.Metrics {
-		parts[strconv.Itoa(i)] = map[string]any{
+		parts = append(parts, map[string]any{
 			"position": map[string]any{"x": (i % 2) * 6, "y": (i / 2) * 4, "rowSpan": 4, "colSpan": 6},
 			"metadata": map[string]any{
 				"type": "Extension/HubsExtension/PartType/MonitorChartPart",
@@ -101,13 +104,13 @@ func (p AzureDashPlan) createBody(tags map[string]any) map[string]any {
 					}},
 				}},
 			},
-		}
+		})
 	}
 	return map[string]any{
 		"location": "global",
 		"tags":     tags,
 		"properties": map[string]any{
-			"lenses": map[string]any{"0": map[string]any{"order": 0, "parts": parts}},
+			"lenses": []any{map[string]any{"order": 0, "parts": parts}},
 		},
 	}
 }

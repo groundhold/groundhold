@@ -234,6 +234,36 @@ func TestSESInbound_InactiveIsUnknown(t *testing.T) {
 	}
 }
 
+// TestSESInbound_ForeignActiveSetRefusesActivation (D997): a region whose ACTIVE
+// receipt rule set is a stranger's (not groundhold's prefix) routes that stranger's
+// inbound mail. A create must NOT call SetActiveReceiptRuleSet — doing so would
+// silently replace their active set and stop their mail — it leaves our rule INACTIVE
+// (unknown WITH the pid) and names the conflict, and the stranger's set stays active.
+func TestSESInbound_ForeignActiveSetRefusesActivation(t *testing.T) {
+	f := newFakeSESInb()
+	f.active = "someone-elses-active-set" // NOT a pv- set: a real active set routing mail
+	srv := f.handler(t, nil)
+	defer srv.Close()
+	d := sesInbDriver(t, srv)
+	attrs, impl := sesInbCandidate()
+
+	res := d.createSESInbound(sesInbRegion, "prod", sesInbCap, attrs, impl, 1)
+	if res.Status != "unknown" {
+		t.Fatalf("a foreign active set must leave our rule inactive (unknown), got %q (%s)", res.Status, res.Reason)
+	}
+	if !strings.Contains(res.Reason, "not groundhold") && !strings.Contains(res.Reason, "hijack") {
+		t.Fatalf("the refusal must name the foreign-active-set conflict, got %q", res.Reason)
+	}
+	for _, a := range f.order {
+		if a == "SetActiveReceiptRuleSet" {
+			t.Fatal("create must NOT call SetActiveReceiptRuleSet when a stranger's set is active — that silently disables their mail")
+		}
+	}
+	if f.active != "someone-elses-active-set" {
+		t.Fatalf("the stranger's active set must be untouched, got %q", f.active)
+	}
+}
+
 // TestSESInbound_ObserveReverseMap: a scanning rule with an S3 action, in the
 // ACTIVE rule set, reverse-maps to spam.filtered=true and delivery.sink=true, with
 // EU residency and service.managed.

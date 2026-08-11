@@ -156,9 +156,43 @@ func Forecast(planDoc map[string]any, cand *contract.Candidate,
 				observations[af.Capability], evalClock, &rollup)
 			rollup.NoEffect++
 		case af.Operation == "update" && bound:
-			af.Effect = "will-update"
 			af.Attributes = predict(cand, af.Capability,
 				observations[af.Capability], evalClock, &rollup)
+			// D577: an update whose every predicted attribute ALREADY matches
+			// reality changes nothing, and saying "will-update" tells a script a
+			// change is coming for a plan overtaken by the world. The precedent is
+			// three cases above: a create against a bound capability is called
+			// no-effect because the executor "would 409-continue and change
+			// NOTHING" — the same statement about the same world, from predictions
+			// this line has just computed.
+			//
+			// An EMPTY prediction set is not evidence of no effect: concluding from
+			// absence is the failure this project keeps finding (D513, D522), so it
+			// stays an update.
+			// D639: the ACTION's own change set is the plan's authoritative statement
+			// of what apply will do, and this branch never consulted it — it decided
+			// "changes nothing" from the CANDIDATE's vocabulary attributes alone. Two
+			// measured consequences, both in the dangerous direction (predicted
+			// nothing, got a mutation):
+			//
+			//   - a plan sealed while the world drifted, then a newer observation
+			//     showing the target already reached: forecast said
+			//     `no-effect / target-already-matches`, apply performed the update and
+			//     bumped the binding generation;
+			//   - a change set on an OPERAND path (implementation.*): the forecast
+			//     never mentions the changed path at all — operands are not vocabulary
+			//     attributes — and still reported noEffect.
+			//
+			// The second needs no staging: any Lambda whose only drift is an env var
+			// compiles inside plain `converge`, which prints the rollup on the line
+			// above the consent prompt.
+			if allAttributesMatch(af.Attributes) && !hasChanges(a) {
+				af.Effect = "no-effect"
+				af.Reason = "target-already-matches"
+				rollup.NoEffect++
+				break
+			}
+			af.Effect = "will-update"
 			rollup.WillUpdate++
 		case af.Operation == "update" && !bound:
 			af.Effect = "unknown"
@@ -319,4 +353,26 @@ func sortedPaths(attrs map[string]contract.Provenanced) []string {
 func str(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+// allAttributesMatch reports whether EVERY predicted attribute is already at its
+// desired value. Empty means nothing was predicted — never "nothing will change".
+// hasChanges reports whether the sealed action carries a change set. If it does, apply
+// will call the driver's Update with those paths — unconditionally — so no forecast may
+// call it no-effect (D639).
+func hasChanges(a map[string]any) bool {
+	ch, _ := a["changes"].([]any)
+	return len(ch) > 0
+}
+
+func allAttributesMatch(attrs []Attribute) bool {
+	if len(attrs) == 0 {
+		return false
+	}
+	for _, a := range attrs {
+		if a.Prediction != "match" {
+			return false
+		}
+	}
+	return true
 }

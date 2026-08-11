@@ -71,7 +71,7 @@ func (d *Driver) discoverGapBGlobal(providerPath, apiVersion, resourceType, labe
 		out = append(out, provider.Discovered{
 			ProviderID:   p,
 			ResourceType: resourceType,
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out, diags, nil
@@ -192,7 +192,7 @@ func (d *Driver) ehDiscoverHubs(rg, ns string, diags *[]string) []provider.Disco
 		out = append(out, provider.Discovered{
 			ProviderID:   pid,
 			ResourceType: "capability.streaming.pipe",
-			Observations: obs,
+			Observations: provider.WithoutAbsence(obs),
 		})
 	}
 	return out

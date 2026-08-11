@@ -27,8 +27,12 @@ schema:                              # the mapped-surface fingerprint pins the s
   # sha256 over the identity facts + each mapped field's terminal type signature.
   # Drift INSIDE this surface (a mapped field changed type/enum or vanished) is a
   # mapping-schema-drift refusal; drift outside it is tolerated. Authored against
-  # the vendored testdata/resourcequota-openapi.json schema.
-  mappedSurface: sha256:f536265d49d02293bc98d3c31e866ba9a6c4fee8aceb67609db0866788a72cf7
+  # the vendored testdata/resourcequota-openapi.json schema — which is now a
+  # VERBATIM recording from a live API server (D509). The previous pin was
+  # authored against a hand-simplified fixture that modelled Quantity as a plain
+  # string; a real server models it as oneOf[string,number], so the old pin
+  # described a shape Kubernetes has never served and every real cluster drifted.
+  mappedSurface: sha256:8ce46100509afc25429feb19029bbaa29be5049e233315094adbcf02e9254f94
 
 ownership: k8s/v1                    # the engine's single strategy (labels + SSA); written once
 

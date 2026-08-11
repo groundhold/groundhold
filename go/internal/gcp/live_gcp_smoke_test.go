@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -22,42 +23,156 @@ import (
 // SubscriptionNotFound), so an ARM endpoint-reality check needs a real subscription.
 // AKS also carries no D273-class risk — it polls the resource's own provisioningState,
 // never a constructed sub-resource path — so that gap is an accepted, documented boundary.
+//
+// D718: the subject is DERIVED, not typed. This gate carried eight GKE paths by hand,
+// so it covered one service; the measurement that found the Secret Manager and
+// Artifact Registry `:getIamPolicy` defect had to be run outside it. It reads
+// testdata/gcp-routes.txt now, recorded from what the drivers build.
+//
+// The predicate is deliberately WEAKER than the AWS one, and the reason is worth
+// stating rather than hiding: GCP tests point several base-URL overrides at one
+// fixture server, so a recorded URL's origin often cannot say which service it
+// belonged to. Such a line carries its candidate set, and the gate accuses only when a
+// route exists under NONE of them. That still catches "the driver builds a path this
+// cloud does not have anywhere" — the D717/D718 class — and never accuses a driver
+// because the test harness was ambiguous.
 func TestLiveGCPEndpointReality(t *testing.T) {
 	if os.Getenv("GROUNDHOLD_LIVE_GCP_SMOKE") != "1" {
 		t.Skip("live GCP endpoint-reality disabled (set GROUNDHOLD_LIVE_GCP_SMOKE=1 with network egress)")
 	}
-	const base = "https://container.googleapis.com/v1"
 	d := NewDriver("x")
 
-	route := func(method, path string) (recognized bool, detail string) {
-		req, _ := http.NewRequest(method, base+path, nil)
+	// A real route is auth-gated (401/403) for an unauthenticated call. A 404 is
+	// ambiguous and the distinction matters: the Google FRONTEND answers an unmatched
+	// route with an HTML page, while an API answers a missing RESOURCE under a real
+	// route with its JSON error envelope. Reading every 404 as "no such route" accused
+	// every Cloud Storage and IAM path in the set, because those APIs answer an
+	// anonymous caller about a resource rather than demanding credentials first.
+	exists := func(method, url string) (bool, string) {
+		req, err := http.NewRequest(method, url, nil)
+		if err != nil {
+			return false, "unbuildable request: " + err.Error()
+		}
 		resp, err := d.HTTP.Do(req) // the DRIVER's client — a transport regression fails here
 		if err != nil {
 			return false, "transport error: " + err.Error()
 		}
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<12))
 		resp.Body.Close()
-		// A real route is auth-gated (401) for an unauthenticated call; an unmatched route
-		// is a 404 from the Google frontend. 404 == the route does not exist.
-		return resp.StatusCode != http.StatusNotFound, strings.TrimSpace(string(b[:min(len(b), 120)]))
+		body := strings.TrimSpace(string(b))
+		absent := resp.StatusCode == http.StatusNotFound && strings.HasPrefix(body, "<")
+		return !absent, body[:min(len(body), 140)]
 	}
 
-	// EVERY (method, path) the GKE driver constructs, with bogus placeholders.
-	for _, e := range []struct{ method, path string }{
-		{"GET", "/projects/x/locations/y/clusters"}, {"POST", "/projects/x/locations/y/clusters"},
-		{"GET", "/projects/x/locations/y/clusters/z"}, {"PUT", "/projects/x/locations/y/clusters/z"},
-		{"DELETE", "/projects/x/locations/y/clusters/z"},
-		{"GET", "/projects/x/locations/y/operations/op"},
-		{"GET", "/projects/x/locations/-/clusters"},
-		{"POST", "/projects/x/locations/y/clusters/z:setAddons"},
-	} {
-		if ok, detail := route(e.method, e.path); !ok {
-			t.Errorf("GKE endpoint %s %s is NOT a real GCP route (%q) — the driver calls a nonexistent "+
-				"path (the D273 class), or the client cannot connect (a transport regression)", e.method, e.path, detail)
+	raw, err := os.ReadFile(routesFile)
+	if err != nil {
+		t.Fatalf("read %s: %v", routesFile, err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	// D328: assert the subject before reporting on it.
+	if len(lines) < 400 {
+		t.Fatalf("%s holds %d routes — too few to be the real set; the gate would report "+
+			"clean without asking about most of what the drivers call", routesFile, len(lines))
+	}
+	// 694 routes with candidate sets is thousands of requests, and the same URL recurs
+	// across lines. Ask each DISTINCT (method, url) once, concurrently, then read the
+	// verdicts out of that table. Asked naively this outran the test timeout, and when
+	// it did finish it accused two dozen healthy routes — the extra load produced
+	// transport errors that the classifier could not tell from "route absent". A gate
+	// that manufactures its own evidence is worse than no gate.
+	type req struct{ method, url string }
+	type ans struct {
+		exists bool
+		detail string
+	}
+	want := map[req]bool{}
+	type job struct {
+		method, shown string
+		urls          []string
+	}
+	var jobs []job
+	ambiguous := 0
+	for _, l := range lines {
+		p := strings.SplitN(l, "\t", 3)
+		if len(p) != 3 {
+			t.Fatalf("malformed line in %s: %q", routesFile, l)
+		}
+		urls := candidateURLs(p[0], p[2])
+		if len(urls) == 0 {
+			t.Errorf("route %q resolves to no URL — it went unasked", l)
+			continue
+		}
+		if len(urls) > 1 {
+			ambiguous++
+		}
+		for _, u := range urls {
+			want[req{p[1], u}] = true
+		}
+		jobs = append(jobs, job{method: p[1], shown: p[2], urls: urls})
+	}
+
+	var mu sync.Mutex
+	answers := map[req]ans{}
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for r := range want {
+		wg.Add(1)
+		go func(r req) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			ok, detail := exists(r.method, r.url)
+			mu.Lock()
+			answers[r] = ans{ok, detail}
+			mu.Unlock()
+		}(r)
+	}
+	wg.Wait()
+
+	// A transport failure is NOT an absent route. Counting it as one is how this gate
+	// accused healthy drivers; it is reported as unmeasured instead, loudly.
+	unmeasured := 0
+	for r, a := range answers {
+		if !a.exists && strings.HasPrefix(a.detail, "transport error") {
+			unmeasured++
+			answers[r] = ans{true, a.detail} // do not accuse on evidence we do not have
 		}
 	}
-	// NEGATIVE CONTROL: a plausible-but-nonexistent nested sub-resource MUST be flagged.
-	if ok, _ := route("GET", "/projects/x/locations/y/clusters/z/nodePools/np/updates/id"); ok {
-		t.Error("negative control FAILED: a known-nonexistent nested path was not flagged — the gate has no teeth")
+	for _, j := range jobs {
+		var details []string
+		found := false
+		for _, u := range j.urls {
+			a := answers[req{j.method, u}]
+			if a.exists {
+				found = true
+				break
+			}
+			details = append(details, u+" -> "+strings.ReplaceAll(a.detail, "\n", " "))
+		}
+		if !found {
+			t.Errorf("%s %s exists under none of its candidate services — the driver builds "+
+				"a path GCP does not have (the D717/D718 class):\n    %s",
+				j.method, j.shown, strings.Join(details, "\n    "))
+		}
+	}
+	t.Logf("asked Google about %d distinct requests for %d routes (%d against a candidate "+
+		"set, because the test harness shares one fixture across several bases); %d could "+
+		"not be measured and were not counted against any driver",
+		len(want), len(jobs), ambiguous, unmeasured)
+
+	// NEGATIVE CONTROLS: routes this project either never had or shipped wrongly. If any
+	// reads as real, the classifier has stopped working and every result above is noise.
+	for _, c := range []struct{ why, method, url string }{
+		{"D273-shaped nested sub-resource", "GET",
+			"https://container.googleapis.com/v1/projects/x/locations/y/clusters/z/nodePools/np/updates/id"},
+		{"D718 secretmanager getIamPolicy under POST", "POST",
+			"https://secretmanager.googleapis.com/v1/projects/p/secrets/x:getIamPolicy"},
+		{"D718 artifactregistry getIamPolicy under POST", "POST",
+			"https://artifactregistry.googleapis.com/v1/projects/p/locations/l/repositories/r:getIamPolicy"},
+	} {
+		if ok, _ := exists(c.method, c.url); ok {
+			t.Errorf("negative control FAILED (%s): a known-nonexistent route was not "+
+				"flagged — the gate has no teeth", c.why)
+		}
 	}
 }

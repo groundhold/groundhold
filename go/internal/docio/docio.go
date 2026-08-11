@@ -49,6 +49,25 @@ func CheckSafeNumbers(v any) error {
 		return checkInt(int64(x))
 	case int64:
 		return checkInt(x)
+	case uint64:
+		// D684: yaml.v3 decodes an integer past int64 as uint64, and this switch
+		// had no arm for it — so `18446744073709551615` passed the LOAD gate that
+		// `spec/canonicalization.md` says refuses it ("Both implementations refuse
+		// such a value at LOAD ... as a structural error"). `validate` printed OK
+		// and the refusal arrived later from the canonicalizer as "cannot
+		// canonicalize value of type uint64", which names a Go type rather than the
+		// operator's number and carries none of the remediation this gate has.
+		if x >= uint64(maxSafeInteger) {
+			return fmt.Errorf("integer %d exceeds the JSON-safe range (2^53): a "+
+				"value this large cannot survive a JSON round trip unchanged, so "+
+				"it is refused at load rather than silently altered", x)
+		}
+	case uint:
+		if uint64(x) >= uint64(maxSafeInteger) {
+			return fmt.Errorf("integer %d exceeds the JSON-safe range (2^53): a "+
+				"value this large cannot survive a JSON round trip unchanged, so "+
+				"it is refused at load rather than silently altered", x)
+		}
 	case float64:
 		// any double with |x| >= 2^53 is necessarily integral (no
 		// fractional bits remain at that magnitude) and lossy through

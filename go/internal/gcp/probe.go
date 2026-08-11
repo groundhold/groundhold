@@ -127,10 +127,13 @@ func publicIP(addrs []addr) string {
 func (d *Driver) probeExposure(dbVersion, pubIP string,
 	out *provider.ProbeOutcome) {
 	if pubIP == "" {
+		// D775: the value is right — for Cloud SQL the allocated address list IS the
+		// answer, so there is no unknown-versus-absent fold here. What was wrong is the
+		// METHOD: `tcp-connect` names a handshake nobody attempted.
 		out.Measurements = append(out.Measurements, provider.ProbeMeasurement{
 			Path: "network.publicExposure", Value: false,
-			Method:   "tcp-connect",
-			Evidence: "no public address allocated; no endpoint to reach",
+			Method:   "provider-config",
+			Evidence: "no public address allocated; no endpoint to reach, nothing dialled",
 		})
 		return
 	}
