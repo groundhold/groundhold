@@ -138,6 +138,11 @@ func TestAzureDeclaredPermissionsCoverTheMutationsTheDriversCall(t *testing.T) {
 		"Microsoft.Cdn/profiles/originGroups/write":         "D1014: azurecdn Front Door origin-group write, undeclared",
 		"Microsoft.Cdn/profiles/originGroups/origins/write": "D1014: azurecdn Front Door origin write, undeclared",
 		"Microsoft.Cdn/profiles/customDomains/write":        "D1014: azurecdn Front Door custom-domain write, undeclared",
+		// D1017: the 6th child type, reached ONLY on the BYO Key Vault certificate branch a
+		// managed cert never takes. A completeness-critic found it uncaptured (the gate was
+		// blind); TestCreateAzureCDNBYOCertWritesSecret now drives the branch so the route is
+		// captured and this gap is visible and held.
+		"Microsoft.Cdn/profiles/secrets/write": "D1017: azurecdn Front Door BYO-cert secret write, undeclared",
 	}
 
 	var uncovered []string

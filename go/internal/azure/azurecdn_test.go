@@ -260,6 +260,45 @@ func TestCreateAzureCDNCustomDomainGolden(t *testing.T) {
 	}
 }
 
+// TestCreateAzureCDNBYOCertWritesSecret drives the BYO Key Vault certificate branch so the
+// profiles/secrets PUT is exercised and CAPTURED. Without a test on this branch (a managed
+// cert never reaches it) the route never enters azure-routes.txt, and the permission
+// sufficiency gate is blind to Microsoft.Cdn/profiles/secrets/write — the D1014 completeness
+// gap a completeness-critic surfaced.
+func TestCreateAzureCDNBYOCertWritesSecret(t *testing.T) {
+	secretSeen := false
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "PUT" && strings.Contains(r.URL.Path, "/secrets/") {
+				secretSeen = true
+			}
+			switch r.Method {
+			case "PUT":
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded"}}`))
+			case "GET":
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{"tags":{"groundhold-capability":"edge","groundhold-environment":"prod"},` +
+					`"properties":{"provisioningState":"Succeeded"}}`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	defer srv.Close()
+	d := azCDNDriver(t, srv)
+	impl := azCDNImpl()
+	impl["aliases"] = []any{"api.example.com"}
+	impl["certificate"] = "/subscriptions/" + testSub +
+		"/resourceGroups/rg1/providers/Microsoft.KeyVault/vaults/pv-kv-edge/secrets/tls-cert"
+	res := d.createAzureCDN("prod", "edge", azCDNAttrs(), impl, 1)
+	if res.Status != "succeeded" {
+		t.Fatalf("BYO-cert create: %+v", res)
+	}
+	if !secretSeen {
+		t.Fatal("a BYO Key Vault certificate must PUT a profiles/secrets resource")
+	}
+}
+
 // azRouteJSON returns the route properties JSON fragment for a viewer.protocol.
 func azRouteJSON(viewer string) string {
 	switch viewer {
