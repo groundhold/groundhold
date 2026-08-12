@@ -33216,3 +33216,36 @@ management` (the `scc` driver) — its discovery document does not render withou
 (`$discovery/rest` returns 403, the go-client mirror 404, the directory list has no entry), so
 its path and enum claims are unconfronted against any Google authority. The next pass starts
 there rather than at the beginning.
+
+## D1010 — a wrong GCP security-module id read a live control as off (external-authority round 2)
+
+A second external-authority round covered the least-confronted surfaces: Azure against
+`azure-rest-api-specs` and the one service the prior GCP pass left UNCHECKED (`scc`,
+securitycentermanagement). Azure was a strong NEGATIVE on the dangerous surface — all 43
+pinned api-versions resolve to real spec directories (measured against untruncated spec
+trees), and the enum/path samples matched. But `scc` carried a real defect.
+
+**The defect (CONFIRMED, high harm — the freeze-admissible core).** `scc.go` addressed the
+VM-threat module as `securityCenterServices/virtual-machine-threat-detection`, but the API's
+documented service id — a closed set in the securitycentermanagement v1 model (googleapis
+proto, corroborated by google-cloud-go) — is `vm-threat-detection`; the string
+`virtual-machine` appears nowhere in either authority. The driver maps a 404 to
+`found=false`, so a GET on the non-existent id made `observeSCC` report `protection.malware =
+false` even when the live `vm-threat-detection` module is ENABLED — a live security control
+read as OFF — and `deleteSCC` skipped it as "nothing to disable" while the module stayed live,
+returning succeeded. This is the D694/D709 shape: the tool says something false about a real
+estate in the dangerous direction, on a SECURITY control. Fix: the id, and a gate
+(`TestSCCModuleIdsAreDocumentedServices`) pins the driver's module ids to the API's documented
+`{service}` set so a wrong one cannot regress. (`event-threat-detection` and
+`container-threat-detection` were already correct.)
+
+**One low-harm provenance fix.** `apiver.go`'s `cosmos-change-feed` pin named
+`Source: Microsoft.DocumentDB`, but the driver calls `Microsoft.EventGrid` (Cosmos change feed
+is delivered as an EventGrid subscription), and `2025-02-15` exists under EventGrid, not
+DocumentDB. So the D236 drift-currency instrument for this one service queried the wrong
+resource provider. Fail-safe (it would over-report staleness, never falsely-current), so below
+the dangerous bar, but a provably-wrong provenance field — corrected to `Microsoft.EventGrid`.
+
+**Recorded UNPROVEN** (honest coverage): Azure required-body properties and the path/enum
+checks across the other ~29 drivers were not executed this pass; the api-version surface (the
+dangerous one) was measured complete.

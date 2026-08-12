@@ -679,10 +679,10 @@ gkeBaseURLOverride	POST	/projects/test-proj/locations/europe-west1/clusters
 gkeBaseURLOverride	PUT	/projects/test-proj/locations/europe-west1/clusters/capability-cluster-kubern-ca7aacf0
 sccBaseURLOverride	GET	/projects/my-project/locations/global/securityCenterServices/container-threat-detection
 sccBaseURLOverride	GET	/projects/my-project/locations/global/securityCenterServices/event-threat-detection
-sccBaseURLOverride	GET	/projects/my-project/locations/global/securityCenterServices/virtual-machine-threat-detection
+sccBaseURLOverride	GET	/projects/my-project/locations/global/securityCenterServices/vm-threat-detection
 sccBaseURLOverride	PATCH	/projects/my-project/locations/global/securityCenterServices/container-threat-detection
 sccBaseURLOverride	PATCH	/projects/my-project/locations/global/securityCenterServices/event-threat-detection
-sccBaseURLOverride	PATCH	/projects/my-project/locations/global/securityCenterServices/virtual-machine-threat-detection
+sccBaseURLOverride	PATCH	/projects/my-project/locations/global/securityCenterServices/vm-threat-detection
 vertexAIBaseURLOverride	DELETE	/projects/acme-prod/locations/europe-west4/endpoints/123
 vertexAIBaseURLOverride	GET	/projects/acme-prod/locations/europe-west4/endpoints
 vertexAIBaseURLOverride	GET	/projects/acme-prod/locations/europe-west4/endpoints/123
