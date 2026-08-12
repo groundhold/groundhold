@@ -195,3 +195,70 @@ func TestMaturityFieldTestedCountMatchesCoverage(t *testing.T) {
 			"the evidence behind the number.", matN, matM, measured, total)
 	}
 }
+
+// TestReadmeBreadthCountsMatchDrivers makes README's own claim true. The breadth
+// bullet states "145 service mappings across AWS (54), GCP (46) and Azure (45),
+// fulfilling 50/45/45 distinct capability TYPES ... Counts are read from the drivers'
+// own certified ServiceCapabilities() maps, not from prose." They were prose that
+// happened to match — nothing enforced the sentence's own promise. This does: every
+// number in it is re-derived from ServiceCapabilities and must equal the prose, so the
+// front-page breadth cannot drift from the drivers the way MATURITY's count once did.
+func TestReadmeBreadthCountsMatchDrivers(t *testing.T) {
+	root := repoRoot(t)
+
+	caps := map[string]map[string]string{
+		"aws":   aws.NewDriver("").ServiceCapabilities(),
+		"gcp":   gcp.NewDriver("").ServiceCapabilities(),
+		"azure": azure.NewDriver("").ServiceCapabilities(),
+	}
+	svc := map[string]int{}
+	typ := map[string]int{}
+	total := 0
+	for cloud, m := range caps {
+		svc[cloud] = len(m)
+		total += len(m)
+		distinct := map[string]bool{}
+		for _, c := range m {
+			distinct[c] = true
+		}
+		typ[cloud] = len(distinct)
+	}
+	if total < 100 {
+		t.Fatalf("only %d driver services — the subject went quiet and this gate would "+
+			"certify the front page against nothing (D328)", total)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(root, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	txt := string(raw)
+	svcM := regexp.MustCompile(
+		`(\d+) service mappings across AWS \((\d+)\), GCP \((\d+)\) and Azure \((\d+)\)`).
+		FindStringSubmatch(txt)
+	if svcM == nil {
+		t.Fatalf("README has no \"N service mappings across AWS (a), GCP (b) and Azure (c)\" " +
+			"line — the breadth it says is machine-derived must be present and parseable")
+	}
+	typM := regexp.MustCompile(`fulfilling (\d+)/(\d+)/(\d+) distinct capability TYPES`).
+		FindStringSubmatch(txt)
+	if typM == nil {
+		t.Fatalf("README has no \"fulfilling a/b/c distinct capability TYPES\" line")
+	}
+
+	atoi := func(s string) int { n, _ := strconv.Atoi(s); return n }
+	check := func(label string, got, want int) {
+		if got != want {
+			t.Errorf("README says %s = %d, but the drivers' ServiceCapabilities() say %d. The "+
+				"README claims these counts are 'read from the drivers … not from prose' — this "+
+				"gate is what makes that true. Move the prose behind the drivers.", label, got, want)
+		}
+	}
+	check("total service mappings", atoi(svcM[1]), total)
+	check("AWS services", atoi(svcM[2]), svc["aws"])
+	check("GCP services", atoi(svcM[3]), svc["gcp"])
+	check("Azure services", atoi(svcM[4]), svc["azure"])
+	check("AWS capability types", atoi(typM[1]), typ["aws"])
+	check("GCP capability types", atoi(typM[2]), typ["gcp"])
+	check("Azure capability types", atoi(typM[3]), typ["azure"])
+}
