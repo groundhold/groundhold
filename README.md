@@ -12,13 +12,15 @@
 **Status: private, pre-release (`v0.x`, experimental). Build quiet, launch loud.**
 An honest self-assessment — what is proven vs merely built vs designed — lives in
 [`docs/MATURITY.md`](docs/MATURITY.md): the verification core is proven and
-adversarially hardened; execution has closed the loop against ALL THREE clouds —
-GCP author-run, AWS at one external pilot that filed 36 findings, and Azure once
-(2026-07-24, a VNet end to end, which is a floor and not a claim). The Kubernetes
-driver is schema-driven and has never run against a real cluster. There has been
-one pilot, no external security audit, and one production incident that groundhold
-contributed to (2026-07-26 — it did not cause a bad deploy, it removed the signal
-that would have surfaced one).
+adversarially hardened; execution has closed the loop against all three clouds and
+Kubernetes — most of the 145 services have now been run against a real cloud, and a
+real k3s/k8s cluster exercised all ten mapped services (D509–D549). Read that
+precisely: "field-tested" means it ran against a real cloud — mostly **our own**
+accounts, each run cited in [`docs/COVERAGE.md`](docs/COVERAGE.md) — **not** that an
+external operator ran it. The external track record is one AWS pilot that filed 36
+findings; there is no external security audit, and there is one production incident
+groundhold contributed to (2026-07-26 — it did not cause a bad deploy, it removed the
+signal that would have surfaced one).
 ## TL;DR — see it work in 60 seconds, no cloud account
 
 Grab a binary — no toolchain, no clone — from
@@ -26,7 +28,7 @@ Grab a binary — no toolchain, no clone — from
 then:
 
 ```sh
-gh release download v0.1.4 --repo groundhold/groundhold \
+gh release download v0.1.5 --repo groundhold/groundhold \
   --pattern 'groundhold_linux_amd64' --pattern 'SHA256SUMS'
 sha256sum -c SHA256SUMS --ignore-missing
 chmod +x groundhold_linux_amd64
@@ -247,8 +249,9 @@ halfway. And dropping `--yes` makes converge stop at the plan and wait for you
 to type `apply`; in a pipe it refuses outright rather than assuming consent.
 
 This is the least proven part of the system, and
-[`docs/MATURITY.md`](docs/MATURITY.md) says so plainly: GCP and AWS have closed
-the loop against real clouds, Azure is golden-tested only.
+[`docs/MATURITY.md`](docs/MATURITY.md) says so plainly: all three clouds have closed
+the loop against real accounts (mostly our own — COVERAGE.md cites each run), but the
+only **external** operator so far has been on AWS.
 
 ## Using it with an AI agent
 
@@ -352,7 +355,7 @@ ref/            reference implementation (Python): loader, four-valued verifier,
 go/             Go runtime — passes the identical conformance suite through
                 its own binary
 conformance/    language-independent test cases — the real definition of semantics
-docs/           design decisions and rationale (D1–D345)
+docs/           design decisions and rationale (D1–D1004)
 ```
 
 ## Building from source, and the gates
@@ -399,7 +402,7 @@ provable by a restore test:
 
 The original vertical slice — intent to contract to verify to compile to sealed
 apply to observe to converge — is closed, and has run against real clouds. The
-complete record of decisions and their reasons is `docs/DESIGN.md` (D1–D350);
+complete record of decisions and their reasons is `docs/DESIGN.md` (D1–D1004);
 [`docs/MATURITY.md`](docs/MATURITY.md) says what is proven versus merely built
 and names the gaps. What follows is the short version of everything that came
 after the slice.
@@ -444,11 +447,6 @@ after the slice.
 
 ## What's next
 
-- **Virtual machines, and the family around them.** `capability.compute.instance`
-  landed as a vocabulary first (D357); the EC2, Compute Engine and Azure VM
-  drivers follow, then block storage, images and autoscaling groups — a group
-  expresses capacity where an instance expresses a machine, so they are separate
-  capabilities rather than one overloaded type.
 - **`capability.ai.speech` drivers** — the GCP recogniser and the Azure account.
   The type and its semantics landed first (D350); AWS has no ASR resource to
   author, so it is witnessed there rather than faked.
@@ -458,9 +456,10 @@ after the slice.
 - **Invoke mode and response streaming** on `capability.function.serverless` — a
   silent mismatch between a function URL's setting and the container's own
   breaks streaming while every health signal stays green.
-- **Multi-cloud field validation.** AWS is pilot-proven; the same pilot's Azure
-  and GCP deployments are next, and they are what would move Azure past
-  "golden-tested only".
+- **An external operator beyond AWS.** Azure and GCP are field-tested on our own
+  accounts (COVERAGE.md cites each); what they lack that AWS has is someone else
+  running them in anger. That external track record is the next bar, not a first
+  green run.
 - **Launch mechanics** — make the public repository public, protect `main`, wire
   Pages, and cut the first stable release, which is also what turns the download
   link above into a permanent one.

@@ -97,8 +97,10 @@ These are load-bearing rather than features. Break one and the guarantee collaps
   best-practice hardenings — advisory only, never gating. It proposes and proves;
   a human decides.
 - **Not, yet, a product with an SLA.** It is `v0.x`, experimental — an RFC you
-  can run. Real execution is proven on one cloud today; the others are
-  golden-tested. We say so plainly rather than imply more.
+  can run. Real execution has run against all three clouds and Kubernetes —
+  mostly on our own accounts, each run cited in the coverage matrix; what it
+  lacks is an external operator beyond the one AWS pilot. We say so plainly
+  rather than imply more.
 
 ## The whole thing in one example
 

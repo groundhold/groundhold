@@ -31,20 +31,28 @@ Please do not publicly disclose before the coordinated date.
 
 ## Verifying a release
 
-Release binaries carry a keyless SLSA build-provenance attestation and ship
-with a CycloneDX SBOM, `SHA256SUMS`, and `BUILDINFO.txt`. Before running a
-downloaded binary:
+Release binaries ship with a CycloneDX SBOM, `SHA256SUMS`, and `BUILDINFO.txt`.
+Before running a downloaded binary, verify the checksums:
 
 ```sh
-gh attestation verify groundhold_<ver>_<os>_<arch> --repo groundhold/groundhold
 sha256sum -c SHA256SUMS
 ```
 
+A keyless SLSA build-provenance attestation is produced **only once this repository
+is public** — GitHub does not make one retrievable for a private repository on a free
+plan, so `gh attestation verify` returns 404 until the flip and the release notes claim
+it only after the workflow confirms it exists (D354). Once public:
+
+```sh
+gh attestation verify groundhold_<ver>_<os>_<arch> --repo groundhold/groundhold
+```
+
 **Reproducible builds.** Binaries are built deterministically (`-trimpath`,
-`CGO_ENABLED=0`, pinned `-ldflags`), so you can rebuild a bit-identical
-binary from the tagged source (use the toolchain/command in `BUILDINFO.txt`)
-and confirm it matches `SHA256SUMS`. A binary that fails attestation
-verification did not come from this project's pipeline — do not run it.
+`-buildvcs=false`, `CGO_ENABLED=0`, pinned `-ldflags`), so **within the same
+toolchain** you can rebuild a bit-identical binary from the tagged source (use the
+exact toolchain/command in `BUILDINFO.txt`) and confirm it matches `SHA256SUMS`.
+Cross-host / cross-toolchain reproducibility is NOT yet verified — see
+`docs/THREAT_MODEL.md` (accepted risks).
 
 ## Supported versions
 
@@ -61,8 +69,9 @@ overstepping them is not a vulnerability:
 - **The ledger's authenticity rests on OS file permissions plus a
   recomputable SHA-256 hash chain.** The chain is tamper-EVIDENCE, not
   prevention: anyone who can write the ledger file can forge an
-  internally consistent history, and event signatures are reserved, not
-  implemented, in v0. The optional `anchor` gives the tail external
+  internally consistent history. Optional detached Ed25519 event signatures
+  (D102) close that gap when armed, but are OFF by default in v0 — the
+  default ledger rests on the hash chain alone. The optional `anchor` gives the tail external
   tamper-evidence, but only when the operator stores the anchor
   off-host; arm it and enforcement runs on the apply/resume path.
 - **Actor identity is self-asserted.** `publish --actor` and event

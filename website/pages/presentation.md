@@ -87,6 +87,6 @@ groundhold explain consent-required    # machine error code
 ## Freshness is part of the claim
 
 "Converged" is always "converged **as of** some observation". Human
-renderings carry the age of the evidence they rest on, and the
+renderings carry the age of the evidence they rest on, and
 a downstream management console shows it on every green badge — a green state is
 only as fresh as its stalest proof.

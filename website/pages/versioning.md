@@ -20,8 +20,7 @@
 | `go/` (runtime) | MPL 2.0 | file-level copyleft — forks return file fixes; embedding apps stay unencumbered |
 
 The GOVERNANCE.md promise: this open core will never be relicensed.
-No BSL, no SSPL. "Groundhold Conformant" is intended to mean passing the unmodified suite; "Groundhold" is a working name, with a formal trademark and usage policy to follow the name decision. Historically this claim
-of passing the unmodified suite.
+No BSL, no SSPL. "Groundhold Conformant" is intended to mean passing the unmodified suite; "Groundhold" is a working name, with a formal trademark and usage policy to follow the name decision.
 
 ## Telemetry
 

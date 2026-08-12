@@ -4,7 +4,7 @@ A driver adapts groundhold's executor to one cloud service. This is the pattern
 every HAND-WRITTEN driver follows — extracted from the first three built to it
 (Cloud SQL D43, Cloud Run D76, GCS D77) and hardened by two adversarial security
 reviews. The repository now holds roughly a hundred and forty-five of them across
-AWS, GCP and Azure, plus a second authoring mode for Kubernetes described below. A driver is
+AWS, GCP and Azure (the drivers' own `ServiceCapabilities()` is authoritative), plus a second authoring mode for Kubernetes described below. A driver is
 DONE when it satisfies all five disciplines below and passes the driver
 certification (`go/internal/provider/certify.go`).
 
