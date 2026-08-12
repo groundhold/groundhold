@@ -21,7 +21,7 @@ import (
 const (
 	unpagedGCPSweepCeiling   = 39
 	unpagedAzureSweepCeiling = 39
-	unpagedAWSSweepCeiling   = 34
+	unpagedAWSSweepCeiling   = 33
 )
 
 // TestGCPSweepsThatStillReadOnePage counts the GCP discovery sweeps that do not use the

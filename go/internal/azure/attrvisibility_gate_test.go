@@ -135,7 +135,7 @@ func TestRealisedAttributesAreObservedOrExplained(t *testing.T) {
 			"what it guards (D463)", len(builds), len(observes))
 	}
 
-	var compared int
+	var compared, realisedTotal int
 	var silent []string
 	for b, bb := range builds {
 		key := strings.ToLower(strings.TrimPrefix(b, "Build"))
@@ -144,7 +144,9 @@ func TestRealisedAttributesAreObservedOrExplained(t *testing.T) {
 			continue
 		}
 		compared++
-		for p := range realisedAttrs(bb) {
+		ra := realisedAttrs(bb)
+		realisedTotal += len(ra)
+		for p := range ra {
 			if !strings.Contains(ob, p) {
 				silent = append(silent, key+": "+p)
 			}
@@ -152,6 +154,16 @@ func TestRealisedAttributesAreObservedOrExplained(t *testing.T) {
 	}
 	if compared < 15 {
 		t.Fatalf("only %d build/observe pairs matched — under-counting (D463)", compared)
+	}
+	// D1007-class vacuity: the guards above count FUNCTIONS (builders/observe pairs), but
+	// the observe-coverage check iterates realised-attribute case-arms. If a Build* moved
+	// off `switch path { case ... }` to an if-chain, attrCase matches nothing for it and its
+	// attributes silently escape this check while len(builds)/compared stay healthy. Floor
+	// the realised set the check actually iterates (D328).
+	if realisedTotal < 15 {
+		t.Fatalf("only %d realised attributes parsed across %d builders — the switch shape the "+
+			"case-arm scan depends on has changed, and the observe-coverage check would pass "+
+			"over the attributes it can no longer see (D328)", realisedTotal, compared)
 	}
 	sort.Strings(silent)
 	if len(silent) > 0 {

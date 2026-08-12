@@ -29,7 +29,7 @@ import (
 // suite EXERCISES, where the source scrape saw every literal. That is D317's direction
 // (ask the drivers, do not scrape them) and it is why the coverage assertion below is not
 // optional.
-const unfollowedPagingSiteCeiling = 61
+const unfollowedPagingSiteCeiling = 59
 
 func TestRecordedPagingCallSitesFollowTheirToken(t *testing.T) {
 	root := repoRoot(t)

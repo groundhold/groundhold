@@ -508,23 +508,42 @@ func (d *Driver) discoverSQS(region string) ([]provider.Discovered, []string, er
 // public ALB visible — it had no driver and so was invisible to groundhold. Per-LB
 // isolation: one LB's unreadable listener list never sinks the others.
 func (d *Driver) discoverLoadBalancers(region string) ([]provider.Discovered, []string, error) {
-	st, body, err := d.elbv2Post(region, encodeForm(map[string]string{
-		"Action": "DescribeLoadBalancers", "Version": elbv2Version}))
-	if err != nil {
-		return nil, nil, fmt.Errorf("elbv2 DescribeLoadBalancers: %v", err)
-	}
-	if st != http.StatusOK {
-		return nil, nil, fmt.Errorf("elbv2 DescribeLoadBalancers: HTTP %d: %s", st, rdsErrCode(body))
-	}
-	var r struct {
-		LBs []elbv2LB `xml:"DescribeLoadBalancersResult>LoadBalancers>member"`
-	}
-	if err := xml.Unmarshal(body, &r); err != nil {
-		return nil, nil, fmt.Errorf("elbv2 DescribeLoadBalancers: %w", err)
+	// D1005: FOLLOW the pages. ELBv2 DescribeLoadBalancers answers at most PageSize (400)
+	// at a time and hands back a NextMarker (botocore elbv2/2015-12-01: input token Marker,
+	// output token NextMarker) — unlike EC2, it does NOT return everything when the limit is
+	// unset. The D810/D812 pagination pass looped this sweep's siblings and missed it, so a
+	// region past 400 load balancers silently dropped the rest from discovery: a real public
+	// ALB reported not-present-in-estate, the exact invisibility this sweep exists to end.
+	var lbs []elbv2LB
+	marker := ""
+	for {
+		form := map[string]string{"Action": "DescribeLoadBalancers", "Version": elbv2Version}
+		if marker != "" {
+			form["Marker"] = marker
+		}
+		st, body, err := d.elbv2Post(region, encodeForm(form))
+		if err != nil {
+			return nil, nil, fmt.Errorf("elbv2 DescribeLoadBalancers: %v", err)
+		}
+		if st != http.StatusOK {
+			return nil, nil, fmt.Errorf("elbv2 DescribeLoadBalancers: HTTP %d: %s", st, rdsErrCode(body))
+		}
+		var r struct {
+			LBs        []elbv2LB `xml:"DescribeLoadBalancersResult>LoadBalancers>member"`
+			NextMarker string    `xml:"DescribeLoadBalancersResult>NextMarker"`
+		}
+		if err := xml.Unmarshal(body, &r); err != nil {
+			return nil, nil, fmt.Errorf("elbv2 DescribeLoadBalancers: %w", err)
+		}
+		lbs = append(lbs, r.LBs...)
+		if r.NextMarker == "" {
+			break
+		}
+		marker = r.NextMarker
 	}
 	var out []provider.Discovered
 	var diags []string
-	for _, lb := range r.LBs {
+	for _, lb := range lbs {
 		if lb.Name == "" {
 			continue
 		}
