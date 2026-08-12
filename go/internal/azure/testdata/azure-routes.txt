@@ -65,6 +65,7 @@ GET	Microsoft.Cdn/profiles/{}/customDomains/{}
 GET	Microsoft.Cdn/profiles/{}/endpoints/{}
 GET	Microsoft.Cdn/profiles/{}/originGroups/{}
 GET	Microsoft.Cdn/profiles/{}/originGroups/{}/origins/{}
+GET	Microsoft.Cdn/profiles/{}/secrets/{}
 GET	Microsoft.CognitiveServices/accounts
 GET	Microsoft.CognitiveServices/accounts/{}
 GET	Microsoft.CognitiveServices/accounts/{}/deployments
@@ -176,6 +177,7 @@ PUT	Microsoft.Cdn/profiles/{}/afdEndpoints/{}/routes/{}
 PUT	Microsoft.Cdn/profiles/{}/customDomains/{}
 PUT	Microsoft.Cdn/profiles/{}/originGroups/{}
 PUT	Microsoft.Cdn/profiles/{}/originGroups/{}/origins/{}
+PUT	Microsoft.Cdn/profiles/{}/secrets/{}
 PUT	Microsoft.CognitiveServices/accounts/{}
 PUT	Microsoft.CognitiveServices/accounts/{}/deployments/{}
 PUT	Microsoft.Communication/emailServices/{}

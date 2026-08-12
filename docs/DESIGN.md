@@ -33440,3 +33440,46 @@ base-concat handling. The result is an EMPTY recorded-gap register: unlike Azure
 GCP mutation the drivers make is covered — which is what the D1013 field audit found by hand, now
 machine-confirmed and guarded against drift. The three clouds' permission surfaces are now each
 gated, not hand-traced.
+
+## D1017 — the gate's own blind spot: a branch no test drove
+
+An adversarial completeness pass over the three new sufficiency gates found one real gap the
+Azure gate PASSED. The azurecdn Front Door composite writes a SIXTH child type,
+`Microsoft.Cdn/profiles/secrets/{}`, but only on the BYO Key Vault certificate branch
+(`createAzureCDN` PUTs it when `CertKeyVault != nil`); the suite exercised only the managed-cert
+path, so the route was never captured, so the gate's `needed` set never contained
+`Microsoft.Cdn/profiles/secrets/write`, so the gate could not miss it — and passed clean. The
+five-entry register named the other Front Door child writes and not this one.
+
+This is the capture-completeness limit the gate documents, biting the gate itself: a gate whose
+subject is "the routes the suite drives" is blind to a mutation no test drives. The fix is not to
+special-case the permission but to drive the branch: `TestCreateAzureCDNBYOCertWritesSecret`
+creates a Front Door with a BYO Key Vault cert, so the `secrets` PUT is exercised and captured.
+Once captured, the gate saw it as uncovered exactly as designed, and it joins the register as the
+sixth fail-loud azurecdn gap. The lesson generalises past this one route — a sufficiency gate is
+only as complete as the suite that feeds it, so a conditional secondary write that no case
+reaches is invisible until a case reaches it. The same shape (a CMK associate, a BYO-cert secret,
+any operand-gated child write) is where the next one will hide.
+
+## D1016 — the one permission the AWS gate structurally cannot see
+
+The AWS sufficiency gate (D846-D853) joins a route to the action AWS's own model says
+AUTHORIZES that operation. `iam:PassRole` is invisible to it by construction: PassRole never
+authorizes an operation, it authorizes the acting identity to HAND a role to a service, so no
+operation→action row mentions it. A driver whose create passes a role ARN needs it declared, and
+nothing derived from the operation table can tell — the D1013 audit named this as one of the two
+structural reasons its findings survived.
+
+The set of role-passers is small and stable, so a curated gate covers it: eight capabilities pass
+a role (ecs, apprunner, lambda, eks and its addon and pod-identity, eventbridgescheduler, and vpc
+for the flow-logs delivery role), each traced to the field that carries the ARN, and each is
+asserted to declare `iam:PassRole` (vpc's is exercised through `flowLogs.enabled`, since it is
+conditional). Three more PASS a role and declare it NOWHERE — `backupplan` (`IamRoleArn` on
+`CreateBackupSelection`, so the selection 403s and a backup plan backs up nothing), `s3`
+(`replication_role_arn` -> `<Role>`, conditional on replication), and `cloudtrail`
+(`cloudWatchLogsRoleArn`, conditional on a log group). All three are fail-loud — the pass 403s and
+apply reports failed — so the freeze does not admit fixing the declaration; they sit in the gate's
+register with their reason, and the gate holds that register flat: a role-passer that stops
+declaring PassRole fails it, and a registered gap that starts declaring it fails it too. This is
+the AWS complement to the Azure (D1014) and GCP (D1015) sufficiency gates — the PassRole class
+those two do not have (ARM and GCP express role-passing as an ordinary resource permission).
