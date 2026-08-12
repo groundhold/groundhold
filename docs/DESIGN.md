@@ -33334,3 +33334,41 @@ the honest `unknown` ("still deleting"), and two meter mutants revert each wirin
 behaviourally (not just by compile). The lesson is the recurring one: a convention that is real,
 enforced by a helper, and pinned by a table can still leak through a member nobody added to the
 table — gate the class, then hunt for who is not in it.
+
+## D1013 — two create-adoption scans preflighted green, then minted a duplicate
+
+The next confrontation angle was the D75 permission PREFLIGHT itself: `plan` declares
+`requiredPermissions` per action and `apply` preflights them BEFORE the lease, so an identity
+missing a permission is refused before anything mutates rather than walling mid-plan. The
+authority is each cloud's own operation→permission model; the defect is a mutation-path operation
+whose permission is declared in NEITHER the plan's list nor apply's own derivation, so the
+preflight passes green over an identity that will fail.
+
+Most of what a broad sweep surfaced here is the WEAKER half of that shape — a missing permission
+that makes the operation 403 and apply report FAILED. The operator sees the failure; they are not
+worse off than if the preflight had said nothing, so under the freeze those are recorded, not
+fixed. Two are the DANGEROUS half, because the operation whose permission is missing is a
+CREATE-ADOPTION SCAN that fails OPEN:
+
+- **kms** (`provider.go` create arm): `findKMSKeyByTags` (D253) lists keys and READS EACH KEY'S
+  TAGS to find one already ours before `CreateKey` — a KMS key id is server-assigned with no
+  idempotency token, so a blind create on a lost ledger mints a new key every run. The tag read
+  is `kms:ListResourceTags`, declared on delete but not create. Missing it, the scan is
+  `readable=false` and — by deliberate D253 design, so a genuine first deploy is not blocked —
+  falls through to `CreateKey`. So an identity with `CreateKey` but not `ListResourceTags` passed
+  the preflight, and on a lost-ledger redeploy minted a DUPLICATE CMK, reported `succeeded`, with
+  the ledger binding the new key and orphaning the old.
+- **eks** (`provider.go` create arm): `ensureEKSNodeGroup` (D258 self-adopt) LISTS the cluster's
+  real node groups and binds them if any exist; only a cluster with zero gets a fresh one. The
+  list is `eks:ListNodegroups`, declared on UPDATE (D848 fixed exactly this shape there) but not
+  create. Missing it, the list 403s, the scan falls open, and `CreateNodegroup` makes a DUPLICATE
+  managed node group — doubled compute, reported `succeeded`.
+
+Both are `succeeded` over a silently-duplicated resource: the dangerous direction. The fix is to
+declare the scan's read permission on the create arm, so the preflight refuses first (D75's whole
+point) — the same one-line correction D848 made for the eks update arm, applied to the two create
+arms that escaped it. A focused test pins that each create-adoption scan's permission is declared
+on the create arm, and two meter mutants remove each and are caught. The WEAKER fail-loud gaps
+(update-arm secondary reads on sns/sqs/secretmanager/pubsub, azurecdn child writes, backupplan
+PassRole) and the STRUCTURAL gap the sweep named — GCP and Azure have no permission-sufficiency
+gate at all, so their declarations rest on hand-tracing — are recorded for the next unfreeze.
