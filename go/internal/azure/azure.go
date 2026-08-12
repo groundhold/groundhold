@@ -294,10 +294,20 @@ func (d *Driver) doARM(method, url string, body []byte) (int, []byte, error) {
 	return d.doARMHeader(method, url, body, nil)
 }
 
+// azureRouteSink is nil in production and stays nil: it is the seam through which a
+// test records every (method, url) the drivers ACTUALLY construct, so the permission-
+// sufficiency gate (D1014) can ask what ARM operations we call of the drivers rather
+// than reading them back out of the source (D317 — a static scrape lies). doARMHeader
+// is the one funnel every ARM request passes through. See routecapture_test.go.
+var azureRouteSink func(method, url string)
+
 // doARMHeader is doARM with extra headers (e.g. If-Match for a CAS lock).
 func (d *Driver) doARMHeader(method, url string, body []byte, extra map[string]string) (int, []byte, error) {
 	if !d.hasToken() {
 		return 0, nil, fmt.Errorf("no Azure access token in the environment")
+	}
+	if azureRouteSink != nil {
+		azureRouteSink(method, url)
 	}
 	var rdr io.Reader
 	if body != nil {
