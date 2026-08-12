@@ -2736,7 +2736,10 @@ cases:
       GCP/AWS parity on the key domain. A single key (no ring); tags ride inline
       on CreateKey; rotation adds EnableKeyRotation. A KMS key cannot be hard-
       deleted, so delete is ScheduleKeyDeletion. D853 adds kms:ListKeys: the create
-      looks for an existing key carrying our tags before making another one.
+      looks for an existing key carrying our tags before making another one. D1013
+      adds kms:ListResourceTags — that search READS each listed key's tags, and
+      without the read declared the preflight passed an identity whose scan 403s and
+      falls open to a DUPLICATE key.
     plan:
       at: "2026-07-15T10:00:00Z"
       contract:
@@ -2777,6 +2780,7 @@ cases:
             - kms:EnableKeyRotation
             - kms:GetKeyRotationStatus
             - kms:ListKeys
+            - kms:ListResourceTags
             - kms:TagResource
 
   - name: plan-emits-azure-keyvaultkey-permissions

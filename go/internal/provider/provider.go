@@ -1418,8 +1418,16 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			// (version/endpoint) is slice 3 but its permissions are declared.
 			switch operation {
 			case "create", "adopt":
+				// D1013: ensureEKSNodeGroup LISTS the cluster's real node groups (D258
+				// self-adopt) before creating one — a cluster that already carries node
+				// groups binds them instead. Declared on update (D848) but MISSING here,
+				// so an operator with CreateNodegroup but not ListNodegroups passed the
+				// preflight, the list 403'd, the scan fell open, and CreateNodegroup made
+				// a DUPLICATE managed node group (doubled compute) — reported succeeded.
+				// Declaring it makes the preflight refuse first (D75), like the update arm.
 				return sortedDedup([]string{"eks:CreateCluster", "eks:DescribeCluster",
-					"eks:CreateNodegroup", "eks:DescribeNodegroup", "eks:TagResource", "iam:PassRole"})
+					"eks:CreateNodegroup", "eks:DescribeNodegroup", "eks:ListNodegroups",
+					"eks:TagResource", "iam:PassRole"})
 			case "update":
 				// The node-group roll is part of an update, not a separate action
 				// (D248): once the control plane is bumped, updateEKS lists the managed
@@ -2119,8 +2127,14 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 				// D853: the create looks for an EXISTING key carrying our tags before
 				// making a second one (ListKeys). Undeclared, that search fails and the
 				// create's own adoption path cannot run.
+				// D1013: findKMSKeyByTags READS each listed key's tags (ListResourceTags)
+				// to verify ownership — ListKeys alone only names them. Declared on delete
+				// but MISSING here, so an operator with CreateKey but not ListResourceTags
+				// passed the preflight, the tag read 403'd, the scan fell open (readable=
+				// false), and CreateKey minted a DUPLICATE CMK on a lost-ledger redeploy —
+				// reported succeeded. Declaring it makes the preflight refuse first (D75).
 				p := []string{"kms:CreateKey", "kms:TagResource", "kms:ListKeys",
-					"kms:DescribeKey", "kms:GetKeyRotationStatus"}
+					"kms:ListResourceTags", "kms:DescribeKey", "kms:GetKeyRotationStatus"}
 				if rotating {
 					p = append(p, "kms:EnableKeyRotation")
 				}
