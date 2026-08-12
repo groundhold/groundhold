@@ -75,3 +75,48 @@ func TestAuditEvaluatesPresenceConstraints(t *testing.T) {
 		})
 	}
 }
+
+// TestAuditBlocksASubjectlessHardConstraint pins D1019: a hard constraint with no
+// subject was silently dropped into a clean verdict, while verify BLOCKS it (unknown)
+// and validate counts it hard — so a hard constraint verify refuses was invisible at
+// audit, the alerting surface (exit code + violation.detected). Now audit surfaces it
+// as unknown, which blocks, exactly as verify does.
+func TestAuditBlocksASubjectlessHardConstraint(t *testing.T) {
+	td := t.TempDir()
+	cpath := filepath.Join(td, "c.yaml")
+	body := "" +
+		"apiVersion: contract/v0.1\n" +
+		"kind: InfrastructureContract\n" +
+		"meta: { id: nosubj, environment: test, version: 1 }\n" +
+		"capabilities:\n" +
+		"  - id: db\n" +
+		"    type: capability.database.relational\n" +
+		"constraints:\n" +
+		"  hard:\n" +
+		"    - id: c-nosubject\n" +
+		"      path: network.publicExposure\n" +
+		"      op: equals\n" +
+		"      value: false\n" +
+		"      verify: { method: static }\n"
+	if err := os.WriteFile(cpath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := contract.LoadContract(cpath)
+	if err != nil {
+		t.Fatalf("load: %v (the loader accepts a subjectless constraint today)", err)
+	}
+	led := ledger.New()
+	res, err := Run(c, led, filepath.Join(td, "l.jsonl"),
+		"2026-07-15T12:05:00Z", false, embeddedVocabs(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Verdicts) != 1 || res.Verdicts[0].Verdict != "unknown" {
+		t.Fatalf("verdict = %+v, want one unknown — a subjectless hard constraint must "+
+			"block, not be dropped into a clean verdict", res.Verdicts)
+	}
+	if res.Status == "clean" || res.Violations == 0 {
+		t.Fatalf("status=%q violations=%d — a subjectless hard constraint must make audit "+
+			"NOT clean; it is the alerting surface", res.Status, res.Violations)
+	}
+}

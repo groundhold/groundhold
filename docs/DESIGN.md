@@ -33500,3 +33500,34 @@ register with their reason, and the gate holds that register flat: a role-passer
 declaring PassRole fails it, and a registered gap that starts declaring it fails it too. This is
 the AWS complement to the Azure (D1014) and GCP (D1015) sufficiency gates — the PassRole class
 those two do not have (ARM and GCP express role-passing as an ordinary resource permission).
+
+## D1019 — audit dropped a subjectless hard constraint into a clean verdict
+
+An export/audit fidelity sweep (the fold that turns the ledger's honest reality into the stream
+a console BFF and a monitoring cron read) came back a strong negative on four of five shapes —
+the export refuses rather than silently shortens (D315), `violation.resolved` fires only on a
+real satisfying observation, ids are whole-event hashes, time is compared chronologically — but
+one shape was a real defect.
+
+`audit` skipped a constraint with an empty `subject` (`internal/audit/audit.go`, the
+`Subject == ""` disjunct on the scope guard). The three verbs disagreed on the same subjectless
+hard constraint: `validate` accepts it and counts it hard, `verify` BLOCKS it (`unknown`, exit 2),
+and `audit` reported `clean` (exit 0, no `violation.detected`). audit is the ALERTING surface — a
+cron alerting on its exit code, or a consumer reading the exported violation stream, saw an
+affirmative all-clear over a hard constraint that was never checked against reality. Worse than
+silence, and reachable by an ordinary author typo (an omitted or mistyped `subject:` from a
+template). It is the "gate that found nothing passes" shape, on the compliance surface.
+
+The scope guard bundled two cases and only one was justified: the objective/budget forms
+(`Expected == nil && !isPresence`) are genuinely out of audit scope and are forced soft at load,
+so the guard keeps them; the `Subject == ""` disjunct predated D964 and was never reconsidered.
+Dropping it lets a subjectless constraint flow through — `latestSufficient` finds no observation
+for the empty subject and returns `unknown`, which blocks a hard constraint exactly as verify
+does. A test pins that a subjectless hard constraint makes audit not-clean (unknown), and a meter
+mutant restoring the drop is caught.
+
+Recorded, not fixed here (the root, a separate published-registries-drift): the loader accepts a
+subject-absent constraint though `spec/contract.schema.json` marks `subject` required, so
+`validate` says OK. That is not the dangerous direction (verify and now audit both block it), so
+under the freeze it is banked — enforcing the schema at load is the deeper close for the next
+unfreeze.
