@@ -1,5 +1,8 @@
 # The groundhold driver standard
 
+_Status: v0.x / experimental. The standard is stable in shape, but the project is
+pre-1.0; the "MUST"/"MANDATORY" clauses below describe what the gates enforce today._
+
 A driver teaches groundhold to speak one provider's control plane. This document is
 the **contract every driver — first-party or community — must satisfy**, and the
 bar a new provider, platform, application or stack is held to before it ships.

@@ -36,8 +36,8 @@ content-addressed identity and the ledger hash chain. These use the Go standard
 library (crypto/ed25519, crypto/sha256) only — no third-party or custom
 cryptographic implementation is included.
 
-Because the complete corresponding source code is published and freely
-available, this software is classified as publicly available encryption source
+Once the complete corresponding source code is published and freely
+available, this software qualifies as publicly available encryption source
 code under U.S. Export Administration Regulations (EAR) License Exception TSU
 (15 CFR 740.13(e)). Redistributors are responsible for their own compliance in
 their jurisdiction.

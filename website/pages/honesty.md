@@ -44,8 +44,9 @@ light would be a claim the ledger cannot back.
 
 **6. If a cloud cannot honor or measure something, it says so loudly.**
 When a provider cannot enforce an attribute in the same operation it
-already makes, the driver refuses that cloud — it never half-applies
-or quietly creates extra resources. An attribute one cloud honors and
+already makes, the driver refuses that cloud rather than half-applying, and a
+cross-driver certification gate holds each mutating verb to that rule (the sweep
+that added it, D391–D472, is recorded in MATURITY). An attribute one cloud honors and
 another refuses is the comparison, not a bug.
 
 **7. Nothing mutates before it is proven safe to try.**
