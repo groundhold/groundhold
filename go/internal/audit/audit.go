@@ -65,11 +65,20 @@ func Run(c *contract.Contract, led *ledger.Ledger, ledgerPath, at string,
 
 	for _, cn := range ordered {
 		isPresence := cn.Op == "exists" || cn.Op == "absent"
-		if cn.Subject == "" || (cn.Expected == nil && !isPresence) {
-			// D964: presence forms (exists/absent) carry no Expected value but ARE
-			// audit material — a hard `absent` that recorded reality violates must
-			// not be silently dropped into a clean verdict. Only the budget/objective
-			// forms (an Objective, no operand) are still out of scope here.
+		if cn.Expected == nil && !isPresence {
+			// Only the budget/objective forms (an Objective — no operand, not a
+			// presence op) are out of audit scope; they are forced soft at load, so
+			// they never block. D964: presence forms (exists/absent) carry no Expected
+			// but ARE audit material.
+			//
+			// D1019: a SUBJECTLESS constraint is no longer skipped here. It used to be
+			// dropped into a clean verdict — but `verify` BLOCKS it (unknown) and
+			// `validate` counts it hard, so a hard constraint that verify refuses became
+			// invisible at audit, the alerting surface (exit code + violation.detected
+			// export). Now it flows through: latestSufficient finds no observation for
+			// the empty subject and returns `unknown`, which blocks a hard constraint
+			// exactly as verify does. audit never certifies `clean` over a constraint it
+			// could not evaluate.
 			continue
 		}
 		v := Verdict{Constraint: cn.ID, Capability: cn.Subject,
