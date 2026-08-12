@@ -33372,3 +33372,39 @@ on the create arm, and two meter mutants remove each and are caught. The WEAKER 
 (update-arm secondary reads on sns/sqs/secretmanager/pubsub, azurecdn child writes, backupplan
 PassRole) and the STRUCTURAL gap the sweep named — GCP and Azure have no permission-sufficiency
 gate at all, so their declarations rest on hand-tracing — are recorded for the next unfreeze.
+
+## D1014 — Azure grows the permission-sufficiency gate it never had
+
+D1013's audit named the structural hole: AWS confronts the permissions its drivers DECLARE
+against the operations they CALL (D846-D853), so an operation whose permission is declared
+NOWHERE fails the gate rather than the preflight; GCP and Azure had no such gate, and their
+declarations rested on hand-tracing. This grows Azure's half — a gate is a test, freely allowed
+under the freeze, and building it converts a hand-traced claim into a machine-checked one.
+
+Azure needs no external authority table, which is what made AWS's gate heavy (a scraped
+Service Reference of operation→action). An ARM permission is a PURE FUNCTION of the request's
+`(method, resource-type path)`: a PUT to `.../Microsoft.Cdn/profiles/{}/afdEndpoints/{}` needs
+`Microsoft.Cdn/profiles/afdEndpoints/write`, a DELETE needs `.../delete`, a POST action
+`.../{}/lock` needs `.../lock/action`. So the gate DERIVES the needed permission from the route
+directly. The subject is the routes the drivers actually build: `doARMHeader` gained the same
+test-only capture seam AWS/GCP have (`azureRouteSink`, nil in production), a `TestMain` records
+what the suite drives, normalises instance names to `{}`, and writes/compares
+`internal/azure/testdata/azure-routes.txt` — which doubles as a route-reality diff. 227 routes,
+~100 mutations.
+
+Two Azure shapes the declared-set extraction has to honour or it invents false gaps, both found
+by running the gate: a WILDCARD grant (`Microsoft.Network/dnsZones/*/write` covers the concrete
+`.../CNAME/write` a record driver builds) and a BASE CONCATENATION (`base + "delete"` from a
+literal ending in `/`, so no full string exists to scrape). Matching is case-insensitive because
+ARM is (one table says `Microsoft.Cache/Redis`, another `Microsoft.Cache/redis`).
+
+What the gate found, live, is exactly the D1013 audit's lead, now machine-confirmed: the
+azurecdn Front Door composite writes five child ARM types — `afdEndpoints`, its `routes`,
+`originGroups`, their `origins`, `customDomains` — whose permissions are declared nowhere (the
+arm declares `profiles/endpoints/write`, the CLASSIC-CDN type, not the Front Door types the
+driver actually PUTs). An identity without them passes the preflight and leaves a half-built,
+non-serving Front Door. That is fail-loud (the child PUT 403s and apply reports failed), so the
+freeze does not admit fixing the declaration; the five sit in the gate's recorded-gap register
+with their reason, and the gate asserts the uncovered set EQUALS that register — a NEW undeclared
+mutation fails it, and a gap fixed at unfreeze but left in the register fails it too. Everything
+else the drivers mutate is covered. GCP's equivalent gate is the remaining structural item.
