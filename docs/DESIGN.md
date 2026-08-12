@@ -33249,3 +33249,88 @@ the dangerous bar, but a provably-wrong provenance field — corrected to `Micro
 **Recorded UNPROVEN** (honest coverage): Azure required-body properties and the path/enum
 checks across the other ~29 drivers were not executed this pass; the api-version surface (the
 dangerous one) was measured complete.
+
+## D1011 — external-authority round 3: three clouds confronted, strong negative, debt recorded
+
+Round 2 (D1009/D1010) found two real defects by confronting drivers against the providers'
+OWN models. Round 3 pushed the same method across the three remaining under-confronted
+surfaces in parallel — Azure create-request BODIES against `azure-rest-api-specs`, AWS enum
+VALUE strings against botocore `service-2.json`, and GCP required-create-fields + observe
+reverse-mapping field names against the live Google discovery docs. The result is a **strong
+negative on the freeze-admissible surface: zero dangerous-direction defects across all three
+clouds.** A confrontation that finds nothing is not a wasted one — it is measured evidence the
+driver-model-vs-provider-authority layer is sound, and it converts "we think the enums are
+right" into "we checked 55 of them against Amazon's own model."
+
+**What was measured clean.**
+- *AWS enums (~55 value sites):* every enumerated value string a driver sends or matches is a
+  legal member of the matching botocore enum, right casing, right API version — encryption/TLS
+  (`AES256`, `Policy-Min-TLS-1-2-2019-07`, `SSEType=KMS`), poll terminal states
+  (`ACTIVE`/`available`/`active`), and the SES v1-XML `Require` vs SESv2-JSON `BOUNCE` casing
+  split (the exact trap targeted) both on the right side. The silent-absent class (a Describe
+  filter value the API doesn't list → live resource read as ABSENT, the D1005 shape) has NO
+  surface: the discoverers list unfiltered and filter in Go.
+- *Azure bodies (13 security-bearing drivers):* every spec-`required` property is sent under
+  the correct name/casing/nesting with valid enums — including the notorious traps (lowercase
+  `keyvaultproperties`/`keyvaulturi`, Search strict-lowercase `publicNetworkAccess`, ACR
+  premium-only public access, Cosmos mandatory `periodicModeProperties`). The D1010 class ("a
+  control sent under a name ARM silently drops") was hunted specifically and not found.
+- *GCP (8 security drivers):* every create writes the secure baseline EXPLICITLY
+  (`authEnabled`, `uniformBucketLevelAccess`, `sslMode=ENCRYPTED_ONLY`, userManaged
+  replication) rather than inheriting a provider default, and every observe reads its security
+  fields under the discovery-documented name.
+
+**Debt recorded for the next unfreeze** (each is the tool being SILENT, not FALSE — so none
+crosses the D716 bar, but each is a real limitation the freeze doctrine says to bank as
+unfreeze input):
+1. *Azure `capability.encryption.key` models no network exposure.* `key_azure.go` creates the
+   Key Vault that HOLDS a CMK at the provider default (`publicNetworkAccess=enabled`,
+   publicly reachable) while its sibling `secret_kv.go` gates exposure. The tool asserts
+   nothing false — the capability has no `network.publicExposure` attribute and observe never
+   reads it — but a CMK-holding vault reachable from the internet is a real posture the
+   contract cannot express. Unfreeze: add exposure to the key capability + gate.
+2. *Purge-protection unmodelled* on both Azure vault drivers (a CMK vault without
+   `enablePurgeProtection` can be permanently purged, defeating recovery).
+3. *`azureopenai_net.go` hardcodes `publicNetworkAccess=Enabled`* with no observed exposure.
+4. *GCP `gke_net.go` derives `encryption.secrets` from `state=="ENCRYPTED"` only* — the newer
+   `ALL_OBJECTS_ENCRYPTION_ENABLED` would read as `false`. This is the SAFE direction (secure
+   reality read as insecure = a false block, never a false clear), so it is doubly out of the
+   freeze, but a correctness gap to close when the enum widens.
+
+Completeness note (not debt): the Azure CMK branches in `blob_net.go`/`flexserver_net.go`/
+`azacr.go` reference a user-assigned identity inside the encryption block but omit the
+resource's top-level `identity` — ARM rejects with a 400, so it fails LOUDLY and the operator
+is not worse off than silence. Three external-authority rounds now cover this vein; the layer
+is mined for the dangerous class.
+
+## D1012 — two async deletes concluded succeeded on a 202, tombstoning a live resource
+
+Round 4 opened a NEW confrontation angle the value-checks never touched: driver error handling
+and outcome CLASSIFICATION against each provider's real taxonomy. AWS was a strong negative (~90
+`strings.Contains(errCode, …)` sites confronted against botocore's per-operation error lists — the
+only PROVEN mismatch, `asg_net.go` matching `NotFound` where `DeleteAutoScalingGroup` has no
+not-found code, fails SAFE and is masked by a pre-read). GCP was clean (15 LRO pollers all read
+the terminal `op.Error`; ~30 delete-idempotency sites use EXACT status equality, not loose
+substrings). But the Azure delete surface had two escapes.
+
+**The defect (CONFIRMED, dangerous direction).** `deleteChangeFeed` (Cosmos change-feed export,
+an EventGrid event subscription) and `deleteFrontDoorWAF` (a Front Door WAF policy) each concluded
+`succeeded` on ANY 2xx — INCLUDING a 202 Accepted. Confronted against Microsoft's own specs, both
+operations are long-running: `EventSubscriptions_Delete` (EventGrid 2025-02-15) and
+`Policies_Delete` (FrontDoor 2022-05-01) both carry `x-ms-long-running-operation: true` with 202
+among their responses. On a 202 the resource has only entered "deleting" — it is not gone. So the
+tool reported the change-feed export channel RETIRED while it may still be delivering events to its
+destination (data egress continues after we said it stopped — the dangerous half), and reported a
+WAF policy gone while it was still live and billing; if either async deletion then failed, the
+resource was orphaned from a ledger that says it is gone.
+
+This is the exact shape D971 identified and D984 swept — the codebase already decided that
+concluding a delete on a bare 202 is a defect, and built `deleteAndConfirm` (poll the 202 to a
+confirmed 404, unknown on timeout, 200/204 = synchronous-gone) with ~30 deletes routed through it
+and a table test (`TestAzureAsyncDeletesPollToAbsence`) pinning each. These two simply were not on
+that table and kept their hand-rolled tail. Fix: route both through `deleteAndConfirm`, and add
+both to the table so the class is closed — the two subtests drive a stuck-202 fixture and assert
+the honest `unknown` ("still deleting"), and two meter mutants revert each wiring and are caught
+behaviourally (not just by compile). The lesson is the recurring one: a convention that is real,
+enforced by a helper, and pinned by a table can still leak through a member nobody added to the
+table — gate the class, then hunt for who is not in it.

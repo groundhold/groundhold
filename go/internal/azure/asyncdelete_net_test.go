@@ -99,6 +99,15 @@ func TestAzureAsyncDeletesPollToAbsence(t *testing.T) {
 		{"containerappsjob", "worker", "prod", func(d *Driver) provider.CreateResult {
 			return d.deleteContainerAppsJob("worker", "prod", containerAppsJobProviderID(testSub, "rg1", azResourceName("pv-job", "prod", "worker", 1)))
 		}},
+		// D1012: the two LRO deletes that escaped D971/D984 — an EventGrid event
+		// subscription (EventSubscriptions_Delete) and a Front Door WAF policy
+		// (Policies_Delete) are both x-ms-long-running-operation with 202 in the spec.
+		{"changefeed", "feed", "prod", func(d *Driver) provider.CreateResult {
+			return d.deleteChangeFeed("feed", "prod", changeFeedProviderID(testSub, changeFeedName("prod", "feed", 1)))
+		}},
+		{"frontdoorwaf", "edge", "prod", func(d *Driver) provider.CreateResult {
+			return d.deleteFrontDoorWAF("edge", "prod", frontDoorWAFProviderID(testSub, "rg1", frontDoorWAFName("prod", "edge", 1)))
+		}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

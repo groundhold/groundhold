@@ -10,7 +10,6 @@ package azure
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
@@ -206,21 +205,13 @@ func (d *Driver) deleteChangeFeed(capability, environment, providerID string) pr
 	if err != nil {
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
-	st, resp, e := d.doARM("DELETE", url, nil)
-	if e != nil {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
-			Reason: fmt.Sprintf("delete outcome unknown: %v", e)}
-	}
-	if st == http.StatusNotFound {
-		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // idempotent
-	}
-	if st >= 500 {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
-			Reason: fmt.Sprintf("delete HTTP %d (server error) — reconcile", st)}
-	}
-	if st < 200 || st >= 300 {
-		return provider.CreateResult{ProviderID: providerID, Status: "failed",
-			Reason: fmt.Sprintf("delete HTTP %d: %s", st, mutDetailAz(resp))}
-	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// D1012: an EventGrid event-subscription DELETE is a LONG-RUNNING operation —
+	// EventSubscriptions_Delete is x-ms-long-running-operation in the 2025-02-15 spec,
+	// with 202 among its responses. Concluding succeeded on the 202 would tombstone a
+	// change-feed export channel that has only entered "deleting" and may still be
+	// delivering events to its destination; if the async deletion then fails it is
+	// orphaned from a ledger that says it is gone. Route through deleteAndConfirm (D971),
+	// which polls a 202 to a confirmed 404 (unknown on timeout) exactly as the create
+	// path polls provisioningState. A 200/204 is a synchronous delete — already gone.
+	return *d.deleteAndConfirm(url, providerID, "event subscription")
 }
