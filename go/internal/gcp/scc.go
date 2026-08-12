@@ -13,7 +13,7 @@
 // (a.k.a. modules), each a per-parent SINGLETON with an intendedEnablementState:
 //   - detection.enabled     -> event-threat-detection  (the core log-based detector)
 //   - protection.kubernetes  -> container-threat-detection (GKE control-plane threats)
-//   - protection.malware     -> virtual-machine-threat-detection (VM memory malware/
+//   - protection.malware     -> vm-threat-detection (VM memory malware/
 //     crypto-mining scanning — the closest honest SCC analog to GuardDuty's EBS
 //     malware protection; documented as an analog, not an identity)
 //   - location.region        -> SCC is global (locations/global), not regional; the
@@ -47,9 +47,9 @@ import (
 // The securitycentermanagement service ids groundhold governs for this capability.
 // Fixed, closed set — never user input (safe to interpolate into the REST path).
 const (
-	sccModuleEventThreat     = "event-threat-detection"           // detection.enabled
-	sccModuleContainerThreat = "container-threat-detection"       // protection.kubernetes
-	sccModuleVMThreat        = "virtual-machine-threat-detection" // protection.malware
+	sccModuleEventThreat     = "event-threat-detection"     // detection.enabled
+	sccModuleContainerThreat = "container-threat-detection" // protection.kubernetes
+	sccModuleVMThreat        = "vm-threat-detection"        // protection.malware
 )
 
 // sccModulesSorted is the deterministic order the net shell walks the governed
@@ -82,7 +82,7 @@ type SCCPlan struct {
 	Tier       string // operand: STANDARD | PREMIUM | ENTERPRISE
 	Enabled    bool   // detection.enabled     -> event-threat-detection
 	Kubernetes bool   // protection.kubernetes -> container-threat-detection
-	Malware    bool   // protection.malware    -> virtual-machine-threat-detection
+	Malware    bool   // protection.malware    -> vm-threat-detection
 }
 
 // BuildSCC maps capability.security.threatdetection attributes + the impl block to
@@ -240,7 +240,7 @@ func classifySCCChange(path string) (string, string) {
 	case "protection.kubernetes":
 		return "mutable", "in-place via securityCenterServices.patch (container-threat-detection intendedEnablementState)"
 	case "protection.malware":
-		return "mutable", "in-place via securityCenterServices.patch (virtual-machine-threat-detection intendedEnablementState)"
+		return "mutable", "in-place via securityCenterServices.patch (vm-threat-detection intendedEnablementState)"
 	case "location.region":
 		return "unsupported", "SCC modules are global (locations/global), not regional — nothing regional to patch"
 	case "service.managed":

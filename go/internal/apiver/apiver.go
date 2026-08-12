@@ -141,7 +141,7 @@ var registry = []Pin{
 	az("consumption-budget", "2023-05-01", "Microsoft.Consumption"),
 	az("data-protection", "2023-05-01", "Microsoft.DataProtection"),
 	az("cosmos-db", "2024-05-15", "Microsoft.DocumentDB"),
-	az("cosmos-change-feed", "2025-02-15", "Microsoft.DocumentDB"),
+	az("cosmos-change-feed", "2025-02-15", "Microsoft.EventGrid"),
 	az("defender", "2024-01-01", "Microsoft.Security"),
 	az("event-hubs", "2024-01-01", "Microsoft.EventHub"),
 	az("event-hubs-kafka", "2024-01-01", "Microsoft.EventHub"),
