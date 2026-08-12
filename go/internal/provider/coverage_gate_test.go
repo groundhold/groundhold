@@ -131,3 +131,67 @@ func TestCoverageMatrixCannotOverclaimOrOmit(t *testing.T) {
 			"an exemption the summary hides reads as breadth still owed (D882)", exempt)
 	}
 }
+
+// TestMaturityFieldTestedCountMatchesCoverage links the two "authoritative" honesty
+// docs so neither can go stale while the other moves. This session's honesty pass
+// found MATURITY.md asserting "23 of 145 field-tested" while the gated COVERAGE.md
+// said 144 — two source-of-truth documents with nothing between them, drifted by a
+// factor of six because reality advanced and only one doc absorbed it. The arbiter is
+// machine-derived: the `measured` rows COVERAGE carries (each already forced to cite a
+// run by TestCoverageMatrixCannotOverclaimOrOmit, and the header already gated against
+// those rows) and the service total the drivers themselves report (D317). MATURITY's
+// headline count must equal both, or this fails and names the stale number.
+func TestMaturityFieldTestedCountMatchesCoverage(t *testing.T) {
+	root := repoRoot(t)
+
+	// Denominator: ask the drivers, never a prose count (D317).
+	total := 0
+	for _, caps := range []map[string]string{
+		aws.NewDriver("").ServiceCapabilities(),
+		gcp.NewDriver("").ServiceCapabilities(),
+		azure.NewDriver("").ServiceCapabilities(),
+	} {
+		total += len(caps)
+	}
+	if total < 100 {
+		t.Fatalf("only %d driver services enumerated — the subject went quiet and this gate "+
+			"would tie two docs to nothing (D328)", total)
+	}
+
+	// Numerator: the `measured` rows in COVERAGE. A counted row is a cited run, because the
+	// sibling gate forbids a `measured` row with an empty evidence column.
+	covRow := regexp.MustCompile(`^\|\s*(?:aws|gcp|azure)\s*\|\s*[a-z0-9-]+\s*\|\s*[^|]+?\s*\|\s*measured\s*\|`)
+	covRaw, err := os.ReadFile(filepath.Join(root, "docs", "COVERAGE.md"))
+	if err != nil {
+		t.Fatalf("COVERAGE.md is gone: %v — the honest breadth number cannot be missing", err)
+	}
+	measured := 0
+	for _, ln := range strings.Split(string(covRaw), "\n") {
+		if covRow.MatchString(ln) {
+			measured++
+		}
+	}
+	if measured == 0 {
+		t.Fatalf("parsed 0 `measured` rows from COVERAGE.md — the row shape changed and this " +
+			"gate would compare MATURITY against nothing (D328)")
+	}
+
+	// The link that was missing: MATURITY's headline must equal the machine-derived reality.
+	matRaw, err := os.ReadFile(filepath.Join(root, "docs", "MATURITY.md"))
+	if err != nil {
+		t.Fatalf("MATURITY.md is gone: %v", err)
+	}
+	m := regexp.MustCompile(`(\d+)\s+of\s+(\d+)\s+services field-tested`).FindStringSubmatch(string(matRaw))
+	if m == nil {
+		t.Fatalf("MATURITY.md states no \"N of M services field-tested\" count — the number the " +
+			"launch narrative rests on must be present and checkable against COVERAGE")
+	}
+	matN, _ := strconv.Atoi(m[1])
+	matM, _ := strconv.Atoi(m[2])
+	if matN != measured || matM != total {
+		t.Errorf("MATURITY.md says %d of %d services field-tested, but COVERAGE's rows + the "+
+			"drivers say %d of %d — the two authoritative honesty docs have drifted (the 23-vs-144 "+
+			"failure this gate exists to stop). Move the stale number behind the evidence, never "+
+			"the evidence behind the number.", matN, matM, measured, total)
+	}
+}
