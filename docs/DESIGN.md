@@ -33408,3 +33408,35 @@ freeze does not admit fixing the declaration; the five sit in the gate's recorde
 with their reason, and the gate asserts the uncovered set EQUALS that register — a NEW undeclared
 mutation fails it, and a gap fixed at unfreeze but left in the register fails it too. Everything
 else the drivers mutate is covered. GCP's equivalent gate is the remaining structural item.
+
+## D1015 — the GCP permission-sufficiency gate closes the set
+
+The third and last of the sufficiency gates (AWS D846-D853, Azure D1014). GCP declares its
+permissions `<service>.<resource>.<verb>` and preflights them before the lease; the gate
+confronts the mutations the drivers call — the captured `gcp-routes.txt` (D718) — against what
+they declare, so a mutation whose permission is granted nowhere fails the gate rather than the
+preflight.
+
+GCP is the messy one, and the mess forced a weaker-but-honest match than Azure's. Two problems
+Azure's ARM path did not have. First, the GCP route file cannot name the SERVICE: the capture
+records a path plus the base-URL FIELD it resolved, but the driver tests share a fixture host, so
+~75 mutation routes come back `AMBIGUOUS` across two dozen fields — and one resource name belongs
+to several services (`locations/{}/instances` is BOTH memorystore and filestore), so even the
+path cannot disambiguate. Second, the permission's resource TOKEN routinely diverges from the URL
+segment: a Certificate Manager cert is `/certificates/{}` but `certificatemanager.certs.*`; a
+log-based metric is `/metrics/{}` but `logging.logMetrics.*`; a GCS bucket is `/b/{bucket}` but
+`storage.buckets.*` and spells `setIamPolicy` as `PUT .../b/{bucket}/iam`; a compute GLOBAL
+address is a different token (`globalAddresses`) from its regional sibling, and a custom method
+arrives as `:setAddons`, `:destroy`, `:pause`, or a bare trailing action segment.
+
+So the gate matches on the `(resource, verb)` PAIR, not the full triple. That is the same power
+the AWS and Azure gates already have — "declared somewhere" — and it is sound here because a GCP
+resource name is 1:1 with its service for every resource but the shared `instances`. The verb and
+resource remaps (`certificates`->`certs`, `metrics`->`logMetrics`, `b`->`buckets`, the global
+compute tokens, the custom-method verbs) were not guessed: each was found by RUNNING the gate,
+which reported the derived pair a real declaration did not cover, and confirming against what the
+driver actually declares — the same converge-by-running that built the Azure gate's wildcard and
+base-concat handling. The result is an EMPTY recorded-gap register: unlike Azure's azurecdn, every
+GCP mutation the drivers make is covered — which is what the D1013 field audit found by hand, now
+machine-confirmed and guarded against drift. The three clouds' permission surfaces are now each
+gated, not hand-traced.
