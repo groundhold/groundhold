@@ -52,6 +52,7 @@ func TestGCPDeclaredPermissionsCoverTheMutationsTheDriversCall(t *testing.T) {
 		t.Fatalf("read gcp-routes.txt: %v", err)
 	}
 	needed := map[string]string{} // "resource\tverb" -> the route that needs it
+	seenCustom := map[string]bool{}
 	mutations := 0
 	for _, line := range strings.Split(strings.TrimSpace(string(blob)), "\n") {
 		parts := strings.Split(strings.TrimSpace(line), "\t")
@@ -59,7 +60,10 @@ func TestGCPDeclaredPermissionsCoverTheMutationsTheDriversCall(t *testing.T) {
 			continue
 		}
 		method, rawpath := parts[1], parts[2]
-		resource, verb, ok := gcpResourceVerb(method, rawpath)
+		resource, verb, custom, ok := gcpResourceVerb(method, rawpath)
+		if custom != "" {
+			seenCustom[custom] = true
+		}
 		if !ok {
 			continue // a read, or a path with no resource to name
 		}
@@ -67,6 +71,17 @@ func TestGCPDeclaredPermissionsCoverTheMutationsTheDriversCall(t *testing.T) {
 		key := resource + "\t" + verb
 		if _, seen := needed[key]; !seen {
 			needed[key] = method + " " + rawpath
+		}
+	}
+	// D1018: the skip register is audited like AWS discoveryOnly — every exemption carries a
+	// reason and is still exercised by a route; a dead one is dropped, so it cannot linger as
+	// a channel that silently swallows a future write.
+	for cv, reason := range gcpSkipVerbs {
+		if strings.TrimSpace(reason) == "" {
+			t.Errorf("skip-verb %q has no reason — an unreasoned exemption is worse than none", cv)
+		}
+		if !seenCustom[cv] {
+			t.Errorf("skip-verb %q is exercised by no captured route — a dead exemption, drop it", cv)
 		}
 	}
 	if mutations < 50 {
@@ -103,19 +118,29 @@ func TestGCPDeclaredPermissionsCoverTheMutationsTheDriversCall(t *testing.T) {
 	}
 }
 
-// gcpVerbFromCustom maps a GCP custom method (the ":verb" suffix, or a trailing action
-// segment) to the permission verb it needs. A read-only probe returns "" (skip).
-var gcpVerbFromCustom = map[string]string{
+// gcpWriteVerbs maps a GCP custom method (the ":verb" suffix, or a trailing action segment)
+// to the permission verb the MUTATION needs.
+var gcpWriteVerbs = map[string]string{
 	"setIamPolicy":        "setIamPolicy",
-	"getIamPolicy":        "",        // a read
-	"testIamPermissions":  "",        // the preflight's own probe (D75)
-	"getEffectivePolicy":  "",        // a read
 	"destroy":             "destroy", // cloudkms key version
 	"pause":               "pause",   // cloudscheduler job
 	"enable":              "enable",  // serviceusage service
 	"setAddons":           "update",  // gke cluster addon toggle
 	"lockRetentionPolicy": "update",  // gcs bucket retention lock
-	"restoreBackup":       "",        // the RTO probe's restore (double-consented, D59)
+}
+
+// gcpSkipVerbs is the AUDITED counterpart (D1018): custom methods this gate deliberately
+// does NOT treat as a plan-action mutation, each with the reason it is exempt. A "" mapping
+// buried in the write table would silently swallow a real write; here a skip is a named
+// decision, and the gate asserts every entry is BOTH reasoned AND still called by some route
+// (a dead exemption is dropped) — the discipline the AWS discoveryOnly register already has.
+// A custom verb in NEITHER table is used verbatim and fails the gate: an unclassified verb is
+// never silently skipped.
+var gcpSkipVerbs = map[string]string{
+	"getIamPolicy":       "a read of the IAM policy, not a write",
+	"testIamPermissions": "the preflight's OWN probe (D75), never a plan mutation",
+	"getEffectivePolicy": "a read of the effective org policy, not a write",
+	"restoreBackup":      "the RTO probe's restore into a scratch instance — intrusive, double-consented (D59), outside any plan action; the scratch CREATE is declared separately",
 }
 
 // gcpResourceRemap fixes the resource names whose URL segment differs from the IAM
@@ -135,12 +160,22 @@ func remapGCPResource(r string) string {
 	return r
 }
 
+func gcpKnownCustom(v string) bool {
+	if _, ok := gcpWriteVerbs[v]; ok {
+		return true
+	}
+	_, ok := gcpSkipVerbs[v]
+	return ok
+}
+
 // gcpResourceVerb derives the (resource, verb) a GCP mutation needs, or ok=false for a read
-// or an unrecognisable path. The path is /projects/{p}/.../<collection>[/{name}[:verb]] or a
-// collection create /projects/{p}/.../<collection>; nested collections and zone/region/
-// location prefixes are context. GET is a read; POST is a create unless it carries a custom
-// verb (":verb" or a known trailing-action segment).
-func gcpResourceVerb(method, rawpath string) (string, string, bool) {
+// or an unrecognisable path. It also returns the custom method it saw (":verb" or trailing
+// action), "" if none, so the gate can assert the skip register has no dead entries. The path
+// is /projects/{p}/.../<collection>[/{name}[:verb]] or a collection create; nested collections
+// and zone/region/location prefixes are context. GET is a read; POST is a create unless it
+// carries a custom verb, which must be classified in gcpWriteVerbs or gcpSkipVerbs — an
+// unclassified one is used verbatim and fails the gate rather than being silently skipped.
+func gcpResourceVerb(method, rawpath string) (resourceOut, verbOut, customOut string, ok bool) {
 	path := rawpath
 	if i := strings.Index(path, "://"); i >= 0 {
 		if s := strings.IndexByte(path[i+3:], '/'); s >= 0 {
@@ -150,16 +185,16 @@ func gcpResourceVerb(method, rawpath string) (string, string, bool) {
 	path = strings.SplitN(path, "?", 2)[0]
 	segs := strings.Split(strings.Trim(path, "/"), "/")
 	if len(segs) == 0 || segs[0] == "" {
-		return "", "", false
+		return "", "", "", false
 	}
 	// A trailing "iam" sub-resource is an IAM-policy op on its parent (GCS spells
 	// setIamPolicy as PUT /b/{bucket}/iam, not a ":verb"): drop it and let the method
 	// decide (PUT/POST -> setIamPolicy, GET -> read).
 	if segs[len(segs)-1] == "iam" && len(segs) >= 3 {
 		if method == "GET" {
-			return "", "", false
+			return "", "", "", false
 		}
-		return remapGCPResource(segs[len(segs)-3]), "setIamPolicy", true
+		return remapGCPResource(segs[len(segs)-3]), "setIamPolicy", "", true
 	}
 
 	custom := ""
@@ -167,7 +202,7 @@ func gcpResourceVerb(method, rawpath string) (string, string, bool) {
 		nv := strings.SplitN(last, ":", 2)
 		segs[len(segs)-1] = nv[0]
 		custom = nv[1]
-	} else if _, ok := gcpVerbFromCustom[last]; ok && len(segs) >= 2 {
+	} else if gcpKnownCustom(last) && len(segs) >= 2 {
 		// a trailing ACTION segment (lockRetentionPolicy, restoreBackup) — not a resource
 		custom = last
 		segs = segs[:len(segs)-1]
@@ -188,23 +223,23 @@ func gcpResourceVerb(method, rawpath string) (string, string, bool) {
 
 	switch method {
 	case "DELETE":
-		return resource(len(segs) - 2), "delete", true
+		return resource(len(segs) - 2), "delete", custom, true
 	case "PATCH", "PUT":
-		return resource(len(segs) - 2), "update", true
+		return resource(len(segs) - 2), "update", custom, true
 	case "POST":
 		if custom != "" {
-			verb, mapped := gcpVerbFromCustom[custom]
-			if !mapped {
-				verb = custom // an action we have not mapped: use it verbatim (fail loud in the gate)
+			if v, ok := gcpWriteVerbs[custom]; ok {
+				return resource(len(segs) - 2), v, custom, true
 			}
-			if verb == "" {
-				return "", "", false // a read/probe
+			if _, ok := gcpSkipVerbs[custom]; ok {
+				return "", "", custom, false // an audited read/probe
 			}
-			return resource(len(segs) - 2), verb, true
+			// an unclassified custom verb — verbatim, so the gate fails loudly on it
+			return resource(len(segs) - 2), custom, custom, true
 		}
 		// a collection create: the last segment is the resource type
-		return resource(len(segs) - 1), "create", true
+		return resource(len(segs) - 1), "create", "", true
 	default:
-		return "", "", false // GET / HEAD — a read
+		return "", "", custom, false // GET / HEAD — a read (custom carried for staleness)
 	}
 }

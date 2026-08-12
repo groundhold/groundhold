@@ -33441,6 +33441,23 @@ GCP mutation the drivers make is covered — which is what the D1013 field audit
 machine-confirmed and guarded against drift. The three clouds' permission surfaces are now each
 gated, not hand-traced.
 
+## D1018 — an audited skip register, so the gate cannot silently swallow a write
+
+The same completeness pass that found D1017 named a softer weakness in the GCP gate: its custom
+methods that are NOT mutations (`getIamPolicy`, `testIamPermissions`, `getEffectivePolicy`,
+`restoreBackup`) were mapped to `""` in the same table as the real write verbs. A `""` buried
+among writes is a channel that swallows silently — map a genuine write verb to `""` by mistake
+and the gate skips it with no complaint, the exact "a gate that passes having found nothing" shape
+the project guards against. The AWS `discoveryOnly` register does not have this weakness: every
+exemption there carries a traced reason and is dropped when no call needs it any more.
+
+So the skip verbs are their own register now, each with the reason it is exempt, and the gate
+holds it to the discoveryOnly discipline: an entry with no reason fails, and an entry no captured
+route exercises fails as a dead exemption. A custom verb in neither the write table nor the skip
+register is used verbatim and fails the gate — an unclassified verb is never silently skipped, it
+forces a write-or-exempt decision. The change is derivation-internal (the gate now reports the
+custom method it saw so it can prove the register is live); the coverage it computes is unchanged.
+
 ## D1017 — the gate's own blind spot: a branch no test drove
 
 An adversarial completeness pass over the three new sufficiency gates found one real gap the
