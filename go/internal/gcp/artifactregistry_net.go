@@ -176,7 +176,13 @@ func (d *Driver) createARRepo(capability, environment string,
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	pid := garProviderID(d.Project, plan.Region, plan.RepoID)
-	url := fmt.Sprintf("%s/projects/%s/locations/%s/repositories?repository_id=%s",
+	// D1009: the create query param is `repositoryId` (camelCase) per the artifactregistry
+	// v1 discovery doc — and per every sibling here (instanceId, certificateId, keyRingId …).
+	// This was the lone snake_case `repository_id`; if the API ignored it and auto-named the
+	// repo, the create would land under a name the providerId (built from RepoID above) does
+	// not match, so observe would read a live repository as absent. Aligned to the documented
+	// form, which is provably accepted.
+	url := fmt.Sprintf("%s/projects/%s/locations/%s/repositories?repositoryId=%s",
 		d.arBase(), d.Project, plan.Region, plan.RepoID)
 	st, body, e := d.call("POST", url, plan.createBody(capability, environment))
 	switch {

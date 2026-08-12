@@ -33188,3 +33188,31 @@ which fall below the freeze bar; recorded here so the next unfreeze starts where
 - **historical anecdote counts.** `conformance/run.py` and a `coverage_gate_test.go` docstring
   cite `282/518` where the suite now holds `289/550` — dated narrative illustrating a past
   incident, not a live claim.
+
+## D1009 — GCP create query params are camelCase (a snake_case that could have hidden a resource)
+
+A second round of the highest-yield audit surface — the drivers confronted against the
+PROVIDERS' OWN models, fetched without credentials — and mostly a strong NEGATIVE, which is
+the point of running it. AWS: 37 create operations' `required` members all supplied and ~35
+enum families all valid against botocore `service-2.json`; the known casing cases
+(D878/D879/D735/D883/D1001) re-confirmed correct. GCP: 25 of 26 services' path templates and
+enum sets match Google's discovery documents, including the D994 project-NUMBER-vs-ID shape
+(fixed and pinned in assetfeed).
+
+The one anomaly: `artifactregistry`'s create passed the new repository's id as snake_case
+`repository_id`, the lone exception among thirteen camelCase `<x>Id` query params, where the
+v1 discovery doc documents `repositoryId`. The providerId is built from the INTENDED `RepoID`,
+so if the API ignored the snake_case name and auto-named the repository, the create would land
+under a name the providerId does not match and observe would read a live repository as ABSENT
+— the created-but-invisible dangerous direction. It is UNPROVEN whether Google actually rejects
+the alias (auth is enforced before query-param validation, so an unauthenticated probe cannot
+tell), but camelCase is the provably-accepted documented form used by every sibling, so the fix
+is a zero-downside alignment rather than a suspicion-driven behaviour change. A gate
+(`TestGCPCreateQueryIdParamsAreCamelCase`) pins the convention so the snake_case that slipped
+through the whole driver set cannot return.
+
+Recorded UNCHECKED, with the instruments tried (D317's honest-limit rule): `securitycenter-
+management` (the `scc` driver) — its discovery document does not render without credentials
+(`$discovery/rest` returns 403, the go-client mirror 404, the directory list has no entry), so
+its path and enum claims are unconfronted against any Google authority. The next pass starts
+there rather than at the beginning.
