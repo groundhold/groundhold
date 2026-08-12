@@ -1549,6 +1549,18 @@ func run(args []string) int {
 		}
 		out, _ := json.MarshalIndent(rep, "", "  ")
 		fmt.Println(string(out))
+		// D1020: attest is the UNION integrity reporter (chain + anchor + snapshot +
+		// archive + signatures) and it ALREADY gates the chain — missing ledger exits 1,
+		// a broken chain exits 5. But an anchor/snapshot/archive integrity FAILURE was
+		// written into a report FIELD and the exit code stayed 0, so a cron/CI running
+		// `attest` as its one-pass integrity check read ALL-CLEAR over a foreign/rewritten
+		// anchor, a truncated tail, a neutralized witness, or a swapped snapshot/archive —
+		// while `anchor --check` exits 5 on the same input. D613 corrected the report WORD
+		// (verified→unverifiable), not the code. Gate on what attest reports: a corrupted
+		// off-host witness is corruption-class (5), exactly as certify-capsule/anchor exit.
+		if !attestIntegrityHealthy(rep) {
+			return 5
+		}
 		return 0
 	}
 	if cmd == "anchor" {
@@ -3911,6 +3923,29 @@ func detachVerdict(handle, ledgerPath string, e detach.Entry, alive bool) (int, 
 // The spec's rule is "nothing proceeds over corruption"; these verbs' own rule is
 // "reporting is not judging", and both hold: a file that is not a ledger is not a run
 // that failed.
+// attestIntegrityHealthy reports whether every integrity fact `attest` re-checked
+// passed (D1020). A nil sub-report (no anchor sidecar / no snapshot) is nothing to
+// gate. The anchor is healthy only when it VERIFIED against the live ledger or was
+// genuinely ABSENT; a present snapshot must self-verify, bind THIS ledger, and its
+// archive still match. Anything else — a diverged/truncated/unreadable/unverifiable
+// anchor, a snapshot that does not self-verify or names another ledger, a
+// mismatched/missing/misnamed/unreadable archive — is a corrupted off-host witness the
+// exit code must not read as all-clear.
+func attestIntegrityHealthy(rep *ledger.IntegrityReport) bool {
+	if a := rep.Anchor; a != nil && a.Status != "verified" && a.Status != "absent" {
+		return false
+	}
+	if s := rep.Snapshot; s != nil {
+		if s.Unreadable || !s.SignatureSelfVerifies || !s.LedgerIdMatches {
+			return false
+		}
+		if st := s.Archive.Status; st != "matched" && st != "not-claimed" {
+			return false
+		}
+	}
+	return true
+}
+
 func refuseCorruptLedger(err error) int {
 	// D617: a path that is WRONG and bytes that do not REPLAY are different operator
 	// problems. Between them they had four exit codes across sixteen verbs; a caller

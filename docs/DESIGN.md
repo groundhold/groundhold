@@ -33531,3 +33531,37 @@ subject-absent constraint though `spec/contract.schema.json` marks `subject` req
 `validate` says OK. That is not the dangerous direction (verify and now audit both block it), so
 under the freeze it is banked — enforcing the schema at load is the deeper close for the next
 unfreeze.
+
+## D1020 — attest read a tampered off-host witness as exit-0 all-clear
+
+The D1019 export/audit sweep generalised to one question across every verb: does any return
+exit 0 (or a success-shaped result) over a state that is actually blocked, refused, violated, or
+unknown? A sweep of all verbs' exit codes came back a strong negative — verify/plan/preflight
+exit 2 on a block; posture/react run one `Summary.ExitCode()` (D958/D966); capsule/anchor/repair
+exit 5 on corruption; observe/forecast exit 0 by design and emit a marker rather than a false
+"clean" — except `attest`.
+
+`attest` is the UNION integrity reporter: chain + off-host anchor + snapshot + archive +
+signatures. Its exit code already gates the chain (a missing ledger exits 1, a broken chain exits
+5 via D617/ReplayExisting), so a cron/CI reasonably treats `attest --ledger L --at T` as its
+one-pass integrity check. But `ledger.Attest` returns `(rep, nil)` for every FIELD-level
+integrity failure — a diverged/truncated/unverifiable off-host anchor, a snapshot that does not
+self-verify or names another ledger, a mismatched/missing/misnamed archive — writing the failure
+into a report field, and the dispatch returned 0 regardless. Proven on a real ledger: a genuine
+anchor exits 0; a foreign `ledgerId` reads `anchor.status:"diverged"` and exits 0; a cut tail
+reads `truncated` and exits 0; a zero-event neutralised witness reads `unverifiable` and exits 0 —
+while `anchor --check` on the identical input exits 5, and `repair`/Diagnose does not check anchor
+identity at all. So there was NO single verb whose exit code covered what attest reports, and the
+off-host witness — the copy an attacker cannot reach, whose whole purpose is to detect a rewrite
+(D613/D647) — reported all-clear over exactly the rewrite it exists to catch. D613 had corrected
+the report WORD (`verified`→`unverifiable`, "'I could not check' is not 'I checked'") but not the
+exit code.
+
+The fix gates on what attest reports: after a successful `Attest`, a non-verified/non-absent
+anchor, a snapshot that does not self-verify / does not bind this ledger, or a non-matched/
+non-not-claimed archive returns corruption-class 5 — exactly as certify-capsule and anchor --check
+already exit. A unit test pins the health function across every anchor/snapshot/archive state, and
+an end-to-end test builds a real ledger, writes a genuine anchor (exit 0), swaps its ledgerId, and
+asserts a non-zero exit; a meter mutant restoring the exit-0 is caught. attest was meant as a fact
+reporter (D646), but a reporter that gates HALF its facts and stays silent on the other half is
+the inconsistency: a consumer cannot tell which half.

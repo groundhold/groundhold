@@ -11,3 +11,7 @@ differential-failures/
 state/
 # mkdocs build output (D490: `mkdocs build --strict` now runs in CI and locally)
 website/site/
+
+# compiled CLI binary (build artifact — never commit)
+/go/groundhold
+/groundhold
