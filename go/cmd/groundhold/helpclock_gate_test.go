@@ -79,3 +79,68 @@ func TestHelpNamesEveryVerbThatRequiresAnExplicitClock(t *testing.T) {
 		}
 	}
 }
+
+// D1006. The help publishes two more closed sets that had drifted from the code: the
+// verbs that REQUIRE --provider (the F4 note still listed `repair` and `anchor`, removed
+// from providerVerbs in D571 — pure-ledger verbs that name no driver), and the accepted
+// provider NAMES (three copies said "aws|gcp|azure|k8s|fake" while 8 are accepted, so a
+// user who mistyped `cloudfare` was told cloudflare was not a real provider). Both are
+// reconciled here against the sets the binary enforces, so neither can outlive the code.
+func TestHelpNamesTheProviderVerbsAndProviders(t *testing.T) {
+	if len(providerVerbs) < 8 || len(knownProviders) < 6 {
+		t.Fatalf("provider sets collapsed (%d verbs, %d providers)",
+			len(providerVerbs), len(knownProviders))
+	}
+	help := captureStdout(t, func() { run([]string{"--help"}) })
+	if len(help) < 500 {
+		t.Fatalf("--help produced %d bytes — nothing to check", len(help))
+	}
+
+	vstart := strings.Index(help, "Provider verbs (")
+	if vstart < 0 {
+		t.Fatal("the help no longer states the --provider rule in the form this gate reads")
+	}
+	seg := help[vstart:]
+	vend := strings.Index(seg, ") REQUIRE")
+	pstart := strings.Index(seg, "--provider (")
+	if vend < 0 || pstart < 0 {
+		t.Fatal("the --provider verb or name list lost the shape this gate reads")
+	}
+	pend := strings.Index(seg[pstart:], ")")
+	if pend < 0 {
+		t.Fatal("the accepted-provider list lost its closing paren")
+	}
+
+	reconcile := func(what, listText string, tokenRe *regexp.Regexp, enforced map[string]bool) {
+		prose := map[string]bool{}
+		for _, w := range tokenRe.FindAllString(listText, -1) {
+			prose[w] = true
+		}
+		var miss, extra []string
+		for v := range enforced {
+			if !prose[v] {
+				miss = append(miss, v)
+			}
+		}
+		for w := range prose {
+			if !enforced[w] {
+				extra = append(extra, w)
+			}
+		}
+		sort.Strings(miss)
+		sort.Strings(extra)
+		if len(miss) > 0 {
+			t.Errorf("the help's %s OMITS %s — the binary enforces each, so the text the "+
+				"tool prints about itself contradicts the tool", what, strings.Join(miss, ", "))
+		}
+		if len(extra) > 0 {
+			t.Errorf("the help's %s names %s, which the binary does NOT enforce (a stale "+
+				"published set — D1006/D571)", what, strings.Join(extra, ", "))
+		}
+	}
+
+	reconcile("--provider verb list", seg[len("Provider verbs ("):vend],
+		regexp.MustCompile(`[a-z]+`), providerVerbs)
+	reconcile("accepted-provider list", seg[pstart+len("--provider ("):pstart+pend],
+		regexp.MustCompile(`[a-z0-9]+`), knownProviders)
+}

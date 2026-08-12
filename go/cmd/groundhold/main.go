@@ -315,8 +315,8 @@ Global: the full attribute vocabulary is compiled into this binary and
         posture, probe, publish, react, refresh, resume, runs, status,
         unadopt. (wait is exempt: it IS the live clock.)
         Provider verbs (discover/apply/adopt/observe/converge/probe/
-        resume/repair/anchor/react/refresh/crawl/preflight) REQUIRE an
-        explicit --provider (aws|gcp|azure|k8s|fake): the fake driver
+        resume/react/refresh/crawl/preflight) REQUIRE an
+        explicit --provider (aws|gcp|azure|k8s|cloudflare|hetzner|upstash|fake): the fake driver
         fabricates reality, so it is chosen deliberately, never defaulted,
         and an unknown provider name is refused, not silently faked (F4).
         Per-verb detail: groundhold <verb> --help (or: groundhold help
@@ -352,6 +352,8 @@ Exit codes:
   3  refused: stale plan or lease conflict
   4  apply failed mid-flight
   5  corrupted ledger
+  (apireq classify carries its own verdict scheme: 0 green / 10 provider-drift /
+   20 groundhold-regression / 30 infra-flake — route on it separately)
 `
 
 // buildVersion is stamped at release time via
@@ -533,6 +535,19 @@ var providerVerbs = map[string]bool{
 var knownProviders = map[string]bool{
 	"aws": true, "gcp": true, "azure": true, "k8s": true, "fake": true,
 	"upstash": true, "hetzner": true, "cloudflare": true,
+}
+
+// knownProviderList renders the accepted provider names deterministically, so the errors
+// that name them cannot drift from the set the CLI actually accepts. Three copies of
+// "(aws|gcp|azure|k8s|fake)" had gone stale while 8 are accepted, so a user who mistyped
+// `cloudfare` was told cloudflare was not a real provider (D1006).
+func knownProviderList() string {
+	ks := make([]string, 0, len(knownProviders))
+	for k := range knownProviders {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return strings.Join(ks, "|")
 }
 
 // emitBanner: one banner word, last, on stderr — the prose channel; the
@@ -1390,12 +1405,12 @@ func run(args []string) int {
 	if providerVerbs[cmd] {
 		if !providerProvided && providerName == "fake" {
 			fmt.Fprintf(os.Stderr, "%s requires an explicit --provider "+
-				"(aws|gcp|azure|k8s|fake): fake fabricates reality, so it must be chosen "+
-				"deliberately (--provider fake) rather than defaulted\n", cmd)
+				"(%s): fake fabricates reality, so it must be chosen "+
+				"deliberately (--provider fake) rather than defaulted\n", cmd, knownProviderList())
 			return 1
 		}
 		if !knownProviders[providerName] {
-			fmt.Fprintf(os.Stderr, "unknown provider %q (want aws|gcp|azure|k8s|fake)\n", providerName)
+			fmt.Fprintf(os.Stderr, "unknown provider %q (want %s)\n", providerName, knownProviderList())
 			return 1
 		}
 	}

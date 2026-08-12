@@ -33119,3 +33119,72 @@ a clear record: the scheduler DLQ operand (039#2, a new capability), `claim` for
 iam/bedrock/eventbridgescheduler (039#3/036#1, a frozen-compiler predicate), and the lambda log
 group before the function exists (037#2, an operand or apply returning derived names). Pinned by
 classify + update tests for both, plus mutants that revert each classify to immutable.
+
+## D1005 — discoverLoadBalancers follows ELBv2's pages (a sibling the pagination pass missed)
+
+An adversarial audit confronting the AWS drivers against botocore's own model (the
+highest-yield surface in BUG_HUNTING.md) found `discoverLoadBalancers` issuing one
+`DescribeLoadBalancers` and unmarshalling the members once, while its six siblings in the
+same sweep loop. ELBv2 paginates at `PageSize` (default 400) and hands back a `NextMarker`
+(botocore elbv2/2015-12-01: input token `Marker`, output token `NextMarker`) — and unlike
+EC2, it does NOT return everything when the limit is unset. So a region past 400 load
+balancers silently dropped the rest from discovery: a real public ALB reported
+not-present-in-estate, invisible to adoption, which is the exact failure this sweep exists
+to end. The D810/D812 pagination pass looped the siblings and missed this one (and
+`discoverVPC`, which is harmless because EC2 returns all VPCs without `MaxResults`).
+
+Freeze-admissible (D716): the tool says something FALSE in the dangerous direction — an
+existing resource reported absent. Fix: loop on `Marker`/`NextMarker` like the RDS sibling;
+a test drives a fake that hands back a `NextMarker` and asserts the page-two balancer is
+discovered.
+
+## D1006 — the help's provider verb and provider-name lists, reconciled to the code
+
+Same audit, the CLI `--help` surface: two published closed sets had drifted from the sets
+the binary enforces. The F4 note still listed `repair` and `anchor` as `--provider`-required
+verbs — removed from `providerVerbs` in D571 as pure-ledger operations — so the help named
+two verbs the guard does not gate. And three copies of the accepted-provider list (the F4
+note and both refusal messages) said `(aws|gcp|azure|k8s|fake)` while `knownProviders` holds
+eight, so a user who mistyped `cloudfare` was told cloudflare was not a real provider.
+
+Fix: the prose is corrected; the two error messages now render `knownProviderList()` so they
+cannot drift by construction; and a gate (`TestHelpNamesTheProviderVerbsAndProviders`)
+reconciles the F4 verb list against `providerVerbs` and the name list against
+`knownProviders` — the same shape as D688's `--at` gate.
+
+## D1007 — attrvisibility's vacuity guard floored the wrong population
+
+Same audit, the gates-that-cannot-fail (D328) surface. `TestRealisedAttributesAreObserved-
+OrExplained` checks that every attribute a driver REALISES (a `case "x.y":` arm in a `Build*`
+switch) is one its `observe` reads back or names a reason it cannot. Its floor guards count
+builder FUNCTIONS (`len(builds)`, `compared`), not the realised-attribute case-arms the
+check iterates — so a `Build*` refactored from a switch to an if-chain would match nothing
+under the `attrCase` regex, contribute zero realised attributes, and silently escape the
+observe-coverage check while the function-count guards stayed green. The verbatim example
+BUG_HUNTING.md warns about ("a switch rewritten as if-chains"). Fix: floor the realised set
+the check actually iterates, in all three driver gates.
+
+## D1008 — audit findings recorded but deferred under the freeze
+
+The same adversarial sweep turned up findings whose honest fix is a post-unfreeze feature or
+which fall below the freeze bar; recorded here so the next unfreeze starts where this stopped.
+
+- **`mutablehasupdater` gate escape.** `aws/asg`, `gcp/mig` and `azure/azvmss` classify their
+  capacity/autoscaling paths `mutable`, but none has an updater — so plan and forecast present
+  an in-place capacity resize that apply then refuses (`… in-place update is not wired yet`): a
+  plan-level false claim, one step earlier than D805, and fail-closed. `TestEveryMutablePath-
+  HasAnUpdaterThatCouldApplyIt` keys classifier↔updater by NAME and silently skips a service
+  with no same-named updater, so the three rode through. A robust general gate needs
+  cross-provider dispatch-token analysis (AWS uses a clean `case … default`, GCP a fall-through
+  CloudSQL tail that `mig` also mis-dispatches a resize into), and reclassifying the paths
+  `immutable` is worse — the D215 default would REPLACE the fleet on a capacity change. Wiring
+  the three updaters is the post-freeze fix. The gate also treats `caveated` as distinct from
+  `mutable` though the compiler does not (compiler.go `case "mutable", "caveated":`) — a second
+  follow-up.
+- **botocore pagination, harm not reachable.** `rolepolicy` (ListAttachedRolePolicies) and
+  `backupplan` (ListBackupSelections) read page one only — real divergences from botocore, but
+  the dangerous direction is quota-bounded (attached-policies-per-role defaults to 10, far below
+  the 100-item page) or the provider rejects loudly. Below the freeze bar; recorded.
+- **historical anecdote counts.** `conformance/run.py` and a `coverage_gate_test.go` docstring
+  cite `282/518` where the suite now holds `289/550` — dated narrative illustrating a past
+  incident, not a live claim.
