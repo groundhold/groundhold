@@ -156,21 +156,11 @@ func (d *Driver) deleteFrontDoorWAF(capability, environment, providerID string) 
 		return provider.CreateResult{Status: "failed",
 			Reason: "waf policy tags do not match — refusing to delete a resource that is not ours"}
 	}
-	dst, dresp, de := d.doARM("DELETE", url, nil)
-	if de != nil {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("delete outcome unknown: %v", de)}
-	}
-	if dst == http.StatusNotFound {
-		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
-	}
-	if dst >= 500 {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("delete HTTP %d (server error) — reconcile", dst)}
-	}
-	if dst < 200 || dst >= 300 {
-		if r := provider.MutationResult(dst, azErrCode(dresp), nil, providerID, "delete"); r != nil {
-			return *r
-		}
-		return provider.CreateResult{ProviderID: providerID, Status: "failed", Reason: fmt.Sprintf("delete HTTP %d: %s", dst, mutDetailAz(dresp))}
-	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// D1012: a Front Door WAF policy DELETE is a LONG-RUNNING operation — Policies_Delete
+	// is x-ms-long-running-operation in the 2022-05-01 spec, with 202 among its responses.
+	// Concluding succeeded on the 202 tombstones a policy that has only entered "deleting";
+	// if the async deletion then fails it is orphaned from a ledger that says it is gone
+	// (and keeps billing). Route through deleteAndConfirm (D971) — poll the 202 to a
+	// confirmed 404, unknown on timeout. A 200/204 is a synchronous delete, already gone.
+	return *d.deleteAndConfirm(url, providerID, "waf policy")
 }
