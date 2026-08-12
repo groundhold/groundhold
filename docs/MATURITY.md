@@ -219,8 +219,9 @@ external security audit, and no sustained customer production beyond it.
    entry used to say the README "stops at ~D64/D75" with none of the later work
    reflected. That stopped being true, so the gap list was itself out of date —
    the D287 failure in miniature. Corrected in D324, together with a service
-   count that had drifted: the drivers certify 133 service mappings, not the
-   ~128 the README claimed, which had silently counted capability TYPES.)
+   count that had drifted: at D324 the drivers certified 133 service mappings
+   (145 today), not the ~128 the README had claimed, which had silently counted
+   capability TYPES.)
 9. **Probes have measured reachability for real, but never a real RECOVERY.** The restore-test / reachability
    machinery is built (D59) and consent-gated, and its intrusive paths are now
    gated as a class — all four probers refuse a foreign estate before the spend
