@@ -145,6 +145,46 @@ func TestApplyRefusesEmissionAdoptWithoutConsent(t *testing.T) {
 	}
 }
 
+const liveContract = `apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta: { id: live, environment: test, version: 1 }
+capabilities:
+  - id: app
+    type: capability.function.serverless
+`
+
+const liveCandidate = `apiVersion: candidate/v0.1
+kind: ImplementationCandidate
+contract: live
+capabilities:
+  app:
+    provider: fake
+    service: mock
+    attributes:
+      location.region: eu-central-1
+`
+
+// D1038: apply refuses a delete of a capability the pinned contract declares LIVE (not
+// retired) with no create replacing it — a bare destroy the compiler never seals (it
+// deletes only on retire or as the destroy half of a replace). Without this a hand-
+// authored plan with valid contract+candidate hashes destroys a live resource on the
+// plan's word — the D959 threat model, at the operation itself.
+func TestApplyRefusesBareDeleteOfLiveCapability(t *testing.T) {
+	c, cand, planDoc, vocabs := compilePlanDoc(t, liveContract, liveCandidate)
+	for _, a := range planActionMaps(planDoc) {
+		if a["operation"] == "create" && a["capability"] == "app" {
+			a["operation"] = "delete" // forge a bare delete of the still-live cap
+			a["targetProviderId"] = "fake:mock:app"
+			a["targetGeneration"] = float64(1)
+		}
+	}
+	res := Apply(c, cand, vocabs, planDoc, freshLedger(t), &provider.Fake{}, pfAt, false)
+	if !strings.Contains(strings.Join(res.Reasons, " "), "non-retire, non-replace") {
+		t.Fatalf("a bare delete of a live cap must refuse as a plan the compiler never "+
+			"seals; reasons=%v outcomes=%v", res.Reasons, res.Outcomes)
+	}
+}
+
 // emAdoptProv certifies its lambda service emits a log group a monitoring.logs governs
 // — the provenance emissionAdoptProvenanceOK re-derives.
 type emAdoptProv struct{ provider.Fake }

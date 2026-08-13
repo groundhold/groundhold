@@ -527,6 +527,29 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 				r.Capability = capID // D230: main builds the allow_protection_lift edit
 				return r
 			}
+			// D1038: refuse a delete the compiler never emits. It deletes a capability only
+			// on RETIRE (the contract declares it `state: retired`), as the destroy half of
+			// a REPLACE (paired with a create for the same cap), or as a deposed-orphan
+			// cleanup (ledger-validated below). A hand-authored plan asserting a bare delete
+			// of a capability the pinned contract declares LIVE (not retired), with no create
+			// replacing it, would destroy a live resource on the plan's word — the D959
+			// threat model, at the operation itself. The `state` read is from the hash-pinned
+			// contract, so it cannot be forged without changing contractHash; the paired
+			// create, if forged to dodge this, makes it a REPLACE gated by the stateful
+			// consent above.
+			if raw, stillDeclared := c.Capabilities[capID]; stillDeclared {
+				state, _ := raw["state"].(string)
+				dep, _ := a["deposed"].(bool)
+				if state != "retired" && !dep && !planCreates(actions, capID) {
+					r := refused(perr.NotExecutable, 2, fmt.Sprintf(
+						"action %v deletes %s, which the contract declares live (not retired) "+
+							"and no create in this plan replaces — a non-retire, non-replace delete "+
+							"is not a plan this compiler seals; refusing to destroy a live resource "+
+							"on the plan's word", a["id"], capID))
+					r.Capability = capID // D230
+					return r
+				}
+			}
 			pinnedID, _ := a["targetProviderId"].(string)
 			pinnedGen, _ := a["targetGeneration"].(int)
 			if dep, _ := a["deposed"].(bool); dep {
@@ -1390,6 +1413,18 @@ func planDeletes(actions []any, capID string) bool {
 	for _, it := range actions {
 		a, _ := it.(map[string]any)
 		if a["capability"] == capID && a["operation"] == "delete" {
+			return true
+		}
+	}
+	return false
+}
+
+// planCreates reports whether the plan carries a create for capID — the paired create
+// that makes a same-cap delete a REPLACE rather than a bare destroy (D1038).
+func planCreates(actions []any, capID string) bool {
+	for _, it := range actions {
+		a, _ := it.(map[string]any)
+		if a["capability"] == capID && a["operation"] == "create" {
 			return true
 		}
 	}
