@@ -33707,3 +33707,35 @@ derivation was not the cross-implementation safety it looked like. A teeth check
 removing a Go operator fails with the D25-divergence message. All five match today —
 this is drift insurance on the vocabulary the dual-implementation guarantee rests on,
 made a checked invariant. Test only; no runtime logic changed.
+
+## D1027 — `alert.notify`'s description claimed a guarantee it does not make
+
+A field report (a dogfooding operator, 2026-08-08) stood up a full monitoring set —
+probe, two alarms, an SNS topic — and got a wholly green plan, SEALED, every
+capability `no-op (bound, observed==declared)`. Yet no alarm would notify anyone: both
+topics had ZERO subscriptions. The alarm fires, hands the notification to the topic,
+and the topic has no one to deliver it to. The operator correctly classified it as a
+missing CAPABILITY (the contract has no way to require a subscriber), not a driver
+defect — and praised that the driver REFUSES an unknown `subscriptions` operand rather
+than dropping it silently.
+
+The freeze-admitted part is not the missing capability (that is recorded below) but a
+sentence in `capability.monitoring.alert.yaml` that was FALSE in the dangerous
+direction: `alert.notify`'s description said notify=true "makes 'someone is actually
+told' a verifiable guarantee." It does not. After D726 the attribute is
+`AlarmActions non-empty && ActionsEnabled != false` — the alarm is ARMED and NAMES a
+target. Whether a recipient stands behind that target is a further link it never
+checks, and a topic with zero subscribers satisfies notify=true while delivering to no
+one. A reader acting on "someone is told" over a green `notify=true` trusts a
+notification path that is silently dead — worse off than with an honest description.
+The three spots that conflated "a channel is referenced" with "a recipient exists"
+(the attribute description, the header, the stateful comment) now scope the claim to
+what is verified and name the gap explicitly. Vocabulary prose only; the attribute's
+kind, mappings and driver behaviour are unchanged (the alarm-armed and effect-attribute
+gates still pass), and the embedded copy was regenerated.
+
+RECORDED, NOT BUILT (needs unfreeze + vocab governance, the same family as the
+resource-completion gaps in logs retention, s3 retention and registry lifecycle): a
+`subscriptions` operand on the `aws/sns` driver, or a `delivery.hasSubscriber`
+attribute on `capability.messaging.topic`, so a blind topic is expressible in the
+contract rather than left to whoever remembers to check by hand.
