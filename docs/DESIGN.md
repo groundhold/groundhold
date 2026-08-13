@@ -33882,3 +33882,38 @@ negative a unary witness cannot supply. The read reuses the driver's own
 `describeCWLogGroup`; `logs:DescribeLogGroups` was already declared and already recorded,
 so the permission and route gates are satisfied without a new call class. GCP Cloud
 Functions retention is a mapped parity follow-up.
+
+## D1032 — the emission registry (resource-completion Slice 3.2)
+
+Slice 3.1 lets a contract that KNOWS to constrain `defaultLogGroup.retention` block on an
+ungoverned Lambda log group. But the registry of WHICH companion resources a driver's
+create causes the provider to auto-materialise was implicit — `observeLambda` hard-coded
+"read /aws/lambda/<fn>". The two Slice-3 reviews (proposal §9) were emphatic on one point:
+the emission registry is a COMPLETENESS gate — "is this compute's auto-group left
+ungoverned?" — NEVER an authorization token to adopt the group (that stays a plan-time
+sealed grant naming the exact providerId, D1032+/Slice 3.3). This makes the registry
+explicit and fail-closed.
+
+Added `provider.EmittedCompanion{GovernedBy, NameOutput}` and the optional
+`EmissionCertifier` interface; the AWS driver's `EmittedCompanions()` declares
+`lambda → {governedBy: capability.monitoring.logs, nameOutput: logGroupName}` — a
+HAND-TRACED register (the `discoveryOnlyOperations` discipline: reasons traced, never
+guessed) that grows by ratchet and does not claim every service was examined.
+`observeLambda`'s default-group witness now DERIVES from this register (load-bearing: no
+entry → no read), so the registry is the single source of what a compute emits, shared by
+the S3.1 witness now and the S3.3 adopt grant next.
+
+The load-bearing invariant is `CertifyEmissions` (mirrors CertifyParity/
+CertifyDiscoverability): every `NameOutput` must be a real output the emitting service
+PUBLISHES (`OutputsFor`) — D329, one derivation, so the name a witness reads and a governor
+sets can never drift — and every `GovernedBy` must be a capability the driver actually
+fulfils (`ServiceCapabilities`), never a phantom. A floor that may only rise keeps the
+register from silently emptying (D328). Remove lambda's `logGroupName` output or rename the
+derivation and the gate fails loudly rather than letting writer and witness part ways.
+
+Deliberately NOT here: the cross-capability completeness DIAGNOSTIC ("this compute emits a
+companion no monitoring.logs governs") and the adopt grant that lets a bound monitoring.logs
+set retention on the emitted group. Both need "governed" defined by the binding, so they
+land with Slice 3.3. The severity floor the reviews decided (block only when a hard
+constraint depends on the emission being governed) is already delivered by 3.1's
+`defaultLogGroup.retention`.

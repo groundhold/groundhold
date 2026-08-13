@@ -70,6 +70,40 @@ type OutputProducer interface {
 	OutputsFor(service string) []OutputSpec
 }
 
+// EmittedCompanion is a resource a service's create causes the PROVIDER to
+// auto-materialise as a side effect — groundhold never creates it, but it is a
+// companion groundhold is accountable for surfacing (D1032). The dangerous case:
+// AWS Lambda auto-creates /aws/lambda/<fn> (a CloudWatch Logs group) with NO
+// retention on first invocation, and the function's logs land THERE — not in a
+// separate managed group a monitoring.logs capability builds. An emission a
+// capability GOVERNS (a bound monitoring.logs sets its retention) is closed; an
+// ungoverned one is a completeness gap. This registry is NOT an authorization
+// token to adopt the companion (that stays a plan-time sealed grant, D1032+): it
+// only NAMES what is emitted and which capability CAN govern it.
+type EmittedCompanion struct {
+	// GovernedBy is the capability TYPE that can govern this companion, e.g.
+	// "capability.monitoring.logs" for a log group. Certified against the driver's
+	// own ServiceCapabilities() — never a token no service fulfils.
+	GovernedBy string `json:"governedBy"`
+	// NameOutput is the emitting service's OWN declared output that names the
+	// companion (e.g. lambda's "logGroupName", D381). D329: the emission's name and
+	// the producer's published output are the SAME derivation, so a witness reading
+	// the companion and a bound consumer governing it can never disagree. Certified
+	// against OutputsFor(service) — a NameOutput the producer does not publish is a
+	// drift the gate refuses.
+	NameOutput string `json:"nameOutput"`
+}
+
+// EmissionCertifier is the OPTIONAL driver interface declaring the companion
+// resources each service's create auto-materialises (D1032). Resolved by
+// type-assertion like OutputProducer; a driver that emits nothing need not
+// implement it. Certified by CertifyEmissions: every NameOutput is a real declared
+// output of the emitting service (D329, no writer/witness drift) and every
+// GovernedBy is a capability the driver actually fulfils.
+type EmissionCertifier interface {
+	EmittedCompanions() map[string][]EmittedCompanion
+}
+
 // OperandConsumer is the OPTIONAL driver interface declaring, per service, the
 // exact set of `implementation:` operand KEYS the driver legitimately reads.
 // The candidate `implementation:` block is free-form (D26), but an operand no

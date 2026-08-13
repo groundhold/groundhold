@@ -61,6 +61,7 @@ var readOnlyVerbs = map[string]string{
 	"Observe":                  "read + reverse-map (D44)",
 	"ClassifyChange":           "pure provider knowledge (D46)",
 	"OutputsFor":               "declaration (D275-D284)",
+	"EmittedCompanions":        "declaration (D1032) — names provider-auto-materialised companions, writes nothing",
 	"ConsumedOperands":         "declaration",
 	"OperandTargets":           "declaration",
 	"CheckPermissions":         "read (D75)",
