@@ -59,19 +59,21 @@ A contribution merged here is replayed upstream before the next sync, and the sy
 refuses rather than overwriting commits it did not put there (D714) — so a merged pull
 request is never quietly reverted by the following release.
 
-## Settings to apply when the repository becomes public
+## Repository protections in force
 
-These cannot be set while the repository is private (the API answers 403), so they are
-written here as a list to flip rather than a thing to remember:
+The repository is public (2026-08-13). These are enabled:
 
-- Branch protection on `main`: require a pull request, require review from a CODEOWNER,
-  require the `ci`, `security` and `dco` checks, dismiss stale approvals on push,
-  no force pushes, no deletions.
+- Branch protection on `main`: required status checks (`gate`, `gitleaks`,
+  `signed-off`), enforced on admins, no force pushes, no deletions. PR review is not
+  yet required (solo maintainer — there is no second reviewer to require); add a
+  CODEOWNER review requirement when a second maintainer joins.
+- CodeQL runs on the public repo (first run: zero alerts); secret scanning and push
+  protection are on; private vulnerability reporting is enabled; org-wide 2FA is
+  required.
 - Actions: "Require approval for all outside collaborators" — the D713 runner split
   keeps a fork's code off the self-hosted fleet, and this keeps it from running at all
   until a maintainer looks.
 - Secrets: none available to `pull_request` runs. The canaries that hold cloud
   credentials trigger on `schedule`/`workflow_dispatch` only, and are stripped from the
   export.
-- Pages, CodeQL default setup, and Dependabot: enable at the flip; all three are
-  dormant until then.
+- Pages deploys the docs site; Dependabot is a remaining follow-up.

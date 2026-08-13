@@ -77,16 +77,15 @@ implicit, and states what is enforced BY A GATE rather than by intention (D474).
   SHA-256 check** (the `gh` CLI in the release job).
 - **Scanning**: govulncheck (pinned), gitleaks and golangci-lint run on every push
   and pull request, each as its own job so a finding is legible rather than buried.
-  **CodeQL is wired and DORMANT**: code scanning needs GitHub Advanced Security on a
-  private repository, so the job is conditioned on `repository.visibility == 'public'`
-  and skips green. It starts running at the public flip and has never run. (This entry
-  listed CodeQL among the active scanners for about an hour after D477 was written,
-  which is what happens when a defence is described from the workflow file rather than
-  from the condition on the job — corrected in D491.)
+  **CodeQL** runs on the public repository (its job is conditioned on
+  `repository.visibility == 'public'`); its first run on the public repo reported
+  zero alerts. It runs on push, on tags, and weekly.
 - **Release artifacts** ship `SHA256SUMS`, a CycloneDX SBOM, a `BUILDINFO.txt`
   recording the exact toolchain and build command so a third party can rebuild
   bit-identically, a verified version stamp, and a keyless SLSA build-provenance
-  attestation.
+  attestation. On the public repository the attestation is authoritative: the
+  release fails if it is not retrievable, and the notes only claim it once the
+  workflow has confirmed `gh attestation verify` succeeds (D354).
 
 ## Accepted risks (NOT defended — by design, in v0.x)
 
@@ -105,11 +104,6 @@ implicit, and states what is enforced BY A GATE rather than by intention (D474).
   question the design log tracks, surfaced here rather than left implicit.
 - **No external security audit yet** (see `docs/MATURITY.md`); all adversarial
   review to date is internal.
-- **Build provenance is not yet enforceable.** The attestation step runs on every
-  release, but GitHub does not retrieve attestations for a private repository, so
-  it is best-effort until the public flip and the release notes must not promise
-  a `gh attestation verify` that returns 404 (D354). It becomes authoritative when
-  the repo is public.
 - **A pin is checked against its tag, not against the code.** Every pin carries a
   `# vX.Y.Z` comment (enforced at `make check`) and a scheduled job re-resolves each
   tag and compares it to the hash (D479), so a hash written down wrongly, or an
@@ -122,11 +116,12 @@ implicit, and states what is enforced BY A GATE rather than by intention (D474).
   across them.** Every release rebuilds each artifact a second time and fails if the
   bytes differ (D478), which catches an embedded timestamp or a non-deterministic
   link. It does NOT prove that a different host or Go version produces the same
-  bytes. That half is not merely unmeasured, it is currently unmeasurable HERE: the
-  only non-Linux runner in CI is gated on `github.repository_owner == 'groundhold'`
-  and does not execute before the public flip (D480). `BUILDINFO.txt` records the
-  exact toolchain and command so a third party can check it meanwhile; at the flip
-  the macOS job starts running and the comparison becomes available in CI.
+  bytes. On the public repository the non-Linux runner (gated on
+  `github.repository_owner == 'groundhold'`, D480) now executes, so the
+  cross-environment comparison is becoming available in CI; until it has run against
+  a release, cross-host reproducibility stays verified in one environment only, and
+  `BUILDINFO.txt` records the exact toolchain and command so a third party can check
+  it meanwhile.
 
 ## Reporting
 

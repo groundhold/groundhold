@@ -28,7 +28,7 @@ Grab a binary — no toolchain, no clone — from
 then:
 
 ```sh
-gh release download v0.1.5 --repo groundhold/groundhold \
+gh release download v0.1.7 --repo groundhold/groundhold \
   --pattern 'groundhold_linux_amd64' --pattern 'SHA256SUMS'
 sha256sum -c SHA256SUMS --ignore-missing
 chmod +x groundhold_linux_amd64
@@ -45,10 +45,9 @@ exists this becomes a one-liner that never goes stale:
 Every release carries `SHA256SUMS`, a CycloneDX SBOM and `BUILDINFO.txt` for a
 reproducible rebuild; the checksums cover all three (D680), and the download above
 fetches the sums file so the verification line has something to read — following
-the old snippet literally left `sha256sum: SHA256SUMS: No such file or directory`. A keyless SLSA build-provenance
-attestation is produced only once this repository is public: GitHub does not make
-one retrievable for a private repository on a free plan, so the release notes
-claim it only after the workflow has confirmed it exists (D354).
+the old snippet literally left `sha256sum: SHA256SUMS: No such file or directory`. Every
+release also carries a keyless SLSA build-provenance attestation, verifiable with
+`gh attestation verify <asset> --repo groundhold/groundhold` (D354).
 
 Prefer to build it yourself? Go ≥ 1.25 and nothing else:
 
