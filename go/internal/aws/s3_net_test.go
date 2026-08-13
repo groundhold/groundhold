@@ -11,8 +11,8 @@ import (
 )
 
 // s3Server routes path-style S3 sub-resource calls (the driver uses path-style
-// when S3BaseURL is set). It asserts Content-MD5 is present on body PUTs (S3
-// requires it — verified live) and tracks tag state so a create sequence and an
+// when S3BaseURL is set). It asserts the SHA-256 body checksum is present on body PUTs
+// (x-amz-checksum-sha256, field-verified live) and tracks tag state so a create sequence and an
 // ownership check see consistent tags.
 func s3Server(t *testing.T, createStatus int, createErrCode string) *httptest.Server {
 	t.Helper()
@@ -34,14 +34,14 @@ func s3Server(t *testing.T, createStatus int, createErrCode string) *httptest.Se
 				}
 				w.WriteHeader(200)
 			case r.Method == "PUT" && q == "tagging":
-				if r.Header.Get("Content-Md5") == "" {
-					t.Errorf("PutBucketTagging must carry Content-MD5")
+				if r.Header.Get("X-Amz-Checksum-Sha256") == "" {
+					t.Errorf("PutBucketTagging must carry x-amz-checksum-sha256")
 				}
 				tagged = true
 				w.WriteHeader(200)
 			case r.Method == "PUT": // public-access-block, versioning, policy
-				if r.Body != nil && r.Header.Get("Content-Md5") == "" {
-					t.Errorf("body PUT %q must carry Content-MD5", q)
+				if r.Body != nil && r.Header.Get("X-Amz-Checksum-Sha256") == "" {
+					t.Errorf("body PUT %q must carry x-amz-checksum-sha256", q)
 				}
 				w.WriteHeader(200)
 			case r.Method == "GET" && q == "tagging":
@@ -271,8 +271,8 @@ func TestCreateS3ObjectLockHappyPath(t *testing.T) {
 				}
 				w.WriteHeader(200)
 			case r.Method == "PUT" && q == "object-lock":
-				if r.Header.Get("Content-Md5") == "" {
-					t.Errorf("PutObjectLockConfiguration must carry Content-MD5")
+				if r.Header.Get("X-Amz-Checksum-Sha256") == "" {
+					t.Errorf("PutObjectLockConfiguration must carry x-amz-checksum-sha256")
 				}
 				gotLockPut = true
 				w.WriteHeader(200)
