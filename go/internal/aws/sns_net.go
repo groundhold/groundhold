@@ -13,6 +13,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"groundhold/internal/provider"
@@ -309,6 +310,28 @@ func (d *Driver) observeSNS(capability, providerID string) ([]provider.Observati
 			obs = append(obs, provider.Observation{Path: "network.publicExposure",
 				Value: public, Derivation: "measured"})
 		}
+	}
+	// delivery.confirmedSubscribers (D1030): a topic with none is a dummy an alarm
+	// fires into and no one hears. SNS reports the confirmed count on GetTopicAttributes,
+	// so no extra call. A witness can PROVE ">= N confirmed" but NOT "reaches nobody":
+	// a 0 read is confounded by a pending subscription (and SNS's SubscriptionsPending
+	// counter LAGS a just-created one — field-observed 2026-08-13, it stayed 0 right
+	// after Subscribe), a cross-account subscription, or a delivery path it does not
+	// enumerate. So confirmed>0 is measured; 0 is UNKNOWN (emit nothing -> a hard gte-1
+	// blocks as unknown, never a false violated). Counts CONFIRMED subscriptions, not
+	// that a human reads them (the alert.notify D1027 non-claim).
+	confRaw, hasConf := tattrs["SubscriptionsConfirmed"]
+	confirmed, cerr := strconv.Atoi(confRaw)
+	switch {
+	case !hasConf || cerr != nil:
+		diags = append(diags, "delivery.confirmedSubscribers not observed: SubscriptionsConfirmed missing/unparseable")
+	case confirmed > 0:
+		obs = append(obs, provider.Observation{Path: "delivery.confirmedSubscribers",
+			Value: confirmed, Derivation: "measured"})
+	default:
+		diags = append(diags, "delivery.confirmedSubscribers unknown: 0 confirmed — a witness "+
+			"cannot prove a topic reaches nobody (a pending, cross-account, or uncatalogued "+
+			"subscription is not counted here)")
 	}
 	return obs, diags, nil
 }

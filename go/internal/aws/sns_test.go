@@ -414,3 +414,56 @@ func TestAdoptsExistingSNS(t *testing.T) {
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }
+
+// TestObserveSNSConfirmedSubscribers pins delivery.confirmedSubscribers (D1030):
+// a confirmed count is measured; a genuinely-empty topic reads measured 0 (a
+// gte-1 constraint then reads violated); but 0-confirmed-with-a-pending is
+// UNKNOWN (no observation + a diag) — pending is not "reaches nobody".
+func TestObserveSNSConfirmedSubscribers(t *testing.T) {
+	obsWith := func(confirmed, pending string) ([]provider.Observation, []string) {
+		srv := httptest.NewServer(http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				if queryAction(body) == "GetTopicAttributes" {
+					_, _ = w.Write([]byte(`<GetTopicAttributesResponse><GetTopicAttributesResult><Attributes>` +
+						`<entry><key>KmsMasterKeyId</key><value>alias/aws/sns</value></entry>` +
+						`<entry><key>SubscriptionsConfirmed</key><value>` + confirmed + `</value></entry>` +
+						`<entry><key>SubscriptionsPending</key><value>` + pending + `</value></entry>` +
+						`</Attributes></GetTopicAttributesResult></GetTopicAttributesResponse>`))
+					return
+				}
+				w.WriteHeader(404)
+			}))
+		defer srv.Close()
+		d := snsTestDriver(t, srv)
+		obs, diags, err := d.observeSNS("events", "sns:eu-central-1:000000000000:pv-events-prod-abcd1234")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return obs, diags
+	}
+	confSub := func(obs []provider.Observation, _ []string) (any, bool) {
+		for _, o := range obs {
+			if o.Path == "delivery.confirmedSubscribers" {
+				return o.Value, true
+			}
+		}
+		return nil, false
+	}
+	// A positive confirmed count is measured.
+	if v, ok := confSub(obsWith("3", "0")); !ok || v != 3 {
+		t.Fatalf("3 confirmed -> %v (ok=%v), want measured 3", v, ok)
+	}
+	// 0 confirmed is UNKNOWN (no observation + a diag), NEVER a measured 0 that a
+	// gte-1 reads as a false "reaches nobody" — a witness cannot prove that, and the
+	// provider's pending counter lags a just-created subscription (field-observed).
+	for _, pend := range []string{"0", "1"} {
+		obs, diags := obsWith("0", pend)
+		if _, ok := confSub(obs, nil); ok {
+			t.Fatalf("0 confirmed (pending=%s) must be UNKNOWN (no observation), never measured 0", pend)
+		}
+		if !strings.Contains(strings.Join(diags, " "), "reaches nobody") {
+			t.Fatalf("the 0-confirmed case must diag why it is unknown, got %v", diags)
+		}
+	}
+}

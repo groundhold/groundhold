@@ -33813,3 +33813,40 @@ Slice 1's other half (#3, S3 retention taken-as-declared) needed no work: `obser
 already reads `GetObjectLockConfiguration`/lifecycle and emits `retention.minimum`/
 `retention.maximum` MEASURED (`TestObserveS3ObjectLock` pins it) — the field finding
 predates that read. Confirmed closed.
+
+## D1030 — messaging.topic `delivery.confirmedSubscribers` (resource-completion Slice 2)
+
+The field's sharpest resource-completion finding (Acme 2026-08-08): a monitoring
+contract goes wholly green — probe, alarms, an SNS topic, all `no-op (bound,
+observed==declared)`, plan SEALED — while the topics have ZERO subscribers, so no
+alarm reaches anyone. Four green capabilities, zero value. D1027 already scoped
+`alert.notify` to armed+targeted (not delivered); this adds the witness half so the
+CONTRACT can require the topic actually reach a consumer.
+
+Added `delivery.confirmedSubscribers` (a `number`, `evidence: resource`, witness-only)
+to `capability.messaging.topic`. A contract writes `delivery.confirmedSubscribers gte 1`
+and a topic nobody subscribes to stops reading satisfied. The AWS SNS driver reads it
+from the confirmed count SNS already returns on `GetTopicAttributes` (no extra call,
+route, or permission — the whole class of gates S1's ECR slice tripped is avoided).
+
+The honest shape, corrected BY the field verification (the reason field-verify exists):
+a witness can PROVE ">= N confirmed" but NOT "reaches nobody". The first cut used SNS's
+`SubscriptionsPending` to turn a 0-confirmed-with-a-pending into `unknown` (FM-1) — but
+a real-account run showed `SubscriptionsPending` LAGS: right after `Subscribe` it still
+read 0, so a just-subscribed topic would have read a measured 0 and a `gte 1` a false
+`violated` ("reaches nobody") while a subscription was in flight. So the rule is simpler
+and safer: a POSITIVE count is `measured`; **0 is always `unknown`** (emit nothing — a
+hard `gte 1` blocks as unknown, never a false violated), because a 0 read is confounded
+by a pending, cross-account, or uncatalogued subscription the witness cannot enumerate.
+Field-verified on our own account: empty topic → unknown; after subscribing a pending
+email → still unknown (proving the lag); topic deleted, no residue.
+
+What it deliberately does NOT claim (the alert.notify D1027 non-claim, restated in the
+vocab): that a HUMAN reads what is delivered. This is delivery-READINESS, not receipt —
+no deterministic witness can prove someone is on the other end of an inbox. The
+author-side `implementation.subscriptions` operand (groundhold creating subscriptions)
+is deliberately NOT built here: it is the contentious author-vs-witness half (FM-4), and
+the witness attribute alone closes the honesty gap — a topic with no subscriber now
+blocks a `gte 1` instead of shipping green. Steady-state, as the proposal notes: converge
+does not conclude green at create (no subscriber yet); `refresh`/re-observe carries the
+verdict forward once a subscriber is confirmed. GCP Pub/Sub is a mapped parity follow-up.
