@@ -70,11 +70,35 @@ attributes:
     evidence: projection      # D311: a forecast, never resource state
     verification: static against a pricing catalog; billing after deploy
 
+  delivery.confirmedSubscribers:
+    kind: number
+    evidence: resource
+    description: >
+      How many CONFIRMED subscriptions point at the topic — WITNESSED, never set by
+      the author (subscribers own their subscriptions; this only COUNTS them). A topic
+      with zero is a dummy: an alarm or event fires into it and no one is on the other
+      end, while every other attribute reads satisfied. Constrain it
+      (delivery.confirmedSubscribers gte 1) to require the topic actually reach a
+      consumer, closing the "created but unused" gap. A witness can PROVE ">= N
+      confirmed" but NOT "reaches nobody": a 0 read is confounded by a pending
+      subscription (whose counter the provider updates only eventually), a cross-account
+      subscription, or a delivery path it does not enumerate. So a positive count is
+      MEASURED and 0 is UNKNOWN — a hard gte-1 then blocks as unknown, never a false
+      violated. What it does NOT assert: that a HUMAN reads what is delivered. "Someone is
+      actually told" is not a claim a deterministic witness can make — this is
+      delivery-READINESS, not receipt (the alert.notify D1027 discipline, one capability
+      over). This is a COUNT, not the cross-capability reference the deferred note below
+      still describes.
+    mappings:
+      aws.sns: GetTopicAttributes SubscriptionsConfirmed (>0 measured; 0 -> unknown, cannot prove reaches-nobody)
+      gcp.pubsub-topic: attached subscriptions count (separate slice)
+
 # Deliberately absent in v0.1 (belongs to the consumer/subscription, or noise):
-# subscriptions, push endpoint config, delivery protocol, subscription filters,
-# raw message delivery, fan-out wiring, ordering (subscription-side), retention
-# (subscription-side), topic names. delivery.guarantee: single-valued
-# (at-least-once) here, so not an attribute.
+# subscription CONFIG (push endpoint, protocol, filters, raw message delivery,
+# fan-out wiring, ordering and retention on the subscription side), topic names.
+# delivery.confirmedSubscribers above is a COUNT (a witness of non-vacuity), NOT
+# this config. delivery.guarantee: single-valued (at-least-once) here, so not an
+# attribute.
 #
 # Deferred, needs a cross-capability REFERENCE kind: which queues/consumers a topic
 # fans out to (that is the consumer declaring a source, not the topic sprouting
