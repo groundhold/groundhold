@@ -1,6 +1,6 @@
 # MCP server
 
-Agents (Claude Code, anything MCP) get the lifecycle as gated tools.
+Agents (Claude Code, anything MCP) get the core lifecycle verbs as gated tools.
 
 ```json
 { "mcpServers": { "groundhold": { "command": "bin/groundhold-go", "args": ["mcp"] } } }

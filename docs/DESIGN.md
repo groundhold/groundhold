@@ -33565,3 +33565,145 @@ an end-to-end test builds a real ledger, writes a genuine anchor (exit 0), swaps
 asserts a non-zero exit; a meter mutant restoring the exit-0 is caught. attest was meant as a fact
 reporter (D646), but a reporter that gates HALF its facts and stays silent on the other half is
 the inconsistency: a consumer cannot tell which half.
+
+## D1021 — a shared fixture makes the console's run-status mirror a gate, not a claim
+
+`internal/runstatus.DeriveRunStatus` and the console's `deriveRun` (a separate,
+private repo that cannot import this internal package) fold the same ledger into
+the same six run states. The console's suite MIRRORED this package's golden cases
+by hand, and asserted parity in a comment — which is exactly how D656/D641/D676
+happened: a fixture that claimed to match the runtime but did not cover its
+hardenings, so each divergence shipped green on the console until it was hunted.
+
+`testdata/runstatus_parity.json` is now ONE declarative case set — event
+sequences, clocks, capabilities, and the expected state — executed by BOTH repos.
+Here `TestRunStatusParityFixtureIsTheContract` proves every expected state against
+the real `DeriveRunStatus` (this side is the authority) and pins the file's
+sha256; the console commits a byte-identical copy and runs `deriveRun` over it, so
+a divergence in EITHER derivation fails that repo's build. The fifteen cases cover
+all six states and the D656 (last-terminal-wins), D641 (unknown-receipt→
+needs-reconcile), D241 (retryable-concludes) and D676 (disjoint-cap release)
+hardenings; a console mutant that reintroduces the D656 good-news drift is caught.
+
+The sha256, pinned identically in both repos, is the cross-repo sync anchor. Two
+separate repos with separate CI cannot gate one shared artifact hermetically, so
+the remaining seam is a human copying the regenerated fixture to both — the pinned
+hash makes a one-sided update visible to a reviewer, and the executable cases make
+a logic divergence fail a build. Test/fixture/doc only; no runtime logic changed
+(the freeze admits it).
+
+## D1022 — the same parity gate for the verdict rollup (verdictStatus)
+
+The second fold the console re-derives: `verdictStatus` maps a verdict slice to
+the pill state (proven/blocked/violated). The runtime derives the same banner in
+two steps — the verify/audit CLI builds a `render.Rollup` from ONLY the hard
+verdicts (`cmd/groundhold/main.go`, `if v.Severity != "hard" { continue }`), then
+`render.Pick` applies the precedence (violated > unknown/unverifiable > proven).
+The console mirrored that precedence AND the hard-only rule by hand.
+
+`testdata/verdictstatus_parity.json` is one declarative case set — verdict slices
+→ expected pill state — run by both repos. Here
+`TestVerdictStatusParityIsTheContract` proves each case through the REAL `Pick`
+over a rollup built by the same hard-only rule (that loop is inline in the CLI, so
+it is mirrored in the test with a pointer), and pins the sha256; the console runs
+`verdictStatus` over the byte-identical copy. The twelve cases pin all three
+states, the violated-over-blocked precedence, and — the property most likely to
+drift — the hard-only rule: a soft violation must NOT flip the pill off green. A
+console mutant that drops the severity check is caught.
+
+Two things stay OUT of the shared contract, by design, not as divergences: the
+empty slice (the console's console-only `declared` lifecycle state) and an
+unrecognised hard value (the console fail-closes it to `blocked`, D-a0b608f, which
+is safer and non-reachable — the runtime emits a closed set). Test/fixture/doc
+only; no runtime logic changed.
+
+## D1023 — parity gate for the receipt-pending fold, pinned to the live status set
+
+The third re-derived fold: the console's `/api/inflight` decides which receipt
+statuses leave an operation UNSETTLED (a resource may exist and be billed → in
+flight). It mirrored `pending`/`unknown` by hand — a hardcoded subset of
+`ledger.ReceiptStatuses()` with no default arm, so a NEW leaves-pending status
+added here would be silently not-counted and the console would under-report
+in-flight work (a good-news drift; the D641/D328 class, and D641 was a real
+divergence in exactly this family).
+
+`internal/ledger/testdata/receiptpending_parity.json` maps every status to its
+`leavesPending` bool. `TestReceiptPendingParityIsTheContract` proves each against
+the real `ReceiptLeavesIntentPending` AND — the part that makes this stronger than
+a hand-authored case list — asserts the fixture covers EXACTLY `ReceiptStatuses()`:
+add a status to the closed set and this test fails until the fixture learns it,
+which then fails the console's build until its fold learns it too. The console
+extracted a named `receiptLeavesIntentPending` (it is not frozen) mirroring the
+runtime function and runs it over the byte-identical fixture; a mutant dropping
+`unknown` is caught as under-counting. This side is test/fixture/doc only; no
+runtime logic changed.
+
+## D1024 — surveyDigest parity: an unfreeze candidate, not built under the freeze
+
+The fourth console fold that re-derives a closed runtime set: `surveyDigest`
+counts a contract's survey coverage by the status words `uncovered`/`gap` and
+orphans by `orphaned`. Those are a hardcoded subset — the same shape D1023 closed
+for receipts — so a coverage status added to `internal/survey` (today the inline
+literals `covered`/`uncovered`/`gap` at survey.go and `orphaned`) that the digest
+does not count would silently under-report coverage problems on the portfolio
+glance (a good-news drift).
+
+It is NOT gated, deliberately. The strong form (D1023's) proves the fixture
+against a callable closed-set authority and pins the fixture to cover it exactly —
+here that authority does not exist: the survey statuses are inline string literals,
+not a `survey.CoverageStatuses()` the way the ledger exposes `ReceiptStatuses()`.
+Exposing one is new runtime production code, which the freeze does not admit (it is
+not a dangerous-direction fix, and it is not test/gate/doc). A fixture that nothing
+proves against the runtime would be precisely the claims-parity-without-a-gate
+anti-pattern the three gates exist to remove, so a fake was not built.
+
+UNFREEZE CANDIDATE: expose `survey.CoverageStatuses()` (and the orphan-status set)
+as closed-set functions, then gate `surveyDigest` exactly as D1023 gates the
+in-flight fold — the runtime oracle pins the fixture to the live set, the console
+mirrors it. Until then this drift is recorded and visible, not silently accepted.
+
+## D1025 — the closed receipt-status set was enumerated twice; the gate D1023 rests on now says so
+
+Auditing for the published-registries-drift class (D329/D330/D338) surfaced one in
+the very file D1023's authority lives in. `internal/ledger` enumerates the closed
+receipt-status set TWICE, independently: `ReceiptStatuses()` (the slice the parity
+fixtures and `TestBothFoldsAgreeOnWhichReceiptsStayPending` iterate) and the
+private `receiptStatuses` map (the PRODUCTION validator — `recordReceipt` rejects a
+status with `!receiptStatuses[status]`). Nothing tied them.
+
+This is not cosmetic: it hollowed D1023. That gate pins the parity fixture to the
+SLICE, so a status the validator accepts but the slice omits would flow through
+production while the fixture — and the console fold it drives — stayed blind to it,
+exactly the drift D1023 was built to catch. `TestReceiptStatusSliceAndValidatorAgree`
+now requires identical members both ways (a validator-only status is caught with the
+message that names the hole; a teeth check adds one and it fails). Test only; the two
+enumerations stay (collapsing them to one source is a logic change the freeze does
+not admit) — the gate makes their agreement a checked invariant instead of a hope.
+
+## D1026 — the core vocabulary sets are now gated Go↔Python, not matched by hand
+
+Sweeping the closed sets outward from D1025 reached the ones that live in BOTH
+implementations. `capabilityTypesV01`, `validMethods` and `validStatuses` here, and
+`CAPABILITY_TYPES_V01`/`VALID_METHODS`/`VALID_STATUSES` in
+`ref/groundholdlib/contract.py`, are load-time validators that REFUSE a document
+whose value is not a member. D25 makes the two the same contract, so a member in one
+but not the other is a document one implementation loads and the other rejects.
+
+Event types already carried exactly this gate (ledger's classification_gate reads
+`scenario.py`), and D338 is the record of what the untied version does: the Go and
+Python event-type sets drifted to 21 vs 16 members and the reference REFUSED to load
+a ledger `converge` wrote — the D25 guarantee inverted in the evidence substrate.
+These sets matched only by hand.
+
+`TestVocabularySetsMatchThePythonReference` (contract package) reads the reference
+and requires identical membership both ways for FIVE sets: capability types, verify
+methods and provenance statuses (from `contract.py`), and the scalar operators and
+presence operators (from `scalars.py`). The last two feed `validOps` in BOTH
+implementations (`range scalars.Operators | presenceOps`; `set(OPERATORS) |
+PRESENCE_OPERATORS`, D327): that derivation keeps `validOps` consistent WITHIN each
+implementation but says nothing ACROSS them, so an operator in one but not the other
+makes `validOps` disagree and a valid contract panic-or-refused in the other — the
+derivation was not the cross-implementation safety it looked like. A teeth check
+removing a Go operator fails with the D25-divergence message. All five match today —
+this is drift insurance on the vocabulary the dual-implementation guarantee rests on,
+made a checked invariant. Test only; no runtime logic changed.

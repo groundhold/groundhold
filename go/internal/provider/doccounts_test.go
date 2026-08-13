@@ -203,6 +203,8 @@ func TestMaturityCountsMatchReality(t *testing.T) {
 		total += len(regexp.MustCompile(`(?m)^\s*- name:`).FindAllString(string(raw), -1))
 	}
 	claim("the conformance suite size", `one (\d+)-case conformance suite`, total)
+	_, dual := suiteCounts(t)
+	claim("the dual subset", `(\d+) of the \d+ run through both`, dual)
 }
 
 // D353: the docs site states the suite's size and its DUAL subset. Both were
@@ -230,6 +232,7 @@ func TestWebsiteConformanceCountsMatchTheSuite(t *testing.T) {
 	check("website/pages/conformance.md", "the suite size", `(\d+) cases, plus seeded`, total)
 	check("website/pages/conformance.md", "the dual subset", `\*\*(\d+) run against BOTH`, dual)
 	check("website/pages/quickstart.md", "the suite size", `conformance suite \((\d+) cases\)`, total)
+	check("website/pages/quickstart.md", "the dual subset", `(\d+) run through both implementations`, dual)
 }
 
 // suiteCounts reads the suite's own size and its dual subset from the case files.

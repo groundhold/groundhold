@@ -3,8 +3,9 @@
 Groundhold asks you to let software — proposed by an AI — touch
 production. That only works if the system never earns your trust with
 adjectives. So every promise below is enforced by a mechanism, and
-every mechanism is pinned by a conformance case. Not one of them is a
-policy or a habit; they are the shape of the system.
+every mechanism a test can exercise is pinned by a conformance case — the
+one that cannot (zero telemetry: an *absence* of network calls) is structural,
+not a case. Not one of them is a policy or a habit; they are the shape of the system.
 
 Where a promise belongs to the verification core, its cases run against
 BOTH implementations and they must agree exactly. Where it belongs to
@@ -83,8 +84,10 @@ anchor you hold (`--check`). A verifier that proves less says so.
 
 ## Don't believe this page — run it
 
-Every rule above is pinned by a named conformance case, run through the
-implementations' own binaries rather than their internals. The `runs on`
+Every rule above that a test can exercise is pinned by a named conformance case,
+run through the implementations' own binaries rather than their internals; the
+exception is zero telemetry, guaranteed by the absence of any network call in the
+core rather than by a case. The `runs on`
 column says whether a case is checked by both implementations or by the
 Go runtime alone — a distinction this page would rather state than blur.
 A sample, verbatim from `conformance/cases/`:

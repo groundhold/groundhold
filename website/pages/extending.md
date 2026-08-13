@@ -30,6 +30,9 @@ types, SKUs do not). Guide: [`spec/vocab/AUTHORING.md`](https://github.com/groun
 
 ### 2. A provider driver — *how it is executed and observed*
 
+Where a vocabulary is a declarative file, this is the **expert seam** — a driver
+is engineering hardened against a real cloud, which is why its certification is
+adversarial and why the field keeps finding driver defects (see `docs/MATURITY.md`).
 A driver adapts the executor's provider interface to one cloud service
 (`Name · Validate · Create · Observe · ClassifyChange · Update · Delete`, plus
 optional `Discoverer`/`Reconciler`/`Prober`). It is a **pure mapping core +

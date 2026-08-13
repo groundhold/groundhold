@@ -3,8 +3,8 @@
 ## Build
 
 ```sh
-git clone git@github.com:groundhold/groundhold.git && cd groundhold
-make check        # vet + tests + the full conformance suite (550 cases), both implementations
+git clone https://github.com/groundhold/groundhold.git && cd groundhold
+make check        # vet + tests + the full conformance suite (550 cases); 261 run through both implementations, the rest Go-only
 cd go && go build -o ../bin/groundhold-go ./cmd/groundhold && cd ..   # the CLI binary
 ```
 
