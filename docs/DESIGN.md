@@ -34094,3 +34094,30 @@ claim are corrected to state provenance is re-derived, not merely sealed. The ot
 consents (replace_stateful, intrusive_probes, protection_lift, field_reclaim) were audited in the
 same pass and confirmed re-derived and fail-closed; the other five Slice-3 vectors (false-measured,
 green-over-vacant, vacuous-gate, D329 drift, FM-3) were confirmed defended.
+
+## D1038 — apply refuses a bare delete of a live capability (the forged-delete hole)
+
+A second overnight audit agent, generalizing D1037 ("what else does apply trust from the
+forgeable plan?"), found the same shape one level up — at the OPERATION itself. Apply anchors
+only the contract and candidate read-set hashes, never the plan's action set, so a
+hand-authored plan can carry any operation. For a `delete`, the only content gates were
+`ForbidsDeleteStateful` (which is opt-IN — true only if the contract lists
+`autonomy.forbidden: [{delete_stateful: true}]`, NOT default-on; the D47 "deletionProtection
+default-on" is a provider-resource attribute, a different thing) and `ProtectionOf`. So a
+forged `delete` of a stateful database whose contract did not opt into the forbid, with
+`targetProviderId`/`targetGeneration` set to the live binding (both readable from the ledger),
+passed every gate → `prov.Delete` → the live database destroyed, reported succeeded.
+
+The compiler emits a delete of a capability in exactly three shapes: RETIRE (the contract
+declares it `state: retired`), the destroy half of a REPLACE (paired with a create for the same
+cap), or a deposed-orphan cleanup (ledger-validated). A bare delete of a capability the pinned
+contract declares LIVE is a plan the compiler never seals. The fix refuses it: in the delete
+case, if `c.Capabilities[capID]` is present with `state != "retired"`, and the action is not
+`deposed`, and no create in the plan replaces it (`planCreates`), refuse (`NotExecutable`). The
+`state` is read from the hash-pinned contract so it cannot be forged without changing
+`contractHash`; forging a paired create to dodge the guard makes it a REPLACE, gated by the
+stateful-replace consent that already re-checks at apply. Retire, replace, and deposed cleanup
+are unaffected (a conformance suite that exercises all three stays green). The other trusted-field
+findings from the same audit: the fold slot→producer binding is trusted beyond `log_group`
+(recorded, being addressed next); `targetProviderId`, `changes`, `replaces`, and
+`requiredPermissions` were confirmed re-derived or inert.
