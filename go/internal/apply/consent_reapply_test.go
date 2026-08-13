@@ -185,6 +185,41 @@ func TestApplyRefusesBareDeleteOfLiveCapability(t *testing.T) {
 	}
 }
 
+// D1039: apply re-derives every fold's slot->producer binding from the pinned candidate,
+// not the forgeable plan fold. A hand-authored fold that overrides a literal operand or
+// names a different producer (injecting a wrong key/endpoint) is refused; a legitimate
+// $ref-backed fold (top-level or nested in a map operand) still matches.
+func TestFoldMatchesCandidateRef(t *testing.T) {
+	ref := func(cap, out string) map[string]any {
+		return map[string]any{"$ref": map[string]any{"capability": cap, "output": out}}
+	}
+	cand := &contract.Candidate{Extras: map[string]map[string]any{
+		"app": {"implementation": map[string]any{
+			"kms_key_arn": ref("producer", "keyArn"),
+			"env":         map[string]any{"HOST": ref("db", "endpoint")},
+			"literal":     "hardcoded-value",
+		}},
+	}}
+	if !foldMatchesCandidateRef(cand, "app", "kms_key_arn", "producer", "keyArn") {
+		t.Fatal("a legit top-level $ref must match its fold")
+	}
+	if !foldMatchesCandidateRef(cand, "app", "env.HOST", "db", "endpoint") {
+		t.Fatal("a legit nested $ref must match its fold")
+	}
+	if foldMatchesCandidateRef(cand, "app", "kms_key_arn", "otherkey", "keyArn") {
+		t.Fatal("a fold naming a DIFFERENT producer must fail — the wrong-key injection")
+	}
+	if foldMatchesCandidateRef(cand, "app", "literal", "producer", "keyArn") {
+		t.Fatal("a fold overriding a LITERAL operand must fail")
+	}
+	if foldMatchesCandidateRef(cand, "app", "env.MISSING", "db", "endpoint") {
+		t.Fatal("a fold on an absent nested slot must fail")
+	}
+	if foldMatchesCandidateRef(cand, "app", "absent", "producer", "keyArn") {
+		t.Fatal("a fold on an absent slot must fail")
+	}
+}
+
 // emAdoptProv certifies its lambda service emits a log group a monitoring.logs governs
 // — the provenance emissionAdoptProvenanceOK re-derives.
 type emAdoptProv struct{ provider.Fake }

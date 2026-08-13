@@ -34121,3 +34121,31 @@ are unaffected (a conformance suite that exercises all three stays green). The o
 findings from the same audit: the fold slot→producer binding is trusted beyond `log_group`
 (recorded, being addressed next); `targetProviderId`, `changes`, `replaces`, and
 `requiredPermissions` were confirmed re-derived or inert.
+
+## D1039 — apply re-derives every fold's slot→producer binding, not just log_group
+
+The third finding from the same overnight audit, and the general form of D1037. A compile-folded
+operand (D283) is a `{slot, capability, output, value}` sealed onto an action. `foldStaleReason`
+re-judged only the VALUE (against the replayed ledger output) and the freshness; it read the
+`slot`, `capability`, and `output` straight from the plan fold and never asked the pinned
+candidate whether that slot is wired to that producer. `foldedImplementation` then wrote
+`out[slot] = value` for whatever slot the fold named. So a hand-authored plan (valid
+contract+candidate hashes) could append a fold `{slot: "kms_key_arn", capability: "otherkey",
+output: "keyArn", value: <a real output of otherkey that decrypts to the attacker>}`: the value
+exists in the ledger and is fresh → passes → the resource is created encrypted with the wrong,
+attacker-readable key, or (with a `DATABASE_HOST` fold) wired to a different real database.
+`candidateHash` cannot catch it because the fold, not the candidate, carries the override. D1037
+had hardened exactly one slot (`log_group`); this is its ungeneralized remainder across every
+folded operand.
+
+Fix: `foldStaleReason` now re-derives the slot→producer binding from the HASH-PINNED candidate
+(`foldMatchesCandidateRef`). The compiler folds an operand ONLY from a candidate `$ref`, so a
+legitimate fold's slot in the candidate is a `$ref` to exactly this `(capability, output)` —
+top-level or nested in a map operand's value (a dotted slot, the same shape
+`foldedImplementation` folds into). A fold that overrides a literal operand, names a different
+producer/output, or targets an absent slot has no matching candidate `$ref` and is refused before
+the lease. Legitimate folds (D283/D961/D962, the emission-adopt `log_group` included) are
+unchanged — conformance's fold cases stay green. With D1037/D1038/D1039 the executor now
+re-derives from the pinned contract/candidate every plan field that authorizes or targets a
+mutation — consents, the delete operation, and folded operands alike — closing the trusted-plan-
+field class the audit opened.
