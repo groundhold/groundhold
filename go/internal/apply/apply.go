@@ -433,6 +433,18 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 			r.Capability = capID // D230
 			return r
 		}
+		// D1034: the emission-adopt consent (D1034), same re-derivation. A stale or
+		// hand-authored plan can assert emissionAdopt=true for a capability the contract
+		// never scoped — taking over a log group the provider created. The provenance
+		// (a $ref to a certified emission) was checked when the grant was minted and is
+		// sealed under the plan hash; this is the consent half's defence-in-depth.
+		if adopt, _ := a["emissionAdopt"].(bool); adopt && !policy.AllowsEmissionAdopt(c, capID) {
+			r := refused(perr.ConsentRequired, 2, fmt.Sprintf(
+				"action %v adopts a provider-created log group on %s without "+
+					"autonomy.allow_emission_adopt consent", a["id"], capID))
+			r.Capability = capID // D230
+			return r
+		}
 		switch op, _ := a["operation"].(string); op {
 		case "create":
 			// D76: the service comes from the SEALED plan target, cross-

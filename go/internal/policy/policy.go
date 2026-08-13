@@ -88,6 +88,24 @@ func AllowsFieldReclaim(c *contract.Contract, capID string) bool {
 	return false
 }
 
+// AllowsEmissionAdopt reports whether the contract scopes allow_emission_adopt
+// consent to this capability (D1034) — the D48/D699 shape again: consent names the
+// capability it covers, never a blanket. It permits ONE thing: a monitoring.logs
+// bound by $ref to a compute's CERTIFIED emitted log group (D1032) may set retention
+// on that group even though the provider, not groundhold, created it — adopting a
+// resource we did not make, so it is gated like every other ownership-affecting act.
+// The $ref-to-a-certified-emission provenance is the SAFETY (which group); this
+// consent is the operator's explicit authorization to take it over.
+func AllowsEmissionAdopt(c *contract.Contract, capID string) bool {
+	allowed, _ := c.Autonomy["allow_emission_adopt"].([]any)
+	for _, it := range allowed {
+		if s, _ := it.(string); s == capID {
+			return true
+		}
+	}
+	return false
+}
+
 // ForbidsDeleteStateful reports whether the contract's autonomy block
 // forbids destroying stateful capabilities (D47).
 func ForbidsDeleteStateful(c *contract.Contract) bool {
