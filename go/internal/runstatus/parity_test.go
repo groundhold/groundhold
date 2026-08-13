@@ -11,7 +11,7 @@ import (
 
 // runstatusParitySHA256 pins the exact bytes of the shared run-status parity
 // fixture. The SAME file and the SAME constant live in the console
-// (proviso-console/internal/server/parity_test.go). The console cannot import
+// (the console repo, internal/server/parity_test.go). The console cannot import
 // this package (it is internal, and a separate repo), so "the console mirrors
 // groundhold's run-status derivation" was a hand-copied CLAIM with nothing
 // enforcing it — the exact shape that produced D656/D641/D676 (a golden fixture

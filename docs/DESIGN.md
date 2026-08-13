@@ -6638,7 +6638,7 @@ code appears automatically), so the machine glossary cannot drift from what
 
 This closes the console's grounding gap (item 35, one glossary, no drift): a
 blocked/violated/refused figure carrying a `code` can now show HOW to fix it,
-projected verbatim from proviso — the same discipline as the vocabulary glossary
+projected verbatim from groundhold — the same discipline as the vocabulary glossary
 (spec/vocab → /api/vocab). The invocation-specific `next` (exact command with the
 operator's paths) stays a CLI-side affordance — a projection cannot know the
 operator's invocation — so the console projects the STATIC per-code remediation,
@@ -33967,3 +33967,66 @@ group and setting retention — and FM-3, making that retention write its own DA
 killed apply cannot leave the real group at `None` while converge reads green. Until 3.3c the
 grant is inert: a plan carries it, but the driver still refuses, so behaviour is unchanged and
 safe. The derivation ships and can be reviewed before it authorises a single write.
+## D1035 — the deny gate restated the export's file list, and the copy had drifted
+
+The cheap in-`make check` half of the publication gate (D580) reads the deny LIST from
+the export script rather than restating it, "so a client added there is guarded here
+without anyone remembering to". It then restated the other half by hand: the files to
+scan. That list named eleven paths; the export's `INCLUDE` array names twenty-three.
+
+So `docs/COVERAGE.md`, `docs/REVIEWING.md`, `website/`, `.claude/skills` and `.github`
+were SHIPPED and never scanned. COVERAGE.md is the worst of them to miss — it cites
+every field run, which is where a client name enters the tree, and the export's own sed
+loop scrubs it for exactly that reason (the a real GCP project entry records a leak that
+reached it). A gate that skips the riskiest file it exists to cover is the vacuity
+shape (D328) wearing a different costume: it was green because it was not looking.
+
+`exportedTextFiles` now PARSES `INCLUDE` out of the script — the single authority on
+what crosses — with a parser vacuity guard of its own, because an empty path list makes
+`git ls-files` enumerate the whole repository, which would have looked greener still.
+Binary content is skipped by what it is (a NUL byte in the first 8 KiB) instead of by an
+extension allowlist an author must remember to extend, so `Makefile`, `LICENSE` and the
+extensionless files joined the scan. Teeth-checked: a client name planted in COVERAGE.md
+in a casing the sanitizer does not rewrite now fails the gate, naming the file and line;
+before this change the same line was invisible.
+
+**What crossed while nobody was looking.** The audit that found this was a check of the
+public tree against the whole deny list — clean, in the tree and in all 69 commits of
+history (the only matches were the maintainer's intended public identity in `Author:`
+and `Signed-off-by:` lines). What it also found is a name NOT on that list: the tool's
+PRE-RENAME name, which is still the name of the private source repository and of the
+private console repository. It stood in six exported places — four parity-test comments
+citing the console's internal paths (D1021–D1024), a dead entry in the Python dependency
+allowlist left over from the rename, and one sentence in this record.
+
+The comments now cite the path without the repository that holds it. The dead allowlist
+entry is gone (nothing under `ref/` imports it). This entry does not spell the token,
+for D580's reason — a gate that carries the name it forbids is the leak. It is denied at
+the boundary with a trailing character class so it cannot match `provision`/
+`provisioning`, which this codebase says 697 times; a denylist that cries wolf stops
+being read, and the token is deliberately NOT on the client line, whose parser accepts
+`^[a-z-]+$` and would drop a regex silently rather than enforce it. The record itself is
+never rewritten, only projected: the sentence keeps its wording and the private name
+becomes the public one on the way out, the same stance D384 takes for the private CI
+estate.
+
+The renamed comments were preferred over renaming to a *public-looking* repository name
+that does not exist. Trading a small disclosure for a false statement in the public
+record is not a trade this project makes.
+
+**The seventh occurrence was in a PATH, and it is in the published repository right
+now.** The content sweep that found six could not see it: `go/.groundhold/` — the tool's
+pre-rename state directory — holds two orphaned fixtures committed by an add-everything
+(`0af4d909`), referenced by nothing in the tree, shipped into the public mirror where
+the private name reads off the directory listing rather than any file's contents. The
+new token found it on the first real export run, through `deny-audit.sh`'s PATH arm
+(D651 — the arm that exists because contents are only half of a leak). The two files
+are deleted; the removal reaches the mirror the way everything else does, on the next
+sync.
+
+Ignoring the directory was tried and REJECTED, by the gate, against its own author: a
+`.gitignore` line naming it put the token straight back into an exported file, and the
+export refused to publish. That is the correct outcome and it is worth recording rather
+than working around — there is no version of "ignore this name" that does not write the
+name down. The deletion plus the boundary token is the whole fix; if the directory ever
+returns, publication fails loudly instead of shipping it a second time.

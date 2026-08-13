@@ -11,7 +11,7 @@ import (
 
 // receiptPendingParitySHA256 pins the shared receipt-pending parity fixture. The
 // SAME file and constant live in the console
-// (proviso-console/internal/server/receiptpending_parity_test.go). The console's
+// (the console repo, internal/server/receiptpending_parity_test.go). The console's
 // in-flight fold decides which receipt statuses leave an operation UNSETTLED
 // (a resource may exist and be billed) and mirrored `pending`/`unknown` by hand
 // — a hardcoded subset of this package's closed status set, with no default arm.
