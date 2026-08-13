@@ -33850,3 +33850,35 @@ the witness attribute alone closes the honesty gap — a topic with no subscribe
 blocks a `gte 1` instead of shipping green. Steady-state, as the proposal notes: converge
 does not conclude green at create (no subscriber yet); `refresh`/re-observe carries the
 verdict forward once a subscriber is confirmed. GCP Pub/Sub is a mapped parity follow-up.
+
+## D1031 — function.serverless `defaultLogGroup.retention` (resource-completion Slice 3.1)
+
+The field's GDPR finding (Acme): a contract declares `capability.monitoring.logs
+{retention.days: 365d}`, groundhold builds a log group with 365d retention, `converge`
+reads green — but the group is EMPTY. The app is a Lambda; its real logs land in
+`/aws/lambda/<fn>`, a group AWS auto-creates on first invocation with NO retention (keeps
+every line forever). The 365d covers an empty vessel; the personal data is covered by
+nothing. Two adversarial design reviews (Codex + an independent pass, recorded in
+`docs/proposals/resource-completion.md` §9) decomposed Slice 3 into rising-risk sub-slices;
+this is 3.1, the warm start with ZERO new authorization.
+
+Added `defaultLogGroup.retention` (a `duration`, `evidence: resource`, witness-only) to
+`capability.function.serverless`. `observeLambda` reads the function's default log group
+(`lambdaLogGroupName(name)` — the SAME derivation the producer publishes as
+`outputs.logGroupName`, D381, so the compute witness and a bound monitoring.logs read one
+reality, D329) via the existing `DescribeLogGroups`. A contract can now write
+`defaultLogGroup.retention lte 365d` (GDPR age-out) or `gte 90d` and bind the group that
+ACTUALLY holds the data. WITNESS ONLY: this reads, never sets — governing the auto-group
+is a later sub-slice's job under a plan-time adopt grant (§9), never a driver-side name
+match (the fold-at-plan leak the reviews surfaced).
+
+The honest shape mirrors `observeCWLogs` exactly (D329, no drift): a group with no
+`retentionInDays` keeps logs forever — an unbounded posture a witness CANNOT fake as a
+finite duration — so it is NOT emitted (a hard constraint blocks as `unknown`, never a
+false `satisfied` over never-expire, FM-2/FM-6). A not-yet-created group (never invoked)
+is likewise `unknown`. Named for what it reads — the default group's retention — never
+`logsCovered`/`gdprCompliant` (FM-8): proving "these are ALL the app's logs" needs a
+negative a unary witness cannot supply. The read reuses the driver's own
+`describeCWLogGroup`; `logs:DescribeLogGroups` was already declared and already recorded,
+so the permission and route gates are satisfied without a new call class. GCP Cloud
+Functions retention is a mapped parity follow-up.

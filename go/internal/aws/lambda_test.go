@@ -132,6 +132,11 @@ func lambdaDriver(t *testing.T, srv *httptest.Server) *Driver {
 	d.creds = Credentials{AccessKeyID: "AKID", SecretAccessKey: "secret"}
 	d.Account = "000000000000"
 	d.LambdaBaseURL = srv.URL
+	// D1031: observeLambda now reads the default log group (/aws/lambda/<fn>) via
+	// DescribeLogGroups. Point logs at the same fake so no observe test reaches the
+	// real endpoint; the lambda fakes 404 that route (→ a diagnostic, no observation),
+	// which the existing tests ignore. A test that cares serves its own logs response.
+	d.LogsBaseURL = srv.URL
 	d.Now = time.Now
 	d.PollInterval = time.Millisecond
 	d.PollTimeout = 2 * time.Second
