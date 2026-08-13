@@ -2,8 +2,9 @@
 # builds the groundhold binary for linux/darwin × amd64/arm64, and publishes a
 # GitHub Release with the binaries + SHA256SUMS to pull from.
 #
-# Pre-launch (launch-frozen): releases are marked --prerelease. The version is
-# stamped into the binary via -ldflags; `groundhold version` reports the tag.
+# Experimental v0.x: releases are marked --prerelease (an RFC you can run, not a
+# GA product). The version is stamped into the binary via -ldflags; `groundhold
+# version` reports the tag.
 name: release
 
 on:
@@ -290,10 +291,11 @@ jobs:
           output-file: dist/sbom.cdx.json
 
       # S3: keyless SLSA build-provenance attestation for every artifact.
-      # Attestations require a PUBLIC repo (or a paid plan); on the private
-      # pre-launch repo this step is best-effort and does not block the
-      # release. It becomes authoritative at the public flip — flip
-      # continue-on-error to false then so a missing attestation fails the build.
+      # Attestations require a PUBLIC repo (or a paid plan). At the public flip
+      # (2026-08-13) this became authoritative: continue-on-error is now false, so
+      # a missing/failed attestation fails the release rather than shipping an
+      # artefact nobody can verify. A release cut while the repo is private will
+      # therefore fail here — which is intended; releases are public-only now.
       # D680: the checksums are taken LAST, after every published artefact exists.
       # They used to be computed before BUILDINFO.txt and the SBOM were written, and
       # the glob was `groundhold_*` — so two of the four asset kinds could not be
@@ -324,7 +326,7 @@ jobs:
 
       - name: Attest build provenance
         id: attest
-        continue-on-error: true
+        continue-on-error: false
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: 'dist/groundhold_*'
@@ -381,7 +383,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            printf 'Pre-launch internal build (launch-frozen). Standalone `groundhold` binaries for linux/darwin × amd64/arm64, SHA256SUMS, a CycloneDX SBOM, and BUILDINFO.txt.\n\n'
+            printf 'Experimental `v0.x` build — an RFC you can run, not a product with an SLA (see `docs/MATURITY.md` for what is proven vs merely built). Standalone `groundhold` binaries for linux/darwin × amd64/arm64, SHA256SUMS, a CycloneDX SBOM, and BUILDINFO.txt.\n\n'
             printf 'Verify what you downloaded:\n\n```sh\nsha256sum -c SHA256SUMS --ignore-missing\n```\n\n'
             printf 'Builds are reproducible: rebuild from this tag with BUILDINFO.txt and compare against SHA256SUMS. Also: `groundhold version`.\n\n'
             if [ "${PROVENANCE}" = "true" ]; then
