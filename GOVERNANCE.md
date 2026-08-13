@@ -24,8 +24,8 @@ foundation.
 
 ## Name and conformance claim
 
-"Groundhold" is a working name (pre-release; formal trademark clearance is
-not yet complete). "Groundhold Conformant" is intended to mean one thing:
+"Groundhold" is a working name (formal trademark clearance is not yet
+complete). "Groundhold Conformant" is intended to mean one thing:
 an implementation that passes the unmodified conformance suite. The code is
 free; the claim of conformance is earned. A formal trademark and a written
 usage policy will follow the name decision — until then, treat the name as

@@ -2,8 +2,8 @@
 
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project is
-**pre-release (`v0.x`, experimental)** — the tags below are internal builds, not
-a supported release line, and the launch itself is frozen by decision.
+**experimental (`v0.x`)** — the tags below are public prereleases, not a
+supported or LTS release line.
 See [`docs/MATURITY.md`](docs/MATURITY.md) for what is proven vs merely built.
 
 The authoritative, rationale-carrying decision log is

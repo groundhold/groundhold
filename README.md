@@ -1,4 +1,4 @@
-# Groundhold (working name)
+# Groundhold
 
 > AI should not write Terraform. It should emit verifiable contracts —
 > and a deterministic runtime should validate, gate, execute and prove them.
@@ -9,7 +9,7 @@
 [![Lint](https://github.com/groundhold/groundhold/actions/workflows/lint.yml/badge.svg)](https://github.com/groundhold/groundhold/actions/workflows/lint.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0%20%2F%20MPL--2.0-blue)](LICENSE)
 
-**Status: private, pre-release (`v0.x`, experimental). Build quiet, launch loud.**
+**Status: public, experimental (`v0.x`) — an RFC you can run, not GA.**
 An honest self-assessment — what is proven vs merely built vs designed — lives in
 [`docs/MATURITY.md`](docs/MATURITY.md): the verification core is proven and
 adversarially hardened; execution has closed the loop against all three clouds and
@@ -460,9 +460,10 @@ after the slice.
   accounts (COVERAGE.md cites each); what they lack that AWS has is someone else
   running them in anger. That external track record is the next bar, not a first
   green run.
-- **Launch mechanics** — make the public repository public, protect `main`, wire
-  Pages, and cut the first stable release, which is also what turns the download
-  link above into a permanent one.
+- **A first stable release.** The repository is public, `main` is protected and
+  Pages is live; what remains is graduating from `v0.x` prereleases to a first
+  stable (`v1.0`) release, which is also what turns the download link above into
+  a permanent one.
 
 Questions left deliberately open are recorded in `docs/DESIGN.md`. The largest is
 a delegated executor for two-phase or airgapped provisioning, where the second

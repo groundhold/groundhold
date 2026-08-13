@@ -8,8 +8,7 @@ which opens a private advisory visible only to maintainers). Do not open
 public issues for exploitable problems. You will get an acknowledgment
 within 72 hours.
 
-(Private vulnerability reporting is enabled once this repository is public.
-Until then the project is pre-release and not publicly distributed.)
+(Private vulnerability reporting is enabled on this repository.)
 
 A structured threat model — assets, trust boundaries, threats/mitigations,
 and the accepted risks — is in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
@@ -56,7 +55,7 @@ Cross-host / cross-toolchain reproducibility is NOT yet verified — see
 
 ## Supported versions
 
-The project is pre-release (`v0.x`, experimental). Only the latest tagged
+The project is experimental (`v0.x`). Only the latest tagged
 release and `main` receive security fixes; there is no back-porting or LTS
 during v0.x.
 
