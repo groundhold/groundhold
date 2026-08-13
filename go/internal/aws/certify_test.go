@@ -32,5 +32,13 @@ func TestAWSParityComplete(t *testing.T) {
 	provider.CertifyParity(t, NewDriver("eu-central-1"), awsCertifyServices)
 }
 
+// TestAWSEmissionsComplete enforces the emission registry (D1032): every companion
+// an AWS service's create auto-materialises is named by a real output the service
+// publishes (D329 — one derivation, no witness/governor drift) and is governed by a
+// capability this driver fulfils. Lambda's /aws/lambda/<fn> is the first entry.
+func TestAWSEmissionsComplete(t *testing.T) {
+	provider.CertifyEmissions(t, NewDriver("eu-central-1"))
+}
+
 // compile-time assertion that the driver satisfies the provider interface.
 var _ provider.Provider = (*Driver)(nil)

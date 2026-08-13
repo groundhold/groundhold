@@ -7,6 +7,8 @@
 // from the driver's Build dispatch + header docstring and noted inline.
 package aws
 
+import "groundhold/internal/provider"
+
 // ServiceCapabilities reports, for every SERVICE token this driver certifies,
 // the capability TYPE it fulfils (D76: one TYPE, many services). The key set MUST
 // equal awsCertifyServices exactly. The value is the capability.<...> string the
@@ -75,5 +77,27 @@ func (d *Driver) ServiceCapabilities() map[string]string {
 		// cwlogfilter has no discover ResourceType (NonListableServices: "sub-resource");
 		// awslogfilter.go header + BuildCWLogFilter fulfil capability.monitoring.logmetric.
 		"cwlogfilter": "capability.monitoring.logmetric",
+	}
+}
+
+// EmittedCompanions declares the companion resources an AWS service's create causes
+// the PROVIDER to auto-materialise (D1032, resource-completion Slice 3.2). This is a
+// HAND-TRACED register — each entry examined against the service, never guessed (the
+// discoveryOnlyOperations discipline: a register whose reasons are guessed is worse
+// than none). It grows by ratchet (emittedCompanionFloor) and does NOT claim every
+// service was examined; absence means "not yet traced", never "certified emits
+// nothing". CertifyEmissions holds the two invariants that make it trustworthy: every
+// NameOutput is a real output the emitting service publishes (D329 — one derivation,
+// so a witness and a governor never drift), and every GovernedBy is a capability this
+// driver fulfils.
+func (d *Driver) EmittedCompanions() map[string][]provider.EmittedCompanion {
+	return map[string][]provider.EmittedCompanion{
+		// Lambda auto-creates /aws/lambda/<fn> (a CloudWatch Logs group) on first
+		// invocation with NO retention — it keeps every line forever, and the
+		// function's own logs land THERE, not in a separate monitoring.logs group. The
+		// group's name is the lambda output logGroupName (D381), the SAME derivation
+		// observeLambda's defaultLogGroup.retention witness (D1031) reads and a bound
+		// capability.monitoring.logs would govern.
+		"lambda": {{GovernedBy: "capability.monitoring.logs", NameOutput: "logGroupName"}},
 	}
 }

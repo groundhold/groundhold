@@ -543,33 +543,43 @@ func (d *Driver) observeLambda(capability, providerID string) ([]provider.Observ
 			"network.publicExposure not observed: Function URL config read failed (HTTP %d: %v)", st, uerr))
 	}
 
-	// D1031: witness the retention on the function's DEFAULT log group — the group
-	// AWS auto-creates on first invocation and the function's own logs actually land
-	// in (/aws/lambda/<fn>). A monitoring.logs capability builds a SEPARATE group the
-	// function never writes to, so a 365d retention there reads satisfied while the
-	// real logs never expire (the field GDPR finding). WITNESS ONLY: governing this
-	// group is a bound monitoring.logs' job under an adopt grant; here we only READ.
-	// Mirror observeCWLogs (cwlogs_net.go: a group with no retentionInDays keeps logs
-	// forever — an unbounded posture a witness cannot fake as a finite duration), so a
-	// never-expires group and a not-yet-created group both leave the attribute
-	// UNMEASURED (a hard constraint then blocks as unknown, never a false satisfied).
-	// Same group name the producer publishes as outputs.logGroupName (D381), so a bound
-	// monitoring.logs and this witness read the same reality (D329 — one derivation).
-	lg, lgFound, lgErr := d.describeCWLogGroup(region, lambdaLogGroupName(name))
-	switch {
-	case lgErr != nil:
-		diags = append(diags, "defaultLogGroup.retention not observed: DescribeLogGroups on "+
-			lambdaLogGroupName(name)+" failed — "+lgErr.Error())
-	case lgFound && lg.RetentionInDays > 0:
-		obs = append(obs, provider.Observation{Path: "defaultLogGroup.retention",
-			Value: fmt.Sprintf("%dh", lg.RetentionInDays*24), Derivation: "measured"})
-	case lgFound:
-		diags = append(diags, "defaultLogGroup.retention unknown: the function's default log group "+
-			lambdaLogGroupName(name)+" exists but has NO retention policy (never-expires) — a witness "+
-			"cannot express unbounded retention as a finite duration; a hard constraint blocks as unknown")
-	default:
-		diags = append(diags, "defaultLogGroup.retention unknown: the function's default log group "+
-			lambdaLogGroupName(name)+" does not exist yet (created on first invocation)")
+	// D1031/D1032: witness the retention on the function's certified EMITTED log group
+	// — the /aws/lambda/<fn> group AWS auto-creates on first invocation, where the
+	// function's own logs actually land. A monitoring.logs capability builds a SEPARATE
+	// group the function never writes to, so a 365d retention there reads satisfied
+	// while the real logs never expire (the field GDPR finding). The emission registry
+	// (D1032) is the authority for WHICH companion this compute auto-materialises and
+	// WHICH capability governs it; CertifyEmissions proves that companion is named by
+	// the lambda `logGroupName` output (D381), so the name below (lambdaLogGroupName —
+	// the same derivation) cannot drift from what a bound monitoring.logs would govern
+	// (D329). WITNESS ONLY: governing this group is a bound monitoring.logs' job under
+	// an adopt grant; here we only READ. Mirror observeCWLogs — a group with no
+	// retentionInDays keeps logs forever, an unbounded posture a witness cannot fake as
+	// a finite duration — so a never-expires group and a not-yet-created group both
+	// leave the attribute UNMEASURED (a hard constraint blocks as unknown, never a
+	// false satisfied).
+	for _, comp := range d.EmittedCompanions()["lambda"] {
+		if comp.GovernedBy != "capability.monitoring.logs" {
+			continue
+		}
+		group := lambdaLogGroupName(name)
+		lg, lgFound, lgErr := d.describeCWLogGroup(region, group)
+		switch {
+		case lgErr != nil:
+			diags = append(diags, "defaultLogGroup.retention not observed: DescribeLogGroups on "+
+				group+" failed — "+lgErr.Error())
+		case lgFound && lg.RetentionInDays > 0:
+			obs = append(obs, provider.Observation{Path: "defaultLogGroup.retention",
+				Value: fmt.Sprintf("%dh", lg.RetentionInDays*24), Derivation: "measured"})
+		case lgFound:
+			diags = append(diags, "defaultLogGroup.retention unknown: the certified emission "+group+
+				" (governed by "+comp.GovernedBy+") exists but has NO retention policy (never-expires)"+
+				" — a witness cannot express unbounded retention as a finite duration; a hard"+
+				" constraint blocks as unknown")
+		default:
+			diags = append(diags, "defaultLogGroup.retention unknown: the certified emission "+group+
+				" does not exist yet (created on first invocation)")
+		}
 	}
 	return obs, diags, nil
 }

@@ -228,3 +228,83 @@ func CertifyDriver(t TestingT, prov Provider, services []string) {
 		}
 	}
 }
+
+// emittedCompanionFloor is how many (service, companion) emissions CertifyEmissions
+// resolves. It may only RISE: a register that quietly empties certifies nothing
+// (D328/D856), and this register's whole value is that a companion cannot be added
+// to a driver without its name and its governor proven consistent.
+const emittedCompanionFloor = 1
+
+// CertifyEmissions proves the emission registry (D1032) is trustworthy for the two
+// properties a completeness gate and a future adopt grant both rest on:
+//
+//   - D329, ONE derivation: every EmittedCompanion.NameOutput is a real output the
+//     emitting service PUBLISHES (OutputsFor). The companion's name and the
+//     producer's output are then the same value, so a witness reading the companion
+//     and a capability governing it cannot drift into disagreement.
+//   - no phantom governor: every GovernedBy is a capability this driver actually
+//     fulfils (ServiceCapabilities), never a token no service serves.
+//
+// A driver that emits nothing need not implement EmissionCertifier; one that does is
+// held to both invariants and to a floor that may only rise.
+func CertifyEmissions(t TestingT, prov Provider) {
+	t.Helper()
+	ec, ok := prov.(EmissionCertifier)
+	if !ok {
+		return // optional: a driver with no auto-emitted companions
+	}
+	op, ok := prov.(OutputProducer)
+	if !ok {
+		t.Errorf("%s certifies emissions but is not an OutputProducer — a companion's "+
+			"NameOutput cannot be proven against the producer's outputs (D329)", prov.Name())
+		return
+	}
+	cm, ok := prov.(CapabilityMapper)
+	if !ok {
+		t.Errorf("%s certifies emissions but is not a CapabilityMapper — a companion's "+
+			"GovernedBy cannot be proven a real capability", prov.Name())
+		return
+	}
+	governors := map[string]bool{}
+	for _, capType := range cm.ServiceCapabilities() {
+		governors[capType] = true
+	}
+
+	count := 0
+	for svc, comps := range ec.EmittedCompanions() {
+		outs := map[string]bool{}
+		for _, o := range op.OutputsFor(svc) {
+			outs[o.Name] = true
+		}
+		if len(comps) == 0 {
+			t.Errorf("%s: service %q has an EMPTY emission list — omit the key or name a "+
+				"companion; an empty entry certifies nothing (D328)", prov.Name(), svc)
+		}
+		for _, c := range comps {
+			count++
+			if c.NameOutput == "" || !outs[c.NameOutput] {
+				names := make([]string, 0, len(outs))
+				for n := range outs {
+					names = append(names, n)
+				}
+				t.Errorf("%s: emission for %q names its companion via output %q, which %q "+
+					"does NOT publish — the emission name and the producer output must be the "+
+					"SAME derivation or a witness and a governor drift (D329). Published: %v",
+					prov.Name(), svc, c.NameOutput, svc, sortedDedup(names))
+			}
+			switch {
+			case c.GovernedBy == "" || !strings.HasPrefix(c.GovernedBy, "capability."):
+				t.Errorf("%s: emission for %q has GovernedBy %q, not a capability.<...> type",
+					prov.Name(), svc, c.GovernedBy)
+			case !governors[c.GovernedBy]:
+				t.Errorf("%s: emission for %q is GovernedBy %q, which no service in this "+
+					"driver fulfils — a companion cannot be governed by a phantom capability",
+					prov.Name(), svc, c.GovernedBy)
+			}
+		}
+	}
+	if count < emittedCompanionFloor {
+		t.Errorf("%s: CertifyEmissions resolved %d companions, below floor %d — the register "+
+			"shrank and now certifies almost nothing (D328)", prov.Name(), count, emittedCompanionFloor)
+	}
+}
