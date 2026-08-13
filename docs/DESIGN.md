@@ -34149,3 +34149,43 @@ unchanged — conformance's fold cases stay green. With D1037/D1038/D1039 the ex
 re-derives from the pinned contract/candidate every plan field that authorizes or targets a
 mutation — consents, the delete operation, and folded operands alike — closing the trusted-plan-
 field class the audit opened.
+
+## D1040 — the customerManagedKeys sweep was incomplete: 11 drivers still omitted the false
+
+D1003 established that a security bool (`encryption.customerManagedKeys`) must be emitted for
+BOTH states — a resource with no customer key must read a MEASURED `false`, not nothing —
+because adoption fills a MISSING observation with the candidate's own declared value and does
+not refuse (`adopt.go`: a present resource lacking a customer key sails through as
+"declared intent"; only a 404 is caught by the D957 `IsAbsent` gate). Emitting nothing lets a
+`customerManagedKeys: true` candidate be ADOPTED over a provider-default-encrypted resource,
+and a later static audit then reads the declared intent as satisfied → `verify` PROVEN. A
+false-SECURE, silent-wrong-answer (the class field-confirmed at a tester for D1003).
+
+An overnight audit found the D1003 sweep had fixed ~21 drivers but MISSED 12 (11 accidental, 1 deliberate-D985) with the same
+omit-on-empty shape hidden behind a different guard — the classic "the fix is almost always too
+narrow" (BUG_HUNTING §4), and it had no gate, so the miss was invisible. Fixed, in three shapes:
+- **GCP, read from the main GET (5):** `gcs`, `pubsub`, `filestore`, `memorystore`, `logbucket`
+  emitted `true` only inside `if kmsKey != ""` — two even carried a comment defending "emit
+  nothing rather than a false". Now emit `Value: <field> != ""` unconditionally: empty is the
+  Google-managed default, a measured false.
+- **AWS, KMS-traced (5):** `rds`, `elasticache`, `opensearch`, `efs`, `aurora` correctly traced a
+  PRESENT key to KMS (`false` for the `aws/*` default, D800) but omitted the `KmsKeyId == ""`
+  case (at-rest encryption disabled) — now an `else` emits a measured `false`. The trace-failed
+  diagnostic carve-out stays.
+- **Read-and-parsed companion (1):** `gcp.pubsub-queue` (backing topic read OK, empty key)
+  emitted a diagnostic where a successful read is a measurement; now emits `false`, keeping the
+  diagnostic only for the read that failed.
+
+FLAGGED, deliberately NOT fixed here: `azure.loganalytics` has the same shape (a linked cluster
+read OK with no key emits a diagnostic; no linked cluster at all emits nothing), but D985 made a
+DELIBERATE choice to "leave it unread otherwise, never a false true" — the no-key case was an
+argued decision, not the accidental omit the other eleven were. Superseding D985 to emit a
+measured `false` (the D1040 discipline, which would prevent the same adopt-lie) is the right
+direction but is a decision to make with the owner, not autonomously — recorded for review, not
+changed. The eleven accidental omits are fixed.
+
+Confirmed clean and left alone: ~20 drivers that already emit both states from a real read
+(`aws.ecr`/`s3`/`ebs`/`ec2`/`ami`, the Azure `KeySource`/`KeyVault` family, `gcp.artifactregistry`/
+`secretmanager`/`persistentdisk`). No public-exposure false-negative survived the sampled sweep.
+The recurrence (D1003 then this) is a gate gap — a machine check that every driver emitting a
+security bool emits it for both states is a recorded follow-up.

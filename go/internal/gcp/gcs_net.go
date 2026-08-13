@@ -619,13 +619,14 @@ func (d *Driver) observeGCS(capability, providerID string) ([]provider.Observati
 			break
 		}
 	}
-	// customerManagedKeys: a CMEK is present iff the bucket carries a default
-	// KMS key. Absent means the Google-managed default, which does NOT satisfy
-	// the constraint — emit nothing rather than a false.
-	if b.Encryption.DefaultKmsKeyName != "" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
-			Value: true, Derivation: "measured"})
-	}
+	// customerManagedKeys: a CMEK is present iff the bucket carries a default KMS
+	// key, read here from the bucket GET (no separate call). Absent means the
+	// Google-managed default — a MEASURED false, not an absence (D1040/D1003):
+	// emitting nothing let a `customerManagedKeys: true` candidate be ADOPTED over a
+	// Google-managed bucket (adopt fills the gap with the declared value and does not
+	// refuse). Emit the bool for BOTH states.
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+		Value: b.Encryption.DefaultKmsKeyName != "", Derivation: "measured"})
 
 	// publicExposure has TWO honest gates.
 	//   1. prevention=enforced is definitively private regardless of IAM.

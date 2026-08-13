@@ -312,9 +312,11 @@ func TestMetamorphicPubSubRoundTrip(t *testing.T) {
 			if got["network.publicExposure"] != c.public {
 				t.Errorf("public round-trip broke: wrote %v observed %v", c.public, got["network.publicExposure"])
 			}
-			_, hasCMEK := got["encryption.customerManagedKeys"]
-			if hasCMEK != c.cmek {
-				t.Errorf("cmek presence round-trip broke: want %v observed %v", c.cmek, hasCMEK)
+			// D1040: customerManagedKeys is a MEASURED value emitted for BOTH states —
+			// assert the VALUE, not the mere PRESENCE of the observation (the old check
+			// enforced the omit-on-empty bug: no observation for a Google-managed topic).
+			if got["encryption.customerManagedKeys"] != c.cmek {
+				t.Errorf("cmek round-trip broke: want %v observed %v", c.cmek, got["encryption.customerManagedKeys"])
 			}
 		})
 	}

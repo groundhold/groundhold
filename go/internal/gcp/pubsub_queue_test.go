@@ -493,9 +493,10 @@ func TestMetamorphicPubSubQueueRoundTrip(t *testing.T) {
 			if got["retention.minimum"] != "3600s" {
 				t.Errorf("retention round-trip broke: observed %v", got["retention.minimum"])
 			}
-			_, hasCMEK := got["encryption.customerManagedKeys"]
-			if hasCMEK != c.cmek {
-				t.Errorf("cmek presence round-trip broke: want %v observed %v", c.cmek, hasCMEK)
+			// D1040: assert the MEASURED value, not mere presence — a no-key backing
+			// topic reads customerManagedKeys=false, not an omitted observation.
+			if got["encryption.customerManagedKeys"] != c.cmek {
+				t.Errorf("cmek round-trip broke: want %v observed %v", c.cmek, got["encryption.customerManagedKeys"])
 			}
 		})
 	}

@@ -423,6 +423,11 @@ func (d *Driver) observeAurora(capability, providerID string) ([]provider.Observ
 			diags = append(diags, "encryption.customerManagedKeys not observed on the "+
 				"cluster's KMS key: "+kerr.Error()+" — probe/reconcile")
 		}
+	} else {
+		// D1040/D1003: cluster unencrypted = definitively not a customer key, from the
+		// main describe → a MEASURED false, not an absence.
+		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+			Value: false, Derivation: "measured"})
 	}
 	return obs, diags, nil
 }

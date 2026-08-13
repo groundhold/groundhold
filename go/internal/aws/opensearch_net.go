@@ -248,6 +248,11 @@ func (d *Driver) observeOpenSearch(capability, providerID string) ([]provider.Ob
 			diags = append(diags, "encryption.customerManagedKeys not observed on the domain's "+
 				"KMS key: "+kerr.Error()+" — probe/reconcile")
 		}
+	} else {
+		// D1040/D1003: at-rest encryption disabled = definitively not a customer key,
+		// from the main describe → a MEASURED false, not an absence.
+		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+			Value: false, Derivation: "measured"})
 	}
 	return obs, diags, nil
 }

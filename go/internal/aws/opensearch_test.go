@@ -287,8 +287,10 @@ func TestMetamorphicOpenSearchRoundTrip(t *testing.T) {
 			if got["availability.class"] != c.wantAvail {
 				t.Errorf("availability round-trip: want %q got %v", c.wantAvail, got["availability.class"])
 			}
-			if _, has := got["encryption.customerManagedKeys"]; has != c.cmek {
-				t.Errorf("cmek round-trip: want present=%v got %v", c.cmek, got["encryption.customerManagedKeys"])
+			// D1040: customerManagedKeys is a MEASURED value for BOTH states — assert the
+			// value, not mere presence (unencrypted reads false, not an omitted obs).
+			if got["encryption.customerManagedKeys"] != c.cmek {
+				t.Errorf("cmek round-trip: want %v got %v", c.cmek, got["encryption.customerManagedKeys"])
 			}
 		})
 	}
