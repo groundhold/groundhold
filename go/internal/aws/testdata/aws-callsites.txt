@@ -296,6 +296,8 @@ ecr	DescribeRepositories	Reconcile>reconcileECR>rc1ecrExists>ecrCall>doSigned
 ecr	DescribeRepositories	discoverECR>ecrCall>doSigned
 ecr	DescribeRepositories	discoverECR>observeECR>ecrCall>doSigned
 ecr	DescribeRepositories	observeECR>ecrCall>doSigned
+ecr	GetLifecyclePolicy	List>func1>discoverECR>observeECR>ecrCall>doSigned
+ecr	GetLifecyclePolicy	observeECR>ecrCall>doSigned
 ecr	ListTagsForResource	Create>createService>createECR>ecrTags>ecrCall>doSigned
 ecr	ListTagsForResource	Delete>deleteECR>ecrTags>ecrCall>doSigned
 ecr	ListTagsForResource	Reconcile>reconcileECR>ecrTags>ecrCall>doSigned
@@ -303,6 +305,7 @@ ecr	ListTagsForResource	Update>update>updateECR>ecrTags>ecrCall>doSigned
 ecr	ListTagsForResource	deleteECR>ecrTags>ecrCall>doSigned
 ecr	ListTagsForResource	updateECR>ecrTags>ecrCall>doSigned
 ecr	PutImageScanningConfiguration	updateECR>ecrCall>doSigned
+ecr	PutLifecyclePolicy	createECR>ecrApplyLifecycle>ecrCall>doSigned
 ecs	CreateCluster	Create>createService>createECS>ecsCall>doSigned
 ecs	CreateCluster	createECS>ecsCall>doSigned
 ecs	CreateService	Create>createService>createECS>ecsCall>doSigned

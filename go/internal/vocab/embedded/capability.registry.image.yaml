@@ -80,6 +80,23 @@ attributes:
       gcp.artifactregistry: Artifact Analysis on-push scanning (separate slice)
       azure.acr: Microsoft Defender for Cloud registry scanning (separate slice)
 
+  retention.maximum:
+    kind: duration
+    description: >
+      Images must NOT outlive this age — the registry ages out old images after N
+      (data minimization / storage hygiene: "expire images older than N"). Fulfilled
+      by a registry lifecycle rule, NOT by deleting individual images; the rule is the
+      capability. A registry with no age-out rule leaves this UNKNOWN (blocks a hard
+      constraint) rather than satisfied — the D1028-family point that a created
+      registry without a lifecycle is a gap the contract can now express. The driver
+      renders and reads back one CLOSED rule shape (expire since-pushed, in days); a
+      richer hand-authored policy it cannot reverse-map is reported unknown, never
+      guessed.
+    mappings:
+      aws.ecr: lifecycle rule selection.countType=sinceImagePushed countUnit=days action=expire
+      gcp.artifactregistry: cleanup policy condition.olderThan action=DELETE (separate slice)
+      azure.acr: retention policy days (separate slice)
+
   service.managed:
     kind: bool
     description: Managed registry vs a self-operated one
@@ -91,8 +108,9 @@ attributes:
     verification: static against a pricing catalog; billing after deploy
 
 # Deliberately absent in v0.1 (implementation detail / topology, not capability
-# semantics): SKU/tier (Basic/Standard/Premium sizing), replication topology, cleanup /
-# lifecycle policies (age-out rules — a richer per-cloud shape, deferred), the image
+# semantics): SKU/tier (Basic/Standard/Premium sizing), replication topology, RICHER
+# lifecycle rules (tag-filtered / count-based age-out — a per-cloud shape beyond the
+# single since-pushed-days expiry that retention.maximum above renders), the image
 # FORMAT (docker/OCI is the universal default; maven/npm/other Artifact Registry formats
 # are a one-cloud feature, deferred). The scan-on-push POSTURE is now security.scanOnPush
 # (above); richer scan configuration (continuous rescan, enhanced-scan filters, severity

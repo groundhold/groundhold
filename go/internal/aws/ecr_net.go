@@ -94,6 +94,9 @@ func (d *Driver) createECR(region, account, environment, capability string,
 	}
 	switch {
 	case st == http.StatusOK:
+		if r := d.ecrApplyLifecycle(region, pid, plan); r != nil {
+			return *r
+		}
 		return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
 	case strings.Contains(ecsErr(resp), "RepositoryAlreadyExists"):
 		tags, terr := d.ecrTags(region, arn)
@@ -103,6 +106,9 @@ func (d *Driver) createECR(region, account, environment, capability string,
 		if !groundholdTagsMatch(tags, capability, environment) {
 			return provider.CreateResult{Status: "failed", Reason: "a repository with this name exists and is not ours (tags do not match)"}
 		}
+		if r := d.ecrApplyLifecycle(region, pid, plan); r != nil {
+			return *r
+		}
 		return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
 	case st >= 500:
 		return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: fmt.Sprintf("create HTTP %d (server error — may have landed): %s", st, mutDetail(resp))}
@@ -111,6 +117,34 @@ func (d *Driver) createECR(region, account, environment, capability string,
 			return *r
 		}
 		return provider.CreateResult{Status: "failed", Reason: fmt.Sprintf("create HTTP %d: %s", st, mutDetail(resp))}
+	}
+}
+
+// ecrApplyLifecycle applies retention.maximum's lifecycle rule once the repo exists.
+// PutLifecyclePolicy is idempotent (re-assertable in place), so create and a later
+// converge both call it. Returns a non-nil result to short-circuit the create on a
+// failed/unknown lifecycle apply; nil when there is nothing to do or it succeeded.
+func (d *Driver) ecrApplyLifecycle(region, pid string, plan ECRPlan) *provider.CreateResult {
+	if plan.RetentionMaxDays <= 0 {
+		return nil
+	}
+	body, _ := json.Marshal(map[string]any{
+		"repositoryName":      plan.RepoName,
+		"lifecyclePolicyText": plan.lifecyclePolicyText(),
+	})
+	st, resp, err := d.ecrCall(region, "PutLifecyclePolicy", string(body))
+	switch {
+	case err != nil:
+		return &provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: "lifecycle outcome unknown (repo created): " + err.Error()}
+	case st == http.StatusOK:
+		return nil
+	case st >= 500:
+		return &provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("PutLifecyclePolicy HTTP %d (may have landed): %s", st, mutDetail(resp))}
+	default:
+		return &provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("retention.maximum lifecycle refused: HTTP %d: %s", st, mutDetail(resp))}
 	}
 }
 
@@ -181,6 +215,31 @@ func (d *Driver) observeECR(capability, providerID string) ([]provider.Observati
 		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
 			Value: false, Derivation: "measured"})
 	}
+	// retention.maximum: reverse-map the lifecycle policy (the ONE shape we render).
+	// No policy -> the path is simply absent; a shape we do not render -> a diag, never
+	// a guess (the D1024 discipline: unknown beats a fabricated verdict).
+	if lst, lbody, lerr := d.ecrCall(region, "GetLifecyclePolicy", `{"repositoryName":"`+name+`"}`); lerr != nil {
+		diags = append(diags, "retention.maximum not observed: GetLifecyclePolicy: "+lerr.Error())
+	} else {
+		switch {
+		case lst == http.StatusOK:
+			var lp struct {
+				LifecyclePolicyText string `json:"lifecyclePolicyText"`
+			}
+			if json.Unmarshal(lbody, &lp) == nil {
+				if days, ok := ecrLifecycleDays(lp.LifecyclePolicyText); ok {
+					obs = append(obs, provider.Observation{Path: "retention.maximum",
+						Value: fmt.Sprintf("%dd", days), Derivation: "measured"})
+				} else {
+					diags = append(diags, "retention.maximum not observed: lifecycle policy is a shape this driver does not render")
+				}
+			}
+		case strings.Contains(ecsErr(lbody), "LifecyclePolicyNotFoundException"):
+			// no age-out rule configured — retention.maximum simply absent
+		default:
+			diags = append(diags, fmt.Sprintf("retention.maximum not observed: GetLifecyclePolicy HTTP %d", lst))
+		}
+	}
 	return obs, diags, nil
 }
 
@@ -196,6 +255,9 @@ func classifyECRChange(path string) (string, string) {
 	case "immutable.tags":
 		return "mutable", ""
 	case "security.scanOnPush":
+		return "mutable", ""
+	case "retention.maximum":
+		// PutLifecyclePolicy re-asserts the whole policy in place.
 		return "mutable", ""
 	case "encryption.customerManagedKeys":
 		return "immutable", "ECR encryption configuration is fixed at repository " +
@@ -256,6 +318,19 @@ func (d *Driver) updateECR(capability, environment, providerID string,
 			}
 			action = "PutImageScanningConfiguration"
 			body = `{"repositoryName":"` + name + `","imageScanningConfiguration":{"scanOnPush":` + scan + `}}`
+		case "retention.maximum":
+			if plan.RetentionMaxDays > 0 {
+				pol, _ := json.Marshal(map[string]any{
+					"repositoryName":      name,
+					"lifecyclePolicyText": plan.lifecyclePolicyText(),
+				})
+				action = "PutLifecyclePolicy"
+				body = string(pol)
+			} else {
+				// the contract dropped the age-out rule: remove it, don't leave a stale one.
+				action = "DeleteLifecyclePolicy"
+				body = `{"repositoryName":"` + name + `"}`
+			}
 		default:
 			return provider.CreateResult{Status: "failed",
 				Reason: fmt.Sprintf("ecr path %s is not patchable in place", path)}

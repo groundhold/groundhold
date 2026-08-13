@@ -13,17 +13,20 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"groundhold/internal/scalars"
 )
 
 var ecrRepoNameOK = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{1,255}$`)
 
 // ECRPlan is the attribute-derived shape a create assembles.
 type ECRPlan struct {
-	RepoName      string
-	ImmutableTags bool
-	ScanOnPush    bool
-	CMEK          bool
-	KmsKey        string
+	RepoName         string
+	ImmutableTags    bool
+	ScanOnPush       bool
+	CMEK             bool
+	KmsKey           string
+	RetentionMaxDays int64 // retention.maximum: expire images older than N days (0 = no rule)
 }
 
 func ecrRepoName(environment, capability string, generation int) string {
@@ -70,6 +73,17 @@ func BuildECR(environment, capability string,
 			p.ImmutableTags, _ = raw.(bool)
 		case "security.scanOnPush":
 			p.ScanOnPush, _ = raw.(bool)
+		case "retention.maximum":
+			sc, err := scalars.Parse(raw)
+			if err != nil || sc.Kind != scalars.Duration {
+				return ECRPlan{}, fmt.Errorf("retention.maximum must be a duration, got %v", raw)
+			}
+			days := int64(sc.Value.(float64)) / 86400000
+			if days < 1 {
+				return ECRPlan{}, fmt.Errorf(
+					"retention.maximum must be at least 1 day (ECR lifecycle age-out is whole days)")
+			}
+			p.RetentionMaxDays = days
 		case "service.managed":
 			if raw != true {
 				return ECRPlan{}, fmt.Errorf("service.managed=false cannot be honored by ECR")
@@ -107,4 +121,54 @@ func (p ECRPlan) createBody(capability, environment string) string {
 	}
 	b, _ := json.Marshal(body)
 	return string(b)
+}
+
+// lifecyclePolicyText renders the ONE closed rule retention.maximum maps to: expire
+// images older than RetentionMaxDays since push. Deterministic, never user-authored —
+// observe reverse-maps exactly this shape and reports anything richer as unknown.
+func (p ECRPlan) lifecyclePolicyText() string {
+	pol := map[string]any{"rules": []any{map[string]any{
+		"rulePriority": 1,
+		"description":  "groundhold-retention-maximum",
+		"selection": map[string]any{
+			"tagStatus":   "any",
+			"countType":   "sinceImagePushed",
+			"countUnit":   "days",
+			"countNumber": p.RetentionMaxDays,
+		},
+		"action": map[string]any{"type": "expire"},
+	}}}
+	b, _ := json.Marshal(pol)
+	return string(b)
+}
+
+// ecrLifecycleDays reverse-maps a lifecyclePolicyText back to a since-pushed-days
+// expiry, or (0, false) if the policy is empty or a shape this driver does not render
+// (richer/hand-authored rules) — which observe reports as unknown, never a guess.
+func ecrLifecycleDays(policyText string) (int64, bool) {
+	if policyText == "" {
+		return 0, false
+	}
+	var pol struct {
+		Rules []struct {
+			Selection struct {
+				CountType   string `json:"countType"`
+				CountUnit   string `json:"countUnit"`
+				CountNumber int64  `json:"countNumber"`
+			} `json:"selection"`
+			Action struct {
+				Type string `json:"type"`
+			} `json:"action"`
+		} `json:"rules"`
+	}
+	if json.Unmarshal([]byte(policyText), &pol) != nil {
+		return 0, false
+	}
+	for _, r := range pol.Rules {
+		if r.Action.Type == "expire" && r.Selection.CountType == "sinceImagePushed" &&
+			r.Selection.CountUnit == "days" && r.Selection.CountNumber > 0 {
+			return r.Selection.CountNumber, true
+		}
+	}
+	return 0, false
 }

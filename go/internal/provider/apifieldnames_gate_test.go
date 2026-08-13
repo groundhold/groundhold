@@ -72,8 +72,16 @@ func TestEveryAWSFieldNameExistsInTheProviderAPI(t *testing.T) {
 		"widgets":             "CloudWatch dashboard body (a string to the API), not a modeled field",
 		"metrics":             "CloudWatch dashboard widget body (a string to the API), not a modeled field",
 		"deadLetterTargetArn": "SQS RedrivePolicy document (a string to the API), not a modeled field",
-		"maxReceiveCount":     "SQS RedrivePolicy document (a string to the API), not a modeled field",
-		"AllowFromPublic":     "OpenSearch Serverless network policy document (a string to the API)",
+		// ECR lifecycle policy document fields the observe reverse-map DECODES from the
+		// lifecyclePolicyText JSON string (D1029) — the inner age-out shape is not a
+		// modeled API field (rules/action/lifecyclePolicyText themselves are, and are
+		// confirmed in the verified list).
+		"selection":       "ECR lifecycle policy document field (inside lifecyclePolicyText), not a modeled field",
+		"countType":       "ECR lifecycle policy document field (inside lifecyclePolicyText), not a modeled field",
+		"countUnit":       "ECR lifecycle policy document field (inside lifecyclePolicyText), not a modeled field",
+		"countNumber":     "ECR lifecycle policy document field (inside lifecyclePolicyText), not a modeled field",
+		"maxReceiveCount": "SQS RedrivePolicy document (a string to the API), not a modeled field",
+		"AllowFromPublic": "OpenSearch Serverless network policy document (a string to the API)",
 		// encoding/json's ignore directive, not a field name at all.
 		"-": "encoding/json ignore directive, not a field name",
 	})
