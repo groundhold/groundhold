@@ -74,10 +74,10 @@ func TestEveryReleaseTagAppearsInTheChangelog(t *testing.T) {
 // present, so the list cannot rot into unexplained absences.
 var changelogExemptTags = map[string]string{
 	// The first three tags predate the CHANGELOG, whose earliest section is v0.1.3.
-	// The document's own header scopes them: internal builds, not a release line.
-	"v0.1.0": "the tags below are internal builds, not",
-	"v0.1.1": "the tags below are internal builds, not",
-	"v0.1.2": "the tags below are internal builds, not",
+	// The document's own header scopes them: public prereleases, not a release line.
+	"v0.1.0": "the tags below are public prereleases, not",
+	"v0.1.1": "the tags below are public prereleases, not",
+	"v0.1.2": "the tags below are public prereleases, not",
 	// Tagged from a RED commit and replaced; v0.1.5's section says so rather than
 	// the tag being quietly deleted (a deleted tag hides the mistake).
 	"v0.1.4": "Supersedes **v0.1.4**",
