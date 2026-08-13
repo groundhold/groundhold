@@ -111,6 +111,16 @@ type Action struct {
 	// the reason every consent here is: granting it after sealing must produce a
 	// DIFFERENT plan, not silently change what an existing one does.
 	FieldReclaim bool `json:"fieldReclaim,omitempty"`
+	// EmissionAdopt (D1034) carries the contract's scoped allow_emission_adopt consent
+	// into the SEALED plan for a create whose log_group operand is a $ref to a compute's
+	// CERTIFIED emitted log group (D1032) — authorising the driver to set retention on a
+	// group the PROVIDER, not groundhold, created (the /aws/lambda/<fn> case). Minted
+	// only when BOTH the consent is scoped AND the provenance holds (the operand
+	// resolves to a certified emission governed by monitoring.logs); a driver never
+	// re-derives adoption from the group name, closing the fold-at-plan leak. Sealed,
+	// not re-derived, for the reason every consent here is: granting it after sealing
+	// must yield a DIFFERENT plan.
+	EmissionAdopt bool `json:"emissionAdopt,omitempty"`
 	// RequiredPermissions (D75): the provider permissions this action's
 	// driver call sequence needs — deterministic, sorted, deduped, from
 	// provider.PermissionsFor. Enters the plan hash; the executor preflights
@@ -840,6 +850,11 @@ func Compile(c *contract.Contract, cand *contract.Candidate,
 		return nil, err
 	}
 
+	// D1034: now that log_group $refs are resolved to their producer, seal the
+	// emission-adopt grant onto any create that governs a certified emitted log group
+	// with the operator's scoped consent.
+	mintEmissionAdopt(actions, c, cand, in)
+
 	// The SILENT-IGNORE GUARD: after $ref operands are resolved, refuse any
 	// implementation operand no driver reads — a free-form (D26) block must not
 	// let a key the driver silently drops through to a "succeeded" apply. Runs
@@ -1537,6 +1552,59 @@ func addDep(deps []string, id string) []string {
 // idempotency key folds the producer keys so a producer change (e.g. a D48 replace
 // bumping the generation) re-keys the consumer. Every failure refuses
 // (reference-invalid) — no coercion (invariant #2), no literal fallback.
+// mintEmissionAdopt seals the D1034 emission-adopt grant. A monitoring.logs create
+// whose `log_group` operand is a $ref (resolved by wireReferences into a Fold or a
+// same-plan Reference) to a compute's CERTIFIED emitted log group (D1032) is
+// authorised to set retention on that group — which the PROVIDER, not groundhold,
+// created — but ONLY when the operator scoped allow_emission_adopt to it. Both the
+// provenance (the operand truly resolves to a certified emission governed by
+// monitoring.logs) AND the consent must hold; the grant is a per-action bool because
+// the action's own Target already names the exact log group. The driver never
+// re-derives adoption from the name (the fold-at-plan leak the reviews flagged): the
+// decision is made here, sealed, and re-checked at apply.
+func mintEmissionAdopt(actions []Action, c *contract.Contract, cand *contract.Candidate, in Inputs) {
+	isCertifiedLogEmission := func(producerCapID, output string) bool {
+		pExtras := cand.Extras[producerCapID]
+		pProv, _ := pExtras["provider"].(string)
+		if pProv == "" {
+			pProv = in.BindingProviders[producerCapID]
+		}
+		pSvc, _ := pExtras["service"].(string)
+		ec, ok := in.providerFor(pProv).(provider.EmissionCertifier)
+		if !ok {
+			return false
+		}
+		for _, comp := range ec.EmittedCompanions()[pSvc] {
+			if comp.NameOutput == output && comp.GovernedBy == "capability.monitoring.logs" {
+				return true
+			}
+		}
+		return false
+	}
+	for i := range actions {
+		a := &actions[i]
+		if a.Operation != "create" {
+			continue
+		}
+		if typ, _ := c.Capabilities[a.Capability]["type"].(string); typ != "capability.monitoring.logs" {
+			continue
+		}
+		if !policy.AllowsEmissionAdopt(c, a.Capability) {
+			continue // no scoped consent — the group stays behind the ownership gate
+		}
+		for _, f := range a.Folds {
+			if f.Slot == "log_group" && isCertifiedLogEmission(f.Capability, f.Output) {
+				a.EmissionAdopt = true
+			}
+		}
+		for _, r := range a.References {
+			if r.Slot == "log_group" && isCertifiedLogEmission(r.Capability, r.Output) {
+				a.EmissionAdopt = true
+			}
+		}
+	}
+}
+
 func wireReferences(actions []Action, cand *contract.Candidate, in Inputs, candidateHash string) error {
 	// Only a create yields fresh outputs; map capability -> its create action.
 	// A same-plan DELETE marks the producer retiring: a value read from a

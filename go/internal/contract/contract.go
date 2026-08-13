@@ -780,7 +780,7 @@ func checkAutonomyShape(autonomy map[string]any) error {
 	// than my reading of the code that ignores it.
 	for _, key := range []string{"forbidden",
 		"allow_replace_stateful", "allow_intrusive_probes", "allow_protection_lift",
-		"allow_field_reclaim"} {
+		"allow_field_reclaim", "allow_emission_adopt"} {
 		if _, err := wantList(autonomy, key, "autonomy."+key); err != nil {
 			return err
 		}
@@ -802,7 +802,7 @@ func checkAutonomyCapabilities(doc map[string]any,
 	// quite possibly during the incident the probe was meant to measure. A third
 	// list added here is covered without anyone remembering to add a branch.
 	for _, key := range []string{"allow_replace_stateful", "allow_intrusive_probes",
-		"allow_protection_lift", "allow_field_reclaim"} {
+		"allow_protection_lift", "allow_field_reclaim", "allow_emission_adopt"} {
 		allowed, _ := autonomy[key].([]any)
 		for _, it := range allowed {
 			s, _ := it.(string)

@@ -33937,3 +33937,33 @@ output declared for `$ref` wiring is no longer conflated with a resource a creat
 The `$ref` output the advice tells the operator to bind now comes from the companion's own
 `NameOutput`, so the advisory names exactly what the registry certifies. Behaviour is unchanged
 for the lambda case the field report was about; the fix is the standalone-group misfire.
+
+## D1034 — the emission-adopt grant is minted and sealed (Slice 3.3b)
+
+To let a `monitoring.logs` set retention on the group a compute auto-emits (`/aws/lambda/<fn>`),
+the driver must adopt a group the PROVIDER created — cross the ownership-tag gate (`createCWLogs`
+refuses an untagged group, D439–D472). The two Slice-3 reviews were emphatic that the authority
+to do so must NOT be a driver-side name match: fold-at-plan (D283) turns the `$ref` into a bare
+literal before the driver sees it, so a driver deciding adoption from the string cannot tell a
+`$ref`-to-a-certified-emission from a hand-written `/aws/lambda/<someone-else's-fn>` and would
+launder an arbitrary group past the gate. The authority is minted at COMPILE from resolved
+provenance and sealed onto the action; the owner chose (like every ownership-affecting act —
+replace_stateful, protection_lift, field_reclaim) to gate it behind an explicit scoped consent.
+
+3.3b is the derivation half. A new `autonomy.allow_emission_adopt: [<capID>]` (validated and
+capability-scoped like its siblings) + `policy.AllowsEmissionAdopt`. `mintEmissionAdopt` runs
+after `wireReferences` and seals `Action.EmissionAdopt = true` on a create ONLY when ALL hold:
+the capability is a `capability.monitoring.logs`; the operator scoped the consent to it; and its
+`log_group` operand resolves (Fold or same-plan Reference) to a producer whose emission registry
+(D1032) declares that output a companion `GovernedBy: capability.monitoring.logs`. Provenance AND
+consent, or no grant — the group stays refused. The grant is a per-action bool because the
+action's own `Target` already names the exact log group, so nothing widens it. Apply re-derives
+the CONSENT from the pinned contract (`emissionAdopt=true` without scoped consent → refuse,
+naming `allow_emission_adopt`), the D959 defence-in-depth; the provenance is sealed under the plan
+hash.
+
+Deliberately NOT here (Slice 3.3c): `createCWLogs` HONOURING the grant — adopting the untagged
+group and setting retention — and FM-3, making that retention write its own DAG action so a
+killed apply cannot leave the real group at `None` while converge reads green. Until 3.3c the
+grant is inert: a plan carries it, but the driver still refuses, so behaviour is unchanged and
+safe. The derivation ships and can be reviewed before it authorises a single write.

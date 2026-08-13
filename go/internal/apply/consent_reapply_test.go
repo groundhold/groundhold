@@ -129,3 +129,18 @@ func TestApplyRefusesFieldReclaimWithoutConsent(t *testing.T) {
 			"allow_field_reclaim; reasons=%v outcomes=%v", res.Reasons, res.Outcomes)
 	}
 }
+
+// D1034: the same defence for the emission-adopt consent. A hand-authored plan cannot
+// assert emissionAdopt=true (take over a provider-created log group) for a capability
+// the pinned contract never scoped — apply re-derives the consent from the contract.
+func TestApplyRefusesEmissionAdoptWithoutConsent(t *testing.T) {
+	c, cand, planDoc, vocabs := compilePlanDoc(t, replContract, replCandidate)
+	for _, a := range planActionMaps(planDoc) {
+		a["emissionAdopt"] = true // forge the consent the pinned contract never gave
+	}
+	res := Apply(c, cand, vocabs, planDoc, freshLedger(t), &provider.Fake{}, pfAt, false)
+	if !strings.Contains(strings.Join(res.Reasons, " "), "allow_emission_adopt") {
+		t.Fatalf("a forged emissionAdopt without consent must refuse and name "+
+			"allow_emission_adopt; reasons=%v outcomes=%v", res.Reasons, res.Outcomes)
+	}
+}
