@@ -197,6 +197,7 @@ VpcConfig
 WebACL
 WebACLs
 ZoneAwarenessEnabled
+action
 addon
 addonName
 addonVersion
@@ -250,6 +251,7 @@ kmsKey
 kmsKeyArn
 kmsKeyId
 launchType
+lifecyclePolicyText
 loadBalancers
 logGroupName
 logGroups
@@ -281,6 +283,7 @@ resourcesVpcConfig
 retentionInDays
 roleArn
 rolloutState
+rules
 runningCount
 scanOnPush
 securityPolicyDetail

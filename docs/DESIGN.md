@@ -33781,3 +33781,35 @@ The driver stays `measured` — the new header is field-proven, not assumed. The
 autofix PR is closed in favour of this, which lands through the private→sync path
 (a merge on the public mirror would be overwritten by the next sync and the sync
 would then refuse the un-replayed work, D714).
+
+## D1029 — registry.image `retention.maximum` (resource-completion Slice 1, part #4)
+
+The first buildable slice of the resource-completion proposal
+(`docs/proposals/resource-completion.md`). A field finding: a container registry is
+created with no age-out rule, and the contract had no way to require one — the
+"deferred, richer per-cloud shape" note in `capability.registry.image` was covering a
+gap the field hit. The pressure-test's verdict was that this one is cheap and clean:
+not a "completion" problem, a missing MEASURED attribute.
+
+Added `retention.maximum` (a `duration`) to `capability.registry.image`, the exact
+dual of `capability.storage.object retention.maximum`: "images must not outlive this
+age", fulfilled by a lifecycle expiration rule the driver renders from ONE closed
+shape (expire since-pushed, in whole days) — never user-authored policy JSON. The AWS
+ECR driver renders it (`PutLifecyclePolicy` after `CreateRepository`, re-asserted on
+converge), reverse-maps it on observe (`GetLifecyclePolicy` → the duration, MEASURED),
+and reports a policy shape it does not render as a diagnostic — `unknown`, never a
+guessed verdict (the D1024 discipline). A sub-day duration is refused (ECR age-out is
+whole days); a missing policy leaves the path absent, never a fabricated satisfied.
+
+Field-verified on our own account (jpdevops, eu-central-1): create a repo with
+`retention.maximum: 7d` → real ECR accepted the lifecycle policy → observe read it
+back as `7d` measured (no diagnostics) → repo deleted, no residue. So the attribute is
+`measured`, not assumed. The two new routes (`Get`/`PutLifecyclePolicy`) are recorded
+in the route-capture file. GCP Artifact Registry (cleanup policy) and Azure ACR
+(retention policy) fulfil the same attribute in their own slices — an explicit,
+mapped parity follow-up, not a silent gap (the vocab names both mappings).
+
+Slice 1's other half (#3, S3 retention taken-as-declared) needed no work: `observeS3`
+already reads `GetObjectLockConfiguration`/lifecycle and emits `retention.minimum`/
+`retention.maximum` MEASURED (`TestObserveS3ObjectLock` pins it) — the field finding
+predates that read. Confirmed closed.

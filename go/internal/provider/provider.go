@@ -1793,13 +1793,24 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			// (observe + ownership pre-read on delete/conflict).
 			switch operation {
 			case "create", "adopt":
-				return sortedDedup([]string{"ecr:CreateRepository", "ecr:DescribeRepositories",
-					"ecr:ListTagsForResource", "ecr:TagResource"})
+				perms := []string{"ecr:CreateRepository", "ecr:DescribeRepositories",
+					"ecr:ListTagsForResource", "ecr:TagResource"}
+				if _, ok := attrs["retention.maximum"]; ok {
+					// D1029: applies the age-out lifecycle rule and reads it back on observe.
+					perms = append(perms, "ecr:PutLifecyclePolicy", "ecr:GetLifecyclePolicy")
+				}
+				return sortedDedup(perms)
 			case "update":
 				// D4: scan-on-push (PutImageScanningConfiguration) + tag mutability, each
 				// re-checking ownership tags via DescribeRepositories/ListTagsForResource.
-				return sortedDedup([]string{"ecr:DescribeRepositories", "ecr:ListTagsForResource",
-					"ecr:PutImageTagMutability", "ecr:PutImageScanningConfiguration"})
+				perms := []string{"ecr:DescribeRepositories", "ecr:ListTagsForResource",
+					"ecr:PutImageTagMutability", "ecr:PutImageScanningConfiguration"}
+				if _, ok := attrs["retention.maximum"]; ok {
+					// D1029: re-assert or clear the age-out rule; converge observes it.
+					perms = append(perms, "ecr:PutLifecyclePolicy",
+						"ecr:DeleteLifecyclePolicy", "ecr:GetLifecyclePolicy")
+				}
+				return sortedDedup(perms)
 			case "delete":
 				return sortedDedup([]string{"ecr:DeleteRepository",
 					"ecr:DescribeRepositories", "ecr:ListTagsForResource"})

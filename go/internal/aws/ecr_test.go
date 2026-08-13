@@ -1,6 +1,7 @@
 package aws
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -317,4 +318,117 @@ func TestAdoptsExistingECR(t *testing.T) {
 		AllowedMutations: 2, // the refused CreateRepository + convergence
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
+
+// TestECRRetentionMaximumRoundTrip pins the closed lifecycle shape: BuildECR parses
+// the duration, the render round-trips through the reverse-map, a shape the driver
+// does not render maps to UNKNOWN (never a guess), and a sub-day duration is refused.
+func TestECRRetentionMaximumRoundTrip(t *testing.T) {
+	a := ecrAttrs()
+	a["retention.maximum"] = "30d"
+	p, err := BuildECR("prod", "images", a, ecrImpl(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.RetentionMaxDays != 30 {
+		t.Fatalf("RetentionMaxDays = %d, want 30", p.RetentionMaxDays)
+	}
+	if days, ok := ecrLifecycleDays(p.lifecyclePolicyText()); !ok || days != 30 {
+		t.Fatalf("render->reverse-map = (%d,%v), want (30,true)", days, ok)
+	}
+	rich := `{"rules":[{"rulePriority":1,"selection":{"tagStatus":"tagged","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}`
+	if _, ok := ecrLifecycleDays(rich); ok {
+		t.Fatal("a countType we do not render must reverse-map to unknown, not a guess")
+	}
+	a["retention.maximum"] = "12h"
+	if _, err := BuildECR("prod", "images", a, ecrImpl(), 1); err == nil {
+		t.Fatal("sub-day retention.maximum must be refused (ECR age-out is whole days)")
+	}
+}
+
+// TestCreateECRAppliesLifecycle: a create with retention.maximum puts the lifecycle
+// policy (the closed shape) after CreateRepository.
+func TestCreateECRAppliesLifecycle(t *testing.T) {
+	var lifecycleBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tgt := r.Header.Get("X-Amz-Target")
+		switch tgt[strings.LastIndex(tgt, ".")+1:] {
+		case "CreateRepository":
+			_, _ = w.Write([]byte(`{"repository":{"repositoryName":"x"}}`))
+		case "PutLifecyclePolicy":
+			b, _ := io.ReadAll(r.Body)
+			lifecycleBody = string(b)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			w.WriteHeader(400)
+		}
+	}))
+	defer srv.Close()
+	d := ecrDriver(t, srv)
+	a := ecrAttrs()
+	a["retention.maximum"] = "45d"
+	res := d.createECR("eu-central-1", "000000000000", "prod", "images", a, ecrImpl(), 1)
+	if res.Status != "succeeded" {
+		t.Fatalf("create status = %q (%s)", res.Status, res.Reason)
+	}
+	var pb struct {
+		LifecyclePolicyText string `json:"lifecyclePolicyText"`
+	}
+	if json.Unmarshal([]byte(lifecycleBody), &pb) != nil {
+		t.Fatalf("PutLifecyclePolicy body unparseable: %s", lifecycleBody)
+	}
+	if days, ok := ecrLifecycleDays(pb.LifecyclePolicyText); !ok || days != 45 {
+		t.Fatalf("PutLifecyclePolicy did not carry a 45d since-pushed expiry: %s", pb.LifecyclePolicyText)
+	}
+}
+
+// TestObserveECRRetentionMaximum: observe reverse-maps GetLifecyclePolicy to a
+// measured duration; no policy leaves the path absent (not a false satisfied).
+func TestObserveECRRetentionMaximum(t *testing.T) {
+	policy := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tgt := r.Header.Get("X-Amz-Target")
+		switch tgt[strings.LastIndex(tgt, ".")+1:] {
+		case "DescribeRepositories":
+			_, _ = w.Write([]byte(`{"repositories":[{"imageTagMutability":"MUTABLE","encryptionConfiguration":{"encryptionType":"AES256"}}]}`))
+		case "GetLifecyclePolicy":
+			if !policy {
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`{"__type":"LifecyclePolicyNotFoundException"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"lifecyclePolicyText":"{\"rules\":[{\"rulePriority\":1,\"selection\":{\"tagStatus\":\"any\",\"countType\":\"sinceImagePushed\",\"countUnit\":\"days\",\"countNumber\":60},\"action\":{\"type\":\"expire\"}}]}"}`))
+		default:
+			w.WriteHeader(400)
+		}
+	}))
+	defer srv.Close()
+	d := ecrDriver(t, srv)
+	pid := "ecr:eu-central-1:000000000000:pv-images-prod-abcd1234"
+
+	obs, diags, err := d.observeECR("images", pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := ecrObsVal(obs, "retention.maximum"); v != "60d" {
+		t.Fatalf("retention.maximum = %v, want 60d (diags %v)", v, diags)
+	}
+	// no policy -> the path is simply absent, never a fabricated satisfied
+	policy = false
+	obs2, _, err := d.observeECR("images", pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := ecrObsVal(obs2, "retention.maximum"); v != nil {
+		t.Fatalf("retention.maximum must be absent with no lifecycle policy, got %v", v)
+	}
+}
+
+func ecrObsVal(obs []provider.Observation, path string) any {
+	for _, o := range obs {
+		if o.Path == path {
+			return o.Value
+		}
+	}
+	return nil
 }
