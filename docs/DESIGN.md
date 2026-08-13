@@ -33959,8 +33959,10 @@ the capability is a `capability.monitoring.logs`; the operator scoped the consen
 consent, or no grant — the group stays refused. The grant is a per-action bool because the
 action's own `Target` already names the exact log group, so nothing widens it. Apply re-derives
 the CONSENT from the pinned contract (`emissionAdopt=true` without scoped consent → refuse,
-naming `allow_emission_adopt`), the D959 defence-in-depth; the provenance is sealed under the plan
-hash.
+naming `allow_emission_adopt`), the D959 defence-in-depth. (This 3.3b entry claimed the
+PROVENANCE was "sealed under the plan hash" and needed no apply re-check — that was WRONG, and
+D1037 corrects it: apply anchors only the contract and candidate hashes, never the plan's action
+set, so provenance must be re-derived at apply too.)
 
 Deliberately NOT here (Slice 3.3c): `createCWLogs` HONOURING the grant — adopting the untagged
 group and setting retention — and FM-3, making that retention write its own DAG action so a
@@ -34061,3 +34063,34 @@ now on the group, so the loop closes: govern → measure → satisfied.
 With 3.3c the family's #1 finding is fully addressed: the group that holds the data can be
 required to age it out, the authority to govern it is an explicit scoped consent over a
 provenance-checked `$ref`, and no verdict reads green over an empty or ungoverned vessel.
+
+## D1037 — apply re-derives the emission-adopt PROVENANCE, not just the consent
+
+An overnight adversarial audit (two independent agents, same defect) found a hole in the
+D1034/D1036 emission-adopt path — on the freshest code, the published-claims-need-gates shape
+on my own comment. D1034 re-derived the CONSENT at apply (D959) but trusted the sealed
+`emissionAdopt` bool for the PROVENANCE, justifying it with "the provenance is sealed under the
+plan hash". That claim was false: apply anchors only the contract and candidate hashes
+(`reads.contractHash`/`reads.candidateHash`), NEVER the plan's action set — the whole reason the
+consent is re-derived rather than trusted (D959). Provenance sat outside that defence.
+
+The exploit (the D959 hand-authored-plan threat model, which the create path never emits): a
+contract that legitimately scopes `allow_emission_adopt: [L]`, a candidate for a `monitoring.logs`
+`L` with a LITERAL foreign `log_group` (`BuildCWLogs` allows a pinned literal) — say
+`/prod/security/audit-trail` — and a hand-authored plan whose `L` create carries
+`emissionAdopt: true` with no folds. Both read-set hashes match, the consent re-check passes
+(genuinely scoped), nothing re-checked the provenance, so `createCWLogs` crossed the ownership-tag
+gate (D439–D472) and forced 30-day retention on another team's audit group — reported `succeeded`.
+`emissionAdopt` is the one grant that writes to a resource groundhold does not own, and its
+provenance is the half that PICKS THE TARGET, so leaving it unverified is worse than fieldReclaim's
+owned-field case.
+
+Fix: apply re-derives provenance from the HASH-PINNED CANDIDATE (never the forgeable plan folds).
+`emissionAdoptProvenanceOK` mirrors `mintEmissionAdopt`: `L`'s `implementation.log_group` must be a
+`$ref` whose `(capability, output)` resolves to a certified emission `GovernedBy` monitoring.logs.
+A literal group, a `$ref` to a non-emission output, or a provider that certifies no emissions all
+fail closed → refuse. A legitimate `$ref`-backed plan still passes. The 3.3b comment and DESIGN
+claim are corrected to state provenance is re-derived, not merely sealed. The other four scoped
+consents (replace_stateful, intrusive_probes, protection_lift, field_reclaim) were audited in the
+same pass and confirmed re-derived and fail-closed; the other five Slice-3 vectors (false-measured,
+green-over-vacant, vacuous-gate, D329 drift, FM-3) were confirmed defended.
