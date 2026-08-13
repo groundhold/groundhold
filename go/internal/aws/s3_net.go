@@ -9,7 +9,7 @@
 package aws
 
 import (
-	"crypto/md5"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/xml"
 	"fmt"
@@ -48,7 +48,8 @@ func splitS3ProviderID(providerID string) (region, bucket string, err error) {
 // s3Do signs (with the bucket's region) and sends a request to a bucket
 // sub-resource. Region-explicit so the SigV4 scope matches the endpoint.
 // Body-bearing config PUTs (tagging, public-access-block, versioning) REQUIRE a
-// Content-MD5 (or x-amz-checksum-*) header — verified live; we sign Content-MD5.
+// body checksum — Content-MD5 or x-amz-checksum-* — and we send the SHA-256 one,
+// field-verified live (PutObjectLockConfiguration + PutBucketTagging both accept it).
 func (d *Driver) s3Do(method, region, bucket, path, body string) (int, []byte, error) {
 	return d.s3DoH(method, region, bucket, path, nil, body)
 }
@@ -65,8 +66,14 @@ func (d *Driver) s3DoH(method, region, bucket, path string, extra map[string]str
 	if body != "" {
 		b = []byte(body)
 		h["Content-Type"] = "application/xml"
-		sum := md5.Sum(b)
-		h["Content-MD5"] = base64.StdEncoding.EncodeToString(sum[:])
+		// SHA-256 body checksum, not the legacy Content-MD5. AWS accepts
+		// x-amz-checksum-sha256 in place of Content-MD5 on the body PUTs that once
+		// required it — field-verified live on PutObjectLockConfiguration (200) and
+		// PutBucketTagging (204) — and MD5 raised a CodeQL weak-hash alert on the
+		// public repo (the body is an integrity checksum, never a secret, but the
+		// modern header is the honest fix). doSigned signs whatever we pass here.
+		sum := sha256.Sum256(b)
+		h["x-amz-checksum-sha256"] = base64.StdEncoding.EncodeToString(sum[:])
 	}
 	return d.doSigned(method, d.s3Base(region, bucket)+path, "s3", region, h, b)
 }

@@ -33755,3 +33755,29 @@ resource-completion gaps in logs retention, s3 retention and registry lifecycle)
 `subscriptions` operand on the `aws/sns` driver, or a `delivery.hasSubscriber`
 attribute on `capability.messaging.topic`, so a blind topic is expressible in the
 contract rather than left to whoever remembers to check by hand.
+
+## D1028 — S3 body checksum: SHA-256, not MD5 (a CodeQL alert, field-verified)
+
+The first CodeQL alert on the now-public repo (`go/weak-sensitive-data-hashing`,
+HIGH) flagged the `Content-MD5` header the S3 driver signs on body-bearing config
+PUTs (`s3_net.go`). Copilot Autofix opened a draft PR proposing SHA-256. The alert
+is a false positive in intent — the body is an integrity checksum over XML config
+(Object Lock rule, tagging, policy), never a secret — but MD5 is not the honest
+modern header, and a HIGH alert on a launched project's security tab is worth
+closing at the source rather than dismissing.
+
+The risk was real: `PutObjectLockConfiguration` and `PutBucketTagging` historically
+REQUIRED `Content-MD5`, the current path is field-verified with it, and the S3
+driver is `measured` — swapping to `x-amz-checksum-sha256` unverified could break
+real S3 and regress the driver's honesty. So it was field-verified first, on our
+own account (jpdevops, eu-central-1): a throwaway test created an object-lock bucket
+and sent both operations with `x-amz-checksum-sha256` instead of `Content-MD5` —
+`PutObjectLockConfiguration` 200, `PutBucketTagging` 204, bucket deleted, no
+residue. Real S3 accepts the SHA-256 checksum on exactly the operations that once
+required MD5. Only then was the swap applied (`crypto/md5`→`crypto/sha256`,
+`Content-MD5`→`x-amz-checksum-sha256`; `doSigned` signs whatever header we pass, so
+no signing change), and the golden tests re-pinned to assert the SHA-256 checksum.
+The driver stays `measured` — the new header is field-proven, not assumed. The
+autofix PR is closed in favour of this, which lands through the private→sync path
+(a merge on the public mirror would be overwritten by the next sync and the sync
+would then refuse the un-replayed work, D714).
