@@ -656,7 +656,7 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 	// fold sealed fresh must not apply against a decayed or superseded
 	// reading. Either way the remedy is re-observe + re-seal, the stale-plan
 	// class (exit 3), checked pre-lease like the decision heads above.
-	if reason := foldStaleReason(led, actions, evalClock); reason != "" {
+	if reason := foldStaleReason(led, cand, actions, evalClock); reason != "" {
 		return refused(perr.StaleDecision, 3, reason)
 	}
 	if reason := changeStaleReason(led, actions, evalClock); reason != "" {
@@ -1827,15 +1827,56 @@ func changeStaleReason(led *ledger.Ledger, actions []any, evalClock int) string 
 	return ""
 }
 
-func foldStaleReason(led *ledger.Ledger, actions []any, evalClock int) string {
+// foldMatchesCandidateRef reports whether capID's pinned candidate wires operand
+// `slot` as a $ref to exactly (refCap, refOut) — the fold's claimed producer output
+// (D1039). A dotted slot (base.sub) matches a $ref nested in a map operand's value,
+// the same shape foldedImplementation folds INTO. A literal operand, a $ref to a
+// different producer, or an absent slot all fail closed, so a forged fold is refused.
+func foldMatchesCandidateRef(cand *contract.Candidate, actionCap, slot, refCap, refOut string) bool {
+	impl := implementationOf(cand, actionCap)
+	var operand any
+	if base, sub, nested := strings.Cut(slot, "."); nested {
+		m, _ := impl[base].(map[string]any)
+		operand = m[sub]
+	} else {
+		operand = impl[slot]
+	}
+	m, ok := operand.(map[string]any)
+	if !ok {
+		return false
+	}
+	rm, ok := m["$ref"].(map[string]any)
+	if !ok {
+		return false
+	}
+	c, _ := rm["capability"].(string)
+	o, _ := rm["output"].(string)
+	return c == refCap && o == refOut
+}
+
+func foldStaleReason(led *ledger.Ledger, cand *contract.Candidate, actions []any, evalClock int) string {
 	for _, it := range actions {
 		a, _ := it.(map[string]any)
 		folds, _ := a["folds"].([]any)
+		actionCap, _ := a["capability"].(string)
 		for _, fi := range folds {
 			f, _ := fi.(map[string]any)
 			capID, _ := f["capability"].(string)
 			out, _ := f["output"].(string)
 			slot, _ := f["slot"].(string)
+			// D1039: re-derive the fold's slot->producer binding from the HASH-PINNED
+			// candidate, not the forgeable plan fold. The compiler folds a fold ONLY from
+			// a candidate $ref operand, so a legitimate fold's slot in the candidate is a
+			// $ref to exactly this (capability, output). A hand-authored fold naming a
+			// different producer/output (or overriding a literal operand) would inject an
+			// arbitrary value — a wrong key, a wrong endpoint — that candidateHash cannot
+			// catch because the fold lives in the plan. If the candidate does not wire this
+			// slot to this producer output, the fold is forged: refuse.
+			if !foldMatchesCandidateRef(cand, actionCap, slot, capID, out) {
+				return fmt.Sprintf("forged plan: folded operand %v.%s claims outputs.%s of "+
+					"%s, but the pinned candidate does not wire that slot to it — refusing an "+
+					"operand the candidate never declared", a["id"], slot, out, capID)
+			}
 			rec, ok := led.Outputs[capID][out]
 			if !ok {
 				return fmt.Sprintf("stale plan: folded operand %v.%s — the ledger "+
