@@ -47,6 +47,15 @@ type Driver struct {
 	// is waiting on instead of going silent for minutes. nil = no sink (the driver's
 	// semantics are identical either way). Set via SetProgress; emit via progress().
 	progressSink func(phase string)
+	// emissionAdopt (D1036) is the executor's per-action emission-adopt grant (D1034):
+	// when set, createCWLogs may take over a log group the PROVIDER created — the
+	// /aws/lambda/<fn> group a bound monitoring.logs governs — instead of refusing it
+	// as un-owned. Set from the SEALED plan before the create and cleared after, so it
+	// never leaks onto the next action. Narrow by construction: it only lets the create
+	// set retention on the group its own Target already names; the compiler minted the
+	// grant only for a $ref to a certified emission (D1032), so the driver never decides
+	// adoption from the group name.
+	emissionAdopt bool
 	// secrets (D309) holds the credential values of the mutation in flight so the
 	// driver can scrub them out of a Reason before it is persisted.
 	secrets provider.Redactor
@@ -100,6 +109,10 @@ type Driver struct {
 // SetProgress wires the executor's intra-action heartbeat sink (D257 —
 // provider.ProgressReporter). Passing nil detaches it.
 func (d *Driver) SetProgress(report func(phase string)) { d.progressSink = report }
+
+// SetEmissionAdopt implements provider.EmissionAdopter (D1036). The executor sets it
+// per action from the plan's sealed grant (D1034) and clears it after the call.
+func (d *Driver) SetEmissionAdopt(allowed bool) { d.emissionAdopt = allowed }
 
 // progress emits an intra-action heartbeat (a no-op when no sink is wired). A long
 // poll loop calls it each iteration so the phase (e.g. "cluster upgrading") reaches

@@ -146,10 +146,21 @@ func (d *Driver) createCWLogs(region, environment, capability string,
 				Reason: "name conflict, existing log group tags gave no answer — reconcile: " + terr.Error()}
 		}
 		if !groundholdTagsMatch(tags, capability, environment) {
-			return provider.CreateResult{Status: "failed",
-				Reason: "a log group with this name exists and is not ours (tags do not match)"}
+			if !d.emissionAdopt {
+				return provider.CreateResult{Status: "failed",
+					Reason: "a log group with this name exists and is not ours (tags do not match)"}
+			}
+			// D1036: the sealed emission-adopt grant (D1034) authorises taking over THIS
+			// group — a monitoring.logs bound by $ref to a compute's certified emitted
+			// group (/aws/lambda/<fn>), which the provider created so it carries no
+			// ownership tags. GOVERN without CLAIMING: fall through to set retention but
+			// write NO ownership tag, so a re-run re-adopts idempotently and retire leaves
+			// the provider's group untouched (retire-without-delete). The compiler minted
+			// this grant only for THIS providerId (the action's Target), so it is not a
+			// blanket force over an arbitrary group.
 		}
-		// ours — fall through to (idempotently) ensure retention + encryption
+		// ours, or adopted under a D1036 grant — fall through to (idempotently) ensure
+		// retention + encryption
 	case st >= 500:
 		return provider.CreateResult{ProviderID: pid, Status: "unknown",
 			Reason: fmt.Sprintf("CreateLogGroup HTTP %d (server error — may have landed): %s", st, mutDetail(resp))}

@@ -72,6 +72,8 @@ var readOnlyVerbs = map[string]string{
 	"SetProgress":              "projection only (D257) — changes no mutation semantics",
 	"SetFieldReclaim": "consent carrier (D699) — sets driver state from the SEALED plan; " +
 		"writes nothing itself, and what it permits is checked at the write it gates",
+	"SetEmissionAdopt": "consent carrier (D1036) — sets driver state from the SEALED plan; " +
+		"writes nothing itself, and what it permits is a retention set the compiler already scoped",
 	"LROTimeout": "policy value",
 }
 

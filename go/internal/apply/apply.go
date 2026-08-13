@@ -922,6 +922,12 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 			reclaim, _ := a["fieldReclaim"].(bool)
 			fr.SetFieldReclaim(reclaim)
 		}
+		// D1036: the sealed emission-adopt grant (D1034), same discipline — set from the
+		// PLAN so it cannot be widened after sealing, cleared after the call below.
+		if ea, ok := prov.(provider.EmissionAdopter); ok {
+			adopt, _ := a["emissionAdopt"].(bool)
+			ea.SetEmissionAdopt(adopt)
+		}
 
 		var cr provider.CreateResult
 		op, _ := a["operation"].(string)
@@ -978,6 +984,9 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 		}
 		if fr, ok := prov.(provider.FieldReclaimer); ok {
 			fr.SetFieldReclaim(false)
+		}
+		if ea, ok := prov.(provider.EmissionAdopter); ok {
+			ea.SetEmissionAdopt(false)
 		}
 
 		// D275: a succeeded create's declared outputs are filtered through the

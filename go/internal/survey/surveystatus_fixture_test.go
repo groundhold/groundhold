@@ -11,7 +11,7 @@ import (
 
 // surveyStatusParitySHA256 pins the shared survey-status parity fixture. The SAME
 // file and constant live in the console
-// (proviso-console/internal/server/surveystatus_parity_test.go). The console's
+// (the console repo, internal/server/surveystatus_parity_test.go). The console's
 // surveyDigest folds these statuses into a portfolio count and cannot import this
 // package across the repo split, so it gates its handling against this fixture;
 // this test proves the fixture is EXACTLY CoverageStatuses()/OrphanStatuses(), so

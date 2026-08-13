@@ -69,7 +69,7 @@ func TestPythonReferenceImportsStdlibOnly(t *testing.T) {
 		t.Fatalf("only %d stdlib modules — the gate would be vacuous (D328)", len(stdlib))
 	}
 
-	allowed := map[string]bool{"yaml": true, "groundholdlib": true, "provisolib": true}
+	allowed := map[string]bool{"yaml": true, "groundholdlib": true}
 	importRE := regexp.MustCompile(`(?m)^\s*(?:from\s+([a-zA-Z_][\w.]*)\s+import|import\s+([a-zA-Z_][\w.]*))`)
 
 	var foreign []string

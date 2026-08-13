@@ -130,6 +130,59 @@ func TestCreateCWLogs_AlreadyExistsForeignFails(t *testing.T) {
 	}
 }
 
+// D1036: WITH the sealed emission-adopt grant a group the provider created (untagged
+// by us) is GOVERNED — createCWLogs sets retention on it instead of refusing. The
+// same foreign group that TestCreateCWLogs_AlreadyExistsForeignFails refuses is now
+// adopted, because the grant authorised taking over exactly this providerId.
+func TestCreateCWLogs_EmissionAdoptGoverns(t *testing.T) {
+	name := CWLogGroupName("prod", "app-logs", 1)
+	srv := cwLogsFailAlreadyExistsServer(t, name, "someone-else")
+	defer srv.Close()
+	d := cwLogsDriver(t, srv)
+	d.SetEmissionAdopt(true) // the sealed D1034 grant the executor sets per action
+	res := d.createCWLogs("eu-central-1", "prod", "app-logs", cwLogsAttrs(), nil, 1)
+	if res.Status != "succeeded" {
+		t.Fatalf("with the emission-adopt grant a provider-created group is governed "+
+			"(retention set), not refused, got %+v", res)
+	}
+}
+
+// D1036 / FM-3: the grant lets the create ADOPT, but retention is still enforced
+// WITHIN the same action — if PutRetentionPolicy fails on the adopted group the create
+// does NOT succeed, so converge cannot read green over a group left at its old (None)
+// retention. Governance is not "adopted", it is "adopted AND retention set".
+func TestCreateCWLogs_EmissionAdoptRetentionFailureIsNotGreen(t *testing.T) {
+	name := CWLogGroupName("prod", "app-logs", 1)
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			target := r.Header.Get("X-Amz-Target")
+			switch target[strings.LastIndex(target, ".")+1:] {
+			case "CreateLogGroup":
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`{"__type":"ResourceAlreadyExistsException","message":"exists"}`))
+			case "DescribeLogGroups":
+				arn := "arn:aws:logs:eu-central-1:000000000000:log-group:" + name + ":*"
+				out, _ := json.Marshal(map[string]any{"logGroups": []any{
+					map[string]any{"logGroupName": name, "arn": arn}}})
+				_, _ = w.Write(out)
+			case "ListTagsForResource":
+				_, _ = w.Write([]byte(`{"tags":{"groundhold-capability":"someone-else","groundhold-environment":"prod"}}`))
+			case "PutRetentionPolicy":
+				w.WriteHeader(400) // the whole point: retention does NOT land
+				_, _ = w.Write([]byte(`{"__type":"SomeException","message":"boom"}`))
+			default:
+				_, _ = w.Write([]byte(`{}`))
+			}
+		}))
+	defer srv.Close()
+	d := cwLogsDriver(t, srv)
+	d.SetEmissionAdopt(true)
+	res := d.createCWLogs("eu-central-1", "prod", "app-logs", cwLogsAttrs(), nil, 1)
+	if res.Status == "succeeded" {
+		t.Fatalf("an adopt whose retention did NOT land must not succeed (FM-3), got %+v", res)
+	}
+}
+
 func TestCreateCWLogs_CreateLogGroup5xxIsUnknown(t *testing.T) {
 	srv := cwLogsFailServer(t, "x", "app-logs", 0, "", cwLogsFail{action: "CreateLogGroup", status: 500})
 	defer srv.Close()
