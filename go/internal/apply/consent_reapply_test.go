@@ -144,3 +144,45 @@ func TestApplyRefusesEmissionAdoptWithoutConsent(t *testing.T) {
 			"allow_emission_adopt; reasons=%v outcomes=%v", res.Reasons, res.Outcomes)
 	}
 }
+
+// emAdoptProv certifies its lambda service emits a log group a monitoring.logs governs
+// — the provenance emissionAdoptProvenanceOK re-derives.
+type emAdoptProv struct{ provider.Fake }
+
+func (*emAdoptProv) EmittedCompanions() map[string][]provider.EmittedCompanion {
+	return map[string][]provider.EmittedCompanion{
+		"lambda": {{GovernedBy: "capability.monitoring.logs", NameOutput: "logGroupName"}},
+	}
+}
+
+func emAdoptCand(logGroup any) *contract.Candidate {
+	return &contract.Candidate{ContractID: "x", Extras: map[string]map[string]any{
+		"api": {"provider": "aws", "service": "lambda"},
+		"logs": {"provider": "aws", "service": "cwlogs",
+			"implementation": map[string]any{"log_group": logGroup}},
+	}}
+}
+
+// D1037: apply re-derives emission-adopt PROVENANCE from the pinned candidate, not the
+// forgeable plan folds. The audit exploit: a scoped consent + a LITERAL foreign
+// log_group + a hand-authored emissionAdopt=true plan would take over another team's log
+// group (force 30-day retention on their audit trail) and report success. Provenance
+// re-derivation refuses it — a literal group carries no emission provenance — while a
+// real $ref to a certified emission still passes.
+func TestEmissionAdoptProvenanceReDerivedFromCandidate(t *testing.T) {
+	prov := &emAdoptProv{}
+	if emissionAdoptProvenanceOK(emAdoptCand("/prod/security/audit-trail"), prov, "logs") {
+		t.Fatal("a literal foreign log_group must FAIL provenance — the audit's exploit")
+	}
+	ref := map[string]any{"$ref": map[string]any{"capability": "api", "output": "logGroupName"}}
+	if !emissionAdoptProvenanceOK(emAdoptCand(ref), prov, "logs") {
+		t.Fatal("a $ref to a certified emission must PASS provenance")
+	}
+	bad := map[string]any{"$ref": map[string]any{"capability": "api", "output": "functionArn"}}
+	if emissionAdoptProvenanceOK(emAdoptCand(bad), prov, "logs") {
+		t.Fatal("a $ref to a non-emission output must FAIL provenance")
+	}
+	if emissionAdoptProvenanceOK(emAdoptCand(ref), &provider.Fake{}, "logs") {
+		t.Fatal("a provider that certifies no emissions must FAIL closed")
+	}
+}

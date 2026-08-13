@@ -433,17 +433,34 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 			r.Capability = capID // D230
 			return r
 		}
-		// D1034: the emission-adopt consent (D1034), same re-derivation. A stale or
-		// hand-authored plan can assert emissionAdopt=true for a capability the contract
-		// never scoped — taking over a log group the provider created. The provenance
-		// (a $ref to a certified emission) was checked when the grant was minted and is
-		// sealed under the plan hash; this is the consent half's defence-in-depth.
-		if adopt, _ := a["emissionAdopt"].(bool); adopt && !policy.AllowsEmissionAdopt(c, capID) {
-			r := refused(perr.ConsentRequired, 2, fmt.Sprintf(
-				"action %v adopts a provider-created log group on %s without "+
-					"autonomy.allow_emission_adopt consent", a["id"], capID))
-			r.Capability = capID // D230
-			return r
+		// D1034/D1037: the emission-adopt grant is re-derived from the pinned contract AND
+		// candidate at apply — BOTH halves, not just the consent. apply anchors only the
+		// contract and candidate hashes (above), never the plan's action set, so a
+		// hand-authored plan can assert emissionAdopt=true with a LITERAL foreign
+		// log_group and cross the ownership-tag gate onto a group it never emitted
+		// (D1037, found by audit). So:
+		//   - CONSENT: the live contract must scope allow_emission_adopt to this cap.
+		//   - PROVENANCE: the pinned candidate's log_group must be a $ref to a certified
+		//     emission (mirror mintEmissionAdopt) — the forgeable plan folds are NOT
+		//     trusted. A literal group, or a $ref to a non-emission output, refuses.
+		// This is the D959 discipline applied to the half that PICKS THE TARGET, which for
+		// emission-adopt (unlike fieldReclaim's owned-resource fields) is a foreign group.
+		if adopt, _ := a["emissionAdopt"].(bool); adopt {
+			if !policy.AllowsEmissionAdopt(c, capID) {
+				r := refused(perr.ConsentRequired, 2, fmt.Sprintf(
+					"action %v adopts a provider-created log group on %s without "+
+						"autonomy.allow_emission_adopt consent", a["id"], capID))
+				r.Capability = capID // D230
+				return r
+			}
+			if !emissionAdoptProvenanceOK(cand, prov, capID) {
+				r := refused(perr.ConsentRequired, 2, fmt.Sprintf(
+					"action %v asserts emissionAdopt on %s but its log_group is not a $ref "+
+						"to a certified emission — refusing to adopt a group whose "+
+						"provenance the pinned candidate does not carry", a["id"], capID))
+				r.Capability = capID // D230
+				return r
+			}
 		}
 		switch op, _ := a["operation"].(string); op {
 		case "create":
@@ -1932,6 +1949,38 @@ func candidateService(cand *contract.Candidate, capID string) string {
 	}
 	s, _ := cand.Extras[capID]["service"].(string)
 	return s
+}
+
+// emissionAdoptProvenanceOK re-derives, from the HASH-PINNED candidate (never the
+// forgeable plan folds), that capID's log_group operand is a $ref to a certified
+// emission a monitoring.logs governs (D1037). This is the apply-side twin of
+// mintEmissionAdopt's provenance check: a literal log_group, a $ref to a
+// non-emission output, or a provider that certifies no emissions all fail closed —
+// so a hand-authored plan asserting emissionAdopt over a foreign group is refused.
+func emissionAdoptProvenanceOK(cand *contract.Candidate, prov provider.Provider, capID string) bool {
+	m, ok := implementationOf(cand, capID)["log_group"].(map[string]any)
+	if !ok {
+		return false // a literal (or absent) log_group carries no emission provenance
+	}
+	rm, ok := m["$ref"].(map[string]any)
+	if !ok {
+		return false
+	}
+	refCap, _ := rm["capability"].(string)
+	refOut, _ := rm["output"].(string)
+	if refCap == "" || refOut == "" {
+		return false
+	}
+	ec, ok := prov.(provider.EmissionCertifier)
+	if !ok {
+		return false
+	}
+	for _, comp := range ec.EmittedCompanions()[candidateService(cand, refCap)] {
+		if comp.NameOutput == refOut && comp.GovernedBy == "capability.monitoring.logs" {
+			return true
+		}
+	}
+	return false
 }
 
 func parseTs(s string) (int, error) { return ledger.ParseTs(s) }
