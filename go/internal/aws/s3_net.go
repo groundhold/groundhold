@@ -9,7 +9,7 @@
 package aws
 
 import (
-	"crypto/md5"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/xml"
 	"fmt"
@@ -65,8 +65,8 @@ func (d *Driver) s3DoH(method, region, bucket, path string, extra map[string]str
 	if body != "" {
 		b = []byte(body)
 		h["Content-Type"] = "application/xml"
-		sum := md5.Sum(b)
-		h["Content-MD5"] = base64.StdEncoding.EncodeToString(sum[:])
+		sum := sha256.Sum256(b)
+		h["x-amz-checksum-sha256"] = base64.StdEncoding.EncodeToString(sum[:])
 	}
 	return d.doSigned(method, d.s3Base(region, bucket)+path, "s3", region, h, b)
 }
