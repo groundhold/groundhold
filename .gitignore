@@ -9,9 +9,16 @@ differential-failures/
 .canary/
 .groundhold/
 state/
+# `state/` is a local runtime-state scratch dir, but the name also matches the
+# go/internal/state SOURCE package — new files there were silently ignored (its
+# existing files are tracked only because they were force-added). Re-include it.
+!go/internal/state/
 # mkdocs build output (D490: `mkdocs build --strict` now runs in CI and locally)
 website/site/
 
 # compiled CLI binary (build artifact — never commit)
 /go/groundhold
 /groundhold
+
+# Go build cache — pre-existing tracked bloat (D627), never publish, never track
+.gocache/

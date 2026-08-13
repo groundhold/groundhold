@@ -1,0 +1,64 @@
+{
+  "cases": [
+    {
+      "name": "a single satisfied hard constraint is proven",
+      "verdicts": [{"severity": "hard", "verdict": "satisfied"}],
+      "expected": "proven"
+    },
+    {
+      "name": "two satisfied hard constraints are proven",
+      "verdicts": [{"severity": "hard", "verdict": "satisfied"}, {"severity": "hard", "verdict": "satisfied"}],
+      "expected": "proven"
+    },
+    {
+      "name": "a hard violation is violated",
+      "verdicts": [{"severity": "hard", "verdict": "violated"}],
+      "expected": "violated"
+    },
+    {
+      "name": "a hard unknown blocks",
+      "verdicts": [{"severity": "hard", "verdict": "unknown"}],
+      "expected": "blocked"
+    },
+    {
+      "name": "a hard unverifiable blocks",
+      "verdicts": [{"severity": "hard", "verdict": "unverifiable"}],
+      "expected": "blocked"
+    },
+    {
+      "name": "a hard violation outranks a hard unknown (violated over blocked)",
+      "verdicts": [{"severity": "hard", "verdict": "violated"}, {"severity": "hard", "verdict": "unknown"}],
+      "expected": "violated"
+    },
+    {
+      "name": "hard unknown and hard unverifiable together still block",
+      "verdicts": [{"severity": "hard", "verdict": "unknown"}, {"severity": "hard", "verdict": "unverifiable"}],
+      "expected": "blocked"
+    },
+    {
+      "name": "a satisfied hard constraint plus a hard violation is violated",
+      "verdicts": [{"severity": "hard", "verdict": "satisfied"}, {"severity": "hard", "verdict": "violated"}],
+      "expected": "violated"
+    },
+    {
+      "name": "a satisfied hard constraint plus a hard unknown blocks",
+      "verdicts": [{"severity": "hard", "verdict": "satisfied"}, {"severity": "hard", "verdict": "unknown"}],
+      "expected": "blocked"
+    },
+    {
+      "name": "a soft violation does NOT count: still proven (hard-only rule)",
+      "verdicts": [{"severity": "hard", "verdict": "satisfied"}, {"severity": "soft", "verdict": "violated"}],
+      "expected": "proven"
+    },
+    {
+      "name": "a soft unknown does NOT count: still proven (hard-only rule)",
+      "verdicts": [{"severity": "hard", "verdict": "satisfied"}, {"severity": "soft", "verdict": "unknown"}],
+      "expected": "proven"
+    },
+    {
+      "name": "only soft verdicts, none satisfied: nothing hard counts, proven",
+      "verdicts": [{"severity": "soft", "verdict": "violated"}, {"severity": "soft", "verdict": "unknown"}],
+      "expected": "proven"
+    }
+  ]
+}

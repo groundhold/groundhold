@@ -1,0 +1,139 @@
+{
+  "cases": [
+    {
+      "name": "unknown when no event carries the handle",
+      "handle": "abc123", "now": 100, "expected": "unknown",
+      "events": [
+        {"type": "apply.started", "clock": 100, "body": {"applyRunId": "other"}}
+      ]
+    },
+    {
+      "name": "running while the lease is live",
+      "handle": "abc123", "now": 200, "expected": "running",
+      "events": [
+        {"type": "apply.started", "clock": 100, "body": {"applyRunId": "abc123", "plan": "sha256:p"}},
+        {"type": "lease.acquired", "clock": 100, "body": {"applyRunId": "abc123", "ttlSeconds": 300}}
+      ]
+    },
+    {
+      "name": "stalled when the lease lapsed and nothing is pending",
+      "handle": "abc123", "now": 500, "expected": "stalled",
+      "events": [
+        {"type": "apply.started", "clock": 100, "body": {"applyRunId": "abc123", "plan": "sha256:p"}},
+        {"type": "lease.acquired", "clock": 100, "body": {"applyRunId": "abc123", "ttlSeconds": 300}}
+      ]
+    },
+    {
+      "name": "needs-reconcile when the lease lapsed with a pending receipt",
+      "handle": "abc123", "now": 500, "expected": "needs-reconcile",
+      "events": [
+        {"type": "apply.started", "clock": 100, "body": {"applyRunId": "abc123", "plan": "sha256:p"}},
+        {"type": "lease.acquired", "clock": 100, "body": {"applyRunId": "abc123", "ttlSeconds": 300}},
+        {"type": "operation.receipt", "clock": 110, "body": {"applyRunId": "abc123", "operationId": "op1", "status": "pending"}}
+      ]
+    },
+    {
+      "name": "a pending receipt under a live lease is still running",
+      "handle": "abc123", "now": 200, "expected": "running",
+      "events": [
+        {"type": "apply.started", "clock": 100, "body": {"applyRunId": "abc123", "plan": "sha256:p"}},
+        {"type": "lease.acquired", "clock": 100, "body": {"applyRunId": "abc123", "ttlSeconds": 300}},
+        {"type": "operation.receipt", "clock": 110, "body": {"applyRunId": "abc123", "operationId": "op1", "status": "pending"}}
+      ]
+    },
+    {
+      "name": "a concluded receipt clears pending (stalled, no pending left)",
+      "handle": "abc123", "now": 500, "expected": "stalled",
+      "events": [
+        {"type": "apply.started", "clock": 100, "body": {"applyRunId": "abc123", "plan": "sha256:p"}},
+        {"type": "lease.acquired", "clock": 100, "body": {"applyRunId": "abc123", "ttlSeconds": 300}},
+        {"type": "operation.receipt", "clock": 110, "body": {"applyRunId": "abc123", "operationId": "op1", "status": "pending"}},
+        {"type": "operation.receipt", "clock": 120, "body": {"applyRunId": "abc123", "operationId": "op1", "status": "succeeded"}}
+      ]
+    },
+    {
+      "name": "done on apply.finished even after the lease ttl lapsed",
+      "handle": "abc123", "now": 500, "expected": "done",
+      "events": [
+        {"type": "apply.started", "clock": 100, "body": {"applyRunId": "abc123", "plan": "sha256:p"}},
+        {"type": "lease.acquired", "clock": 100, "body": {"applyRunId": "abc123", "ttlSeconds": 300}},
+        {"type": "apply.finished", "clock": 130, "body": {"applyRunId": "abc123"}}
+      ]
+    },
+    {
+      "name": "failed carries the exit code",
+      "handle": "abc123", "now": 140, "expected": "failed",
+      "events": [
+        {"type": "apply.started", "clock": 100, "body": {"applyRunId": "abc123", "plan": "sha256:p"}},
+        {"type": "lease.acquired", "clock": 100, "body": {"applyRunId": "abc123", "ttlSeconds": 300}},
+        {"type": "apply.failed", "clock": 130, "body": {"applyRunId": "abc123", "action": "a-create-db", "exitCode": 4}}
+      ]
+    },
+    {
+      "name": "a stalled run is never failed",
+      "handle": "abc123", "now": 9999, "expected": "stalled",
+      "events": [
+        {"type": "apply.started", "clock": 100, "body": {"applyRunId": "abc123", "plan": "sha256:p"}},
+        {"type": "lease.acquired", "clock": 100, "body": {"applyRunId": "abc123", "ttlSeconds": 300}}
+      ]
+    },
+    {
+      "name": "a converge that reached its apply phase is running under a live lease",
+      "handle": "abc123", "now": 150, "expected": "running",
+      "events": [
+        {"type": "converge.started", "clock": 100, "body": {"convergeRunId": "abc123"}},
+        {"type": "converge.phase.entered", "clock": 101, "body": {"convergeRunId": "abc123", "phase": "verify"}},
+        {"type": "converge.phase.entered", "clock": 102, "body": {"convergeRunId": "abc123", "phase": "apply"}},
+        {"type": "lease.acquired", "clock": 102, "body": {"convergeRunId": "abc123", "ttlSeconds": 300}}
+      ]
+    },
+    {
+      "name": "an unknown receipt needs-reconcile rather than stalled (D641)",
+      "handle": "abc123", "now": 500, "expected": "needs-reconcile",
+      "events": [
+        {"type": "apply.started", "clock": 100, "body": {"applyRunId": "abc123", "plan": "sha256:p"}},
+        {"type": "lease.acquired", "clock": 100, "body": {"applyRunId": "abc123", "ttlSeconds": 300}},
+        {"type": "operation.receipt", "clock": 140, "body": {"applyRunId": "abc123", "operationId": "op-1", "status": "pending"}},
+        {"type": "operation.receipt", "clock": 160, "body": {"applyRunId": "abc123", "operationId": "op-1", "status": "unknown", "targetProviderId": "sql:eu-central-1:widgets"}}
+      ]
+    },
+    {
+      "name": "a retryable receipt still concludes the intent (D241)",
+      "handle": "abc123", "now": 500, "expected": "stalled",
+      "events": [
+        {"type": "apply.started", "clock": 100, "body": {"applyRunId": "abc123", "plan": "sha256:p"}},
+        {"type": "lease.acquired", "clock": 100, "body": {"applyRunId": "abc123", "ttlSeconds": 300}},
+        {"type": "operation.receipt", "clock": 140, "body": {"applyRunId": "abc123", "operationId": "op-1", "status": "pending"}},
+        {"type": "operation.receipt", "clock": 160, "body": {"applyRunId": "abc123", "operationId": "op-1", "status": "retryable"}}
+      ]
+    },
+    {
+      "name": "the last terminal event decides: failed after finished (D656)",
+      "handle": "abc123", "now": 500, "expected": "failed",
+      "events": [
+        {"type": "converge.started", "clock": 100, "body": {"convergeRunId": "abc123"}},
+        {"type": "converge.finished", "clock": 150, "body": {"convergeRunId": "abc123", "exitCode": 0}},
+        {"type": "converge.failed", "clock": 200, "body": {"convergeRunId": "abc123", "exitCode": 2}}
+      ]
+    },
+    {
+      "name": "the last terminal event decides: done after failed (D656)",
+      "handle": "abc123", "now": 500, "expected": "done",
+      "events": [
+        {"type": "converge.started", "clock": 100, "body": {"convergeRunId": "abc123"}},
+        {"type": "converge.failed", "clock": 150, "body": {"convergeRunId": "abc123", "exitCode": 2}},
+        {"type": "converge.finished", "clock": 200, "body": {"convergeRunId": "abc123", "exitCode": 0}}
+      ]
+    },
+    {
+      "name": "another run's release does not end this run's lease (D676)",
+      "handle": "mine00000000", "now": 200, "expected": "running",
+      "events": [
+        {"type": "apply.started", "clock": 100, "capabilities": ["db"], "body": {"applyRunId": "mine00000000"}},
+        {"type": "lease.acquired", "clock": 100, "capabilities": ["db"], "body": {"applyRunId": "mine00000000", "ttlSeconds": 900}},
+        {"type": "lease.acquired", "clock": 110, "capabilities": ["assets"], "body": {"applyRunId": "other0000000", "ttlSeconds": 900}},
+        {"type": "lease.released", "clock": 120, "capabilities": ["assets"], "body": {}}
+      ]
+    }
+  ]
+}

@@ -13,7 +13,7 @@
 An honest self-assessment — what is proven vs merely built vs designed — lives in
 [`docs/MATURITY.md`](docs/MATURITY.md): the verification core is proven and
 adversarially hardened; execution has closed the loop against all three clouds and
-Kubernetes — most of the 145 services have now been run against a real cloud, and a
+Kubernetes — 144 of the 145 services have now been run against a real cloud, and a
 real k3s/k8s cluster exercised all ten mapped services (D509–D549). Read that
 precisely: "field-tested" means it ran against a real cloud — mostly **our own**
 accounts, each run cited in [`docs/COVERAGE.md`](docs/COVERAGE.md) — **not** that an

@@ -1,0 +1,9 @@
+{
+  "statuses": [
+    {"status": "pending", "leavesPending": true},
+    {"status": "succeeded", "leavesPending": false},
+    {"status": "failed", "leavesPending": false},
+    {"status": "unknown", "leavesPending": true},
+    {"status": "retryable", "leavesPending": false}
+  ]
+}
