@@ -37,10 +37,9 @@ Before running a downloaded binary, verify the checksums:
 sha256sum -c SHA256SUMS
 ```
 
-A keyless SLSA build-provenance attestation is produced **only once this repository
-is public** — GitHub does not make one retrievable for a private repository on a free
-plan, so `gh attestation verify` returns 404 until the flip and the release notes claim
-it only after the workflow confirms it exists (D354). Once public:
+Every release carries a keyless SLSA build-provenance attestation, and the release
+notes claim it only after the workflow has confirmed it is retrievable (D354). Verify
+with:
 
 ```sh
 gh attestation verify groundhold_<ver>_<os>_<arch> --repo groundhold/groundhold
