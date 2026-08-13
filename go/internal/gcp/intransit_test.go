@@ -72,16 +72,27 @@ func TestObserveCloudSQLInTransit(t *testing.T) {
 	}
 }
 
-func TestObserveCloudSQLInTransitAbsentEmitsNothing(t *testing.T) {
+// D1041: an absent sslMode is the deterministic Cloud SQL default
+// (ALLOW_UNENCRYPTED_AND_ENCRYPTED = TLS not enforced), a MEASURED inTransit=false, not
+// an omitted observation — a plaintext-accepting database must not read as TLS-enforced
+// (was TestObserveCloudSQLInTransitAbsentEmitsNothing, which asserted the omit bug).
+func TestObserveCloudSQLInTransitDefaultIsMeasuredFalse(t *testing.T) {
 	inst := map[string]any{
 		"databaseVersion": "POSTGRES_16",
 		"region":          "europe-west1",
 		"settings":        map[string]any{"ipConfiguration": map[string]any{"ipv4Enabled": true}},
 	}
 	out, _ := MapInstance(inst)
+	found := false
 	for _, o := range out {
 		if o.Path == "encryption.inTransit" {
-			t.Fatalf("absent sslMode must not observe inTransit, got %v", o.Value)
+			found = true
+			if o.Value != false {
+				t.Fatalf("an absent sslMode must observe inTransit=false, got %v", o.Value)
+			}
 		}
+	}
+	if !found {
+		t.Fatal("inTransit must be emitted (measured false), not omitted")
 	}
 }

@@ -151,6 +151,12 @@ func (d *Driver) observeRedisAzure(capability, providerID string) ([]provider.Ob
 	if doc.Properties.EnableNonSslPort != nil {
 		obs = append(obs, provider.Observation{Path: "encryption.inTransit",
 			Value: !*doc.Properties.EnableNonSslPort, Derivation: "measured"})
+	} else {
+		// D1041: the field is absent — we did not read it, so DIAGNOSE rather than
+		// silently drop the attribute (which would let an adopt fill the gap). The
+		// populated path above is already honest in both directions; this closes the nil
+		// case, matching the publicNetworkAccess handler above.
+		diags = append(diags, "encryption.inTransit not observed: enableNonSslPort absent from the cache properties")
 	}
 	// D946: availability.class from the ACTUAL zone-redundancy state, not the tier. A
 	// cache with a populated top-level `zones` array survives an availability-zone loss

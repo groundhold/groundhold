@@ -58,25 +58,32 @@ func MapInstance(inst map[string]any) ([]Observed, []string) {
 	out = append(out, Observed{"service.managed", true, "measured"})
 	out = append(out, Observed{"encryption.atRest", true, "config-intent"})
 
-	// customerManagedKeys: a CMEK is present iff diskEncryptionConfiguration
-	// carries a kmsKeyName. Absent means the Google-managed default key — which
-	// does NOT satisfy the constraint, so emit nothing rather than a false.
+	// customerManagedKeys: a CMEK is present iff diskEncryptionConfiguration carries a
+	// kmsKeyName, read from the main GET. Empty (or the block absent) means the
+	// Google-managed default key — a MEASURED false (D1040/D1003), not an absence:
+	// omitting it let a `customerManagedKeys: true` candidate be adopted over a
+	// Google-managed instance (adopt fills the gap with the declared value). This is
+	// the Cloud SQL survivor the D1040 sweep missed — its observe lives here in
+	// MapInstance, not a per-service *_net.go.
+	cmkKey := ""
 	if dek, ok := settings["diskEncryptionConfiguration"].(map[string]any); ok {
-		if key, _ := dek["kmsKeyName"].(string); key != "" {
-			out = append(out, Observed{"encryption.customerManagedKeys", true, "measured"})
-		}
+		cmkKey, _ = dek["kmsKeyName"].(string)
 	}
+	out = append(out, Observed{"encryption.customerManagedKeys", cmkKey != "", "measured"})
 
 	// inTransit: sslMode reports whether TLS is ENFORCED. ENCRYPTED_ONLY and
-	// TRUSTED_CLIENT_CERTIFICATE_REQUIRED both require TLS; the default
-	// ALLOW_UNENCRYPTED_AND_ENCRYPTED does NOT. Absent sslMode emits nothing.
+	// TRUSTED_CLIENT_CERTIFICATE_REQUIRED both require TLS; the default (an empty/absent
+	// sslMode = ALLOW_UNENCRYPTED_AND_ENCRYPTED) does NOT — a plaintext-accepting
+	// instance. That default is deterministic, so an empty sslMode is a MEASURED false
+	// (D1041), not an absence: omitting it let a `encryption.inTransit: true` candidate
+	// be adopted over a database that permits unencrypted connections.
+	sslMode := ""
 	if ipConfig, ok := settings["ipConfiguration"].(map[string]any); ok {
-		if mode, _ := ipConfig["sslMode"].(string); mode != "" {
-			enforced := mode == "ENCRYPTED_ONLY" ||
-				mode == "TRUSTED_CLIENT_CERTIFICATE_REQUIRED"
-			out = append(out, Observed{"encryption.inTransit", enforced, "measured"})
-		}
+		sslMode, _ = ipConfig["sslMode"].(string)
 	}
+	out = append(out, Observed{"encryption.inTransit",
+		sslMode == "ENCRYPTED_ONLY" || sslMode == "TRUSTED_CLIENT_CERTIFICATE_REQUIRED",
+		"measured"})
 
 	return out, diags
 }

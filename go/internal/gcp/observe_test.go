@@ -60,7 +60,8 @@ func TestMapInstanceGolden(t *testing.T) {
 		{"network.publicExposure", false, "measured"}, // config AND evidence
 		{"service.managed", true, "measured"},
 		{"encryption.atRest", true, "config-intent"},
-		{"encryption.inTransit", true, "measured"}, // noisyInstance enforces sslMode
+		{"encryption.customerManagedKeys", false, "measured"}, // D1040: noisyInstance has no CMEK -> measured false
+		{"encryption.inTransit", true, "measured"},            // noisyInstance enforces sslMode
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("golden mismatch:\n got: %+v\nwant: %+v", got, want)

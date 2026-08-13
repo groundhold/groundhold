@@ -34189,3 +34189,35 @@ Confirmed clean and left alone: ~20 drivers that already emit both states from a
 `secretmanager`/`persistentdisk`). No public-exposure false-negative survived the sampled sweep.
 The recurrence (D1003 then this) is a gate gap — a machine check that every driver emitting a
 security bool emits it for both states is a recorded follow-up.
+## D1041 — sibling security bools: three more omit-on-empty, and D1040 itself was too narrow
+
+The D1040 sweep exhausted `customerManagedKeys` but only SAMPLED the sibling security bools. An
+overnight audit exhausted them — the `network.publicExposure` family is exceptionally hardened
+(every driver emits both states or diagnoses an inconclusive/separate read) — and found the same
+omit-on-empty shape in three more places, plus proof that D1040 had missed Cloud SQL.
+
+- **D1040 was too narrow (the recurring lesson).** Cloud SQL's observe lives in
+  `gcp/observe.go` (`MapInstance`), NOT a per-service `*_net.go`, so the sweep's driver list
+  skipped it — and it carried the exact `customerManagedKeys` omit ("emit nothing rather than a
+  false") over a database. Fixed to emit `Value: kmsKeyName != ""`. (D1003 → D1040 → this: "the
+  fix is almost always too narrow" three times over — the recorded gate follow-up is the real
+  cure.)
+- **Cloud SQL `encryption.inTransit` (highest harm).** `sslMode` is on the main GET; an empty
+  `sslMode` is the deterministic default `ALLOW_UNENCRYPTED_AND_ENCRYPTED` = TLS NOT enforced =
+  a plaintext-accepting database — but the code emitted nothing, so a `encryption.inTransit: true`
+  candidate adopted over it and read as satisfied. Now emits the measured bool for both states.
+- **S3 `retention.locked` (permanent false WORM).** `GetObjectLockConfiguration` returning
+  `ObjectLockConfigurationNotFoundError`/404 is an AUTHORITATIVE "Object Lock off", not a read
+  failure — a bucket with no lock is definitively not COMPLIANCE-locked, a measured `false`. It
+  emitted nothing, so a `retention.locked: true` candidate adopted over a freely-mutable bucket;
+  and because Object Lock is enable-at-creation-only, no later converge could make it true — the
+  false assurance is PERMANENT. Now emits `false` in that branch (retention.minimum stays absent —
+  there is genuinely no minimum).
+- **Azure Redis `encryption.inTransit` (nil, hardening).** The populated path is honest both
+  ways; only the `nil` (field-absent) case dropped the attribute silently. Now diagnoses it
+  (a nil is unread, not a false), matching the `publicNetworkAccess` handler beside it.
+
+Confirmed both-states-clean and left alone: the full `publicExposure` set across all four
+providers, `encryption.atRest`, the `inTransit`/`tls.enforced` family (bar the two above),
+`versioning`, and the deletion/protection flags. No inverse false-secure default (safe-value on an
+inconclusive read) was found — every inconclusive read routes to a diagnostic.
