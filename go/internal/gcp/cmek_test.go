@@ -92,17 +92,28 @@ func TestObserveCloudSQLCustomerManagedKeys(t *testing.T) {
 	}
 }
 
-func TestObserveCloudSQLNoCMEKEmitsNothing(t *testing.T) {
+// D1040: a Google-managed-key (default) instance reads a MEASURED
+// customerManagedKeys=false, not an omitted observation — omitting it let a
+// `customerManagedKeys: true` candidate be adopted over it (was
+// TestObserveCloudSQLNoCMEKEmitsNothing, which asserted the omit bug).
+func TestObserveCloudSQLDefaultKeyIsMeasuredFalse(t *testing.T) {
 	inst := map[string]any{
 		"databaseVersion": "POSTGRES_16",
 		"region":          "europe-west1",
 		"settings":        map[string]any{},
 	}
 	out, _ := MapInstance(inst)
+	found := false
 	for _, o := range out {
 		if o.Path == "encryption.customerManagedKeys" {
-			t.Fatalf("default key must not observe customerManagedKeys, got %v", o.Value)
+			found = true
+			if o.Value != false {
+				t.Fatalf("a default-key instance must observe customerManagedKeys=false, got %v", o.Value)
+			}
 		}
+	}
+	if !found {
+		t.Fatal("customerManagedKeys must be emitted (measured false), not omitted")
 	}
 }
 

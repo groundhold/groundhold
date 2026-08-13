@@ -437,7 +437,15 @@ func (d *Driver) observeS3(capability, providerID string) ([]provider.Observatio
 			}
 		}
 	} else if err == nil && (st == http.StatusNotFound || awsErrCode(body) == "ObjectLockConfigurationNotFoundError") {
-		// not object-lock-enabled — retention.minimum/locked simply absent
+		// D1041: no Object Lock is an AUTHORITATIVE read (a 404/NotFoundError, not a read
+		// failure) — the bucket is freely mutable, so it is definitively NOT
+		// COMPLIANCE-locked: a MEASURED retention.locked=false, not an absence. Omitting
+		// it let a `retention.locked: true` candidate be adopted over an unlocked bucket,
+		// and Object Lock is enable-at-creation-only so no later converge could make the
+		// claim true — a PERMANENT false WORM assurance. retention.minimum stays absent
+		// (there genuinely is no minimum to measure).
+		obs = append(obs, provider.Observation{Path: "retention.locked",
+			Value: false, Derivation: "measured"})
 	} else {
 		diags = append(diags, "retention.minimum not observed: "+s3ReadWhy("GetObjectLockConfiguration", st, body, err))
 	}
