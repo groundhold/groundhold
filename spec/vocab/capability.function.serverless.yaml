@@ -87,6 +87,37 @@ attributes:
       aws.lambda: 0 = native scale-to-zero; > 0 = provisioned concurrency (refused in v0)
       gcp.cloudfunctions-fn: serviceConfig.minInstanceCount
 
+  defaultLogGroup.retention:
+    kind: duration
+    evidence: resource
+    description: >
+      Retention on the function's DEFAULT log group — the group the platform
+      auto-creates and the function's own logs actually land in
+      (`/aws/lambda/<fn>` on AWS). WITNESSED, never set here: this capability only
+      READS it; governing it (setting retention) is a bound
+      capability.monitoring.logs' job under an adopt grant. It exists because a
+      SEPARATE monitoring.logs group can carry a 365d retention that reads
+      satisfied while the function's real logs never expire — the platform creates
+      the default group with NO retention policy (keeps every line forever), and
+      the app writes THERE, not to the managed group. Constrain this
+      (defaultLogGroup.retention lte 365d for a GDPR age-out, or gte 90d to keep at
+      least) to bind the group that actually holds the data. Named for exactly what
+      it reads — the default group's retention — NOT "logs are governed" or "GDPR
+      compliant" (proving those needs a negative — no other log destination — a
+      unary witness cannot supply). A never-expires group and a not-yet-created
+      group (the default group is materialised on first invocation) both read
+      UNKNOWN, never a faked duration and never a false satisfied: a witness cannot
+      express unbounded retention as a finite value, so a hard constraint blocks as
+      unknown rather than lying.
+    mappings:
+      aws.lambda: >
+        DescribeLogGroups on /aws/lambda/<fn>, retentionInDays -> a duration
+        (measured); no retentionInDays (never-expires) or group absent -> not
+        emitted (unknown). The SAME group name the producer publishes as
+        outputs.logGroupName (D381) and the same read observeCWLogs uses, so a
+        bound monitoring.logs and this witness never disagree.
+      gcp.cloudfunctions-fn: the function's log retention (separate slice)
+
   service.managed:
     kind: bool
     description: Managed serverless runtime vs self-operated compute
