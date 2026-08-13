@@ -115,13 +115,10 @@ func TestMetamorphicElastiCacheRoundTrip(t *testing.T) {
 			if got["encryption.inTransit"] != c.tls {
 				t.Errorf("inTransit %v not reflected: %+v", c.tls, got)
 			}
-			if c.cmek && got["encryption.customerManagedKeys"] != true {
-				t.Errorf("CMEK true not reflected: %+v", got)
-			}
-			if !c.cmek {
-				if _, claimed := got["encryption.customerManagedKeys"]; claimed {
-					t.Errorf("CMEK false must not be claimed: %+v", got)
-				}
+			// D1040: customerManagedKeys is emitted for BOTH states — a no-key group reads
+			// a MEASURED false, not an omitted observation (which let an adopt lie).
+			if got["encryption.customerManagedKeys"] != c.cmek {
+				t.Errorf("customerManagedKeys %v not reflected: %+v", c.cmek, got)
 			}
 		})
 	}

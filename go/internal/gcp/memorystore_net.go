@@ -199,10 +199,10 @@ func (d *Driver) observeMemorystore(capability, providerID string) ([]provider.O
 	}
 	obs = append(obs, provider.Observation{Path: "encryption.inTransit",
 		Value: doc.TransitEncryptionMode == "SERVER_AUTHENTICATION", Derivation: "measured"})
-	if doc.CustomerManagedKey != "" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
-			Value: true, Derivation: "measured"})
-	}
+	// D1040/D1003: emit for BOTH states — empty (Google-managed) is a MEASURED false
+	// from the instance GET, not an absence that lets an adopt lie.
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+		Value: doc.CustomerManagedKey != "", Derivation: "measured"})
 	switch doc.Tier {
 	case "BASIC":
 		obs = append(obs, provider.Observation{Path: "availability.class", Value: "zonal", Derivation: "measured"})

@@ -104,13 +104,12 @@ func TestMetamorphicMemorystoreRoundTrip(t *testing.T) {
 			if got["engine.protocol"] != "redis/7" {
 				t.Errorf("engine.protocol not reflected: %+v", got)
 			}
-			if c.cmek && got["encryption.customerManagedKeys"] != true {
-				t.Errorf("CMEK true not reflected: %+v", got)
-			}
-			if !c.cmek {
-				if _, claimed := got["encryption.customerManagedKeys"]; claimed {
-					t.Errorf("CMEK false must not be claimed: %+v", got)
-				}
+			// D1040: customerManagedKeys is emitted for BOTH states — a no-key instance
+			// reads a MEASURED false, not an omitted observation. The old assertion
+			// ("CMEK false must not be claimed") encoded the omit-on-empty bug that let a
+			// customerManagedKeys:true candidate be adopted over a Google-managed instance.
+			if got["encryption.customerManagedKeys"] != c.cmek {
+				t.Errorf("customerManagedKeys %v not reflected: %+v", c.cmek, got)
 			}
 		})
 	}

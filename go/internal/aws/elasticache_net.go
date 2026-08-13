@@ -234,6 +234,11 @@ func (d *Driver) observeElastiCache(capability, providerID string) ([]provider.O
 			diags = append(diags, "encryption.customerManagedKeys not observed on the replication group's "+
 				"KMS key: "+kerr.Error()+" — probe/reconcile")
 		}
+	} else {
+		// D1040/D1003: no key = at-rest encryption disabled = definitively not a
+		// customer key, from the main describe → a MEASURED false, not an absence.
+		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+			Value: false, Derivation: "measured"})
 	}
 	// availability.class: zone survival is MultiAZ (replicas in DIFFERENT AZs), NOT
 	// AutomaticFailover. A group with AutomaticFailover=enabled but MultiAZ=disabled keeps

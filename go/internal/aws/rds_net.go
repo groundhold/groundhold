@@ -277,6 +277,13 @@ func (d *Driver) observeRDS(capability, providerID string) ([]provider.Observati
 			diags = append(diags, "encryption.customerManagedKeys not observed on the "+
 				"instance's KMS key: "+kerr.Error()+" — probe/reconcile")
 		}
+	} else {
+		// D1040/D1003: no KmsKeyId at all = at-rest encryption disabled = definitively
+		// not a customer key, read from the main describe → a MEASURED false, not an
+		// absence. Omitting it let a `customerManagedKeys: true` candidate be adopted
+		// over an unencrypted instance.
+		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+			Value: false, Derivation: "measured"})
 	}
 	return obs, diags, nil
 }

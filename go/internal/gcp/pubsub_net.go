@@ -298,12 +298,12 @@ func (d *Driver) observePubSub(capability, providerID string) ([]provider.Observ
 		provider.Observation{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"}, // always encrypts
 		provider.Observation{Path: "service.managed", Value: true, Derivation: "measured"},
 	)
-	// customerManagedKeys: present iff the topic carries a CMEK. Absent means the
-	// Google-managed default, which does NOT satisfy the constraint — emit nothing.
-	if doc.KmsKeyName != "" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
-			Value: true, Derivation: "measured"})
-	}
+	// customerManagedKeys: present iff the topic carries a CMEK, read from the topic
+	// GET. Absent means the Google-managed default — a MEASURED false, not an absence
+	// (D1040/D1003): emit the bool for BOTH states so a `customerManagedKeys: true`
+	// candidate cannot be adopted over a Google-managed topic.
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+		Value: doc.KmsKeyName != "", Derivation: "measured"})
 	// residency: the honesty crux.
 	switch regions := doc.MessageStoragePolicy.AllowedPersistenceRegions; len(regions) {
 	case 0:

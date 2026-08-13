@@ -96,8 +96,10 @@ func TestMetamorphicFilestoreRoundTrip(t *testing.T) {
 			if got["protocol"] != c.wantProto {
 				t.Errorf("protocol derivation: want %q got %v", c.wantProto, got["protocol"])
 			}
-			if _, has := got["encryption.customerManagedKeys"]; has != c.cmek {
-				t.Errorf("cmek round-trip: want present=%v got %v", c.cmek, got["encryption.customerManagedKeys"])
+			// D1040: customerManagedKeys is a MEASURED value for BOTH states — assert the
+			// value, not mere presence (Google-managed reads false, not an omitted obs).
+			if got["encryption.customerManagedKeys"] != c.cmek {
+				t.Errorf("cmek round-trip: want %v got %v", c.cmek, got["encryption.customerManagedKeys"])
 			}
 		})
 	}

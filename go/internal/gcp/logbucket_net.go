@@ -156,10 +156,10 @@ func (d *Driver) observeLogBucket(capability, providerID string) ([]provider.Obs
 		obs = append(obs, provider.Observation{Path: "retention.days",
 			Value: fmt.Sprintf("%dd", doc.RetentionDays), Derivation: "measured"})
 	}
-	if doc.CmekSettings.KmsKeyName != "" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
-			Value: true, Derivation: "measured"})
-	}
+	// D1040/D1003: emit for BOTH states — empty (Google-managed) is a MEASURED false
+	// from the bucket GET, not an absence that lets an adopt lie.
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+		Value: doc.CmekSettings.KmsKeyName != "", Derivation: "measured"})
 	return obs, nil, nil
 }
 

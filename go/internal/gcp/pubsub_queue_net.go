@@ -367,10 +367,11 @@ func (d *Driver) observePubSubQueue(capability, providerID string) ([]provider.O
 			diags = append(diags, "location.region/encryption.customerManagedKeys not "+
 				"observed: the backing topic document is unparseable")
 		} else {
-			if topic.KmsKeyName != "" {
-				obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
-					Value: true, Derivation: "measured"})
-			}
+			// D1040/D1003: the backing topic was read and parsed, so an empty KmsKeyName
+			// is a MEASURED false (Google-managed), not an absence — emit BOTH states.
+			// The read-failed/unparseable branches above keep their diagnostic.
+			obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+				Value: topic.KmsKeyName != "", Derivation: "measured"})
 			switch regions := topic.MessageStoragePolicy.AllowedPersistenceRegions; len(regions) {
 			case 0:
 				diags = append(diags, "location.region not observed: the backing topic has no "+

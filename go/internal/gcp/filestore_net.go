@@ -200,10 +200,10 @@ func (d *Driver) observeFilestore(capability, providerID string) ([]provider.Obs
 	case doc.Tier != "":
 		obs = append(obs, provider.Observation{Path: "availability.class", Value: "zonal", Derivation: "measured"})
 	}
-	if doc.KmsKeyName != "" {
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
-			Value: true, Derivation: "measured"})
-	}
+	// D1040/D1003: emit for BOTH states — empty (Google-managed) is a MEASURED false
+	// read from the instance GET, not an absence that lets an adopt lie.
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+		Value: doc.KmsKeyName != "", Derivation: "measured"})
 	return obs, nil, nil
 }
 
