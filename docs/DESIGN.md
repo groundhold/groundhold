@@ -33917,3 +33917,23 @@ set retention on the emitted group. Both need "governed" defined by the binding,
 land with Slice 3.3. The severity floor the reviews decided (block only when a hard
 constraint depends on the emission being governed) is already delivered by 3.1's
 `defaultLogGroup.retention`.
+
+## D1033 — the unattached-log-group advisory sources from the emission registry (Slice 3.3a)
+
+Slice 3.3 is the largest of the family, so it is broken into steps. 3.3a is the lowest-risk:
+give the compiler's EXISTING completeness advisory (`adviseUnattachedLogGroup`, D388 — "you
+declared a monitoring.logs but nothing writes to it, and a capability here brings its own log
+destination") the same certified source everything else in the family now uses.
+
+It detected log producers with a heuristic: does the service DECLARE a `logGroupName` output?
+Two services do — `lambda` (which auto-emits `/aws/lambda/<fn>`) and `cwlogs` (which IS a log
+group and publishes its own name for others to `$ref`). The heuristic named cwlogs a producer,
+so a contract with two standalone log groups could be advised to bind one to the OTHER — a
+group to a group. The emission registry (D1032) names only true emitters, so `adviseUnattachedLogGroup`
+now reads `EmittedCompanions()` (companions `GovernedBy: capability.monitoring.logs`) instead
+of the output heuristic: cwlogs is not an emitter and the misfire is gone. One certified source
+shared by the observe witness (D1031), this advisory, and the future adopt grant (D329) — an
+output declared for `$ref` wiring is no longer conflated with a resource a create leaves behind.
+The `$ref` output the advice tells the operator to bind now comes from the companion's own
+`NameOutput`, so the advisory names exactly what the registry certifies. Behaviour is unchanged
+for the lambda case the field report was about; the fix is the standalone-group misfire.
