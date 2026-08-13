@@ -101,6 +101,21 @@ type OrphanRow struct {
 	Status string `json:"status"`
 }
 
+// CoverageStatuses is the closed set of CoverageRow.Status values a survey
+// produces. Exposed (D1024) so a consumer — the console's surveyDigest folds it
+// into a portfolio count — can gate its handling against the LIVE set instead of
+// hardcoding a subset with no default, which silently under-reports when a status
+// is added (the D1023/D328 class). Pinned to the literals the code emits by
+// TestSurveyStatusesMatchTheProducedLiterals.
+func CoverageStatuses() []string {
+	return []string{"covered", "uncovered", "gap", "ignored"}
+}
+
+// OrphanStatuses is the closed set of OrphanRow.Status values a survey produces.
+func OrphanStatuses() []string {
+	return []string{"orphaned", "unwitnessed", "witnessed-by-type"}
+}
+
 type Source struct {
 	Repo    string `json:"repo"`
 	Commit  string `json:"commit"`
