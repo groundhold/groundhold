@@ -12,7 +12,9 @@
 #
 # The verifiable core is small and universal: which metric, which threshold, which
 # direction, and — the safety property that catches the most common misconfiguration
-# — whether the alert actually NOTIFIES anyone. The concrete notification target (a
+# — whether the alert is ARMED and names a notification target. Whether a recipient
+# stands BEHIND that target (a subscribed inbox, a paged human) is a further link this
+# does not verify. The concrete notification target (a
 # channel / SNS topic / action group) is a handle in the implementation block (D26);
 # a future slice may let an alert reference a capability.messaging.topic declared in
 # the same contract (cross-capability composition), noted, not built.
@@ -21,8 +23,9 @@ capability: capability.monitoring.alert
 version: 0.1
 stateful: false  # an alert holds no data and removing it loses none — it is
                  # re-creatable from its definition. The risk an alert carries is a
-                 # SILENT one (fires but notifies nobody), which alert.notify makes
-                 # verifiable, not on delete.
+                 # SILENT one (fires but reaches nobody); alert.notify makes the
+                 # config causes of that silence verifiable (unarmed, or no target),
+                 # but not a target with no subscriber. Not a delete risk.
 
 attributes:
 
@@ -62,12 +65,15 @@ attributes:
   alert.notify:
     kind: bool
     description: >
-      Whether a notification action is configured — an alert that fires but notifies
-      NOBODY is the single most common alerting misconfiguration, and this makes
-      "someone is actually told" a verifiable guarantee. notify=true requires a
-      concrete channel (implementation.notification_channel); the driver refuses
-      notify=true with no channel rather than creating a silent alert that claims to
-      notify.
+      Whether the alarm is ARMED and names a notification target — an alert that fires
+      but reaches NOBODY is the single most common alerting misconfiguration. notify=true
+      requires a concrete channel (implementation.notification_channel) AND the arming
+      switch on (D726); the driver refuses notify=true with no channel rather than
+      creating a silent alert that claims to notify. What it does NOT assert is that a
+      RECIPIENT stands behind that target: a topic / action group with zero subscribers
+      satisfies notify=true yet delivers to no one. That last link — whether the channel
+      has a live subscriber — is outside this attribute; modelling it (a subscriptions
+      operand, or a delivery.hasSubscriber attribute) is recorded, not built.
     mappings:
       gcp.monitoring: notificationChannels is non-empty
       aws.cloudwatch: AlarmActions is non-empty
