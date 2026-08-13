@@ -3437,6 +3437,20 @@ type FieldReclaimer interface {
 	SetFieldReclaim(allowed bool)
 }
 
+// EmissionAdopter (D1036) is an OPTIONAL driver capability: a create may need to
+// govern a companion resource the PROVIDER auto-materialised — the /aws/lambda/<fn>
+// log group a compute emits (D1032), which a bound monitoring.logs sets retention on.
+// That group carries no groundhold ownership tags (the provider made it), so a create
+// refuses it by default (D439–D472). The executor sets this per action from the
+// SEALED emission-adopt grant (D1034), which the compiler minted only for a $ref to a
+// certified emission with scoped consent — so when set, the driver takes over exactly
+// the group its own Target names, and never decides adoption from the group string
+// (the fold-at-plan leak the reviews flagged). Cleared after the call so it never
+// leaks onto the next action.
+type EmissionAdopter interface {
+	SetEmissionAdopt(allowed bool)
+}
+
 // LROBudgeter reports a driver's ceiling for a long-running operation — the deadline
 // a provisioning/upgrade poll may run before it concludes `unknown` (D264/D265). It
 // exists to MECHANIZE a class of bug the Acme EKS saga exposed: a real control-plane

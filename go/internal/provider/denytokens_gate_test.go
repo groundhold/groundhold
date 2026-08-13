@@ -1,6 +1,7 @@
 package provider_test
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -123,10 +124,19 @@ func clientTokens(t *testing.T, src string) []string {
 }
 
 // exportedTextFiles lists the tracked text files the export whitelist ships.
+//
+// The paths are READ FROM the export script's INCLUDE array, not restated here. That
+// is the same argument this gate already makes for the deny list ("it reads the deny
+// list from the script rather than restating it") applied to the other half, and the
+// restated copy had done exactly what a restated copy does: it named eleven paths
+// while INCLUDE names twenty-three, so `docs/COVERAGE.md`, `docs/REVIEWING.md`,
+// `website/`, `.claude/skills` and `.github` were shipped and NOT scanned. COVERAGE.md
+// is where every field run is cited — the likeliest file in the tree to name a client,
+// and the export's own sed loop scrubs it for precisely that reason. A gate that skips
+// the riskiest file it is meant to cover is the vacuity shape in a different costume.
 func exportedTextFiles(t *testing.T, root string) []string {
-	out, err := exec.Command("git", "-C", root, "ls-files",
-		"docs/DESIGN.md", "docs/MATURITY.md", "docs/THREAT_MODEL.md", "docs/VOICE_TRACK.md",
-		"README.md", "CHANGELOG.md", "spec", "go", "conformance", "examples", "ref").Output()
+	paths := exportIncludePaths(t, root)
+	out, err := exec.Command("git", append([]string{"-C", root, "ls-files"}, paths...)...).Output()
 	if err != nil {
 		t.Fatalf("git ls-files: %v", err)
 	}
@@ -135,13 +145,55 @@ func exportedTextFiles(t *testing.T, root string) []string {
 		if f == "" {
 			continue
 		}
-		switch filepath.Ext(f) {
-		case ".go", ".md", ".yaml", ".yml", ".json", ".py", ".sh":
-			files = append(files, f)
+		// Binary content is skipped by what it IS, not by an extension allowlist an
+		// author has to remember to extend: a NUL byte in the first 8 KiB. That keeps
+		// Makefile, LICENSE, CODEOWNERS and the extensionless files in the scan.
+		raw, rerr := os.ReadFile(filepath.Join(root, f))
+		if rerr != nil {
+			continue
 		}
+		head := raw
+		if len(head) > 8192 {
+			head = head[:8192]
+		}
+		if bytes.IndexByte(head, 0) >= 0 {
+			continue
+		}
+		files = append(files, f)
 	}
 	if len(files) < 100 {
 		t.Fatalf("only %d exported text files listed — the probe broke", len(files))
 	}
 	return files
+}
+
+// exportIncludePaths parses the export script's INCLUDE array — the single authority
+// on what crosses the boundary.
+func exportIncludePaths(t *testing.T, root string) []string {
+	raw, err := os.ReadFile(filepath.Join(root, "scripts", "export-public.sh"))
+	if err != nil {
+		t.Fatalf("read export script: %v", err)
+	}
+	var paths []string
+	var inside bool
+	for _, line := range strings.Split(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "INCLUDE=(":
+			inside = true
+		case inside && trimmed == ")":
+			inside = false
+		case inside && trimmed != "" && !strings.HasPrefix(trimmed, "#"):
+			paths = append(paths, trimmed)
+		}
+	}
+	// D328: a parser that silently matched nothing would hand the caller an empty
+	// path list, `git ls-files` with no paths lists the WHOLE repository, and the
+	// gate would look greener than ever while covering the wrong tree.
+	if len(paths) < 15 {
+		t.Fatalf("only %d paths parsed from the export INCLUDE array — the parser "+
+			"broke, and an empty list would scan the whole repo instead of the export",
+			len(paths))
+	}
+	return paths
 }

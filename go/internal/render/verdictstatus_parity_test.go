@@ -11,7 +11,7 @@ import (
 
 // verdictStatusParitySHA256 pins the exact bytes of the shared verdict-rollup
 // parity fixture. The SAME file and constant live in the console
-// (proviso-console/internal/server/verdictstatus_parity_test.go). The console's
+// (the console repo, internal/server/verdictstatus_parity_test.go). The console's
 // verdictStatus() maps a verdict slice to the pill state (proven/blocked/
 // violated); the runtime derives the same banner from a rollup built in
 // cmd/groundhold/main.go and Pick() here. That was a hand-mirrored precedence
