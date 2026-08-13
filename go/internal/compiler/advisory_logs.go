@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"groundhold/internal/contract"
+	"groundhold/internal/provider"
 )
 
 // Advisory is something the compile NOTICED: not proven, not blocking, and
@@ -21,10 +22,9 @@ type Advisory struct {
 	Next       string `json:"next"` // what to do about it
 }
 
-// logProducerOutput is the output a driver declares when the resource it creates
-// brings its OWN log destination with it. Asking the DRIVERS which services those
-// are (D317) is the difference between a rule and a hardcoded list that rots.
-const logProducerOutput = "logGroupName"
+// logGovernor is the capability that can GOVERN an auto-emitted log group's
+// retention — the one an EmittedCompanion (D1032) names in GovernedBy.
+const logGovernor = "capability.monitoring.logs"
 
 // adviseUnattachedLogGroup answers a question a field report asked the hard way: a
 // `capability.monitoring.logs` was declared with a 365-day retention, converge went
@@ -53,17 +53,30 @@ func adviseUnattachedLogGroup(c *contract.Contract, cand *contract.Candidate,
 	if c == nil || cand == nil {
 		return nil
 	}
-	// Which capabilities bring their own log destination? Ask the drivers.
-	producers := map[string]bool{}
+	// Which capabilities AUTO-EMIT a log group a monitoring.logs governs? Ask the
+	// certified emission registry (D1032), not a raw "declares a logGroupName output"
+	// heuristic: cwlogs declares that output too but IS the log group, not an emitter
+	// of one — the heuristic named it a producer and would advise binding a standalone
+	// group to another standalone group. The registry names only true emitters, one
+	// certified source shared with observe and the future adopt grant (D329). The
+	// output it records is the one the advice below tells the operator to $ref.
+	type producer struct{ output string }
+	producers := map[string]producer{}
 	for id, extras := range cand.Extras {
 		prov, _ := extras["provider"].(string)
 		svc, _ := extras["service"].(string)
-		if _, ok := outputKind(in.providerFor(prov), svc, logProducerOutput); ok {
-			producers[id] = true
+		ec, ok := in.providerFor(prov).(provider.EmissionCertifier)
+		if !ok {
+			continue
+		}
+		for _, comp := range ec.EmittedCompanions()[svc] {
+			if comp.GovernedBy == logGovernor {
+				producers[id] = producer{output: comp.NameOutput}
+			}
 		}
 	}
 	if len(producers) == 0 {
-		return nil // nothing in this candidate produces logs of its own
+		return nil // nothing in this candidate emits a log group of its own
 	}
 
 	// Which log groups are already bound to a producer? A capability that wired
@@ -107,7 +120,7 @@ func adviseUnattachedLogGroup(c *contract.Contract, cand *contract.Candidate,
 					"capabilities.%s.implementation.log_group: "+
 					"{$ref: {capability: %s, output: %s}}. If a standalone group "+
 					"IS the intent (flow logs, a control plane), nothing needs to change",
-				names[0], capID, names[0], logProducerOutput),
+				names[0], capID, names[0], producers[names[0]].output),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Capability < out[j].Capability })

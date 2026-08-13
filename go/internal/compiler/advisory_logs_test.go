@@ -17,7 +17,8 @@ import (
 // D226 + a `logGroupName` output made the correct wiring expressible. These pin
 // the other half: making the gap VISIBLE.
 
-// logProducer is a driver that declares it brings its own log destination.
+// logProducer is a driver that AUTO-EMITS its own log group (D1032) — the shape
+// AWS Lambda has, whose /aws/lambda/<fn> group its runtime creates on invocation.
 type logProducer struct{ provider.Fake }
 
 func (*logProducer) OutputsFor(service string) []provider.OutputSpec {
@@ -27,10 +28,26 @@ func (*logProducer) OutputsFor(service string) []provider.OutputSpec {
 	return []provider.OutputSpec{{Name: "logGroupName", Kind: "string"}}
 }
 
+func (*logProducer) EmittedCompanions() map[string][]provider.EmittedCompanion {
+	return map[string][]provider.EmittedCompanion{
+		"lambda": {{GovernedBy: "capability.monitoring.logs", NameOutput: "logGroupName"}},
+	}
+}
+
 // quietDriver produces nothing — a service that has no log destination of its own.
 type quietDriver struct{ provider.Fake }
 
 func (*quietDriver) OutputsFor(string) []provider.OutputSpec { return nil }
+
+// outputOnlyDriver DECLARES a logGroupName output but auto-emits NOTHING — the shape
+// of cwlogs itself, which IS a log group (so it publishes its own name for others to
+// $ref) but does not bring a SEPARATE one. The old heuristic keyed on the output and
+// misfired here; the emission registry does not, so it is not a producer (D1032).
+type outputOnlyDriver struct{ provider.Fake }
+
+func (*outputOnlyDriver) OutputsFor(string) []provider.OutputSpec {
+	return []provider.OutputSpec{{Name: "logGroupName", Kind: "string"}}
+}
 
 func fixture(t *testing.T, logsImpl map[string]any, producerService string) (
 	*contract.Contract, *contract.Candidate, Inputs) {
@@ -111,16 +128,31 @@ func TestStandaloneLogGroupIsNotAdvised(t *testing.T) {
 	}
 }
 
-// The producer set comes from the DRIVERS, not from a list in this file (D317).
-// A driver that stops declaring the output stops being named — which is right,
-// and is what keeps this from rotting into a hardcoded table.
+// The producer set comes from the DRIVERS' certified emission registry (D1032),
+// not from a list in this file (D317). A driver that emits no log companion is not
+// named — which is right, and is what keeps this from rotting into a hardcoded table.
 func TestProducersComeFromTheDrivers(t *testing.T) {
 	c, cand, in := fixture(t, nil, "lambda")
 	in.Providers = map[string]provider.Provider{"aws": &quietDriver{}}
 
 	if adv := adviseUnattachedLogGroup(c, cand, in); len(adv) != 0 {
-		t.Fatalf("with no driver declaring a log destination there is no producer "+
+		t.Fatalf("with no driver emitting a log companion there is no producer "+
 			"to name, got: %+v", adv)
+	}
+}
+
+// D1033: the fix the emission registry buys. A service that DECLARES a logGroupName
+// output but AUTO-EMITS nothing (cwlogs — which IS a log group) must NOT be named a
+// producer. The old heuristic keyed on the output and would advise binding a
+// standalone group to another standalone group; the registry keys on the emission,
+// so this stays quiet.
+func TestOutputWithoutEmissionIsNotAProducer(t *testing.T) {
+	c, cand, in := fixture(t, nil, "lambda")
+	in.Providers = map[string]provider.Provider{"aws": &outputOnlyDriver{}}
+
+	if adv := adviseUnattachedLogGroup(c, cand, in); len(adv) != 0 {
+		t.Fatalf("a service that publishes a logGroupName output but emits no companion "+
+			"is not a producer — advising here is the cwlogs misfire, got: %+v", adv)
 	}
 }
 
