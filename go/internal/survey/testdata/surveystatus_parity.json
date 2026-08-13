@@ -1,0 +1,4 @@
+{
+  "coverage": ["covered", "uncovered", "gap", "ignored"],
+  "orphan": ["orphaned", "unwitnessed", "witnessed-by-type"]
+}

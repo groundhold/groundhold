@@ -33662,6 +33662,22 @@ as closed-set functions, then gate `surveyDigest` exactly as D1023 gates the
 in-flight fold — the runtime oracle pins the fixture to the live set, the console
 mirrors it. Until then this drift is recorded and visible, not silently accepted.
 
+**BUILT 2026-08-13** (freeze lifted post-launch). `survey.CoverageStatuses()` and
+`OrphanStatuses()` are exposed and pinned to the literals the fold emits by a source
+scan (`TestSurveyStatusesMatchTheProducedLiterals` — the D1025 second-enumeration
+guard). `surveystatus_parity.json` carries both closed sets; the runtime oracle
+proves it equals the two functions. On the console, `surveyDigest`'s hardcoded
+default-less switch became two classification MAPS (`surveyCoverageClass`,
+`surveyOrphanClass`) whose keys ARE the known-status set and whose values are the
+count decision (`""` = recognised-but-not-a-problem), so a status cannot be known
+without being classified; a console gate pins those keys to the fixture. Adding a
+runtime status now fails the runtime literals gate → the fixture → the console sha
+guard → the console classification gate, in that order, until the console decides
+how to count it. Both teeth-checked (a fixture-only add trips the sha; a missing
+map key trips "silently dropped"). The parity program (D1021 run-status, D1022
+verdictStatus, D1023 receipt-pending, D1024 survey) now covers every console fold
+with a runtime status authority.
+
 ## D1025 — the closed receipt-status set was enumerated twice; the gate D1023 rests on now says so
 
 Auditing for the published-registries-drift class (D329/D330/D338) surfaced one in
