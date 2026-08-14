@@ -159,8 +159,11 @@ func TestDeleteAWSKMSForeignRefused(t *testing.T) {
 }
 
 // kmsScanServer serves ListKeys (one key) + ListResourceTags (the given tags) —
-// the create-adoption scan fixture (D253). Any mutation is a test failure.
-func kmsScanServer(t *testing.T, keyID, capTag, envTag string) *httptest.Server {
+// the create-adoption scan fixture (D253) — plus GetKeyRotationStatus, which the
+// adopt path reads to verify the declared rotation policy against the standing key
+// (D1062). Any MUTATION is still a test failure. rotEnabled/rotDays set the standing
+// key's rotation posture so the control-completeness cases can vary it.
+func kmsScanServer(t *testing.T, keyID, capTag, envTag string, rotEnabled bool, rotDays int) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		action := r.Header.Get("X-Amz-Target")
@@ -172,6 +175,12 @@ func kmsScanServer(t *testing.T, keyID, capTag, envTag string) *httptest.Server 
 			_, _ = w.Write([]byte(`{"Tags":[` +
 				`{"TagKey":"groundhold-capability","TagValue":"` + capTag + `"},` +
 				`{"TagKey":"groundhold-environment","TagValue":"` + envTag + `"}]}`))
+		case "GetKeyRotationStatus":
+			if rotEnabled {
+				_, _ = w.Write([]byte(`{"KeyRotationEnabled":true,"RotationPeriodInDays":` + itoaKMS(rotDays) + `}`))
+			} else {
+				_, _ = w.Write([]byte(`{"KeyRotationEnabled":false}`))
+			}
 		default:
 			t.Errorf("create-adoption must not call %s — bind the existing key, never create", action)
 			w.WriteHeader(400)
@@ -182,13 +191,13 @@ func kmsScanServer(t *testing.T, keyID, capTag, envTag string) *httptest.Server 
 // TestFindKMSKeyByTags_VerifiesOwnership (D253): a key counts as ours only when its
 // tags match; a FOREIGN-tagged key is never counted (never adopted).
 func TestFindKMSKeyByTags_VerifiesOwnership(t *testing.T) {
-	srv := kmsScanServer(t, testKeyID, "datakey", "prod")
+	srv := kmsScanServer(t, testKeyID, "datakey", "prod", true, 90)
 	d := awsKMSDriver(t, srv)
 	if id, n, ok := d.findKMSKeyByTags("eu-central-1", "datakey", "prod"); !ok || n != 1 || id != testKeyID {
 		t.Fatalf("our-tagged key must count as 1 ours, got id=%q n=%d ok=%v", id, n, ok)
 	}
 	srv.Close()
-	srv2 := kmsScanServer(t, testKeyID, "someone-else", "prod")
+	srv2 := kmsScanServer(t, testKeyID, "someone-else", "prod", true, 90)
 	d2 := awsKMSDriver(t, srv2)
 	if id, n, ok := d2.findKMSKeyByTags("eu-central-1", "datakey", "prod"); !ok || n != 0 || id != "" {
 		t.Fatalf("a FOREIGN-tagged key must never be counted as ours, got id=%q n=%d ok=%v", id, n, ok)
@@ -199,7 +208,9 @@ func TestFindKMSKeyByTags_VerifiesOwnership(t *testing.T) {
 // TestCreateAWSKMS_AdoptsExistingOwned (D253): a create whose tag-scan finds our
 // existing key BINDS it (succeeded + pid) and issues NO CreateKey.
 func TestCreateAWSKMS_AdoptsExistingOwned(t *testing.T) {
-	srv := kmsScanServer(t, testKeyID, "datakey", "prod") // default -> t.Errorf on any mutation
+	// the standing key rotates every 90d, matching the declared rotation.period; the
+	// adopt binds it (succeeded + pid) and issues NO mutation.
+	srv := kmsScanServer(t, testKeyID, "datakey", "prod", true, 90)
 	defer srv.Close()
 	d := awsKMSDriver(t, srv)
 	res := d.createAWSKMS("eu-central-1", "prod", "datakey", awsKMSAttrs(), nil, 1)
@@ -230,22 +241,40 @@ func kmsRole(req *http.Request, _ []byte) certifynet.Role {
 func TestAdoptsExistingKMS(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	newKMS := func(happyURL string, rt http.RoundTripper) provider.Provider {
+		d := NewDriver("eu-central-1")
+		d.HTTP = &http.Client{Transport: rt}
+		d.KMSBaseURL = happyURL
+		d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+		return d
+	}
 	p := &certifynet.ExistingProbe{
-		Name:           "aws/kms",
-		Classify:       kmsRole,
-		ExistingServer: func() *httptest.Server { return kmsScanServer(t, testKeyID, "datakey", "prod") },
-		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
-			d := NewDriver("eu-central-1")
-			d.HTTP = &http.Client{Transport: rt}
-			d.KMSBaseURL = happyURL
-			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
-			return d
-		},
+		Name:     "aws/kms",
+		Classify: kmsRole,
+		// the standing key rotates every 90d, matching the declared rotation.period.
+		ExistingServer: func() *httptest.Server { return kmsScanServer(t, testKeyID, "datakey", "prod", true, 90) },
+		New:            newKMS,
 		Create: func(pr provider.Provider) provider.CreateResult {
 			return pr.Create("kms", "datakey", "prod",
 				awsKMSAttrs(), nil, "datakey", 1)
 		},
 		PID: awsKMSProviderID("eu-central-1", testKeyID),
+		// D1062: rotation is set inline at create and never applied to a pre-existing
+		// key; converge has no wired rotation path, so a miss FAILS. Both controls are
+		// derived from the single declared rotation.period (90d).
+		AdoptControls: kmsAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			// the standing key has rotation OFF entirely — the sharpest miss.
+			{Path: "rotation.enabled",
+				Server:     func() *httptest.Server { return kmsScanServer(t, testKeyID, "datakey", "prod", false, 0) },
+				WantStatus: "failed", WantMutations: 0},
+			// rotation is ON but every 365d — LESS often than the declared 90d ceiling.
+			{Path: "rotation.period",
+				Server:     func() *httptest.Server { return kmsScanServer(t, testKeyID, "datakey", "prod", true, 365) },
+				WantStatus: "failed", WantMutations: 0},
+		},
+		// rotation ON every 30d — SHORTER than declared (more secure) — adopts clean.
+		MoreSecure: func() *httptest.Server { return kmsScanServer(t, testKeyID, "datakey", "prod", true, 30) },
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

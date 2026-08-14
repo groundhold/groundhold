@@ -14,8 +14,32 @@ import (
 	"regexp"
 	"strings"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/provider"
 )
+
+// kmsAdoptControls (D1062): a KMS key's automatic rotation is set INLINE at create
+// (EnableKeyRotation with RotationPeriodInDays) and never applied to a key that
+// ALREADY exists — the adopt path bound the key and reported succeeded without
+// re-asserting it. Two controls, both derived from a single declared rotation.period:
+//
+//   - rotation.enabled (SecureTrue): a key with rotation OFF cannot honor a
+//     rotation.period contract at all — the sharpest miss.
+//   - rotation.period (Ceiling): a key rotating LESS often than declared is the
+//     dangerous direction (a longer interval is a wider compromise blast radius).
+//
+// Both are UNWIRED, not immutable: rotation IS mutable on a KMS key (EnableKeyRotation
+// works on a standing key), but converge has no wired path to it yet, so a miss is
+// `failed` rather than unknown+bound — binding a key we cannot bring into compliance
+// would spin the reconciler. When a converge slice wires rotation, UpdateWired flips to
+// true here (same commit) and the verdict becomes unknown+bound. It is NOT marked
+// ImmutableAtCreate, because the honest fix is EnableKeyRotation out of band, never
+// replacing the key (a KMS key replacement loses access to everything encrypted under
+// it — the sharpest data loss there is).
+var kmsAdoptControls = []adoptcheck.Control{
+	{Path: "rotation.enabled", Direction: adoptcheck.SecureTrue},
+	{Path: "rotation.period", Direction: adoptcheck.Ceiling},
+}
 
 var kmsKeyIDOK = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
@@ -167,7 +191,42 @@ func (d *Driver) createAWSKMS(region, environment, capability string,
 	// so it is never adopted. Ambiguous (>1) -> refuse to guess. A readable-empty or
 	// unreadable scan falls through to the normal create.
 	if keyID, n, readable := d.findKMSKeyByTags(region, capability, environment); readable && n == 1 {
-		return provider.CreateResult{ProviderID: awsKMSProviderID(region, keyID), Status: "succeeded"}
+		pid := awsKMSProviderID(region, keyID)
+		// D1062: rotation was set inline at create and never applied to this
+		// pre-existing key. When the candidate declares rotation.period, verify the
+		// standing key rotates at least as often. Read ONLY the rotation status (never
+		// DescribeKey — adoption must not re-read the key it is binding), build the same
+		// measured observations observe emits, and let the shared comparator produce
+		// every verdict. The candidate declares only rotation.period; derive the
+		// rotation.enabled=true it presupposes (a period on a non-rotating key is
+		// meaningless).
+		if _, wants := attrs["rotation.period"]; wants {
+			enabled, days, rerr := d.kmsRotationStatus(region, keyID)
+			if rerr != nil {
+				return provider.CreateResult{ProviderID: pid, Status: "unknown",
+					Reason: "adopted key rotation status not read — reconcile: " + rerr.Error()}
+			}
+			obs := []provider.Observation{{Path: "rotation.enabled", Value: enabled, Derivation: "measured"}}
+			if enabled {
+				obs = append(obs, provider.Observation{Path: "rotation.period",
+					Value: fmt.Sprintf("%dd", days), Derivation: "measured"})
+			}
+			checkAttrs := map[string]any{"rotation.enabled": true, "rotation.period": attrs["rotation.period"]}
+			switch v := adoptcheck.Compare(checkAttrs, obs, kmsAdoptControls); v.Status {
+			case "failed":
+				// Do NOT surface the comparator's generic "a replacement may be required"
+				// for a KMS key: replacing a CMK is unrecoverable data loss. The fix is
+				// EnableKeyRotation out of band.
+				return provider.CreateResult{Status: "failed", Reason: fmt.Sprintf(
+					"adopted key does not meet the declared rotation policy (%v) — enable or "+
+						"shorten automatic rotation out of band (EnableKeyRotation); do NOT "+
+						"replace the key, which would lose access to everything encrypted under it",
+					v.Missing)}
+			case "unknown":
+				return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
+			}
+		}
+		return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
 	} else if readable && n > 1 {
 		return provider.CreateResult{Status: "unknown",
 			Reason: fmt.Sprintf("multiple KMS keys carry our ownership tags for %s/%s — cannot pick one to adopt; reconcile manually", capability, environment)}
@@ -246,28 +305,54 @@ func (d *Driver) observeAWSKMS(capability, providerID string) ([]provider.Observ
 		{Path: "protection.level", Value: "hsm", Derivation: "measured"},
 	}
 	var diags []string
-	const rotOp = "GetKeyRotationStatus"
-	rst, rresp, rerr := d.kmsCall(region, "GetKeyRotationStatus", fmt.Sprintf(`{"KeyId":%q}`, keyID))
+	enabled, days, rerr := d.kmsRotationStatus(region, keyID)
 	if rerr != nil {
-		diags = append(diags, "rotation.period not observed: "+readTransport(rotOp, rerr).Error())
-	} else if rst != http.StatusOK {
-		diags = append(diags, "rotation.period not observed: "+
-			readHTTP(rotOp, rst, awsErrCodeOf(rresp)).Error())
+		// the rotation read failed — do NOT fabricate a rotation.enabled=false (that
+		// would claim rotation is OFF when we simply could not read it). Emit nothing
+		// and diagnose (naming the cause); a rotation constraint stays unverifiable.
+		diags = append(diags, "rotation.enabled/rotation.period not observed: "+rerr.Error())
 	} else {
-		var rr struct {
-			KeyRotationEnabled   bool `json:"KeyRotationEnabled"`
-			RotationPeriodInDays int  `json:"RotationPeriodInDays"`
-		}
-		if json.Unmarshal(rresp, &rr) == nil && rr.KeyRotationEnabled {
-			days := rr.RotationPeriodInDays
-			if days == 0 {
-				days = 365 // legacy default when no explicit period
-			}
+		// D1040/D1003: emit rotation.enabled for BOTH states — a key with rotation OFF is
+		// a MEASURED false, not an absence, so an adopt cannot bind a non-rotating key
+		// under a rotation contract by omission. rotation.period is emitted only when
+		// rotation is ON (a disabled key has no period, and inventing one would lie).
+		obs = append(obs, provider.Observation{Path: "rotation.enabled",
+			Value: enabled, Derivation: "measured"})
+		if enabled {
 			obs = append(obs, provider.Observation{Path: "rotation.period",
 				Value: fmt.Sprintf("%dd", days), Derivation: "measured"})
 		}
 	}
 	return obs, diags, nil
+}
+
+// kmsRotationStatus reads a key's automatic-rotation status. A non-nil error names the
+// CAUSE (transport / HTTP status + the provider's own code, D306) — an unreadable status
+// must NOT become a fabricated "rotation off" (a false claim in the dangerous
+// direction); the caller turns the error into unknown/unverifiable. When enabled, days
+// carries the period (AWS reports 0 for a legacy pre-period key, its documented 365-day
+// default).
+func (d *Driver) kmsRotationStatus(region, keyID string) (enabled bool, days int, err error) {
+	const op = "GetKeyRotationStatus"
+	rst, rresp, rerr := d.kmsCall(region, op, fmt.Sprintf(`{"KeyId":%q}`, keyID))
+	if rerr != nil {
+		return false, 0, readTransport(op, rerr)
+	}
+	if rst != http.StatusOK {
+		return false, 0, readHTTP(op, rst, awsErrCodeOf(rresp))
+	}
+	var rr struct {
+		KeyRotationEnabled   bool `json:"KeyRotationEnabled"`
+		RotationPeriodInDays int  `json:"RotationPeriodInDays"`
+	}
+	if json.Unmarshal(rresp, &rr) != nil {
+		return false, 0, readBody(op, rst)
+	}
+	days = rr.RotationPeriodInDays
+	if rr.KeyRotationEnabled && days == 0 {
+		days = 365 // legacy default when no explicit period
+	}
+	return rr.KeyRotationEnabled, days, nil
 }
 
 func (d *Driver) deleteAWSKMS(capability, environment, providerID string) provider.CreateResult {

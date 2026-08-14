@@ -276,21 +276,20 @@ func CertifyCreateAdoptsExisting(t TestingT, p *ExistingProbe) {
 // shrink again.
 var knownNoAdoptRead = map[string]bool{}
 
-// adoptControlDebt (D1062) names the drivers that set a security control INLINE in
+// adoptControlDebt (D1062) named the drivers that set a security control INLINE in
 // their create body — so a 409-adopt never applied it — and whose control-completeness
-// is NOT YET proven by this gate (they are not wired to the shared comparator with
-// MissingControl cases). It is the campaign's remaining work made VISIBLE and two-way:
-// the moment a driver here declares AdoptControls, `CertifyCreateAdoptsExisting` FAILS
-// ("remove it from the debt list"), so wiring a driver forces its removal and the list
-// can only shrink. The systemic 409-adopt false-success audit found 23 drivers; all but
-// one are now wired to the shared comparator with gate cases.
+// was NOT YET proven by this gate. It was the campaign's remaining work made VISIBLE and
+// two-way: the moment a driver declared AdoptControls, `CertifyCreateAdoptsExisting`
+// FAILED ("remove it from the debt list"), so wiring a driver forced its removal and the
+// list could only shrink. The systemic 409-adopt false-success audit found 23 drivers.
 //
-// The last entry, `aws/kms`, is DEFERRED rather than pending: its only adopt-time inline
-// control is rotation.period, a DURATION whose safe direction is a CEILING (a shorter
-// rotation is more secure), which the comparator has no Direction for yet — adding one is
-// a design change larger than a wiring slice, so it waits. (protection.level=hsm is
-// const-true for every AWS KMS key, so it is not a control that can be missing.) When
-// even this is wired the map is empty and the class is fully gate-enforced.
-var adoptControlDebt = map[string]bool{
-	"aws/kms": true,
-}
+// The map is now EMPTY: every driver is wired to the shared comparator with
+// MissingControl gate cases, so the class is fully enforced rather than remembered. The
+// last to land was aws/kms, which needed a new `Ceiling` Direction for rotation.period (a
+// duration whose safe direction is shorter-is-more-secure) plus a `rotation.enabled`
+// observation so a non-rotating key is a MEASURED miss, not an invisible absence.
+//
+// The map STAYS as the shape of the check, not a leftover: an entry can only be added
+// deliberately (a new driver that sets a control inline before its gate cases exist), and
+// the two-way rule means it can only shrink again. An empty map is the closed state.
+var adoptControlDebt = map[string]bool{}
