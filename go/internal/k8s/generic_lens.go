@@ -286,7 +286,18 @@ func lensNamespacePodSecurity(obj map[string]any) ([]provider.Observation, []str
 	if !validPodSecurity[lvl] {
 		return nil, []string{"pod-security enforce level " + lvl + " is not a known standard — not represented"}
 	}
-	return []provider.Observation{{Path: "security.podSecurity", Value: lvl, Derivation: "measured"}}, nil
+	// D1060: the enforce LABEL is present, but the standard is only ENFORCED if the
+	// API server runs the PodSecurity admission plugin — a static label read cannot
+	// witness that the plugin is on (it is in-tree and default-on since k8s 1.25, but
+	// an operator can disable it). This is the same enforcement-vs-declaration split
+	// the netpol lens draws for ingress.public/egress.restricted (config-intent, not
+	// measured, because a NetworkPolicy is inert without a CNI that honors it). A namespace
+	// labelled `restricted` on a cluster with PodSecurity admission OFF admits privileged
+	// pods while `measured restricted` would read satisfied — the dangerous direction.
+	// Emit config-intent + a caveat, mirroring the CNI caveat; there is no namespace
+	// Prober yet, so probe is the honest path to a witnessed outcome.
+	return []provider.Observation{{Path: "security.podSecurity", Value: lvl, Derivation: "config-intent"}},
+		[]string{"security.podSecurity from the enforce label is CONFIG-INTENT: enforcement depends on the PodSecurity admission plugin being enabled in the API server (default-on since k8s 1.25, but disableable) — a static read cannot witness it"}
 }
 
 // writeLensNamespacePodSecurity stamps the validated enforce label, merging into

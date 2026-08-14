@@ -145,16 +145,35 @@ func TestObserveNamespacePosture(t *testing.T) {
 	if m == nil {
 		t.Fatal("namespace must route through the schema-driven engine")
 	}
-	obs, _, err := d.observeMapped(m, nsProviderID("payments"))
+	obs, diags, err := d.observeMapped(m, nsProviderID("payments"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := map[string]any{}
+	deriv := map[string]string{}
 	for _, o := range obs {
 		got[o.Path] = o.Value
+		deriv[o.Path] = o.Derivation
 	}
 	if got["security.podSecurity"] != "restricted" {
 		t.Fatalf("observe namespace = %v", got)
+	}
+	// D1060: enforcement of the pod-security standard depends on the PodSecurity
+	// admission plugin, which a static label read cannot witness — the value is
+	// CONFIG-INTENT, not measured (the netpol enforcement-vs-declaration split), and a
+	// caveat names the dependency. A `measured restricted` would read satisfied on a
+	// cluster with PSA admission off, admitting privileged pods — the dangerous direction.
+	if deriv["security.podSecurity"] != "config-intent" {
+		t.Fatalf("security.podSecurity derivation = %q, want config-intent", deriv["security.podSecurity"])
+	}
+	var sawCaveat bool
+	for _, dg := range diags {
+		if strings.Contains(dg, "PodSecurity admission plugin") {
+			sawCaveat = true
+		}
+	}
+	if !sawCaveat {
+		t.Fatalf("want a PodSecurity-admission caveat diagnostic, got %v", diags)
 	}
 	if got["service.managed"] != true {
 		t.Fatalf("service.managed const missing: %v", got)

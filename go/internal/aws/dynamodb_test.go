@@ -155,22 +155,35 @@ func TestClassifyDynamoDBChange(t *testing.T) {
 // carry the DECLARED values (disable is expressible, not just enable).
 func TestDynamoDBUpdateInPlace(t *testing.T) {
 	var pitrBody, updTableBody string
-	deleted := false
+	// stateful so the D1061 poll-to-applied sees the update take effect: the Update
+	// calls mutate delProt/pitr, and the Describe reads reflect them.
+	delProt, pitr := false, true
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		switch t := r.Header.Get("X-Amz-Target"); {
 		case strings.HasSuffix(t, "DescribeTable"):
-			_, _ = w.Write([]byte(`{"Table":{"TableStatus":"ACTIVE","TableArn":"arn:aws:dynamodb:eu-central-1:000000000000:table/t","DeletionProtectionEnabled":false}}`))
+			dp := "false"
+			if delProt {
+				dp = "true"
+			}
+			_, _ = w.Write([]byte(`{"Table":{"TableStatus":"ACTIVE","TableArn":"arn:aws:dynamodb:eu-central-1:000000000000:table/t","DeletionProtectionEnabled":` + dp + `}}`))
 		case strings.HasSuffix(t, "ListTagsOfResource"):
 			_, _ = w.Write([]byte(`{"Tags":[{"Key":"groundhold-capability","Value":"sessions"},{"Key":"groundhold-environment","Value":"prod"}]}`))
 		case strings.HasSuffix(t, "UpdateContinuousBackups"):
 			pitrBody = string(b)
+			pitr = strings.Contains(pitrBody, `"PointInTimeRecoveryEnabled":true`)
 			_, _ = w.Write([]byte(`{"ContinuousBackupsDescription":{"ContinuousBackupsStatus":"ENABLED"}}`))
+		case strings.HasSuffix(t, "DescribeContinuousBackups"):
+			st := "DISABLED"
+			if pitr {
+				st = "ENABLED"
+			}
+			_, _ = w.Write([]byte(`{"ContinuousBackupsDescription":{"PointInTimeRecoveryDescription":{"PointInTimeRecoveryStatus":"` + st + `"}}}`))
 		case strings.HasSuffix(t, "UpdateTable"):
 			updTableBody = string(b)
+			delProt = strings.Contains(updTableBody, `"DeletionProtectionEnabled":true`)
 			_, _ = w.Write([]byte(`{"TableDescription":{"TableStatus":"ACTIVE"}}`))
 		default:
-			_ = deleted
 			w.WriteHeader(400)
 		}
 	}))
@@ -198,6 +211,37 @@ func TestDynamoDBUpdateInPlace(t *testing.T) {
 	}
 	if !strings.Contains(updTableBody, `"DeletionProtectionEnabled":true`) {
 		t.Fatalf("deletion.protection must send UpdateTable DeletionProtectionEnabled:true, got %s", updTableBody)
+	}
+}
+
+// TestDynamoDBUpdateAsyncNotAppliedIsUnknown (D1061): an UpdateTable that the API
+// ACCEPTS (200) but that never reaches the applied state — the table stays with
+// deletion protection OFF while the candidate declares it ON — must report unknown,
+// never succeeded. Reporting the accept as done is the D953 shape: a security-closing
+// change recorded as converged while still pending.
+func TestDynamoDBUpdateAsyncNotAppliedIsUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch tg := r.Header.Get("X-Amz-Target"); {
+		case strings.HasSuffix(tg, "DescribeTable"): // accepted, but protection never applies
+			_, _ = w.Write([]byte(`{"Table":{"TableStatus":"ACTIVE","TableArn":"arn:aws:dynamodb:eu-central-1:000000000000:table/t","DeletionProtectionEnabled":false}}`))
+		case strings.HasSuffix(tg, "ListTagsOfResource"):
+			_, _ = w.Write([]byte(`{"Tags":[{"Key":"groundhold-capability","Value":"sessions"},{"Key":"groundhold-environment","Value":"prod"}]}`))
+		case strings.HasSuffix(tg, "UpdateTable"):
+			_, _ = w.Write([]byte(`{"TableDescription":{"TableStatus":"UPDATING"}}`))
+		default:
+			w.WriteHeader(400)
+		}
+	}))
+	defer srv.Close()
+	d := dynamoDriver(t, srv)
+	d.PollTimeout = 5 * time.Millisecond // never reaches applied → times out fast
+	pid := dynamoProviderID("eu-central-1", "000000000000", "sessions")
+	a := dynamoAttrs()
+	a["deletion.protection"] = true
+	res := d.updateDynamoDB("sessions", "prod", pid, a, dynamoImpl(), []string{"deletion.protection"})
+	if res.Status != "unknown" {
+		t.Fatalf("an accepted-but-not-applied protection change must be unknown, got %+v — "+
+			"reporting succeeded records a control still pending as converged", res)
 	}
 }
 

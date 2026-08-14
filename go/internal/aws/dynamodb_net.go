@@ -382,6 +382,7 @@ func (d *Driver) updateDynamoDB(capability, environment, providerID string,
 		return provider.CreateResult{Status: "failed", Reason: berr.Error()}
 	}
 	plan.Table = table
+	changedPITR, changedDelProt := false, false
 	for _, path := range changes {
 		switch path {
 		case "backup.pointInTimeRecovery":
@@ -392,6 +393,7 @@ func (d *Driver) updateDynamoDB(capability, environment, providerID string,
 			if r := dynamoPatchOutcome(st, resp, e, providerID, "UpdateContinuousBackups"); r != nil {
 				return *r
 			}
+			changedPITR = true
 		case "deletion.protection":
 			st, resp, e := d.dynamoCall(region, "UpdateTable", jsonBody(map[string]any{
 				"TableName":                 table,
@@ -400,11 +402,43 @@ func (d *Driver) updateDynamoDB(capability, environment, providerID string,
 			if r := dynamoPatchOutcome(st, resp, e, providerID, "UpdateTable"); r != nil {
 				return *r
 			}
+			changedDelProt = true
 		default:
 			// classifyDynamoDBChange routes everything else to replacement; a path here
 			// would be a wiring bug, not a silent no-op.
 			return provider.CreateResult{Status: "failed",
 				Reason: fmt.Sprintf("dynamodb in-place update does not handle %q (it should have been a replacement)", path)}
+		}
+	}
+	// D1061: UpdateTable (deletion protection) and UpdateContinuousBackups (PITR) are
+	// ASYNC — the 200 only ACCEPTS the change while the table is still UPDATING / PITR
+	// ENABLING. Returning succeeded on the accept is the D953 shape: enabling deletion
+	// protection or PITR (a security-closing change) reported converged while not yet in
+	// effect, and if the async modify fails the ledger has already tombstoned it as
+	// applied. Poll to the APPLIED state — table ACTIVE and each changed control at its
+	// target — exactly as createDynamoDB polls to ACTIVE and the RDS/Aurora updaters poll
+	// to available+empty-pending (D953).
+	if changedPITR || changedDelProt {
+		deadline := d.Now().Add(d.PollTimeout)
+		for {
+			desc, found, rerr := d.describeTable(region, table)
+			applied := rerr == nil && found && desc.TableStatus == "ACTIVE"
+			if applied && changedDelProt && desc.DeletionProtectionEnabled != plan.DeletionProtection {
+				applied = false
+			}
+			if applied && changedPITR {
+				if en, ok := d.pitrEnabled(region, table); !ok || en != plan.PITR {
+					applied = false
+				}
+			}
+			if applied {
+				break
+			}
+			if d.Now().After(deadline) {
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: "table still applying the update at poll timeout — reconcile"}
+			}
+			time.Sleep(d.PollInterval)
 		}
 	}
 	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
