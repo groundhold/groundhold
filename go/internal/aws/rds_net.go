@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/caplens"
 	"groundhold/internal/provider"
 )
@@ -135,6 +136,21 @@ func rdsErrCode(body []byte) string {
 	return e.Code
 }
 
+// rdsAdoptControls are the controls RDS sets INLINE in CreateDBInstance, so on a
+// 409-adopt they never applied to the pre-existing instance (D1062). Storage
+// encryption, its customer key, and TLS enforcement are fixed at create (a change is
+// a replacement or a separate parameter-group binding — classifyRDSChange returns
+// "unsupported"), so their absence FAILS the adopt; public exposure is an online
+// ModifyDBInstance (mutable+wired), so its absence is unknown+bound and converge
+// patches it. deletion.protection is not here yet — observeRDS does not emit it (a
+// follow-up: emit it measured, then add it as a control).
+var rdsAdoptControls = []adoptcheck.Control{
+	{Path: "encryption.atRest", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "encryption.inTransit", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "network.publicExposure", Direction: adoptcheck.SecureFalse, UpdateWired: true},
+}
+
 // createRDS: CreateDBInstance, then poll to "available". A same-name existing
 // instance continues only if ours (tags); otherwise refuses.
 func (d *Driver) createRDS(region, account, environment, capability string,
@@ -144,6 +160,7 @@ func (d *Driver) createRDS(region, account, environment, capability string,
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	pid := rdsProviderID(region, id)
+	adopted := false
 
 	st, resp, err := d.rdsPost(region, body)
 	if err != nil {
@@ -172,7 +189,8 @@ func (d *Driver) createRDS(region, account, environment, capability string,
 			return provider.CreateResult{Status: "failed",
 				Reason: "an instance with this name exists but is not ours (tags do not match)"}
 		}
-		// ours — continue to poll
+		// ours — continue to poll, then re-check declared controls (D1062)
+		adopted = true
 	case st >= 500:
 		// "may have landed" — the id is deterministic, so carry the pid so a
 		// reconcile keeps the handle (as the transport-error branch above does).
@@ -195,6 +213,25 @@ func (d *Driver) createRDS(region, account, environment, capability string,
 		if rerr == nil && found {
 			switch inst.Status {
 			case "available":
+				// D1062: an ADOPTED instance (409, ours) never received the CreateDBInstance
+				// body's inline controls — encryption at rest, its KMS key, TLS enforcement,
+				// public exposure. Re-check them against this driver's OWN measured observations
+				// (cmek is KMS-traced, so SSE-KMS with the account default key is NOT a customer
+				// key) before reporting succeeded: an immutable control the instance lacks fails,
+				// a mutable one a wired update can patch is unknown+bound (converge reconciles).
+				if adopted {
+					obs, _, oerr := d.observeRDS(capability, pid)
+					if oerr != nil {
+						return provider.CreateResult{ProviderID: pid, Status: "unknown",
+							Reason: "adopted instance re-observe gave no answer — reconcile: " + oerr.Error()}
+					}
+					switch v := adoptcheck.Compare(attrs, obs, rdsAdoptControls); v.Status {
+					case "failed":
+						return provider.CreateResult{Status: "failed", Reason: v.Reason}
+					case "unknown":
+						return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
+					}
+				}
 				return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
 			case "failed", "incompatible-parameters", "incompatible-restore":
 				return provider.CreateResult{ProviderID: pid, Status: "failed",

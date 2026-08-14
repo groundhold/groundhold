@@ -1075,7 +1075,16 @@ func TestAuroraServerlessAutoPause(t *testing.T) {
 	}
 }
 
-func rdsQueryRole(_ *http.Request, body []byte) certifynet.Role {
+func rdsQueryRole(req *http.Request, body []byte) certifynet.Role {
+	// the adopt-check's KMS key trace is a JSON-protocol read (X-Amz-Target:
+	// TrentService.DescribeKey), not a Query-protocol Action= — classify it as the
+	// READ it is, or it inflates the mutation count (D1062).
+	if tgt := req.Header.Get("X-Amz-Target"); tgt != "" {
+		op := tgt[strings.LastIndex(tgt, ".")+1:]
+		if strings.HasPrefix(op, "Describe") || strings.HasPrefix(op, "List") || strings.HasPrefix(op, "Get") {
+			return certifynet.RoleRead
+		}
+	}
 	if v, err := url.ParseQuery(string(body)); err == nil {
 		a := v.Get("Action")
 		if strings.HasPrefix(a, "Describe") || strings.HasPrefix(a, "List") {
