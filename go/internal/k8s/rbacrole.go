@@ -117,12 +117,26 @@ func permPrivileged(perm string) bool {
 	if verb == "*" && res == "*" {
 		return true
 	}
+	// D1051: D988 only fired for the LITERAL verb "*", so a role spelling out its
+	// write verbs to look scoped — apiGroups:["*"] resources:["*"] verbs:[create,
+	// update,patch,delete] — read access.privileged=FALSE (measured, definite) while
+	// being cluster-admin-equivalent: write to ALL resource types of a group can
+	// create a ClusterRoleBinding and re-grant anything. A mutating permission over
+	// res:* is admin-shaped over that group (subsumes rbac objects), same intent as
+	// D988; over-reports a full-control-of-one-CRD-group role as privileged, the safe
+	// direction.
+	if res == "*" && !permReadOnly(perm) {
+		return true
+	}
 	switch verb {
 	case "bind", "escalate", "impersonate":
 		return true
 	}
-	// writing RBAC objects is a re-grant vector
-	if strings.HasPrefix(group, "rbac.authorization.k8s.io") {
+	// writing RBAC objects is a re-grant vector. The apiGroup is either the literal
+	// rbac group or a wildcard "*", which the API server resolves to include it — a
+	// role writing rolebindings under group "*" re-grants exactly as one naming the
+	// group does (D1051).
+	if strings.HasPrefix(group, "rbac.authorization.k8s.io") || group == "*" {
 		switch res {
 		case "roles", "clusterroles", "rolebindings", "clusterrolebindings", "*":
 			if !permReadOnly(perm) {

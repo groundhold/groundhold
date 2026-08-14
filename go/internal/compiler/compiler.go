@@ -850,6 +850,16 @@ func Compile(c *contract.Contract, cand *contract.Candidate,
 		return nil, err
 	}
 
+	// D1052: the create path refuses a $ref whose producer this same plan destroys
+	// (ref-producer-retiring, wireReferences); the UPDATE fold path resolved the
+	// identical operand without that check, so an update could seal a literal read
+	// from a producer being retired or replaced in this very plan — apply would then
+	// rewire a live consumer to a destroyed resource and report succeeded. Apply the
+	// same guard to update Folds now that the full delete/replace set is known.
+	if err := refuseUpdateFoldsRetiringProducer(actions); err != nil {
+		return nil, err
+	}
+
 	// D1034: now that log_group $refs are resolved to their producer, seal the
 	// emission-adopt grant onto any create that governs a certified emitted log group
 	// with the operator's scoped consent.
@@ -1775,6 +1785,40 @@ func wireReferences(actions []Action, cand *contract.Candidate, in Inputs, candi
 		}
 	}
 	return detectRefCycle(actions)
+}
+
+// refuseUpdateFoldsRetiringProducer is the update-path twin of wireReferences'
+// `deleting` guard (D1052). An update action's Folds are resolved by foldDriftRefs
+// (compiler.go:770), which sees only bindings/outputs/clock — never the plan's
+// action set — so it happily folds a literal read from a producer this same plan
+// DELETES or REPLACES (a replace emits a delete of the old generation, so it lands
+// in the same set). Sealing that fold would let apply re-push the operand pointing
+// at a resource being destroyed and report succeeded. Refuse it, matching
+// ref-producer-retiring on the create path. Runs after every action is composed so
+// the delete/replace set is complete regardless of capability ordering.
+func refuseUpdateFoldsRetiringProducer(actions []Action) error {
+	deleting := map[string]bool{}
+	for i := range actions {
+		if actions[i].Operation == "delete" {
+			deleting[actions[i].Capability] = true
+		}
+	}
+	for i := range actions {
+		a := &actions[i]
+		if a.Operation != "update" {
+			continue
+		}
+		for _, f := range a.Folds {
+			if deleting[f.Capability] {
+				return refErr(a.Capability, f.Slot, fmt.Sprintf(
+					"%s.%s folds a value from %q, which this same plan DELETES or "+
+						"REPLACES — a value from a resource being destroyed is a lie "+
+						"(ref-producer-retiring) (D1052)",
+					a.Capability, f.Slot, f.Capability))
+			}
+		}
+	}
+	return nil
 }
 
 // foldDriftRefs resolves the $ref operands in a BOUND capability's implementation

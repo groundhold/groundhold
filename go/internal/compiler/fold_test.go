@@ -130,6 +130,28 @@ func TestWireReferencesRefusesRetiringProducer(t *testing.T) {
 	}
 }
 
+// D1052: the update-path twin — an update action whose Folds read a producer this
+// same plan deletes (or replaces, which emits a delete of the old gen) must refuse
+// exactly as the create path does, so apply never rewires a live consumer to a
+// destroyed resource.
+func TestRefuseUpdateFoldsRetiringProducer(t *testing.T) {
+	actions := []Action{
+		{ID: "a-update-api", Capability: "api", Operation: "update",
+			Folds: []OperandFold{{Slot: "environment.DB_HOST", Capability: "db",
+				Output: "endpoint", Value: "db-g1.rds.amazonaws.com"}}},
+		{ID: "a-delete-db-g1", Capability: "db", Operation: "delete"},
+	}
+	err := refuseUpdateFoldsRetiringProducer(actions)
+	if err == nil || !strings.Contains(err.Error(), "ref-producer-retiring") {
+		t.Fatalf("an update fold from a same-plan-deleted producer must refuse, got: %v", err)
+	}
+	// control: same fold, producer NOT retiring -> no refusal.
+	ok := []Action{actions[0]}
+	if err := refuseUpdateFoldsRetiringProducer(ok); err != nil {
+		t.Fatalf("a fold from a surviving producer must pass, got: %v", err)
+	}
+}
+
 func TestWireReferencesFoldNeedsEvalClock(t *testing.T) {
 	in := foldInputs(map[string]ledger.ObsRecord{
 		"privateSubnetIds": {Value: []any{"subnet-a", "subnet-b"},

@@ -108,6 +108,13 @@ func TestObserveRolePrivilegedSignals(t *testing.T) {
 		{"apps-wildcard", []map[string]any{{"apiGroups": []any{"apps"}, "resources": []any{"*"}, "verbs": []any{"*"}}}},
 		{"rbac-write", []map[string]any{{"apiGroups": []any{"rbac.authorization.k8s.io"}, "resources": []any{"rolebindings"}, "verbs": []any{"create"}}}},
 		{"escalate", []map[string]any{{"apiGroups": []any{"rbac.authorization.k8s.io"}, "resources": []any{"roles"}, "verbs": []any{"escalate"}}}},
+		// D1051: enumerated write verbs over */* — the "spell out the verbs to avoid *"
+		// shape — is cluster-admin-equivalent (can create a ClusterRoleBinding) and must
+		// read privileged even though no permission is the literal */*:*.
+		{"enumerated-wildcard-write", []map[string]any{{"apiGroups": []any{"*"}, "resources": []any{"*"}, "verbs": []any{"get", "list", "watch", "create", "update", "patch", "delete"}}}},
+		// D1051: rbac-object write under a WILDCARD apiGroup — the API server resolves "*"
+		// to include the rbac group, so this re-grants exactly as the named group does.
+		{"wildcard-group-rbac-write", []map[string]any{{"apiGroups": []any{"*"}, "resources": []any{"clusterrolebindings"}, "verbs": []any{"create"}}}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
