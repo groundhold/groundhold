@@ -173,6 +173,23 @@ func (d *Driver) pollFirestoreOperation(opName string) provider.CreateResult {
 // location that does NOT match is a multi-region grouping (nam5, eur3) — D799.
 var gcpRegionID = regexp.MustCompile(`^[a-z]+-[a-z]+[0-9]+$`)
 
+// residencyMultiRegionDiag returns the D799/D1043 residency-honesty diagnostic when
+// `loc` is a GCP MULTI-REGION (US, EU, ASIA, nam5, eur3 …) rather than a single region.
+// A region-name comparison against a multi-region is not comparing what it appears to,
+// so a residency constraint (especially an exclusion like `not-in [asia-southeast1]`)
+// can read SATISFIED while the bytes physically reside across several regions. Empty
+// when `loc` is a single region or empty. `what` names the resource in the message.
+// D1043: D799 landed only on Firestore; the same shape sits on every location.region
+// emitted from a field that can be a multi-region (BigQuery/GCS Location, image storage).
+func residencyMultiRegionDiag(loc, what string) string {
+	if loc == "" || gcpRegionID.MatchString(strings.ToLower(loc)) {
+		return ""
+	}
+	return "location.region is " + loc + ", a MULTI-REGION rather than a region: the " +
+		what + "'s data is resident in more than one region, and a residency constraint " +
+		"comparing region names is not comparing what it appears to"
+}
+
 // firestoreAvailability answers from the location the database is actually in, rather
 // than from the type of the service (D799).
 func firestoreAvailability(locationID string) string {

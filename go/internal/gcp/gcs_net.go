@@ -591,6 +591,12 @@ func (d *Driver) observeGCS(capability, providerID string) ([]provider.Observati
 		if b.Location != "" {
 			obs = append(obs, provider.Observation{Path: "location.region",
 				Value: strings.ToLower(b.Location), Derivation: "measured"})
+			// D1043: "US"/"EU"/"ASIA" multi-region is the DEFAULT bucket location —
+			// diagnose it so a residency constraint is not silently satisfied over data
+			// that spans several regions (D799, propagated from Firestore).
+			if d := residencyMultiRegionDiag(b.Location, "bucket"); d != "" {
+				diags = append(diags, d)
+			}
 		}
 		obs = append(obs, provider.Observation{Path: "replication.enabled",
 			Value: false, Derivation: "measured"})

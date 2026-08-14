@@ -162,10 +162,15 @@ func (d *Driver) observeGCEInstance(capability, providerID string) ([]provider.O
 			break
 		}
 	}
-	cmk := false
+	// D1044: customerManagedKeys means ALL the instance's data sits under a customer key,
+	// so read EVERY attached disk, not just the boot disk. A CMEK boot disk beside a
+	// Google-managed DATA disk is not customer-key-encrypted — reporting true from the
+	// boot disk alone let a hard compliance constraint pass while a data disk held data
+	// under the default key. Any disk without a customer key makes the whole false.
+	cmk := len(doc.Disks) > 0
 	for _, disk := range doc.Disks {
-		if disk.Boot && disk.DiskEncryptionKey != nil && disk.DiskEncryptionKey.KmsKeyName != "" {
-			cmk = true
+		if disk.DiskEncryptionKey == nil || disk.DiskEncryptionKey.KmsKeyName == "" {
+			cmk = false
 			break
 		}
 	}

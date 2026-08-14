@@ -149,6 +149,17 @@ func (d *Driver) observeGCPImage(capability, providerID string) ([]provider.Obse
 	if len(doc.StorageLocations) > 0 {
 		obs = append(obs, provider.Observation{
 			Path: "location.region", Value: doc.StorageLocations[0], Derivation: "measured"})
+		// D1043: a storageLocation can itself be a multi-region, and an image can carry
+		// SEVERAL — emitting only [0] as a single region lets a residency constraint pass
+		// while the bytes sit in a multi-region or in a dropped tail location (D799).
+		if d := residencyMultiRegionDiag(doc.StorageLocations[0], "image"); d != "" {
+			unread = append(unread, d)
+		}
+		if len(doc.StorageLocations) > 1 {
+			unread = append(unread, fmt.Sprintf("location.region reflects only the first of "+
+				"%d image storage locations (%v) — a residency constraint cannot see the rest",
+				len(doc.StorageLocations), doc.StorageLocations))
+		}
 	} else {
 		unread = append(unread, "image reported no storageLocations — location.region unread")
 	}

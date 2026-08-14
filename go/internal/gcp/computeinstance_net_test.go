@@ -181,6 +181,27 @@ func TestObserveGCEInstance(t *testing.T) {
 		}
 	})
 
+	// D1044: customerManagedKeys means ALL the instance's data sits under a customer
+	// key. A CMEK boot disk beside a Google-managed DATA disk must read FALSE — the old
+	// boot-disk-only read reported true and certified a control the data disk lacked.
+	t.Run("a CMEK boot disk beside a Google-managed data disk reads false", func(t *testing.T) {
+		doc := `{"name":"n","status":"RUNNING","labels":{},"networkInterfaces":[{}],
+"disks":[{"boot":true,"diskEncryptionKey":{"kmsKeyName":"projects/p/locations/l/keyRings/r/cryptoKeys/k"}},{"boot":false}]}`
+		s := &gceServer{getStatus: 200, getBody: doc}
+		d, done := gceDriver(t, s)
+		defer done()
+		obs, _, err := d.observeGCEInstance("web", "gce:acme-prod:europe-west1-b:web-abc12345")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, o := range obs {
+			if o.Path == "encryption.customerManagedKeys" && o.Value != false {
+				t.Error("a Google-managed data disk beside a CMEK boot disk must read " +
+					"customerManagedKeys=false (D1044) — not all data is under a customer key")
+			}
+		}
+	})
+
 	// Public exposure is the PRESENCE of an accessConfig, so the reverse mapping
 	// must read presence rather than a field that does not exist.
 	t.Run("an accessConfig makes it public", func(t *testing.T) {
