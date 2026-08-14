@@ -40,6 +40,7 @@ never changes meaning; a misleading word is superseded, not redefined.
 | `REFUSED <code>` | blue | exit 2, any code not claimed above | per the machine code |
 | `DIED` | red | exit 4 | `groundhold resume` |
 | `CORRUPTED` | red inverse | exit 5 | `groundhold repair`; nothing proceeds over corruption |
+| `FAILED` | red | any nonzero exit NOT enumerated above (an unexpected or future exit outside 0–5) — no current verb emits it; present so an unknown exit fails closed to red, never a green success word | read the exit code |
 | `SEALED` | green | plan: a hash-pinned Sealed Plan exists and is executable | `apply` it |
 | `OK` | green | a procedural verb completed (publish, adopt, unadopt, resume, repair, anchor) — the record says what | — |
 
@@ -48,6 +49,14 @@ one already called itself "this closed set" (D329). A registry that is
 complete only if you read a later section is not a registry — the console
 implements against THIS table from another repository. Which verb earns
 which green word still belongs below; the closed set is here, whole.
+
+`FAILED` is the fail-closed floor of the set, not a verb's outcome: the
+renderer maps every documented exit (0–5) to a word above, and anything
+else — an unexpected or future exit code — to `FAILED` (red) rather than
+letting a nonzero result reach a green word. No current verb produces an
+exit outside 0–5, so `FAILED` is unreached today; it is published because a
+word the code can emit must be in the registry the console reads (D329), and
+the safe default for an exit we have no word for is red, never green.
 
 `PROVEN` vs `CONVERGED` is a deliberate epistemic distinction, not a
 synonym pair: PROVEN says every hard constraint is satisfied under

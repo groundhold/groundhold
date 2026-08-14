@@ -35311,3 +35311,69 @@ The fix is the fixture, not just the two lines of code: a parity contract that i
 not prevent drift on that branch, which is the same lesson as a gate that never runs on the thing it
 guards. The console change (the guard plus a local regression test) lives in its own repo; this entry
 records the runtime half — the shared case that makes the omission un-repeatable in either direction.
+## D1084 — the docs site served a tree three days older than main, and said why in its own file
+
+The first field note was written, gated, merged and published to the repository, and
+the site did not have it. Not a build failure: the deploy had not run. Its last
+successful run was hours old and pointed at a commit from before the day's work.
+
+`pages.yml` triggered on `workflow_dispatch` only, and its header said why in as many
+words: Pages on a free organisation needs a PUBLIC repository, and this one was
+private. That was true when written and stopped being true at the launch, three days
+earlier. Nothing re-read it. So every documentation change since — a README rewritten
+so its sixty-second path is executable (D1063), a CHANGELOG that stops presenting build
+numbers as release tags (D1078), the field note itself — was merged, gated, publicly
+visible in the repository, and absent from the site people are pointed at.
+
+**The dormancy notice contained its own fix.** Step three read: "or add a
+`push: { branches: [main], paths: ['website/**'] }` trigger for auto-deploy on docs
+changes." The instruction was correct, sitting in the file, waiting for someone to
+remember a condition had expired. That is the shape worth naming: a note that says "do
+X when Y stops holding" puts the check on a human's memory at exactly the moment nobody
+is looking at the file. Where the change can simply be made once Y is decidable, make
+it; the comment now records what happened rather than asking for future action.
+
+The trigger is path-filtered to `website/**` on purpose. Deploying on every commit to
+main would republish a byte-identical site continuously and make a real docs deploy
+impossible to find in the run history — a log nobody can read is the same as no log.
+
+**Adding the trigger immediately broke a different gate, correctly.** `pages.yml` runs
+on GitHub-hosted runners, and a workflow that was manual-only was exempt from the rule
+that no job may spend the organisation's hosted minutes on an ordinary push — an
+exemption the push trigger silently revoked. D383 is why that rule exists: the Actions
+budget hit 100% and took the release path down with it. Both jobs are now gated to the
+mirror, where the site is actually served; on the private source they would build a page
+nobody can reach. Worth recording because the sequence is the argument for having the
+gate at all — the change was two lines, looked obviously safe, and had a consequence in
+a system the author was not thinking about.
+
+Two things this does not fix, stated rather than left to be found. The site is still
+only as fresh as the last matching push, so a docs change that lands through a path the
+filter does not cover will not deploy; and nothing yet asserts that what the site serves
+matches what the repository holds. A gate for that has to run against the live URL,
+which no repository test can do honestly — recorded as the open half.
+
+## D1085 — the banner registry called itself closed while the renderer had a thirteenth word
+`spec/presentation.md` publishes the banner vocabulary as a closed set — "every verb ends its human
+output with exactly one banner word from this closed set" — and D329 built a gate
+(`TestBannerVocabularyMatchesTheSpec`) to keep the code and the spec in agreement, because the console is
+a separate repository implementing against this glossary and a word only in code reaches a consumer that
+never learned it. The gate exercises `Pick` across the verb × exit × rollup matrix and diffs the words it
+produces against the table — both directions. But it drove `exit` over `{0..5}` only, and the renderer has
+a thirteenth word: `Pick` maps any nonzero exit it does NOT enumerate (anything outside 0–5) to `FAILED`
+(render.go), the fail-closed floor that keeps an unexpected or future exit from reaching a green success
+word (the D194 rule that a green banner is a success claim). No verb emits an exit outside 0–5 today, so
+`FAILED` is unreached and the spec's claim held for all reachable behavior — but the gate's own range hid a
+word the code can emit from the registry that is supposed to be exhaustive, the same shape as a gate that
+does not run on the thing it guards.
+
+The word is not removable: deleting the `FAILED` arm would let an unexpected nonzero exit fall through to
+the per-verb green word — a nonzero result rendered as success, the exact fail-open D194 closed. So the
+fix publishes it. `FAILED` joins the table as the fail-closed floor (red, "any nonzero exit not enumerated
+above"), the prose names it as unreached-today-but-registered-because-the-code-can-emit-it, and the gate
+now drives one out-of-range exit so it actually produces `FAILED` and enforces the closed set as
+exhaustive of what the code emits across the WHOLE exit surface, not just the documented part. A direct
+case pins exit 99 → `FAILED`/red alongside the existing `TestPickNeverGreensNonzeroExit` (which pinned only
+that such an exit is not green). The registry is additive-only by its own rule, and this is an addition of
+a word that already existed in the code — closing the gap between "closed set" as published and as
+enforced.

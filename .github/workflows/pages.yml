@@ -1,15 +1,24 @@
 # Deploy the mkdocs documentation site (website/) to GitHub Pages.
 #
-# DORMANT ON PURPOSE: this triggers manually only. GitHub Pages on a free org
-# requires a PUBLIC repository, and this repo is private. To activate:
-#   1. Make the repo public (or upgrade the org plan for private Pages).
-#   2. Settings > Pages > Build and deployment > Source: "GitHub Actions".
-#   3. Run this workflow (Actions tab > pages > Run workflow) — or add a
-#      `push: { branches: [main], paths: ['website/**'] }` trigger for
-#      auto-deploy on docs changes.
+# Deploys on every docs change to the default branch, and on demand.
+#
+# It used to be manual-only, with a comment explaining why: Pages on a free org needs
+# a PUBLIC repository, and this one was private. That stopped being true at the launch
+# and the workflow did not notice — so for three days the site served a tree older than
+# main, and a page merged into the repository was simply not there. The document that
+# described the dormancy also prescribed the fix ("add a push trigger"), which is the
+# tell: a condition that expires should carry the change it licenses, not a note asking
+# someone to remember (D1084).
+#
+# The path filter is deliberate. `website/**` is what mkdocs builds; a deploy on every
+# unrelated commit would republish an identical site and make a real docs deploy
+# impossible to spot in the run history.
 name: pages
 
 on:
+  push:
+    branches: [main]
+    paths: ['website/**']
   workflow_dispatch:
 
 permissions:
@@ -23,6 +32,11 @@ concurrency:
 
 jobs:
   build:
+    # D383/D1084: the push trigger below makes this fire on an ordinary commit, and
+    # the site is served from the mirror — so on the private source it would spend the
+    # organisation's hosted minutes to build a page nobody can reach. The org's Actions
+    # budget hitting 100% is not hypothetical; it took the release path down once.
+    if: github.repository_owner == 'groundhold'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -40,6 +54,11 @@ jobs:
 
   deploy:
     needs: build
+    # D383/D1084: the push trigger below makes this fire on an ordinary commit, and
+    # the site is served from the mirror — so on the private source it would spend the
+    # organisation's hosted minutes to build a page nobody can reach. The org's Actions
+    # budget hitting 100% is not hypothetical; it took the release path down once.
+    if: github.repository_owner == 'groundhold'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

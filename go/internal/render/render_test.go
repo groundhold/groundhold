@@ -38,6 +38,9 @@ func TestPickPrecedence(t *testing.T) {
 		{"apply-green-is-applied", "apply", 0, "", Rollup{}, "APPLIED", Green},
 		{"plan-green-is-sealed", "plan", 0, "", Rollup{}, "SEALED", Green},
 		{"procedural-green-is-ok", "publish", 0, "", Rollup{}, "OK", Green},
+		// D1085: an exit outside the documented 0–5 range fails closed to FAILED (red),
+		// never to a green success word — the published fail-closed floor of the set.
+		{"unexpected-exit-fails-closed", "apply", 99, "", Rollup{}, "FAILED", Red},
 	}
 	for _, c := range cases {
 		word, color := Pick(c.verb, c.exit, c.code, c.r)

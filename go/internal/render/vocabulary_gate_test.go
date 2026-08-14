@@ -66,8 +66,12 @@ func implementedBanners(t *testing.T) map[string]bool {
 		{Unverifiable: []string{"c"}},
 	}
 	out := map[string]bool{}
+	// 0–5 are the documented exits; the extra out-of-range value exercises the
+	// fail-closed floor (Pick maps any unenumerated nonzero exit to FAILED, red).
+	// Without it the gate never sees FAILED and cannot enforce that the closed set
+	// published in the spec is EXHAUSTIVE of what the code can emit (D329/D1085).
 	for _, v := range verbs {
-		for _, exit := range []int{0, 1, 2, 3, 4, 5} {
+		for _, exit := range []int{0, 1, 2, 3, 4, 5, 99} {
 			for _, r := range rollups {
 				for _, code := range []string{"", "consent-required"} {
 					w, _ := Pick(v, exit, code, r)
