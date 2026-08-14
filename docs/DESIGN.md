@@ -35252,3 +35252,41 @@ case that publishes a signed tail event, tampers its signature, and asserts the 
 never counted as coverage) now also asserts exit 5 — it asserted exit 0 before, the proof the gate was
 missing. Found by the fifth sweep of this class (after D1079 showed D958's exit-honesty sweep was not
 exhaustive); the audit of the other verbs came back clean, each already gating its own problem field.
+
+## D1082 — `restore --partial` exited 0 over a knowingly-incomplete recovery
+D618 closed the all-zero case of `restore --partial`: a run where every capability came back `unknown`
+wrote a zero-event ledger and a fresh anchor beside it and exited 0, and from the next minute `attest`
+and `anchor --check` certified that empty file as the recovered history — so D618 removed the artefacts
+and refused. The same reasoning reaches a NON-empty partial, and D618 stopped one case short of it. A
+partial that recovers some capabilities and leaves others `unknown` writes the recovered subset's ledger
+plus a fresh anchor, and exited 0 with `status: "partial"` and the gaps named only inside the `partial[]`
+block — a report nobody re-reads after a green exit. `attest`/`anchor --check` then certify the recovered
+subset as an internally sound history (which it is — it just omits the unprovable capabilities), and
+automation gating on the exit code reads a whole recovery over an estate it was told, in a field, is
+incomplete. Same class as D1079/D1081: an honest field beside an exit code that says the opposite.
+
+This one is milder than those — `--partial` is an explicit opt-in, `restore` is a mostly-interactive DR
+verb rather than a cron gate, and the recovered ledger is honestly anchored (attest does not misrepresent
+it). But the exit code is a separate axis from whether the data is written, and the two need not agree:
+`--partial` means "give me what can be proven and tell me what cannot", which is satisfied by KEEPING the
+recovered subset (unlike all-zero, which is removed) while EXITING non-zero so automation never reads a
+knowingly-incomplete estate as whole. That is exactly the converge blocked-caps shape (D249: apply what is
+reconcilable, then a non-zero exit so nothing reads green). The fix returns `ExitRefused` when the report
+is `partial` — its own documented meaning is "the set does not hold together — a capsule failed" — after
+the all-zero branch has run, so a full recovery still exits 0 and an all-zero one still removes and
+refuses.
+
+Gating the exit code ALONE is not enough, and a first cut that did only that was one step short: `restore`
+cuts a FRESH anchor over the restored ledger (`BuildAnchor`) unconditionally, before this gate, so a
+partial run left `<out>` and `<out>.anchor` on disk — and that anchor is self-consistent for the RECOVERED
+SUBSET, so `anchor --check` (a containment check) and `attest` (D1081) both answer "verified" on it. That
+is the same class one level out: the exit-code consumer is protected, but two OTHER consumers re-derive
+"whole recovered history" from the artefact the run declined to remove — a responder who trusts
+`anchor --check` over restore's exit-5 is promoted an incomplete estate as authoritative, and the next
+`converge`/`audit` treats the withheld capability's live resources as shadow (and can plan a re-create over
+still-live stateful infra). So the fix also REMOVES the fresh anchor on a partial — keeping the recovered
+LEDGER (the deliverable) but deleting the wholeness claim beside it, exactly as the all-zero sibling removes
+its artefacts (D313). The only completeness check left is `anchor --check` against the ORIGINAL off-host
+anchor, which names the missing capabilities. The two `--partial` tests that asserted exit 0 now assert
+non-zero and that the fresh anchor is gone; every substantive assertion — the sound capability restored,
+the unknown one absent-not-fabricated, the recovered ledger still on disk — is unchanged.
