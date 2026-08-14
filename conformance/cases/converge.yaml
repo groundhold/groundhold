@@ -144,7 +144,7 @@ cases:
             phases: [verify]
             reasonContains: "hard constraint not proven: c-managed"
 
-  - name: converge-inconclusive-check-banners-applied
+  - name: converge-soft-inconclusive-check-banners-applied
     impl: go
     description: >
       D136: CONVERGED is a claim about verified reality — when the
@@ -152,6 +152,11 @@ cases:
       attribute (observation-required), the run reports exactly what it
       proved: APPLIED, with convergence: inconclusive in the machine
       result. A green word never claims more than was checked.
+      The constraint here is SOFT: a control the runtime cannot witness
+      is advisory, so an inconclusive convergence stays a clean exit 0 —
+      this is the sanctioned way to declare a genuinely unobservable
+      constraint (the D1079 escape). A HARD one blocks instead
+      (next case).
     converge:
       contract:
         apiVersion: contract/v0.1
@@ -161,7 +166,7 @@ cases:
           - id: db
             type: capability.database.relational
         constraints:
-          hard:
+          soft:
             - id: c-region
               subject: db
               path: location.region
@@ -187,3 +192,52 @@ cases:
             banner: APPLIED
             phases: [verify, plan, forecast, confirm, apply, observe,
                      convergence-check]
+
+  - name: converge-hard-unwitnessed-blocks
+    impl: go
+    description: >
+      D1079: converge's plan-based convergence check cannot see a
+      HARD constraint left unverifiable — the compiler carries a
+      non-observable attribute as "unverified" and the security floor
+      (D1071) lives only in `audit`. So converge re-witnesses reality
+      with a read-only `audit` before painting the world converged: a
+      hard constraint that recorded reality does not witness
+      (unknown/unverifiable/violated) blocks with exit 2, exactly as
+      `audit` and `posture` do under invariant #1 — never a green exit 0.
+      Same fixture as the soft case above; only the SEVERITY differs.
+      Pre-fix this ran exit 0 APPLIED (the false green this closes).
+    converge:
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: cv-hard-unwit, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-region
+              subject: db
+              path: location.region
+              op: equals
+              value: europe-central2
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: cv-hard-unwit
+        capabilities:
+          db:
+            attributes:
+              location.region: europe-central2
+              service.managed: true
+      runs:
+        - at: "2026-07-11T22:00:00Z"
+          approve: true
+          expect:
+            exit: 2
+            status: applied
+            convergence: inconclusive
+            banner: BLOCKED
+            code: observation-required
+            reasonContains: c-region

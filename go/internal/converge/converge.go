@@ -346,6 +346,99 @@ func (o *Options) refuseIfPending(phases []string) (result, bool) {
 				"to conclude it before trusting this result (D935)", cap)}}, true
 }
 
+// witnessReality re-checks recorded reality against the contract with a read-only
+// `audit` at o.At and returns a blocking result if any HARD constraint is not
+// witnessed as satisfied (violated | unknown | unverifiable). Converge's own
+// convergence check runs the compiler's reconcile, which carries a non-observable
+// or intent-only attribute as "unverified" (D249) and does NOT implement the D1071
+// security floor — that floor lives only in `audit`. So a hard control backed by
+// nothing but the candidate's own word paints the world converged at exit 0, green,
+// while `audit` and `posture` (D965) exit 2 on the identical ledger. Invariant #1
+// says unknown/unverifiable on a hard constraint blocks, "no exceptions"; this is the
+// D1020/D965/D966 shape — an honest machine FIELD (convergence: inconclusive) beside
+// a LYING exit code — applied to the porcelain a CI gates on. Converge RELAYS audit's
+// verdict (rollup + code) rather than re-deriving the floor: one canon, no sibling
+// re-derivation (the trap D965/D966 name). record=false — it never writes, so the
+// alarm-transition channel stays `audit --record` (D54) and there is no D935 pending
+// interaction. finish() paints BLOCKED/VIOLATED from the rollup (D194); the caller
+// sets Status. Clean (no hard failure) -> ({}, false).
+func (o *Options) witnessReality() (result, bool) {
+	if o.Ledger == "" {
+		return result{}, false
+	}
+	args := append([]string{"audit", o.Contract, "--ledger", o.Ledger, "--at", o.At},
+		o.vocabArgs()...)
+	// D638: a ledger-touching child carries the run's full policy (trust to verify a
+	// signed ledger, plus the cluster/region selector) — the flag-forwarding gate
+	// enforces this for every child, this one included.
+	args = append(args, o.policyArgs()...)
+	code, stdout, stderr := o.Run(args...)
+	switch code {
+	case 0:
+		return result{}, false
+	case 2:
+		roll, reasons, ac := parseAuditVerdicts(stdout)
+		if len(reasons) == 0 {
+			// audit exits 2 only when a HARD verdict fails (audit.go), so an
+			// unparsed report is a broken child, not a soft advisory — fail CLOSED
+			// rather than certify converged over a report we could not read.
+			reasons = []string{"audit refused (exit 2) but its report could not be read"}
+		}
+		return result{Exit: 2, Code: ac, Rollup: roll, Convergence: "inconclusive",
+			Reasons: append([]string{"a hard constraint is not witnessed by recorded reality:"}, reasons...)}, true
+	case 5:
+		return result{Status: "corrupted", Exit: 5,
+			Reasons: append([]string{"post-apply audit: ledger corrupted"}, lines(stderr)...)}, true
+	default:
+		// a killed/failed audit child must not let converge claim converged (the
+		// same fail-closed reading the verify phase uses on an unexpected code).
+		return result{Exit: 2,
+			Reasons: append([]string{fmt.Sprintf(
+				"post-apply audit exited %d — cannot certify the world converged", code)}, lines(stderr)...)}, true
+	}
+}
+
+// parseAuditVerdicts reads a read-only audit report into the HARD non-satisfied
+// verdicts as a banner rollup (D194), human reasons, and audit's own blocking code
+// (D624). Converge relays these verbatim — the security floor is not re-implemented
+// here.
+func parseAuditVerdicts(stdout string) (render.Rollup, []string, perr.Code) {
+	var rep struct {
+		Code     perr.Code `json:"code"`
+		Verdicts []struct {
+			Constraint string `json:"constraint"`
+			Path       string `json:"path"`
+			Severity   string `json:"severity"`
+			Verdict    string `json:"verdict"`
+			Reason     string `json:"reason"`
+		} `json:"verdicts"`
+	}
+	_ = json.Unmarshal([]byte(stdout), &rep)
+	var roll render.Rollup
+	var reasons []string
+	for _, v := range rep.Verdicts {
+		if v.Severity != "hard" {
+			continue
+		}
+		switch v.Verdict {
+		case "violated":
+			roll.Violated = append(roll.Violated, v.Constraint)
+		case "unknown":
+			roll.Unknown = append(roll.Unknown, v.Constraint)
+		case "unverifiable":
+			roll.Unverifiable = append(roll.Unverifiable, v.Constraint)
+		default:
+			continue
+		}
+		r := fmt.Sprintf("%s (%s): %s", v.Constraint, v.Path, v.Verdict)
+		if v.Reason != "" {
+			r += " — " + v.Reason
+		}
+		reasons = append(reasons, r)
+	}
+	return roll, reasons, rep.Code
+}
+
 // vocabArgs mirrors the CLI's vocabulary selection into a child invocation:
 // --no-vocab (empty), --vocab DIR (custom), or nothing (the binary's built-in
 // embedded vocabulary — the default a downloaded groundhold uses).
@@ -611,6 +704,14 @@ func Converge(o Options) int {
 				o.say("  ✗ cannot claim converged — an in-flight operation is unresolved")
 				return o.finish(r)
 			}
+			if g, blocked := o.witnessReality(); blocked {
+				if g.Status == "" {
+					g.Status = "refused"
+				}
+				g.Phases = phases
+				o.say("  ✗ cannot certify converged — a hard constraint is not witnessed by recorded reality")
+				return o.finish(g)
+			}
 			o.say("  ✓ converged — the world already matches the candidate")
 			return o.finish(result{Status: "converged", Exit: 0,
 				Phases: phases})
@@ -820,6 +921,13 @@ func Converge(o Options) int {
 					if r, blocked := o.refuseIfPending(phases); blocked {
 						return o.finish(r)
 					}
+					if g, blocked := o.witnessReality(); blocked {
+						if g.Status == "" {
+							g.Status = "applied"
+						}
+						g.Phases = phases
+						return o.finish(g)
+					}
 					o.say("  ✓ converged during backoff")
 					return o.finish(result{Status: "converged", Exit: 0, Phases: phases})
 				}
@@ -841,6 +949,13 @@ func Converge(o Options) int {
 		if childCode(stdout) == perr.NothingToChange {
 			if r, blocked := o.refuseIfPending(phases); blocked {
 				return o.finish(r)
+			}
+			if g, blocked := o.witnessReality(); blocked {
+				if g.Status == "" {
+					g.Status = "applied"
+				}
+				g.Phases = phases
+				return o.finish(g)
 			}
 			o.say("  ✓ converged — nothing to apply; the world already matches on " +
 				"every attribute this run can compare")
@@ -934,6 +1049,19 @@ func Converge(o Options) int {
 	if r, blocked := o.refuseIfPending(phases); blocked {
 		o.say("  ✗ applied, but cannot report converged — an in-flight operation is unresolved")
 		return o.finish(r)
+	}
+	// D1079: witness invariant #1 before painting the world converged. The
+	// plan-based convergence check above cannot see a hard constraint left
+	// unverifiable (the compiler carries it as "unverified"; the D1071 floor is
+	// audit-only), so a hard control witnessed by nothing but the candidate's word
+	// would reach exit 0 here — green — while `audit` on this same ledger exits 2.
+	if g, blocked := o.witnessReality(); blocked {
+		if g.Status == "" {
+			g.Status = "applied"
+		}
+		g.Phases = phases
+		o.say("  ✗ applied, but a hard constraint is not witnessed by recorded reality — not converged")
+		return o.finish(g)
 	}
 	final := result{Status: "applied", Exit: 0, Phases: phases, Convergence: convergence}
 	o.reachability(&final)
