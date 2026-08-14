@@ -47,7 +47,26 @@ reproducible rebuild; the checksums cover all three (D680), and the download abo
 fetches the sums file so the verification line has something to read — following
 the old snippet literally left `sha256sum: SHA256SUMS: No such file or directory`. Every
 release also carries a keyless SLSA build-provenance attestation, verifiable with
-`gh attestation verify <asset> --repo groundhold/groundhold` (D354).
+`gh attestation verify <asset> --repo groundhold/groundhold` (D354). That command
+prints nothing at all when it succeeds and exits 0 — silence is the pass; a
+failure is loud.
+
+Now the loop, with **only** that binary — the tool writes its own documents:
+
+```sh
+./groundhold_linux_amd64 example contract > my.contract.yaml
+./groundhold_linux_amd64 example candidate my.contract.yaml > my.candidate.yaml
+# fill in the two blanks the scaffold leaves: service, and location.region
+./groundhold_linux_amd64 converge my.contract.yaml my.candidate.yaml \
+  --ledger state/try.jsonl --provider fake \
+  --at "$(date -u +%FT%TZ)" --yes
+```
+
+The first run applies; run it again and it reports CONVERGED without touching
+anything. `fake` is a built-in in-process provider, so there is nothing to sign
+up for and nothing to clean up. Leave a blank unfilled and the run ends
+`VIOLATED`, naming the hard constraint that failed and stopping before it
+touches anything — that is the tool working, not a misconfiguration.
 
 Prefer to build it yourself? Go ≥ 1.25 and nothing else:
 
@@ -55,8 +74,9 @@ Prefer to build it yourself? Go ≥ 1.25 and nothing else:
 cd go && go build -o ../bin/groundhold-go ./cmd/groundhold && cd ..
 ```
 
-Then run the loop. The examples below use the built path; a downloaded binary
-works identically — substitute `./groundhold`.
+With a clone you also get the curated examples, which is what the rest of this
+page uses. The binary works identically — but the example FILES come with the
+clone, so the commands below are the built path, not the download path above.
 
 ```sh
 bin/groundhold-go converge \
