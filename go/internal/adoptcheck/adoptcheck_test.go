@@ -202,6 +202,45 @@ func TestCompareSetUnordered(t *testing.T) {
 	}
 }
 
+func TestCompareCeilingDuration(t *testing.T) {
+	ctrl := []Control{{Path: "rotation.period", Direction: Ceiling}} // unwired → failed on miss
+	// live rotation SHORTER than declared → more secure → clean.
+	if v := Compare(
+		map[string]any{"rotation.period": "90d"},
+		[]provider.Observation{measured("rotation.period", "30d")},
+		ctrl); v.Status != "clean" {
+		t.Fatalf("a shorter rotation than declared must be clean, got %+v", v)
+	}
+	// equal → clean (lte includes equality).
+	if v := Compare(
+		map[string]any{"rotation.period": "90d"},
+		[]provider.Observation{measured("rotation.period", "90d")},
+		ctrl); v.Status != "clean" {
+		t.Fatalf("an equal rotation must be clean, got %+v", v)
+	}
+	// mixed units, equal magnitude (365d == 8760h, the legacy default) → clean.
+	if v := Compare(
+		map[string]any{"rotation.period": "8760h"},
+		[]provider.Observation{measured("rotation.period", "365d")},
+		ctrl); v.Status != "clean" {
+		t.Fatalf("365d must satisfy an 8760h ceiling (unit normalisation), got %+v", v)
+	}
+	// live rotation LONGER than declared → dangerous → failed (unwired).
+	if v := Compare(
+		map[string]any{"rotation.period": "90d"},
+		[]provider.Observation{measured("rotation.period", "365d")},
+		ctrl); v.Status != "failed" {
+		t.Fatalf("a longer rotation than declared must fail, got %+v", v)
+	}
+	// a non-duration measured value is unverifiable, never a silent pass.
+	if v := Compare(
+		map[string]any{"rotation.period": "90d"},
+		[]provider.Observation{measured("rotation.period", "yes")},
+		ctrl); v.Status != "unknown" || len(v.Unverifiable) != 1 {
+		t.Fatalf("a non-duration measured value must be unverifiable, got %+v", v)
+	}
+}
+
 func TestCompareReasonNamesThePaths(t *testing.T) {
 	v := Compare(
 		map[string]any{"encryption.customerManagedKeys": true},

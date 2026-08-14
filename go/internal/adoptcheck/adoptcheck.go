@@ -24,6 +24,7 @@ import (
 	"sort"
 
 	"groundhold/internal/provider"
+	"groundhold/internal/scalars"
 )
 
 // Direction is the SAFE comparison for an adopt-critical control — the direction in
@@ -50,6 +51,13 @@ const (
 	// comparing, so element order never causes a false mismatch; a value that is not a
 	// list of strings on either side is unverifiable.
 	Set
+	// Ceiling: the measured value must be <= the declared — the INVERSE of Floor, for a
+	// duration where SMALLER is more secure. A KMS key's `rotation.period` is the case:
+	// declaring "90d" means "rotate at least this often", so a live key rotating every
+	// 365d is LESS secure (the dangerous direction) and a key rotating every 30d is
+	// safe. Compared with the scalar `lte` operator, which normalises units (90d vs
+	// 8760h) and rejects a kind mismatch; a non-duration on either side is unverifiable.
+	Ceiling
 )
 
 // Control is one adopt-critical control a driver declares for a capability. The set
@@ -145,7 +153,7 @@ func requiresControl(dir Direction, want any) bool {
 		b, ok := want.(bool)
 		return ok && !b // only a declared false (the secure state) requires it
 	default:
-		return true // Floor/Exact always compare when declared
+		return true // Floor/Exact/Set/Ceiling always compare when declared
 	}
 }
 
@@ -181,6 +189,20 @@ func satisfies(dir Direction, want, got any) (ok, comparable bool) {
 			return false, false
 		}
 		return equalSortedStrings(ws, gs), true
+	case Ceiling:
+		// measured <= declared. Both parsed as scalars so units normalise (90d vs
+		// 8760h); a parse failure or a kind mismatch is incomparable (unverifiable),
+		// never a silent pass or a false miss.
+		wsc, werr := scalars.Parse(want)
+		gsc, gerr := scalars.Parse(got)
+		if werr != nil || gerr != nil {
+			return false, false
+		}
+		lte, err := scalars.Operators["lte"](gsc, wsc) // got <= want
+		if err != nil {
+			return false, false
+		}
+		return lte, true
 	}
 	return false, false
 }

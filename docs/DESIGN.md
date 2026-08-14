@@ -34765,3 +34765,30 @@ construction and `govulncheck` is green on the source, but the binaries a strang
 downloads today were produced by the pre-bump toolchain. Cutting a release after the
 bump is the whole remedy; it is recorded rather than acted on because a release is the
 owner's call, not a walk's.
+
+## D1067 — the adopt-control campaign closes: a Ceiling direction and rotation as a measured signal
+The D1062 campaign wired 22 of 23 drivers to the shared adopt comparator; the last, `aws/kms`, was
+deferred because its only adopt-time inline control is `rotation.period`, a DURATION whose safe
+direction is the INVERSE of the existing `Floor` — a shorter automatic-rotation interval is more
+secure, so the measured value must be `<=` the declared one. Closing it, brainstormed with a second
+model and reviewed by a third, added two honest pieces rather than a special-case branch. First, a
+`Ceiling` direction in `internal/adoptcheck`: measured `<=` declared, compared through
+`scalars.Operators["lte"]` so units normalise (90d vs 8760h) and a kind mismatch is unverifiable, not
+a silent pass. Second — the subtle half — a key with rotation turned OFF emitted NOTHING for
+`rotation.period`, so a non-rotating key under a rotation contract read as declared-but-unmeasured →
+unverifiable → unknown, when it is in fact the sharpest possible miss. The fix mirrors the D1040/D1003
+"emit the security signal for BOTH states" rule: a new `rotation.enabled` attribute in
+`capability.key.encryption` (the D868 precedent — `trust.principals` was added the same way for IAM),
+which `observeAWSKMS` emits as a MEASURED bool in both states, so a disabled key is a measured false,
+not an absence. The KMS adopt path derives the `rotation.enabled: true` that a declared
+`rotation.period` presupposes (a period is meaningless on a key that does not rotate) and lets the
+comparator produce EVERY verdict — the disabled case is no longer a driver-local short-circuit, so the
+gate's coverage claim is true. Both controls are UNWIRED, not immutable: rotation IS mutable on a
+standing key (`EnableKeyRotation`), but converge has no wired path to it yet, so a miss is `failed`
+(binding a key we cannot bring into compliance would spin the reconciler); when a converge slice wires
+rotation, one field flips to mutable-wired and the verdict becomes unknown+bound. The user-facing
+refusal deliberately does NOT surface the comparator's generic "a replacement may be required": a KMS
+key replacement loses access to everything encrypted under it, so the reason names `EnableKeyRotation`
+out of band and says not to replace the key. An unreadable `GetKeyRotationStatus` stays unknown (never
+a fabricated "rotation off"), naming its cause per D306. `adoptControlDebt` is now EMPTY — the class is
+enforced by the gate rather than tracked by a list, and the empty map stays as the shape of the check.
