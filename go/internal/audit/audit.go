@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"groundhold/internal/perr"
 	"sort"
+	"strings"
 
 	"groundhold/internal/contract"
 	"groundhold/internal/ledger"
@@ -89,8 +90,34 @@ func Run(c *contract.Contract, led *ledger.Ledger, ledgerPath, at string,
 		// bar (a probe-method OUTCOME cannot be judged by a provider-api
 		// config read) AND retains a probe measurement that a later observe
 		// would otherwise erase from the single-slot projection.
+		// Systemic cure for the false-secure class (D1003/D1040/D1041/D1069/D1070): a
+		// SECURITY control must be WITNESSED, never accepted on the candidate's own word.
+		// adopt fills a MISSING observation (a driver that emitted nothing for the
+		// dangerous state) with the declared value at the `candidate-declared` source,
+		// which ranks at the static bar — so a hard security constraint left at the
+		// default `static` runtime bar was SATISFIED by that intent, certifying a control
+		// the resource may lack. Raise the effective runtime bar for a hard security path
+		// to provider-api, so declared intent (rank 0) is insufficient and blocks. A real
+		// measured reading still satisfies/violates; only intent is refused. The floor is
+		// keyed on a fail-closed Go namespace predicate (survives --no-vocab / a vocab
+		// override that omits the marker); the vocab `security:` marker + lint keep the
+		// set honest and drift-free.
+		method := cn.RuntimeMethod
+		raised := false
+		if cn.Severity == "hard" && isSecurityPath(cn.Path) && methodRank(method) < methodRank("provider-api") {
+			method, raised = "provider-api", true
+		}
 		rec, sel, reason := latestSufficient(
-			led.ObservationsBySource[cn.Subject][cn.Path], cn.RuntimeMethod, clock)
+			led.ObservationsBySource[cn.Subject][cn.Path], method, clock)
+		if sel != "" && raised {
+			// surface that audit enforced a HIGHER bar than the constraint declares, so
+			// an operator reading `verify.method: static` is not surprised (Codex review).
+			// The escape for a control genuinely unwitnessable on this provider is to
+			// declare the constraint SOFT (advisory) — the floor bites hard constraints
+			// only, and a soft one records the gap without blocking.
+			reason += " (a hard security control must be witnessed, not taken on the " +
+				"candidate's own word; declare it soft if it is genuinely unobservable here)"
+		}
 		if sel != "" {
 			v.Verdict, v.Reason = sel, reason
 		} else {
@@ -320,6 +347,36 @@ func methodRank(method string) int {
 	default: // static
 		return 0
 	}
+}
+
+// securityNamespaces are the vocabulary path prefixes whose value carries a SECURITY
+// posture — one value is secure, the other dangerous. A hard constraint on such a path
+// must be WITNESSED (provider-api or better), never satisfied by the candidate's own
+// declared word (the D1003/D1040 false-secure). This Go predicate is the FAIL-CLOSED
+// authority: it is present even under --no-vocab or a custom vocab that omits the
+// per-path `security:` marker (Codex review — a vocab-only signal fails open). The
+// vocab marker + its lint exist to keep this set honest and catch a NEW security path,
+// and the lint asserts the two never diverge.
+var securityNamespaces = []string{
+	"encryption.",            // customerManagedKeys, atRest, inTransit
+	"network.publicExposure", // public reachability
+	"tls.",                   // tls.enforced / plaintext-refused
+	"rotation.",              // rotation.enabled / rotation.period (key rotation)
+	"retention.locked",       // WORM / compliance immutability
+	"protection.level",       // HSM vs software key protection
+	"deletion.protection",    // delete-guard on a stateful resource
+	"access.privileged",      // over-privileged identity
+}
+
+// isSecurityPath reports whether a constraint path names a security control that must be
+// witnessed rather than accepted on declared intent.
+func isSecurityPath(path string) bool {
+	for _, ns := range securityNamespaces {
+		if path == ns || strings.HasPrefix(path, ns+".") || (strings.HasSuffix(ns, ".") && strings.HasPrefix(path, ns)) {
+			return true
+		}
+	}
+	return false
 }
 
 func sourceRank(source string) int {

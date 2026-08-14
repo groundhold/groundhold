@@ -371,6 +371,18 @@ func (d *Driver) observeECS(capability, providerID string) ([]provider.Observati
 			obs = append(obs, provider.Observation{Path: "tls.enforced",
 				Value: hasTLSListener(protocols), Derivation: "measured"})
 		}
+	} else {
+		// D1069-class: a service behind NO load balancer has no front door to measure.
+		// The vocabulary (capability.workload.container, aws.ecs) mandates a DIAGNOSTIC
+		// here, NOT silence — silence lets a `tls.enforced: true` candidate's declared
+		// value stand (adopt fills the missing observation with intent, so verify reads
+		// it as satisfied), a false "plaintext ingress is refused". A diagnostic pushes a
+		// hard tls.enforced constraint to unknown/blocks instead. It is NOT a measured
+		// false: the ingress could still be TLS via a mesh/Service Connect this driver
+		// does not trace, so assuming plaintext would be the opposite lie.
+		diags = append(diags, "tls.enforced not observed: the service is behind no load "+
+			"balancer — no front door to measure (TLS may be fronted by a mesh/Service "+
+			"Connect this driver does not trace); probe/reconcile")
 	}
 	return obs, diags, nil
 }

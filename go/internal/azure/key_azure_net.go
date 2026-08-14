@@ -116,17 +116,33 @@ func (d *Driver) observeAzureKey(capability, providerID string) ([]provider.Obse
 		{Path: "location.region", Value: region, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
-	switch doc.Properties.Kty {
-	case "RSA":
-		obs = append(obs, provider.Observation{Path: "protection.level", Value: "software", Derivation: "measured"})
-	case "RSA-HSM":
-		obs = append(obs, provider.Observation{Path: "protection.level", Value: "hsm", Derivation: "measured"})
-	}
-	if la := doc.Properties.RotationPolicy.LifetimeActions; len(la) > 0 {
-		if days := isoDaysToInt(la[0].Trigger.TimeAfterCreate); days > 0 {
-			obs = append(obs, provider.Observation{Path: "rotation.period",
-				Value: fmt.Sprintf("%dd", days), Derivation: "measured"})
+	// D1069-class: protection.level for EVERY key type, not only RSA. Azure marks
+	// HSM-backed keys with a `-HSM` suffix on the key type (RSA-HSM, EC-HSM, oct-HSM);
+	// any other type is software-protected. Matching only RSA/RSA-HSM emitted NOTHING for
+	// an EC or oct key, so a `protection.level: hsm` candidate was adopted/verified as
+	// satisfied over a software EC key (a false HSM assurance). The suffix rule is the
+	// measured fact for all types.
+	if kty := doc.Properties.Kty; kty != "" {
+		level := "software"
+		if strings.HasSuffix(kty, "-HSM") {
+			level = "hsm"
 		}
+		obs = append(obs, provider.Observation{Path: "protection.level", Value: level, Derivation: "measured"})
+	}
+	// D1040/D1067: rotation.enabled is emitted for BOTH states — a key with no active
+	// rotation policy is a MEASURED false (rotation OFF), not an absence. Emitting only
+	// the ON case let a rotation contract be adopted/verified as satisfied over a key
+	// that never rotates (the cross-cloud twin of the AWS/GCP KMS fix). rotation.period
+	// is emitted only when the policy actually rotates the key.
+	rotDays := 0
+	if la := doc.Properties.RotationPolicy.LifetimeActions; len(la) > 0 {
+		rotDays = isoDaysToInt(la[0].Trigger.TimeAfterCreate)
+	}
+	obs = append(obs, provider.Observation{Path: "rotation.enabled",
+		Value: rotDays > 0, Derivation: "measured"})
+	if rotDays > 0 {
+		obs = append(obs, provider.Observation{Path: "rotation.period",
+			Value: fmt.Sprintf("%dd", rotDays), Derivation: "measured"})
 	}
 	return obs, nil, nil
 }

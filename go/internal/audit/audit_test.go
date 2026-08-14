@@ -72,6 +72,173 @@ constraints:
 	}
 }
 
+// TestAuditSecurityPathRejectsDeclaredIntent pins the systemic cure for the D1003/
+// D1040/D1041/D1069/D1070 false-secure class. A hard SECURITY constraint declared at
+// the default `static` bar: adopt filled a MISSING observation with the candidate's
+// own declared value (source candidate-declared, derivation declared — what
+// adopt.go writes when a driver's observe emitted nothing for the path). Without a
+// security-path floor that declared intent SATISFIES the static bar, certifying a
+// control the live resource may lack — the silent false-SECURE. A security control must
+// be WITNESSED (>= provider-api), so declared intent must BLOCK, not satisfy.
+func TestAuditSecurityPathRejectsDeclaredIntent(t *testing.T) {
+	td := t.TempDir()
+	cpath := filepath.Join(td, "c.yaml")
+	if err := os.WriteFile(cpath, []byte(`
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta: { id: sec, environment: test, version: 1 }
+capabilities:
+  - id: db
+    type: capability.database.relational
+constraints:
+  hard:
+    - id: c-cmek
+      subject: db
+      path: encryption.customerManagedKeys
+      op: equals
+      value: true
+      verify: { method: static }
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := contract.LoadContract(cpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the adopt-fill: the candidate's declared true, recorded as intent because the
+	// driver's observe emitted nothing for the path (the one-state defect).
+	led := ledger.New()
+	seedObs(led, "db", map[string]ledger.ObsRecord{
+		"encryption.customerManagedKeys": {Value: true, ObservedAt: "2026-07-15T12:00:00Z",
+			TTLSeconds: 86400, Derivation: "declared", Source: "candidate-declared"},
+	})
+	res, err := Run(c, led, filepath.Join(td, "l.jsonl"),
+		"2026-07-15T12:05:00Z", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Verdicts) != 1 || (res.Verdicts[0].Verdict != "unknown" && res.Verdicts[0].Verdict != "unverifiable") {
+		t.Fatalf("declared intent on a hard SECURITY path must NOT satisfy — a security "+
+			"control must be witnessed; got %+v", res.Verdicts)
+	}
+	if res.Status != "violations-found" || res.Violations != 1 {
+		t.Fatalf("a hard security control witnessed only by declared intent MUST block, "+
+			"got status=%q violations=%d", res.Status, res.Violations)
+	}
+}
+
+// TestAuditNonSecurityPathStillSatisfiesAtStatic proves the security floor does NOT
+// over-fire: a NON-security path (cost.monthly) with a declared-intent observation
+// still satisfies the static bar exactly as before — the floor bites security paths
+// only, so the F-LC3 intent-is-not-a-lie rule survives for genuinely non-observable
+// attributes like cost.
+func TestAuditNonSecurityPathStillSatisfiesAtStatic(t *testing.T) {
+	td := t.TempDir()
+	cpath := filepath.Join(td, "c.yaml")
+	if err := os.WriteFile(cpath, []byte(`
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta: { id: cost, environment: test, version: 1 }
+capabilities:
+  - id: db
+    type: capability.database.relational
+constraints:
+  hard:
+    - id: c-cost
+      subject: db
+      path: cost.monthly
+      op: lte
+      value: "100 USD"
+      verify: { method: static }
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := contract.LoadContract(cpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	led := ledger.New()
+	seedObs(led, "db", map[string]ledger.ObsRecord{
+		"cost.monthly": {Value: "90 USD", ObservedAt: "2026-07-15T12:00:00Z",
+			TTLSeconds: 86400, Derivation: "declared", Source: "candidate-declared"},
+	})
+	res, err := Run(c, led, filepath.Join(td, "l.jsonl"),
+		"2026-07-15T12:05:00Z", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Verdicts) != 1 || res.Verdicts[0].Verdict != "satisfied" {
+		t.Fatalf("a non-security path at the static bar must still accept declared intent, got %+v", res.Verdicts)
+	}
+}
+
+// TestIsSecurityPath pins the fail-closed security classifier — a regression fence so
+// a rename or a new namespace does not silently drop a control out of the floor.
+func TestIsSecurityPath(t *testing.T) {
+	for _, p := range []string{
+		"encryption.customerManagedKeys", "encryption.atRest", "encryption.inTransit",
+		"network.publicExposure", "tls.enforced", "rotation.enabled", "rotation.period",
+		"retention.locked", "protection.level", "deletion.protection", "access.privileged",
+	} {
+		if !isSecurityPath(p) {
+			t.Errorf("%q must classify as a security path (it carries a security posture)", p)
+		}
+	}
+	for _, p := range []string{
+		"cost.monthly", "location.region", "service.managed", "availability.class",
+		"engine.protocol", "retention.minimum", "display.name",
+	} {
+		if isSecurityPath(p) {
+			t.Errorf("%q must NOT classify as a security path (no dangerous-direction posture, or the floor would over-fire)", p)
+		}
+	}
+}
+
+// TestAuditSoftSecurityPathAcceptsIntent proves the escape: the witnessed-evidence
+// floor bites HARD constraints only. A SOFT security constraint with declared intent is
+// recorded and does not block — the honest path for a control genuinely unobservable on
+// a provider (declare it advisory), so the floor never bricks a legitimate gap.
+func TestAuditSoftSecurityPathAcceptsIntent(t *testing.T) {
+	td := t.TempDir()
+	cpath := filepath.Join(td, "c.yaml")
+	if err := os.WriteFile(cpath, []byte(`
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta: { id: sec, environment: test, version: 1 }
+capabilities:
+  - id: db
+    type: capability.database.relational
+constraints:
+  soft:
+    - id: c-cmek
+      subject: db
+      path: encryption.customerManagedKeys
+      op: equals
+      value: true
+      verify: { method: static }
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := contract.LoadContract(cpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	led := ledger.New()
+	seedObs(led, "db", map[string]ledger.ObsRecord{
+		"encryption.customerManagedKeys": {Value: true, ObservedAt: "2026-07-15T12:00:00Z",
+			TTLSeconds: 86400, Derivation: "declared", Source: "candidate-declared"},
+	})
+	res, err := Run(c, led, filepath.Join(td, "l.jsonl"),
+		"2026-07-15T12:05:00Z", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// soft never blocks the machine surface, whatever the verdict.
+	if res.Status == "violations-found" || res.Violations != 0 {
+		t.Fatalf("a SOFT security constraint must not block, got status=%q violations=%d", res.Status, res.Violations)
+	}
+}
+
 // TestAuditFutureDatedObservationIsUnverifiable pins D188 Finding 1: an
 // observation whose observedAt is AFTER the evaluation --at has negative age,
 // which slips past the `age > TTL` staleness test and would read as fresh — a

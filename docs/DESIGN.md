@@ -34833,3 +34833,99 @@ The class this belongs to is the one this record keeps returning to: a check tha
 answers a real question, whose SCOPE is narrower than the reassurance people take from
 it. D714 was never wrong. It just was not the whole question, and nobody asked what
 else could bury work.
+
+## D1069 — the KMS rotation false-secure was cross-cloud: GCP and Azure had the same one-state emit
+D1067 closed `aws/kms` by emitting `rotation.enabled` as a MEASURED bool in both states, so a key
+with automatic rotation OFF is a measured false rather than an invisible absence (the D1040/D1003
+class: a missing observation for a declared control is filled with the candidate's own declared value
+by adopt, so silence over the dangerous state reads as satisfied). An adversarial sweep of the one-
+state-emit class across the fleet found the SAME shape in the two other KMS drivers — the cross-cloud
+twin the D1040/D1041 encryption sweeps never looked at, because they hunted `customerManagedKeys`, not
+rotation. `gcp/kms_net.go` emitted `rotation.period` only inside `if doc.RotationPeriod != ""`, and
+`azure/key_azure_net.go` only inside `if len(lifetimeActions) > 0 && days > 0` — a cryptoKey or Key
+Vault key that never rotates emitted nothing, so a `rotation.period` contract adopted/verified as
+satisfied over it. Both now emit `rotation.enabled` (`= period present`) as a measured bool in both
+states, keeping `rotation.period` only when the key actually rotates — the identical fix to D1067, and
+the completion of the cross-cloud emission of the `rotation.enabled` attribute D1067 added to the
+vocabulary. Both-states tests pin the disabled case per cloud.
+
+The sweep also confirmed the recurring lesson (D1003 → D1040 → D1041 → this): the fix is almost always
+too narrow, and the real cure is a machine gate that every driver emitting a security bool emits it for
+both states. The sweep surfaced a further set of the same class beyond rotation — WORM/immutability and
+retention-floor signals dropped when the governing policy is absent (`azure` blob immutability and
+backup-vault lock/soft-delete, `gcp` backup-DR and GCS retention floors, Cloud SQL RPO when backups are
+off) — recorded for the follow-up slices; the two KMS rotation twins are fixed here because they are the
+exact defect D1067 just proved, in the other two clouds.
+
+## D1070 — three more one-state security emits from the sweep: ECS TLS, blob WORM, EC-key HSM
+The same adversarial sweep that found the KMS rotation twins (D1069) surfaced three more members of
+the one-state-emit class, each in a different signal, all fixed here (the retention-floor and lockMode
+findings it also raised are the deliberate D1041 "genuinely no minimum" shape — a Floor/enum that
+presupposes the feature is on, with no measured off-value — and closing them needs a vocabulary
+addition, an owner decision, not a unilateral change, so they are recorded not changed):
+
+- **ECS `tls.enforced` (a doc↔code drift).** observe traced the fronting load balancer's listener
+  protocol, but a service behind NO load balancer skipped the block entirely — no measured value AND
+  no diagnostic. The vocabulary (`capability.workload.container`, `aws.ecs`) explicitly mandates a
+  DIAGNOSTIC there ("a diagnostic says the trace failed rather than assuming plaintext"), because a
+  no-LB service is NOT authoritatively plaintext (it may be TLS via a mesh/Service Connect this driver
+  does not trace) — so a measured false would be the opposite lie. Silence let a `tls.enforced: true`
+  candidate's declared value stand; the diagnostic now pushes a hard constraint to unknown/blocks.
+- **Azure blob `retention.locked` (permanent false WORM, the S3 D1041 parallel).** A container whose
+  immutabilityPolicies GET 404s, or whose policy has no active floor, emitted nothing — but a 404 is
+  AUTHORITATIVE "no WORM policy", definitively not compliance-locked, a measured false. Emitting
+  nothing let a `retention.locked: true` candidate adopt over a freely-mutable container, and because
+  immutability is create-time the false assurance was permanent. Now emits a measured `false` in both
+  no-policy branches (`retention.minimum` stays absent — genuinely no floor, exactly as S3).
+- **Azure Key Vault `protection.level` (EC/oct keys).** observe matched only `RSA`/`RSA-HSM`, so an EC
+  or oct key emitted no `protection.level` at all and a `protection.level: hsm` candidate adopted over a
+  software EC key. Azure marks HSM-backed keys with a `-HSM` suffix on the key type, so the fix reads
+  the suffix for EVERY type — the measured fact for RSA, EC and oct alike.
+
+Both-states tests pin each. The recurring lesson stands (D1003 → D1040 → D1041 → D1069 → this): the
+machine gate that every driver emitting a security bool emits it for both states is the real cure, still
+the recorded follow-up.
+
+## D1071 — the systemic cure for the false-secure class: a security control must be witnessed
+The false-secure omission class recurred five times (D1003, D1040, D1041, D1069, D1070): a driver's
+observe emits a security bool only in the secure state, the dangerous state is unobserved, adopt fills
+the missing observation with the candidate's OWN declared value (F-LC3 — a deliberate rule for
+genuinely non-observable attributes like cost.monthly), and audit then reads that declared intent as
+satisfied. Each recurrence was caught by a manual sweep; the record kept naming a machine gate as "the
+real cure" and deferring it. This builds it, brainstormed with a second model and reviewed by a third.
+
+The cure is NOT a new gate over drivers — a driver-side both-states registry has the exact failure mode
+that produced the five recurrences (no forcing function: the author who writes a one-sided emit is the
+one who will not register a fixture). It is the restoration of a CONDITIONAL INVARIANT (the D323/D325
+class). Invariant #1 says unknown on a hard constraint blocks; the F-LC3 fill silently weakened it to
+"unknown blocks, UNLESS a driver forgot to emit, then unknown SATISFIES." The fix is at the one place
+the lie is minted: audit's D190 evidence lattice. A security control must be WITNESSED, never accepted
+on the candidate's own word — so for a HARD constraint whose path names a security posture, audit raises
+the required evidence bar to provider-api. A declared-intent observation (source `candidate-declared`,
+derivation `declared`) ranks at the static bar (0), below provider-api (1), so it is insufficient →
+`unknown` → blocks. A real measured reading still satisfies or violates; only intent is refused. This is
+one hook at `audit.go`, and every other verb that decides satisfaction from recorded reality —
+posture, converge, react — consumes audit's verdict, so the fix reaches them without re-derivation (the
+D963/D964 sibling-re-derivation risk was checked: audit is the sole recorded-reality canon; verify is
+compile-time candidate-vs-contract and out of scope).
+
+Three properties make it honest rather than vacuous. (1) The security classifier is a FAIL-CLOSED Go
+namespace predicate (`encryption.*`, `network.publicExposure`, `tls.*`, `rotation.*`, `retention.locked`,
+`protection.level`, `deletion.protection`, `access.privileged`) — present even under `--no-vocab` or a
+custom vocab that omits a marker, where a vocab-only signal would fail open. (2) The floor bites HARD
+constraints only: a control genuinely unobservable on some provider is declared SOFT (advisory), which
+records the gap without blocking — the escape needs no new consent flag, it is the existing severity.
+(3) The block reason surfaces that audit enforced a higher bar than the constraint's declared `static`,
+so an operator is not surprised. The mutant is a conformance case (`audit-honesty`): adopt fills a
+declared `encryption.customerManagedKeys` (the fake observes only service.managed), then a hard audit
+on it — exit 2 post-fix, and it PASSED (false-secure, exit 0) against the pre-hook code, which is the
+proof the gate distinguishes the two.
+
+Scope, stated honestly: this closes the OMISSION/intent false-secure (a control the driver did not
+witness), not driver FABRICATION (a measured `true` that is false) — that is a separate class the
+evidence lattice cannot judge. And the fail-closed predicate covers the known security namespaces; a
+brand-new security namespace outside them would not yet be floored. The recorded follow-up is a vocab
+`security:` marker at each path's definition plus a lint asserting the marker and the Go predicate never
+diverge — the forcing function that makes a NEW security path classify itself in the diff that creates
+it. The per-driver both-states tests (D1069/D1070) stay as regression pins; they are good, but they are
+not the systemic mechanism, and this is.

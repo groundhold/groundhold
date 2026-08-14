@@ -65,3 +65,69 @@ cases:
             status: violations-found
             violations: 1
             events: [violation.detected]
+
+  - name: audit-refuses-a-security-control-witnessed-only-by-declared-intent
+    impl: go
+    description: >
+      The systemic cure for the false-secure class (D1003/D1040/D1069/D1070): a driver's
+      observe that emits a security bool only in the secure state leaves the dangerous
+      state unobserved, and adopt then FILLS the missing observation with the candidate's
+      own declared value (here the fake observes only service.managed, so a declared
+      encryption.customerManagedKeys becomes candidate-declared intent). A hard SECURITY
+      constraint must NOT be satisfied by that intent — a security control must be
+      WITNESSED (provider-api or better), so audit blocks. Before the fix the declared
+      intent satisfied the default static bar and audit reported clean (exit 0) over a
+      control the resource may lack.
+    onboard:
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: secfloor, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-managed
+              subject: db
+              path: service.managed
+              op: equals
+              value: true
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: secfloor
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+              encryption.customerManagedKeys: true
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T12:00:00Z"
+          map: { db: "fake:existing-db" }
+          expect: { exit: 0, status: adopted }
+        - cmd: audit
+          at: "2026-07-12T12:35:00Z"
+          record: true
+          contract:
+            apiVersion: contract/v0.1
+            kind: InfrastructureContract
+            meta: { id: secfloor, environment: test, version: 2 }
+            capabilities:
+              - id: db
+                type: capability.database.relational
+            constraints:
+              hard:
+                - id: c-cmek
+                  subject: db
+                  path: encryption.customerManagedKeys
+                  op: equals
+                  value: true
+                  verify: { method: static }
+          expect:
+            exit: 2
+            status: violations-found
+            violations: 1
+            events: [violation.detected]
