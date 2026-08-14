@@ -73,11 +73,20 @@ func TestEveryReleaseTagAppearsInTheChangelog(t *testing.T) {
 // in the CHANGELOG that accounts for them. Value = a substring that must still be
 // present, so the list cannot rot into unexplained absences.
 var changelogExemptTags = map[string]string{
-	// The first three tags predate the CHANGELOG, whose earliest section is v0.1.3.
-	// The document's own header scopes them: public prereleases, not a release line.
-	"v0.1.0": "the tags below are public prereleases, not",
-	"v0.1.1": "the tags below are public prereleases, not",
-	"v0.1.2": "the tags below are public prereleases, not",
+	// The first three tags predate the CHANGELOG, whose earliest section is v0.1.3,
+	// and the document says so in as many words.
+	//
+	// D1078: this anchored on "the tags below are public prereleases, not" — a
+	// sentence that was FALSE (those headings are build versions; the published
+	// releases are a separate sequence) and was removed for that reason. The gate
+	// caught its own anchor going away, which is the re-derivation working. The
+	// lesson is narrower than it looks: an exemption anchored to a sentence inherits
+	// that sentence's truth, so the anchor should be the claim that actually accounts
+	// for the exemption — here, that the file starts at v0.1.3 — and not whatever
+	// nearby prose happened to be quotable.
+	"v0.1.0": "The entries below begin at `[v0.1.3]`",
+	"v0.1.1": "The entries below begin at `[v0.1.3]`",
+	"v0.1.2": "The entries below begin at `[v0.1.3]`",
 	// Tagged from a RED commit and replaced; v0.1.5's section says so rather than
 	// the tag being quietly deleted (a deleted tag hides the mistake).
 	"v0.1.4": "Supersedes **v0.1.4**",
