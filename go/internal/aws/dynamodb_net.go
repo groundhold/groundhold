@@ -15,10 +15,22 @@ import (
 	"strings"
 	"time"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/provider"
 )
 
 const dynamoTarget = "DynamoDB_20120810"
+
+// ddbAdoptControls are the controls DynamoDB sets INLINE in CreateTable, so on a
+// 409-adopt they never applied to the pre-existing table (D1062). Customer-managed
+// key encryption is immutable at create — a table without it cannot be fixed in
+// place, so its absence FAILS the adopt; deletion protection is mutable with a wired
+// in-place update (updateDynamoDB), so its absence is unknown+bound and converge
+// patches it. PITR is NOT here: the create re-asserts it on both paths already.
+var ddbAdoptControls = []adoptcheck.Control{
+	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "deletion.protection", Direction: adoptcheck.SecureTrue, UpdateWired: true},
+}
 
 func (d *Driver) dynamoBase(region string) string {
 	if d.DynamoDBBaseURL != "" {
@@ -214,13 +226,11 @@ func (d *Driver) createDynamoDB(region, account, environment, capability string,
 
 	// poll to ACTIVE
 	deadline := d.Now().Add(d.PollTimeout)
-	var liveDesc dynamoTableDesc
 	active := false
 	for {
 		desc, found, rerr := d.describeTable(region, plan.Table)
 		if rerr == nil && found {
 			if desc.TableStatus == "ACTIVE" {
-				liveDesc = desc
 				active = true
 				break
 			}
@@ -233,26 +243,26 @@ func (d *Driver) createDynamoDB(region, account, environment, capability string,
 	}
 	_ = active
 
-	// D1058: an ADOPTED table (409 ResourceInUse, ours) never received the CreateTable
-	// body's inline controls — SSE/customer-key and deletion protection. S3's 409-adopt
-	// re-asserts every declared control idempotently; DynamoDB re-asserted only PITR, so
-	// a table adopted with the wrong encryption or protection reported succeeded for a
-	// control that did not land (the D1047/D1048 class). Re-check them against the live
-	// table read we already have and refuse rather than lie; a later converge patches the
-	// mutable drift (classifyDynamoDBChange), but create must not claim what is not there.
+	// D1058/D1062: an ADOPTED table (409 ResourceInUse, ours) never received the
+	// CreateTable body's inline controls — SSE/customer-key and deletion protection. So
+	// re-checking them against the live table before reporting succeeded is the shared
+	// adopt-check invariant (create never returns succeeded while a declared control is
+	// absent). Compare the candidate against this driver's OWN measured observations —
+	// cmek is KMS-traced to KeyManager, so SSE-KMS with the account default key is
+	// correctly NOT a customer key — via the shared comparator: an immutable control the
+	// table lacks (customer key) fails; a mutable one a wired update can patch (deletion
+	// protection) is unknown+bound and converge reconciles it.
 	if adopted {
-		// Only the DANGEROUS direction is a lie: a declared control that the live table
-		// LACKS. A table more protected/encrypted than declared is the safe direction and
-		// adopts cleanly (a later converge reconciles the declared-lower drift in place).
-		if plan.DeletionProtection && !liveDesc.DeletionProtectionEnabled {
-			return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: "adopted an " +
-				"existing table with deletion protection OFF, but the candidate declares it on " +
-				"— reconcile (create did not protect it)"}
+		obs, _, oerr := d.observeDynamoDB(capability, pid)
+		if oerr != nil {
+			return provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "adopted table re-observe gave no answer — reconcile: " + oerr.Error()}
 		}
-		if plan.CMEK && liveDesc.SSEDescription.SSEType != "KMS" {
-			return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: "adopted an " +
-				"existing table with no SSE-KMS encryption, but the candidate declares a " +
-				"customer-managed key — reconcile (create did not encrypt it)"}
+		switch v := adoptcheck.Compare(attrs, obs, ddbAdoptControls); v.Status {
+		case "failed":
+			return provider.CreateResult{Status: "failed", Reason: v.Reason}
+		case "unknown":
+			return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
 		}
 	}
 

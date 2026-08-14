@@ -475,6 +475,8 @@ func TestAdoptsExistingDynamoDB(t *testing.T) {
 					case "DescribeContinuousBackups":
 						_, _ = w.Write([]byte(`{"ContinuousBackupsDescription":` +
 							`{"PointInTimeRecoveryDescription":{"PointInTimeRecoveryStatus":"ENABLED"}}}`))
+					case "DescribeKey": // D1062: the adopt-check traces the SSE key to KeyManager
+						_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"CUSTOMER"}}`))
 					case "UpdateContinuousBackups", "UpdateTable", "TagResource":
 						_, _ = w.Write([]byte(`{}`))
 					default:
@@ -487,6 +489,7 @@ func TestAdoptsExistingDynamoDB(t *testing.T) {
 			d.HTTP = &http.Client{Transport: rt}
 			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
 			d.DynamoDBBaseURL = happyURL
+			d.KMSBaseURL = happyURL // D1062: the adopt-check re-observe traces the SSE key
 			d.Now = time.Now
 			d.PollInterval = time.Millisecond
 			d.PollTimeout = 2 * time.Second
@@ -500,26 +503,63 @@ func TestAdoptsExistingDynamoDB(t *testing.T) {
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }
 
-// TestAdoptDynamoDBRefusesUnlandedControl (D1058): a 409-adopted table whose live
-// deletion protection is OFF while the candidate declares it ON must NOT report
-// succeeded — the CreateTable body's inline control never applied to the existing
-// table, so claiming success is a lie about a control that is not there (D1047/D1048
-// class). The safe direction (table more protected than declared) still adopts.
-func TestAdoptDynamoDBRefusesUnlandedControl(t *testing.T) {
+// TestAdoptDynamoDBRefusesUnlandedImmutableControl (D1062): a 409-adopted table with
+// NO customer-managed key while the candidate declares one must FAIL — CMEK is
+// immutable at create, so the table cannot be fixed in place and binding it would
+// hide that a replacement is required (the shared adopt-check's immutable→failed rule).
+func TestAdoptDynamoDBRefusesUnlandedImmutableControl(t *testing.T) {
 	target := func(r *http.Request) string {
 		full := r.Header.Get("X-Amz-Target")
 		return full[strings.LastIndex(full, ".")+1:]
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch target(r) {
-		case "CreateTable": // already exists
+		case "CreateTable":
 			w.WriteHeader(400)
 			_, _ = w.Write([]byte(`{"__type":"ResourceInUseException","message":"exists"}`))
-		case "DescribeTable": // ACTIVE but deletion protection OFF (declared on)
+		case "DescribeTable": // ACTIVE, no SSE-KMS at all (candidate declares CMEK)
 			_, _ = w.Write([]byte(`{"Table":{"TableStatus":"ACTIVE",` +
 				`"TableArn":"arn:aws:dynamodb:eu-central-1:000000000000:table/t",` +
-				`"DeletionProtectionEnabled":false}}`))
-		case "ListTagsOfResource": // ours
+				`"DeletionProtectionEnabled":true}}`))
+		case "ListTagsOfResource":
+			_, _ = w.Write([]byte(`{"Tags":[{"Key":"groundhold-capability","Value":"sessions"},` +
+				`{"Key":"groundhold-environment","Value":"prod"}]}`))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer srv.Close()
+	d := dynamoDriver(t, srv)
+	a := dynamoAttrs() // declares customerManagedKeys: true
+	res := d.createDynamoDB("eu-central-1", "000000000000", "prod", "sessions", a, dynamoImpl(), 1)
+	if res.Status != "failed" || !strings.Contains(res.Reason, "encryption.customerManagedKeys") {
+		t.Fatalf("adopting a table missing an immutable declared control must FAIL naming it, got %+v", res)
+	}
+	if res.ProviderID != "" {
+		t.Fatalf("an immutable-missing adopt must not bind an unusable resource, got pid %q", res.ProviderID)
+	}
+}
+
+// TestAdoptDynamoDBMutableControlIsUnknown (D1062): a 409-adopted table with CMEK
+// satisfied but deletion protection OFF while the candidate declares it ON is
+// unknown+bound — deletion protection is mutable with a wired update, so converge
+// reconciles it; the create must not claim it landed, but the handle is kept.
+func TestAdoptDynamoDBMutableControlIsUnknown(t *testing.T) {
+	target := func(r *http.Request) string {
+		full := r.Header.Get("X-Amz-Target")
+		return full[strings.LastIndex(full, ".")+1:]
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch target(r) {
+		case "CreateTable":
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(`{"__type":"ResourceInUseException","message":"exists"}`))
+		case "DescribeTable": // CMEK present, but deletion protection OFF (declared on)
+			_, _ = w.Write([]byte(`{"Table":{"TableStatus":"ACTIVE",` +
+				`"TableArn":"arn:aws:dynamodb:eu-central-1:000000000000:table/t",` +
+				`"DeletionProtectionEnabled":false,` +
+				`"SSEDescription":{"Status":"ENABLED","SSEType":"KMS","KMSMasterKeyArn":"arn:aws:kms:eu-central-1:000000000000:key/abc"}}}`))
+		case "ListTagsOfResource":
 			_, _ = w.Write([]byte(`{"Tags":[{"Key":"groundhold-capability","Value":"sessions"},` +
 				`{"Key":"groundhold-environment","Value":"prod"}]}`))
 		case "DescribeKey":
@@ -531,10 +571,13 @@ func TestAdoptDynamoDBRefusesUnlandedControl(t *testing.T) {
 	defer srv.Close()
 	d := dynamoDriver(t, srv)
 	a := dynamoAttrs()
-	a["deletion.protection"] = true // declared ON; the live table has it OFF
+	a["deletion.protection"] = true // declared ON; live OFF, but CMEK satisfied
 	res := d.createDynamoDB("eu-central-1", "000000000000", "prod", "sessions", a, dynamoImpl(), 1)
-	if res.Status != "unknown" || !strings.Contains(res.Reason, "deletion protection OFF") {
-		t.Fatalf("adopting a table missing a declared control must be unknown/reconcile, got %+v", res)
+	if res.Status != "unknown" || !strings.Contains(res.Reason, "deletion.protection") {
+		t.Fatalf("a mutable declared control the live table lacks must be unknown, got %+v", res)
+	}
+	if res.ProviderID == "" {
+		t.Fatalf("a mutable-missing adopt must keep the handle (bind), got no pid")
 	}
 }
 
@@ -555,6 +598,7 @@ func TestRefusesForeignDeleteDynamoDB(t *testing.T) {
 			d.HTTP = &http.Client{Transport: rt}
 			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
 			d.DynamoDBBaseURL = happyURL
+			d.KMSBaseURL = happyURL // D1062: the adopt-check re-observe traces the SSE key
 			d.Now = time.Now
 			d.PollInterval = time.Millisecond
 			d.PollTimeout = 2 * time.Second

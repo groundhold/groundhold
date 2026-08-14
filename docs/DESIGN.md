@@ -34585,3 +34585,30 @@ target (DeletionProtectionEnabled == declared; PITR status == declared) — befo
 timing out to unknown (keep the handle) like the create path. Found by a D953-class sweep of every
 updater (its one finding; the rest poll to applied, apply synchronously, or refuse an unwired
 in-place change — none falsely succeeds).
+
+## D1062 — the shared adopt-time control comparator (23-driver 409-adopt false-success)
+An adversarial audit found a SYSTEMIC defect: across 23 drivers (11 AWS + 12 GCP) the 409-adopt path
+reported `succeeded` without re-asserting or verifying the DECLARED CONTROLS the create body sets
+INLINE (they never applied to the pre-existing resource) — overwhelmingly a customer-managed-key
+drop, plus per-driver deletion protection, TLS, retention floors, immutable tags, IAM trust policy,
+load-balancer scheme. It is the D1047/D1048/D1058 class at scale: a create claiming a security
+control the live resource LACKS. Rather than fix 23 drivers ad-hoc (the "convention not enforced
+everywhere" failure mode that produced this finding), the fix — brainstormed with a second model and
+reviewed by a third before implementation — is a shared, gate-able comparator. `internal/adoptcheck`:
+`Compare(declaredAttrs, observations, controls)` checks every adopt-critical control the candidate
+DECLARES against the driver's OWN observations, delegating nothing to a new comparison engine
+(D963/D964: re-implementing verify's compare produces false-clean). Two disciplines make it honest:
+(1) it consumes ONLY `measured` observations — a config-intent/inferred/absent value proves nothing
+about the live resource's own setting (a public-access read derived from an org policy, an
+"encryption enabled" that does not prove the DECLARED key is attached), so it is unverifiable, never
+a silent pass; the CMEK check therefore KMS-traces the key to KeyManager, so SSE-KMS with the account
+default key is correctly NOT a customer key. (2) verdict precedence: an immutable control the resource
+lacks, or a mutable one with no wired update, is `failed` (no bind — a replacement may be required,
+and `unknown` would spin the reconciler); a mutable control a wired+consent-gated update can patch is
+`unknown`+bound (converge reconciles it); a declared control not measured is unverifiable → unknown.
+The safe direction (resource MORE secure than declared) adopts clean. No new mutating code — mutable
+remediation stays in the consent-gated converge loop. Slice 1: the comparator + 15 unit tests, wired
+first into DynamoDB (replacing the D1058 inline check, which had a precedence gap — it reported
+unknown where an immutable CMEK miss should FAIL). Next slices: extend CertifyCreateAdoptsExisting
+with missing-control + more-secure fixtures and a parity meta-gate (every adopt-enrolled driver must
+carry both, on a debt list that only shrinks), then wire the remaining 22 drivers cloud by cloud.
