@@ -267,6 +267,39 @@ func TestClassifyARChangeScanOnPushUnsupported(t *testing.T) {
 	}
 }
 
+// arAdoptServer is arExistingServer with the two adopt-critical controls made
+// configurable (D1062): the repository GET reports the given kmsKeyName (CMEK iff
+// non-empty) and immutableTags ("true"/"false"), so the control-completeness cases can
+// serve a repository that lacks CMEK or tag immutability.
+func arAdoptServer(tagCap, kmsKeyName, immutableTags string) func() *httptest.Server {
+	return func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/repositories"):
+					w.WriteHeader(http.StatusConflict)
+					_, _ = w.Write([]byte(`{"error":{"code":409,"message":"already exists"}}`))
+				case strings.HasSuffix(r.URL.Path, ":enable"):
+					_, _ = w.Write([]byte(`{"name":"operations/su-op1"}`))
+				case r.Method == "GET" && strings.Contains(r.URL.Path, "/services/"):
+					_, _ = w.Write([]byte(`{"state":"ENABLED"}`))
+				case r.Method == "GET" && strings.Contains(r.URL.Path, "/operations/"):
+					_, _ = w.Write([]byte(`{"done":true}`))
+				case strings.HasSuffix(r.URL.Path, ":getIamPolicy"):
+					_, _ = w.Write([]byte(`{"bindings":[]}`))
+				case strings.HasSuffix(r.URL.Path, ":setIamPolicy"):
+					_, _ = w.Write([]byte(`{}`))
+				case r.Method == "GET":
+					_, _ = w.Write([]byte(`{"format":"DOCKER","kmsKeyName":"` + kmsKeyName + `",` +
+						`"dockerConfig":{"immutableTags":` + immutableTags + `},` +
+						`"labels":{"groundhold-capability":"` + tagCap + `","groundhold-environment":"prod"}}`))
+				default:
+					w.WriteHeader(404)
+				}
+			}))
+	}
+}
+
 func arRole(req *http.Request, _ []byte) certifynet.Role {
 	if req.Method == http.MethodGet || strings.HasSuffix(req.URL.Path, ":getIamPolicy") {
 		return certifynet.RoleRead
@@ -325,6 +358,19 @@ func TestAdoptsExistingARRepo(t *testing.T) {
 			return pr.Create("artifactregistry", "images", "prod", arAttrs(), arImpl(), "images", 1)
 		},
 		AllowedMutations: 2, // the refused create + re-asserting the exposure posture
+		// D1062: CMEK is fixed at creation and tag immutability has no wired update, so
+		// adopting a repository that lacks either FAILS. The check runs before the
+		// exposure re-assertion, so a rejected adopt sends only the refused create.
+		AdoptControls: arAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			// live repository is on a Google-managed key though we declared CMEK.
+			{Path: "encryption.customerManagedKeys", Server: arAdoptServer("images", "", "true"),
+				WantStatus: "failed", WantMutations: 1},
+			// live repository allows tag overwrites though we declared immutable tags.
+			{Path: "immutable.tags", Server: arAdoptServer("images", "k", "false"),
+				WantStatus: "failed", WantMutations: 1},
+		},
+		MoreSecure: arAdoptServer("images", "k", "true"), // both controls in place — adopts clean
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

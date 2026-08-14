@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"time"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/provider"
 )
 
@@ -250,6 +251,19 @@ func (d *Driver) waitLBActive(region, name string) (arn string, ok bool) {
 	}
 }
 
+// lbAdoptControls (D1062): a load balancer's exposure posture is set INLINE at
+// create and never reapplied to one that already exists. The Scheme
+// (internet-facing vs internal) is fixed at creation, and this driver terminates
+// TLS by choosing an HTTPS listener at create — updateLoadBalancer refuses to change
+// either in place (classifyLBChange routes both to a replacement). So a live LB that
+// is internet-facing where we declared internal, or that speaks plaintext where we
+// declared TLS, is the dangerous direction and cannot be fixed in place: FAILED, not
+// a silent adopt of a public or unencrypted front door.
+var lbAdoptControls = []adoptcheck.Control{
+	{Path: "network.publicExposure", Direction: adoptcheck.SecureFalse, ImmutableAtCreate: true},
+	{Path: "encryption.inTransit", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+}
+
 // createLoadBalancer provisions the ALB composite in dependency order:
 // CreateTargetGroup (with health check) -> CreateLoadBalancer (Scheme, Subnets,
 // SecurityGroups) -> AddTags (ownership) -> wait active -> CreateListener (Protocol
@@ -280,8 +294,27 @@ func (d *Driver) createLoadBalancer(region, environment, capability string,
 			return provider.CreateResult{Status: "failed",
 				Reason: "a load balancer with this name exists and is not ours (tags do not match) — refusing to adopt it"}
 		}
-		// ours already — ensure the listener exists (repair a prior partial), else done.
-		return d.ensureListener(region, pid, lb.Arn, plan)
+		// ours already — repair a prior partial (ensure the listener exists), then
+		// D1062: verify the STANDING LB's inline controls (scheme, TLS) match what we
+		// declare before reporting the adopt succeeded. ensureListener only proves a
+		// listener is attached; it does not prove the existing front door is internal
+		// or terminates TLS, and neither can be changed in place.
+		adoptRes := d.ensureListener(region, pid, lb.Arn, plan)
+		if adoptRes.Status != "succeeded" {
+			return adoptRes // partial/unknown — nothing settled to adopt-check yet
+		}
+		obs, _, oerr := d.observeLoadBalancer(capability, pid)
+		if oerr != nil {
+			return provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "adopted load balancer re-observe gave no answer — reconcile: " + oerr.Error()}
+		}
+		switch v := adoptcheck.Compare(attrs, obs, lbAdoptControls); v.Status {
+		case "failed":
+			return provider.CreateResult{Status: "failed", Reason: v.Reason}
+		case "unknown":
+			return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
+		}
+		return adoptRes
 	}
 
 	// (1) CreateTargetGroup — the backend + health check. Must precede the listener

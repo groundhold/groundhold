@@ -34727,3 +34727,41 @@ two documents into the prose) have no paths to resolve, so they are skipped rath
 guessed at — gating a fiction is worse than gating nothing. Those four words were fixed
 by hand and are unguarded. The vacuity guard counts what it checked and fails at zero,
 so the day the shipped-file examples disappear this gate says so instead of going quiet.
+
+## D1065 — the rest of the front door, walked and found clean
+
+D1063 and D1064 are what the walk BROKE. This is what it did not, recorded because a
+surface nobody can tell was checked is indistinguishable from one nobody checked — and
+because the next person to walk this should start where this stopped rather than
+re-deriving it.
+
+**The MCP server does what the README says, exercised over the protocol rather than
+read.** `mcp --print-config` prints both forms with the binary's own absolute path
+resolved. Speaking JSON-RPC to it over stdio: `initialize` answers with protocol
+2024-11-05, `tools/list` returns exactly the six read-only tools the README names, and
+`groundhold_apply` is ABSENT — it appears, seventh, only under
+`GROUNDHOLD_MCP_ALLOW_APPLY=1`, which is the claim that matters, since it is the one
+about not mutating infrastructure by default. A real `tools/call` of `groundhold_verify`
+returned the structured verdict with both document hashes. No drift between the
+documented surface and the served one.
+
+**The eight published skills invoke twelve distinct verbs, and every one exists** in the
+shipped binary. Their file references resolve inside the public tree — the single
+apparent miss was a glob written in prose (`spec/vocab/capability.*.yaml`), not a path.
+This is the surface D355 deliberately crosses the export boundary for, so it is the one
+where a stale instruction would be read by an agent rather than a person.
+
+**The release artefacts match their description.** `SHA256SUMS` covers ten entries
+including `sbom.cdx.json` and `BUILDINFO.txt` — the "checksums cover all three" claim
+(D680) verified by running the check, not by reading it — and BUILDINFO carries a
+complete rebuild recipe (toolchain version, commit, exact flags). The SLSA attestation
+verifies, and the downloaded binary's digest is a subject of it (D1063 records the
+instrument caveat: it prints nothing on success).
+
+**One operational observation, not a defect.** `v0.1.7` — today the newest published
+release, and what the README's download line names — was built with the Go toolchain
+that was bumped hours later for stdlib CVE fixes. Nothing here is exploitable by
+construction and `govulncheck` is green on the source, but the binaries a stranger
+downloads today were produced by the pre-bump toolchain. Cutting a release after the
+bump is the whole remedy; it is recorded rather than acted on because a release is the
+owner's call, not a walk's.

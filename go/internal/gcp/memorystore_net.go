@@ -14,8 +14,21 @@ import (
 	"strings"
 	"time"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/provider"
 )
+
+// memorystoreAdoptControls (D1062): a Redis instance's in-transit encryption
+// (transitEncryptionMode) and CMEK (customerManagedKey) are set INLINE at create and
+// never applied to an instance that already exists. Memorystore has no in-place update
+// path (ClassifyChange routes any drift to a replacement), so both are immutable: a
+// live instance without the TLS or the customer key we declared cannot be fixed in
+// place and FAILS — no silent adopt of a plaintext or Google-managed cache under a
+// contract that asked for TLS or CMEK.
+var memorystoreAdoptControls = []adoptcheck.Control{
+	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "encryption.inTransit", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+}
 
 func (d *Driver) memorystoreBase() string {
 	if d.MemorystoreBaseURL != "" {
@@ -109,6 +122,20 @@ func (d *Driver) createMemorystore(environment, capability string,
 			doc.Labels["groundhold-environment"] != sanitizeLabel(environment) {
 			return provider.CreateResult{Status: "failed",
 				Reason: "an instance with this name exists and is not ours (labels do not match)"}
+		}
+		// ours — but the create body (TLS, CMEK) never applied to this pre-existing
+		// instance, so verify its declared controls before reporting the adopt a
+		// success (D1062). Both are immutable, so a mismatch FAILS rather than binding.
+		obs, _, oerr := d.observeMemorystore(capability, pid)
+		if oerr != nil {
+			return provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "adopted cache re-observe gave no answer — reconcile: " + oerr.Error()}
+		}
+		switch v := adoptcheck.Compare(attrs, obs, memorystoreAdoptControls); v.Status {
+		case "failed":
+			return provider.CreateResult{Status: "failed", Reason: v.Reason}
+		case "unknown":
+			return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
 		}
 		return provider.CreateResult{ProviderID: pid, Status: "succeeded"} // ours, already present
 	case st >= 500:

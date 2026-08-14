@@ -287,7 +287,7 @@ var knownNoAdoptRead = map[string]bool{}
 // listed until migrated to the comparator + given gate cases. When this map is empty the
 // class is closed and gate-enforced.
 var adoptControlDebt = map[string]bool{
-	"aws/loadbalancer": true, "aws/kms": true, "aws/secretsmanager": true,
-	"gcp/memorystore": true, "gcp/artifactregistry": true, "gcp/bigquery": true,
+	"aws/kms":           true,
+	"gcp/bigquery":      true,
 	"gcp/secretmanager": true, "gcp/gcs": true, "gcp/filestore": true,
 }
