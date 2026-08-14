@@ -35493,3 +35493,36 @@ change-set again reproduces the original defect as a failure.
 Why it survived a month is the ordinary reason. It is not reachable from the README, no
 page links it, and `make check` walked past it — a document nobody executes, in the one
 directory whose whole purpose is to be executed by strangers.
+
+## D1089 — the fifth artefact in the closed-code family is the one a reader meets first
+
+D330 binds four artefacts that must agree about the closed error-code set: the constants
+the runtime emits, the remediations `explain` prints, the codes `spec/errors.md`
+publishes, and the enum consumers validate against. Drift between any two is not
+cosmetic — `explain` answering "not an error code" for a code just emitted is the
+example that entry gives.
+
+There is a fifth, outside the gate: the published errors page. It is the first place a
+reader meets a code, and it names nine of the thirty-three.
+
+Checked tonight, and it is clean — every code it lists exists, and it is honest about
+being a selection: it says "Highlights", and points at the full registry for the rest.
+So the finding is not a drift; it is that nothing would have noticed one. A code retired
+from the registry and left in the table would send a reader to the page's own closing
+promise — "any code explains itself: `groundhold explain <code>`" — and that verb would
+answer that the code this project published is not an error code.
+
+The gate is deliberately ONE-DIRECTIONAL: every code the page names must exist, and not
+the reverse. Equality would force every new code onto a curated page and would be a gate
+about the wrong thing — the page's job is to teach the nine a reader actually hits, not
+to mirror a registry that has its own home. What makes that direction the right one is
+the page's framing, so the framing is pinned too: if "Highlights" or the pointer to the
+full registry ever goes, the page is claiming completeness it does not have, and the
+gate says so rather than continuing to check the weaker property.
+
+Both arms teeth-checked — a retired code left in the table fails by name, and removing
+the selection framing fails with the count (nine of thirty-three) in the message.
+
+Recorded as a clean result with a gate rather than as a fix, because the useful part is
+the shape: a closed set with four guarded copies and a fifth that nobody counted, which
+is the D329/D330 pattern arriving one artefact later.

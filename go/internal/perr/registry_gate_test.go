@@ -170,3 +170,66 @@ func schemaCodes(t *testing.T) map[string]bool {
 	}
 	return out
 }
+
+// D1089. D330 binds four artefacts that must agree about the closed code set: the
+// constants the runtime emits, the remediations `explain` prints, the codes
+// spec/errors.md publishes, and the enum consumers validate against. There is a
+// FIFTH, and it is the one a reader meets first — the published errors page.
+//
+// That page is deliberately a SELECTION ("Highlights"), and it says so, pointing at
+// the full registry for the rest. So this is not an equality check; making it one
+// would force every new code onto a curated page and the gate would be wrong about
+// what the page is for. What must hold is the other direction: every code the page
+// names must be a code that exists. The page's own closing line is the promise —
+// "any code explains itself: groundhold explain <code>" — so a code retired from the
+// registry but left in the table sends a reader to a verb that answers "not an error
+// code" about something this project published.
+//
+// Also pinned: that the page still labels itself a selection and still names where
+// the full registry lives. If that framing ever goes, the page is claiming
+// completeness it does not have, and THEN one-directional is the wrong test.
+func TestPublishedErrorsPageNamesOnlyRealCodes(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "website", "pages", "errors.md"))
+	if err != nil {
+		t.Skipf("no published errors page here: %v", err)
+	}
+	page := string(raw)
+
+	known := map[string]bool{}
+	for _, e := range Registry() {
+		known[e.Code] = true
+	}
+	if len(known) < 10 {
+		t.Fatalf("only %d codes in the registry — the probe broke and this gate would "+
+			"pass on anything", len(known))
+	}
+
+	// The table's first column, which is where the page names codes as codes. Prose
+	// mentions elsewhere are not the claim being checked.
+	rows := regexp.MustCompile("(?m)^\\| `([a-z-]+)` \\|").FindAllStringSubmatch(page, -1)
+	if len(rows) < 5 {
+		t.Fatalf("parsed %d code rows from the page — either it stopped listing codes "+
+			"in a table (then this gate watches nothing) or the format changed", len(rows))
+	}
+	for _, m := range rows {
+		if !known[m[1]] {
+			t.Errorf("the published errors page lists %q, which is not in the registry. "+
+				"The page tells the reader that any code explains itself — this one "+
+				"answers that it is not an error code.", m[1])
+		}
+	}
+
+	// The framing that makes a one-directional check the right one.
+	for _, phrase := range []string{"Highlights", "spec/errors.md"} {
+		if !strings.Contains(page, phrase) {
+			t.Errorf("the page no longer says %q. It lists %d of %d codes; without "+
+				"labelling itself a selection and pointing at the full registry, it reads "+
+				"as the complete set, and this gate is then checking the wrong direction.",
+				phrase, len(rows), len(known))
+		}
+	}
+}
