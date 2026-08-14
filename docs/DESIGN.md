@@ -35456,3 +35456,40 @@ The wider point is the one this record keeps arriving at from new directions: a
 published sequence that nothing executes is a claim nobody checked. This one was
 written, reviewed, gated for its wording, published — and broken within a day by a
 change in a different file that no one could have connected to it.
+
+## D1088 — the spec shipped a plan whose own header told you how to catch it lying
+
+`spec/` is the trust interface: Apache-licensed, and the invitation is that anyone may
+implement against it and measure themselves. Contracts and candidates shipped there are
+discovered and checked by the example harness. Plans were not, and there is one.
+
+It had been INVALID since D46 — the rule that an update carries a reviewed change-set
+rather than an implicit diff — which landed on 2026-07-11. The file was last touched on
+2026-07-20, by a repository-wide rename that did not read it. So for a month the tool
+refused to load a document the specification directory offers as the example of what a
+compiler emits, and an implementer following the invitation would have hit
+`update requires a non-empty changes list` on the reference artefact.
+
+**The header is the part worth keeping.** It says: "the reads block pins the ACTUAL
+hashes of the example contract and candidate in this repo — `groundhold hash` on those
+files reproduces them (D28, D36)". Neither did. The contract hash was five weeks stale
+and the candidate hash pinned a document that does not exist in the tree at all. The
+sentence is not merely wrong; it hands the reader the exact command that exposes it,
+which is the honest instinct of whoever wrote it and the reason the drift is
+embarrassing rather than merely unfortunate.
+
+Three fixes, and only the third is worth anything on its own. The update action carries
+the change-set it always should have (`recovery.rpo` 24h → 5m, which is what makes the
+contract's `c-rpo` reachable — point-in-time recovery is off on a fresh instance). The
+two hashes are repinned to what `groundhold hash` produces today. And the harness now
+discovers shipped plan documents the way it discovers contracts (D692's rule: a scope an
+author must remember to widen gates the author's memory, not the tree), requires each to
+LOAD, and re-derives both pinned hashes — so the file's claim about itself is now a
+checked property rather than a sentence.
+
+Teeth-checked on both arms: a drifted hash fails naming both values, and removing the
+change-set again reproduces the original defect as a failure.
+
+Why it survived a month is the ordinary reason. It is not reachable from the README, no
+page links it, and `make check` walked past it — a document nobody executes, in the one
+directory whose whole purpose is to be executed by strangers.
