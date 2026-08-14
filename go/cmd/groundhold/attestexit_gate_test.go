@@ -90,6 +90,18 @@ func TestAttestIntegrityHealthyGatesTamper(t *testing.T) {
 			SignatureSelfVerifies: true, LedgerIdMatches: false, Archive: ledger.ArchiveIntegrity{Status: "matched"}}}, false},
 		{"snapshot archive mismatched (swapped)", &ledger.IntegrityReport{Snapshot: &ledger.SnapshotFacts{
 			SignatureSelfVerifies: true, LedgerIdMatches: true, Archive: ledger.ArchiveIntegrity{Status: "mismatched"}}}, false},
+		// D1081: the signatures arm of the "union" (chain+anchor+snapshot+archive+signatures)
+		// was named as gated but was not — a tail event whose detached signature is PRESENT but
+		// does not self-verify is tamper evidence (its own fact, attest.go), yet exit stayed 0.
+		// The snapshot-signature arm above IS gated; this is the same math, the same corruption
+		// class. Unsigned/self-verified must stay HEALTHY — gating tamper must not fail a
+		// legitimately-unsigned (D102) or fully-signed ledger.
+		{"tail signature present but invalid (tamper)", &ledger.IntegrityReport{
+			Signatures: ledger.SignatureFacts{TailEvents: 3, SelfVerified: 2, EnvelopePresentButInvalid: 1}}, false},
+		{"tail fully self-verified", &ledger.IntegrityReport{
+			Signatures: ledger.SignatureFacts{TailEvents: 3, SelfVerified: 3}}, true},
+		{"tail unsigned is legitimate, not tamper", &ledger.IntegrityReport{
+			Signatures: ledger.SignatureFacts{TailEvents: 3, Unsigned: 3}}, true},
 	}
 	for _, c := range cases {
 		if got := attestIntegrityHealthy(c.rep); got != c.healthy {

@@ -4,6 +4,7 @@ import (
 	"os/exec"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -90,4 +91,72 @@ var changelogExemptTags = map[string]string{
 	// Tagged from a RED commit and replaced; v0.1.5's section says so rather than
 	// the tag being quietly deleted (a deleted tag hides the mistake).
 	"v0.1.4": "Supersedes **v0.1.4**",
+}
+
+// devLineHighWaterMark is the last build number the development line ever minted as a
+// `v*` tag. It is a closed historical fact, not a setting: nothing may be added above
+// it, which is what makes the constant safe to hardcode.
+const devLineHighWaterMark = 17
+
+// D1080. Two sequences shared the `v0.1.x` namespace — the development build line and
+// the published release tags — and D1078 recorded what that cost a reader: entry
+// `[v0.1.8]` (a CloudWatch change, 2026-08-02) and release `v0.1.8` (a toolchain
+// rebuild, 2026-08-14) are different artefacts under one string, on the page you open
+// to find out what you downloaded.
+//
+// The owner's decision (2026-08-14) ends it at the source rather than by convention:
+// `v*` means a PUBLISHED RELEASE and nothing else, so the development line stops using
+// version-shaped names (build markers are `build-<n>`). The historical tags stay — the
+// record is not rewritten — which is precisely why this gate exists: the rule is one
+// sentence in a document, and a document does not stop anyone from typing `git tag
+// v0.1.18` here out of habit.
+//
+// A new `v*` tag in THIS repository would do two things, both silent: it would re-open
+// the collision the decision just closed, and it would trip the release workflow, whose
+// trigger is `v*` and which is meant to fire on the mirror.
+func TestTheSourceRepositoryMintsNoNewVersionTags(t *testing.T) {
+	skipIfExported(t, "the development line's tagging convention")
+	root := repoRoot(t)
+
+	out, err := exec.Command("git", "-C", root, "tag", "-l", "v*").Output()
+	if err != nil {
+		t.Skipf("no git tag listing available: %v", err)
+	}
+	num := regexp.MustCompile(`^v0\.1\.(\d+)$`)
+	var above []string
+	var seen int
+	for _, line := range strings.Split(string(out), "\n") {
+		tag := strings.TrimSpace(line)
+		if tag == "" {
+			continue
+		}
+		seen++
+		m := num.FindStringSubmatch(tag)
+		if m == nil {
+			// A shape neither line uses. Flag it rather than pass: an unrecognised
+			// version-shaped tag is exactly the thing this gate is here to notice.
+			above = append(above, tag+" (unrecognised shape)")
+			continue
+		}
+		n, _ := strconv.Atoi(m[1])
+		if n > devLineHighWaterMark {
+			above = append(above, tag)
+		}
+	}
+	// D328: over a repository whose tags failed to list, an absence check passes while
+	// proving nothing. The historical tags are known to exist, so demand them.
+	if seen <= devLineHighWaterMark {
+		t.Fatalf("only %d v* tags visible, expected more than %d historical ones — a "+
+			"shallow clone or a broken listing, and this gate would pass on anything",
+			seen, devLineHighWaterMark)
+	}
+	if len(above) > 0 {
+		sort.Strings(above)
+		t.Errorf("this repository has minted version tags above the development line's "+
+			"high-water mark (v0.1.%d): %v\n"+
+			"`v*` now means a PUBLISHED RELEASE, cut on the public mirror — a v* tag here "+
+			"re-opens the version collision D1078 closed AND matches the release "+
+			"workflow's trigger. Build markers are `build-<n>`.",
+			devLineHighWaterMark, above)
+	}
 }
