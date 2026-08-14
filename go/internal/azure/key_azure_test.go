@@ -130,12 +130,64 @@ func TestCreateObserveDeleteAzureKey(t *testing.T) {
 		got[o.Path] = o.Value
 	}
 	if got["location.region"] != "eastus" || got["protection.level"] != "hsm" ||
-		got["rotation.period"] != "90d" {
+		got["rotation.period"] != "90d" || got["rotation.enabled"] != true {
 		t.Fatalf("observe: %+v", got)
 	}
 	if del := d.deleteAzureKey("datakey", "prod", res.ProviderID); del.Status != "succeeded" ||
 		!strings.Contains(del.Reason, "soft-delete") {
 		t.Fatalf("delete must succeed + note soft-delete: %+v", del)
+	}
+}
+
+// TestObserveAzureKeyRotationDisabled (D1040/D1067 class): a key with no active
+// rotation policy must emit a MEASURED rotation.enabled=false, not an absence — else a
+// rotation contract is adopted/verified as satisfied over a key that never rotates.
+func TestObserveAzureKeyRotationDisabled(t *testing.T) {
+	srv := azKeyServer(t, "datakey", "RSA-HSM", "") // no rotation policy = rotation disabled
+	defer srv.Close()
+	d := azKeyDriver(t, srv)
+	res := d.createAzureKey("prod", "datakey", azKeyAttrs(), azKeyImpl(), 1)
+	if res.Status != "succeeded" {
+		t.Fatalf("create: %+v", res)
+	}
+	obs, _, err := d.observeAzureKey("datakey", res.ProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]any{}
+	for _, o := range obs {
+		got[o.Path] = o.Value
+	}
+	if got["rotation.enabled"] != false {
+		t.Fatalf("a non-rotating key must emit a MEASURED rotation.enabled=false, got %+v", got)
+	}
+	if _, present := got["rotation.period"]; present {
+		t.Fatalf("a non-rotating key must NOT emit rotation.period, got %+v", got)
+	}
+}
+
+// TestObserveAzureKeyECProtectionLevel (D1069-class): protection.level must be emitted
+// for EVERY key type, not only RSA. A software EC key (Kty "EC", no -HSM suffix) must
+// read a MEASURED protection.level=software — else a `protection.level: hsm` candidate
+// is adopted/verified as satisfied over it (a false HSM assurance).
+func TestObserveAzureKeyECProtectionLevel(t *testing.T) {
+	srv := azKeyServer(t, "datakey", "EC", "") // software-protected elliptic-curve key
+	defer srv.Close()
+	d := azKeyDriver(t, srv)
+	res := d.createAzureKey("prod", "datakey", azKeyAttrs(), azKeyImpl(), 1)
+	if res.Status != "succeeded" {
+		t.Fatalf("create: %+v", res)
+	}
+	obs, _, err := d.observeAzureKey("datakey", res.ProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]any{}
+	for _, o := range obs {
+		got[o.Path] = o.Value
+	}
+	if got["protection.level"] != "software" {
+		t.Fatalf("an EC key must emit measured protection.level=software, got %+v", got)
 	}
 }
 

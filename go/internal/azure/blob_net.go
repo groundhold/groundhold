@@ -419,7 +419,15 @@ func (d *Driver) observeBlobImmutability(rg, account, container string) ([]provi
 			azReadWhy(st, resp, e)}
 	}
 	if st == http.StatusNotFound {
-		return nil, nil // not immutability-protected — absent, not an error
+		// D1041/D1069-class: a 404 is AUTHORITATIVE "no immutability policy", not a read
+		// failure — a container with no WORM policy is definitively NOT compliance-locked,
+		// a MEASURED false. Emitting nothing let a `retention.locked: true` candidate be
+		// adopted/verified as satisfied over a freely-mutable container (a permanent false
+		// WORM assurance — immutability is create-time, no converge could make it true).
+		// retention.minimum stays absent: there is genuinely no floor (the S3 decision).
+		return []provider.Observation{
+			{Path: "retention.locked", Value: false, Derivation: "measured"},
+		}, nil
 	}
 	if st != http.StatusOK {
 		return nil, []string{fmt.Sprintf("retention.minimum not observed: immutabilityPolicies.get HTTP %d", st)}
@@ -434,7 +442,11 @@ func (d *Driver) observeBlobImmutability(rg, account, container string) ([]provi
 		return nil, []string{"retention.minimum not observed: immutabilityPolicies.get unparseable"}
 	}
 	if doc.Properties.Days == nil || *doc.Properties.Days <= 0 {
-		return nil, nil // no active floor
+		// a policy row with no active floor is also not WORM-locked — measured false,
+		// same as the no-policy case (retention.minimum genuinely absent).
+		return []provider.Observation{
+			{Path: "retention.locked", Value: false, Derivation: "measured"},
+		}, nil
 	}
 	return []provider.Observation{
 		{Path: "retention.minimum", Value: fmt.Sprintf("%dd", *doc.Properties.Days), Derivation: "measured"},

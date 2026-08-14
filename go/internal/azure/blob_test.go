@@ -169,6 +169,13 @@ func TestCreateObserveBlobReplication(t *testing.T) {
 	if got["replication.enabled"] != true || got["replication.destinationRegion"] != "eastus2" {
 		t.Fatalf("replication observe = %+v", got)
 	}
+	// D1069-class: the immutabilityPolicies GET 404s (no WORM policy), which is an
+	// AUTHORITATIVE "not locked" — retention.locked must be a MEASURED false, not absent
+	// (absence would let a retention.locked:true candidate adopt over this container).
+	rl, present := got["retention.locked"]
+	if !present || rl != false {
+		t.Fatalf("a container with no immutability policy must emit measured retention.locked=false, got %v (present=%v)", rl, present)
+	}
 }
 
 func blobArmFake(t *testing.T, tagCap string) *httptest.Server {

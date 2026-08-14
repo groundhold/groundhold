@@ -122,13 +122,37 @@ func TestCreateObserveDeleteKMS(t *testing.T) {
 		got[o.Path] = o.Value
 	}
 	if got["location.region"] != "europe-west1" || got["protection.level"] != "hsm" ||
-		got["rotation.period"] != "2592000s" {
+		got["rotation.period"] != "2592000s" || got["rotation.enabled"] != true {
 		t.Fatalf("observe: %+v", got)
 	}
 	// delete destroys the material but is honest that the shell is permanent.
 	del := d.deleteKMS("datakey", "prod", res.ProviderID)
 	if del.Status != "succeeded" || !strings.Contains(del.Reason, "PERMANENT") {
 		t.Fatalf("delete must succeed + note permanence: %+v", del)
+	}
+}
+
+// TestObserveKMSRotationDisabled (D1040/D1067 class): a cryptoKey with automatic
+// rotation OFF (no rotationPeriod) must emit a MEASURED rotation.enabled=false, not an
+// absence — else a rotation contract is adopted/verified as satisfied over a
+// non-rotating key. rotation.period stays absent (a disabled key has no period).
+func TestObserveKMSRotationDisabled(t *testing.T) {
+	srv := kmsServer(t, "datakey", "HSM", "") // no rotationPeriod = rotation disabled
+	defer srv.Close()
+	d := kmsDriver(t, srv)
+	obs, _, err := d.observeKMS("datakey", "gkms:acme-prod:europe-west1:groundhold-prod:x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]any{}
+	for _, o := range obs {
+		got[o.Path] = o.Value
+	}
+	if got["rotation.enabled"] != false {
+		t.Fatalf("a non-rotating key must emit a MEASURED rotation.enabled=false, got %+v", got)
+	}
+	if _, present := got["rotation.period"]; present {
+		t.Fatalf("a non-rotating key must NOT emit rotation.period (no period to report), got %+v", got)
 	}
 }
 

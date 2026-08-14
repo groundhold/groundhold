@@ -176,6 +176,45 @@ func TestObserveECSTLSEnforced(t *testing.T) {
 	}
 }
 
+// TestObserveECSNoLBDiagnosesTLS (D1069-class): a service behind NO load balancer has
+// no front door to measure. The vocabulary mandates a DIAGNOSTIC, not silence — silence
+// let a `tls.enforced: true` candidate's declared value stand (adopt fills the missing
+// observation with intent). tls.enforced must be ABSENT (not a fabricated false — the
+// ingress could be TLS via a mesh) and a diagnostic must say why.
+func TestObserveECSNoLBDiagnosesTLS(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.Header.Get("X-Amz-Target"), "DescribeServices") {
+				_, _ = w.Write([]byte(`{"services":[{"status":"ACTIVE","desiredCount":1,` +
+					`"networkConfiguration":{"awsvpcConfiguration":{"assignPublicIp":"DISABLED"}},` +
+					`"loadBalancers":[],` +
+					`"tags":[{"key":"groundhold-capability","value":"app"}]}]}`))
+				return
+			}
+			w.WriteHeader(400)
+		}))
+	defer srv.Close()
+	d := ecsTestDriver(t, srv)
+	obs, diags, err := d.observeECS("app", "ecs:eu-central-1:app-abcd1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range obs {
+		if o.Path == "tls.enforced" {
+			t.Fatalf("a no-LB service must NOT emit a measured tls.enforced (front door unknown), got %v", o.Value)
+		}
+	}
+	found := false
+	for _, dg := range diags {
+		if strings.Contains(dg, "tls.enforced") && strings.Contains(dg, "no load") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a no-LB service must DIAGNOSE the unmeasured tls.enforced, got diags %v", diags)
+	}
+}
+
 // ecsServer routes JSON actions by the X-Amz-Target header. describeState
 // controls the service rollout: the first describe returns IN_PROGRESS, then
 // COMPLETED with runningCount==desiredCount.

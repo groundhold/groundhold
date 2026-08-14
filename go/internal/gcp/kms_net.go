@@ -167,6 +167,13 @@ func (d *Driver) observeKMS(capability, providerID string) ([]provider.Observati
 		{Path: "location.region", Value: location, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
+	// D1040/D1067: rotation.enabled is emitted for BOTH states — a cryptoKey with no
+	// rotationPeriod is a MEASURED false (rotation OFF), not an absence. Emitting only
+	// the ON case let a rotation contract be adopted/verified as satisfied over a
+	// non-rotating key (the cross-cloud twin of the AWS KMS fix). rotation.period is
+	// emitted only when rotating (a disabled key has no period; inventing one would lie).
+	obs = append(obs, provider.Observation{Path: "rotation.enabled",
+		Value: doc.RotationPeriod != "", Derivation: "measured"})
 	if doc.RotationPeriod != "" {
 		// the API form "2592000s" is a canonical duration — the verifier compares
 		// it to a declared "30d" as durations.
