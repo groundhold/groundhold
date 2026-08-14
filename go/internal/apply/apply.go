@@ -783,6 +783,26 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 		return corrupted(err.Error())
 	}
 
+	// D1055: re-derive the create-before-destroy edge (D48) for every replacement
+	// structurally, BEFORE ordering and fail-isolation read dependsOn. Both
+	// topoOrder and depFailed trust the plan's dependsOn verbatim, and the action
+	// array is not part of the anchor, so a forged/stale plan that drops a
+	// replacement's edge — and reorders the array — would run the delete first
+	// (destroying a live stateful resource before its successor exists) or run it
+	// even when the paired create failed. The compiler emits a create AND a delete
+	// for the same capability ONLY as a replacement, so the structure alone proves
+	// the dependency; inject it if the plan omitted it.
+	enforceReplaceOrdering(actions)
+
+	// D1056: re-derive the identity a replacement's create is REPLACING from the
+	// paired same-capability delete's targetProviderId, so the D723 backstop (below)
+	// cannot be defeated by a forged plan that removes the create's `replaces` field.
+	// A replacement's delete pins the old id it will destroy; if the create comes
+	// back holding that id (a tag-adopting driver found the gen-1 resource), the
+	// following delete would destroy it. The backstop must fire on the STRUCTURE, not
+	// on a forgeable plan field.
+	replacedID := replacedIDByCap(actions)
+
 	// D227: the ephemeral progress stream. Built from the sealed plan's actions
 	// in execution order; emits run-start (the manifest), per-action transitions,
 	// and run-end. It writes to its own sink and never touches the ledger below.
@@ -884,7 +904,7 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 		// overlay on top of them.
 		implArgs := foldedImplementation(a, cand, capID)
 		if refs := actionRefs(a); len(refs) > 0 {
-			resolved, why := resolveActionRefs(refs, implArgs, runOutputs)
+			resolved, why := resolveActionRefs(cand, capID, refs, implArgs, runOutputs)
 			if why != "" {
 				refuseBeforeIntent(perr.ReferenceUnresolved, fmt.Sprintf(
 					"action %s: %s — no intent written, no driver call made", aid, why))
@@ -1008,8 +1028,18 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 			// a create that returns the identity being replaced did not create anything,
 			// and continuing would write a binding to a resource this run is about to
 			// delete. Refuse before that binding is written.
-			if rep, ok := a["replaces"].(map[string]any); ok && cr.Status == "succeeded" {
-				if old, _ := rep["providerId"].(string); old != "" && cr.ProviderID == old {
+			if cr.Status == "succeeded" {
+				// D1056: the old id comes from the plan's `replaces` field OR, if that
+				// was forged away, from the paired delete's pinned target — either names
+				// exactly the identity the following delete destroys.
+				old := ""
+				if rep, ok := a["replaces"].(map[string]any); ok {
+					old, _ = rep["providerId"].(string)
+				}
+				if old == "" {
+					old = replacedID[capID]
+				}
+				if old != "" && cr.ProviderID == old {
 					cr = provider.CreateResult{Status: "failed", Reason: fmt.Sprintf(
 						"the replacement create returned the identity it is replacing "+
 							"(%s) — it adopted the resource the following delete would "+
@@ -1472,6 +1502,79 @@ func actionByID(actions []any, id string) map[string]any {
 
 // topoOrder: dependency order, stable on the document order (the plan
 // loader already proved acyclicity).
+// enforceReplaceOrdering injects the same-capability create->delete dependency (D48)
+// that marks a replacement, so ordering and fail-isolation cannot be defeated by a
+// forged plan dropping the edge (D1055). A capability carrying BOTH a create and a
+// delete in one plan is a replacement by construction (the compiler emits the pair
+// only there); its delete must not run until the create succeeds. Mutates the
+// in-memory action's dependsOn — read by both topoOrder and depFailed — never a
+// hashed field (the anchor is contract/candidate, not the plan body).
+func enforceReplaceOrdering(actions []any) {
+	createID := map[string]string{}
+	for _, it := range actions {
+		a, _ := it.(map[string]any)
+		if a["operation"] == "create" {
+			cap, _ := a["capability"].(string)
+			id, _ := a["id"].(string)
+			if cap != "" && id != "" {
+				createID[cap] = id
+			}
+		}
+	}
+	for _, it := range actions {
+		a, _ := it.(map[string]any)
+		if a["operation"] != "delete" {
+			continue
+		}
+		cap, _ := a["capability"].(string)
+		cid, ok := createID[cap]
+		if !ok {
+			continue // a plain retire/delete has no paired create — not a replacement
+		}
+		deps, _ := a["dependsOn"].([]any)
+		for _, d := range deps {
+			if s, _ := d.(string); s == cid {
+				cid = "" // already depended on — leave the plan's edge intact
+				break
+			}
+		}
+		if cid != "" {
+			a["dependsOn"] = append(deps, cid)
+		}
+	}
+}
+
+// replacedIDByCap maps a capability to the provider id its replacement delete pins
+// as the target — the identity a paired create is replacing (D1056). Only a
+// capability with BOTH a create and a delete (a replacement) gets an entry; the
+// delete's targetProviderId is the old id, re-derived from the structure so the
+// D723 backstop does not depend on the create's forgeable `replaces` field.
+func replacedIDByCap(actions []any) map[string]string {
+	hasCreate := map[string]bool{}
+	for _, it := range actions {
+		a, _ := it.(map[string]any)
+		if a["operation"] == "create" {
+			cap, _ := a["capability"].(string)
+			hasCreate[cap] = true
+		}
+	}
+	out := map[string]string{}
+	for _, it := range actions {
+		a, _ := it.(map[string]any)
+		if a["operation"] != "delete" {
+			continue
+		}
+		cap, _ := a["capability"].(string)
+		if !hasCreate[cap] {
+			continue
+		}
+		if old, _ := a["targetProviderId"].(string); old != "" {
+			out[cap] = old
+		}
+	}
+	return out
+}
+
 func topoOrder(actions []any) []string {
 	done := map[string]bool{}
 	var order []string
@@ -1935,13 +2038,29 @@ func actionRefs(a map[string]any) []planRef {
 // mutated. Any failure — producer receipt absent from this run, output
 // missing, kind mismatch — returns a reason and the caller refuses before the
 // write-ahead intent: zero mutation, nothing pending.
-func resolveActionRefs(refs []planRef, impl map[string]any,
+//
+// D1054: re-derive every reference's slot->producer binding from the HASH-PINNED
+// candidate before substituting, the same guard foldStaleReason applies to folds
+// (D1039/D962). The compiler wires a reference ONLY from a candidate $ref operand
+// (wireReferences.handleRef parses it out of impl[slot]), so a legitimate
+// reference's slot in the candidate is a $ref to exactly this (capability, output).
+// A hand-authored or stale-replayed plan (contract/candidate hashes unchanged) that
+// adds a reference naming a slot the candidate declared as a LITERAL — or a $ref to a
+// different producer/output — would overwrite that operand with an arbitrary producer
+// output, injecting a value candidateHash cannot catch because the reference lives in
+// the plan. Refuse it: this is the live-producer twin of the closed fold hole.
+func resolveActionRefs(cand *contract.Candidate, actionCap string, refs []planRef, impl map[string]any,
 	runOutputs map[string]map[string]any) (map[string]any, string) {
 	resolved := make(map[string]any, len(impl))
 	for k, v := range impl {
 		resolved[k] = v
 	}
 	for _, r := range refs {
+		if !foldMatchesCandidateRef(cand, actionCap, r.Slot, r.Capability, r.Output) {
+			return nil, fmt.Sprintf("forged plan: reference %s <- %s.%s, but the "+
+				"pinned candidate does not wire that slot to it — refusing an operand "+
+				"the candidate never declared", r.Slot, r.Capability, r.Output)
+		}
 		outs, ok := runOutputs[r.ProducerAction]
 		if !ok {
 			return nil, fmt.Sprintf("reference %s <- %s.%s is unresolved: "+

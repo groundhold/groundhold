@@ -393,6 +393,24 @@ func CheckAnchor(led *Ledger, a *Anchor) *AnchorCheck {
 			return res
 		}
 	}
+	// D1059: a manifest-less (pre-D185/external) anchor that does NOT cover the whole
+	// current ledger cannot make the complete-forest guarantee. The manifest guard
+	// above is skipped for want of a manifest; the tip-only heads guard runs only when
+	// the anchor covers the whole ledger. All that remains is the positional Head,
+	// which commits SOLELY to the sub-chain owning line a.Events — so a count-preserving
+	// rewrite of an independent capability's tail inside the anchored prefix (the exact
+	// D185 scenario) passes. Returning the bare word "verified" claims a forest
+	// guarantee that was never checked — the D613 shape, "I could not check" is not
+	// "I checked". Report unverifiable, as the zero-event case does.
+	if a.Manifest == "" && a.Events < led.TotalEvents() {
+		res.Status = "unverifiable"
+		res.Reasons = []string{fmt.Sprintf(
+			"a manifest-less anchor pins %d of the ledger's %d events — its positional "+
+				"head cannot prove an independent capability's tail inside the anchored "+
+				"prefix was not rewritten count-preservingly; re-anchor to regain the "+
+				"complete-forest guarantee (D185)", a.Events, led.TotalEvents())}
+		return res
+	}
 	res.Status = "verified"
 	return res
 }

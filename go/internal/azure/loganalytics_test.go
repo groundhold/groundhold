@@ -208,23 +208,28 @@ func TestObserveLogAnalyticsCMKConfirmedAgainstCluster(t *testing.T) {
 		t.Fatalf("a cluster carrying a key vault key must report CMK=true, got %+v", obs)
 	}
 
-	// (b) the linked cluster carries NO key → CMK must NOT be emitted (false BYOK), and a
-	// diagnostic must explain why.
+	// (b) D1057: the linked cluster was READ and carries NO key → CMK is a MEASURED
+	// false (the same keyVaultProperties the true arm reads, empty), not an omission.
+	// Omitting it let an adopt certify a BYOK control that does not exist — the exact
+	// standalone hole D1046 closed, here on the linked-cluster-keyless branch.
 	srv2 := newSrv("")
 	d2 := laDriver(t, srv2)
-	obs2, diags2, err := d2.observeLogAnalytics("app-logs", pid)
+	obs2, _, err := d2.observeLogAnalytics("app-logs", pid)
 	srv2.Close()
 	if err != nil {
 		t.Fatal(err)
 	}
+	var sawFalse bool
 	for _, o := range obs2 {
 		if o.Path == "encryption.customerManagedKeys" {
-			t.Fatalf("a linked cluster with no key must NOT report CMK — false BYOK; got %+v", o)
+			if o.Value != false || o.Derivation != "measured" {
+				t.Fatalf("keyless linked cluster: CMK = %+v, want measured false", o)
+			}
+			sawFalse = true
 		}
 	}
-	joined := strings.Join(diags2, " | ")
-	if !strings.Contains(joined, "platform-managed") {
-		t.Fatalf("expected a not-observed diagnostic for the keyless cluster, got %q", joined)
+	if !sawFalse {
+		t.Fatalf("a keyless linked cluster must report CMK=false measured, got %+v", obs2)
 	}
 }
 

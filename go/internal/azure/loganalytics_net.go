@@ -155,7 +155,15 @@ func (d *Driver) observeLogAnalytics(capability, providerID string) ([]provider.
 			obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
 				Value: true, Derivation: "measured"})
 		default:
-			diags = append(diags, "encryption.customerManagedKeys not observed: the linked cluster carries no key vault key (platform-managed, not BYOK)")
+			// D1057: the linked cluster was READ (cfound, no error) and carries no key
+			// vault key — that is the same keyVaultProperties the `true` arm reads, empty.
+			// A linked cluster on Microsoft's platform key is a MEASURED false, not an
+			// absence; omitting it let an adopt certify a BYOK control that does not exist,
+			// exactly the standalone case D1046 closed one branch down. (The D985 caution is
+			// about not inferring a false TRUE from cluster LINKAGE; a read-empty key is the
+			// definitively-false case it does not cover.)
+			obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+				Value: false, Derivation: "measured"})
 		}
 	} else {
 		// D1046: a STANDALONE workspace (no linked dedicated cluster) can carry no customer

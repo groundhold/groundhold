@@ -177,6 +177,7 @@ func (d *Driver) createDynamoDB(region, account, environment, capability string,
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	pid := dynamoProviderID(region, account, plan.Table)
+	adopted := false
 	st, resp, err := d.dynamoCall(region, "CreateTable", jsonBody(plan.createBody(capability, environment)))
 	switch {
 	case err != nil:
@@ -194,7 +195,12 @@ func (d *Driver) createDynamoDB(region, account, environment, capability string,
 			return provider.CreateResult{Status: "failed",
 				Reason: "a table with this name exists and is not ours (tags do not match)"}
 		}
-		// ours — fall through to poll + PITR
+		// ours — the CreateTable body (SSE, deletion protection) did NOT apply to the
+		// pre-existing table; only the separate PITR call below re-asserts. Mark adopted
+		// so the inline-set controls are re-checked against the live table before we
+		// report succeeded (D1058).
+		adopted = true
+		// fall through to poll + adopt-reconcile + PITR
 	case st >= 500:
 		return provider.CreateResult{ProviderID: pid, Status: "unknown",
 			Reason: fmt.Sprintf("create HTTP %d (server error — may have landed): %s", st, mutDetail(resp))}
@@ -208,11 +214,13 @@ func (d *Driver) createDynamoDB(region, account, environment, capability string,
 
 	// poll to ACTIVE
 	deadline := d.Now().Add(d.PollTimeout)
+	var liveDesc dynamoTableDesc
 	active := false
 	for {
 		desc, found, rerr := d.describeTable(region, plan.Table)
 		if rerr == nil && found {
 			if desc.TableStatus == "ACTIVE" {
+				liveDesc = desc
 				active = true
 				break
 			}
@@ -224,6 +232,29 @@ func (d *Driver) createDynamoDB(region, account, environment, capability string,
 		time.Sleep(d.PollInterval)
 	}
 	_ = active
+
+	// D1058: an ADOPTED table (409 ResourceInUse, ours) never received the CreateTable
+	// body's inline controls — SSE/customer-key and deletion protection. S3's 409-adopt
+	// re-asserts every declared control idempotently; DynamoDB re-asserted only PITR, so
+	// a table adopted with the wrong encryption or protection reported succeeded for a
+	// control that did not land (the D1047/D1048 class). Re-check them against the live
+	// table read we already have and refuse rather than lie; a later converge patches the
+	// mutable drift (classifyDynamoDBChange), but create must not claim what is not there.
+	if adopted {
+		// Only the DANGEROUS direction is a lie: a declared control that the live table
+		// LACKS. A table more protected/encrypted than declared is the safe direction and
+		// adopts cleanly (a later converge reconciles the declared-lower drift in place).
+		if plan.DeletionProtection && !liveDesc.DeletionProtectionEnabled {
+			return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: "adopted an " +
+				"existing table with deletion protection OFF, but the candidate declares it on " +
+				"— reconcile (create did not protect it)"}
+		}
+		if plan.CMEK && liveDesc.SSEDescription.SSEType != "KMS" {
+			return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: "adopted an " +
+				"existing table with no SSE-KMS encryption, but the candidate declares a " +
+				"customer-managed key — reconcile (create did not encrypt it)"}
+		}
+	}
 
 	// point-in-time recovery is a SEPARATE call — a partial is unknown WITH the pid.
 	if plan.PITR {
@@ -290,10 +321,25 @@ func (d *Driver) observeDynamoDB(capability, providerID string) ([]provider.Obse
 			"is a GLOBAL TABLE replicating into: "+strings.Join(regions, ", ")+
 			" — its data is resident in those regions too")
 	}
+	// D1057: encryption.customerManagedKeys — DynamoDB was the lone AWS driver that
+	// emitted this path NOWHERE. An SSE-KMS table reports a key ARN whether it is the
+	// AWS-managed aws/dynamodb key or a customer key; trace it to KMS (DescribeKey ->
+	// KeyManager) the way RDS/OpenSearch/EFS do, so a real CMK is measured rather than
+	// punted. The default owned-key table (SSEType != "KMS", no ARN) is definitively
+	// NOT customer-managed, read straight from DescribeTable → a MEASURED false, not an
+	// absence. Omitting it let a `customerManagedKeys: true` candidate be adopted over
+	// a default-key table (the broad case: owned-key is DynamoDB's default).
 	if desc.SSEDescription.SSEType == "KMS" && desc.SSEDescription.KMSMasterKeyArn != "" {
-		diags = append(diags, "encryption.customerManagedKeys not observed: DescribeTable "+
-			"reports a KMS key ARN but cannot distinguish the AWS-managed aws/dynamodb key "+
-			"from a customer key without a KMS DescribeKey (KeyManager) lookup — probe/reconcile")
+		if customer, kerr := d.kmsKeyIsCustomerManaged(region, desc.SSEDescription.KMSMasterKeyArn); kerr == nil {
+			obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+				Value: customer, Derivation: "measured"})
+		} else {
+			diags = append(diags, "encryption.customerManagedKeys not observed on the "+
+				"table's KMS key: "+kerr.Error()+" — probe/reconcile")
+		}
+	} else {
+		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+			Value: false, Derivation: "measured"})
 	}
 	if enabled, ok := d.pitrEnabled(region, table); ok {
 		obs = append(obs, provider.Observation{Path: "backup.pointInTimeRecovery", Value: enabled, Derivation: "measured"})

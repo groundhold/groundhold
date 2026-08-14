@@ -208,6 +208,39 @@ func TestObserveGCSFineGrainedIsDiagnostic(t *testing.T) {
 	}
 }
 
+// TestObserveGCSNoRetentionPolicyLocksFalse (D1057): a bucket with no retention
+// policy is necessarily NOT WORM-locked — retention.locked is a MEASURED false read
+// from the same buckets.get response, not an omission. Emitting it only alongside a
+// policy let a `retention.locked: true` candidate be adopted over a freely-deletable
+// bucket, a permanent false WORM assurance (the S3 sibling was fixed in D1041).
+func TestObserveGCSNoRetentionPolicyLocksFalse(t *testing.T) {
+	bucket := `{"location":"EUROPE-CENTRAL2","metageneration":"3","projectNumber":"111",` +
+		`"iamConfiguration":{"publicAccessPrevention":"enforced",` +
+		`"uniformBucketLevelAccess":{"enabled":true}}}`
+	srv := gcsServer(t, bucket, 200, "", 0)
+	defer srv.Close()
+	d := gcsDriver(t, srv)
+	obs, _, err := d.observeGCS("assets", "gcs:acme-prod:the-bucket")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawLocked bool
+	for _, o := range obs {
+		if o.Path == "retention.minimum" {
+			t.Fatalf("no retention policy: retention.minimum must be absent, got %+v", o)
+		}
+		if o.Path == "retention.locked" {
+			if o.Value != false || o.Derivation != "measured" {
+				t.Fatalf("retention.locked = %+v, want measured false", o)
+			}
+			sawLocked = true
+		}
+	}
+	if !sawLocked {
+		t.Fatalf("a bucket with no retention policy must report retention.locked=false measured, got %+v", obs)
+	}
+}
+
 func TestObserveGCSDualRegionReplication(t *testing.T) {
 	// A configurable dual-region bucket: location.region + replication.destinationRegion
 	// are MEASURED from customPlacementConfig (the peers), not from the continent-level

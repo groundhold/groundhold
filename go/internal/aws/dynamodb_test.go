@@ -99,6 +99,8 @@ func dynamoServer(t *testing.T, capLabel string, pitr, delProt, cmek bool) *http
 					dp = "true"
 				}
 				_, _ = w.Write([]byte(`{"Table":{"TableStatus":"ACTIVE","TableArn":"arn:aws:dynamodb:eu-central-1:000000000000:table/t","DeletionProtectionEnabled":` + dp + sse + `}}`))
+			case "DescribeKey": // D1057: KMS key trace -> a customer-managed key
+				_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"CUSTOMER"}}`))
 			case "ListTagsOfResource":
 				_, _ = w.Write([]byte(`{"Tags":[{"Key":"groundhold-capability","Value":"` + capLabel + `"},{"Key":"groundhold-environment","Value":"prod"}]}`))
 			case "UpdateContinuousBackups":
@@ -125,6 +127,7 @@ func dynamoDriver(t *testing.T, srv *httptest.Server) *Driver {
 	d := NewDriver("eu-central-1")
 	d.Account = "000000000000"
 	d.DynamoDBBaseURL = srv.URL
+	d.KMSBaseURL = srv.URL // D1057: observe traces a KMS key ARN to KeyManager
 	d.Now = time.Now
 	d.PollInterval = time.Millisecond
 	d.PollTimeout = 2 * time.Second
@@ -218,10 +221,10 @@ func TestCreateObserveDeleteDynamoDB(t *testing.T) {
 		got["backup.pointInTimeRecovery"] != true || got["deletion.protection"] != false {
 		t.Fatalf("observe: %+v", got)
 	}
-	// customerManagedKeys is unobservable via DescribeTable (managed vs customer
-	// KMS key is indistinguishable by ARN, the RDS case) — never fabricated.
-	if _, has := got["encryption.customerManagedKeys"]; has {
-		t.Fatalf("cmek must not be observed, got %v", got["encryption.customerManagedKeys"])
+	// D1057: the server's DescribeTable reports an SSE-KMS key; observe traces it to
+	// KMS (DescribeKey -> KeyManager=CUSTOMER) and MEASURES customerManagedKeys=true.
+	if got["encryption.customerManagedKeys"] != true {
+		t.Fatalf("cmek = %v, want measured true (traced customer key)", got["encryption.customerManagedKeys"])
 	}
 	if del := d.deleteDynamoDB("sessions", "prod", res.ProviderID); del.Status != "succeeded" {
 		t.Fatalf("delete: %+v", del)
@@ -338,6 +341,8 @@ func TestMetamorphicDynamoDBRoundTrip(t *testing.T) {
 							st = "ENABLED"
 						}
 						_, _ = w.Write([]byte(`{"ContinuousBackupsDescription":{"PointInTimeRecoveryDescription":{"PointInTimeRecoveryStatus":"` + st + `"}}}`))
+					case "DescribeKey": // D1057: the KMS-key case traces to a customer key
+						_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"CUSTOMER"}}`))
 					default:
 						_, _ = w.Write([]byte(`{}`))
 					}
@@ -372,24 +377,14 @@ func TestMetamorphicDynamoDBRoundTrip(t *testing.T) {
 			if got["backup.pointInTimeRecovery"] != c.pitr {
 				t.Errorf("pitr round-trip: want %v got %v", c.pitr, got["backup.pointInTimeRecovery"])
 			}
-			// customerManagedKeys is NOT observable from DescribeTable: SSEType=KMS
-			// covers BOTH the AWS-managed aws/dynamodb key and a customer key, whose
-			// ARNs are indistinguishable without a KMS DescribeKey lookup (the RDS
-			// case). So observe never reports it — even for a table groundhold created
-			// with a customer key — and emits a diagnostic when a KMS key is set.
-			if _, has := got["encryption.customerManagedKeys"]; has {
-				t.Errorf("cmek must be unobservable via DescribeTable, got %v (fabricated)",
-					got["encryption.customerManagedKeys"])
+			// D1057: customerManagedKeys is MEASURED both ways — a KMS-key table traces
+			// its ARN to KeyManager=CUSTOMER (true), an owned-key table reads the absent
+			// SSE-KMS as a definitive false. DynamoDB was the lone AWS driver that emitted
+			// the path nowhere; it now matches RDS/OpenSearch/EFS.
+			if got["encryption.customerManagedKeys"] != c.cmek {
+				t.Errorf("cmek round-trip: want measured %v got %v", c.cmek, got["encryption.customerManagedKeys"])
 			}
-			hasDiag := false
-			for _, dg := range diags {
-				if strings.Contains(dg, "customerManagedKeys not observed") {
-					hasDiag = true
-				}
-			}
-			if c.cmek && !hasDiag {
-				t.Errorf("a KMS-key table must emit a customerManagedKeys diagnostic, got %v", diags)
-			}
+			_ = diags
 		})
 	}
 }
@@ -459,6 +454,44 @@ func TestAdoptsExistingDynamoDB(t *testing.T) {
 		AllowedMutations: 3, // the refused create + backup/protection convergence
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
+
+// TestAdoptDynamoDBRefusesUnlandedControl (D1058): a 409-adopted table whose live
+// deletion protection is OFF while the candidate declares it ON must NOT report
+// succeeded — the CreateTable body's inline control never applied to the existing
+// table, so claiming success is a lie about a control that is not there (D1047/D1048
+// class). The safe direction (table more protected than declared) still adopts.
+func TestAdoptDynamoDBRefusesUnlandedControl(t *testing.T) {
+	target := func(r *http.Request) string {
+		full := r.Header.Get("X-Amz-Target")
+		return full[strings.LastIndex(full, ".")+1:]
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch target(r) {
+		case "CreateTable": // already exists
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(`{"__type":"ResourceInUseException","message":"exists"}`))
+		case "DescribeTable": // ACTIVE but deletion protection OFF (declared on)
+			_, _ = w.Write([]byte(`{"Table":{"TableStatus":"ACTIVE",` +
+				`"TableArn":"arn:aws:dynamodb:eu-central-1:000000000000:table/t",` +
+				`"DeletionProtectionEnabled":false}}`))
+		case "ListTagsOfResource": // ours
+			_, _ = w.Write([]byte(`{"Tags":[{"Key":"groundhold-capability","Value":"sessions"},` +
+				`{"Key":"groundhold-environment","Value":"prod"}]}`))
+		case "DescribeKey":
+			_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"CUSTOMER"}}`))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer srv.Close()
+	d := dynamoDriver(t, srv)
+	a := dynamoAttrs()
+	a["deletion.protection"] = true // declared ON; the live table has it OFF
+	res := d.createDynamoDB("eu-central-1", "000000000000", "prod", "sessions", a, dynamoImpl(), 1)
+	if res.Status != "unknown" || !strings.Contains(res.Reason, "deletion protection OFF") {
+		t.Fatalf("adopting a table missing a declared control must be unknown/reconcile, got %+v", res)
+	}
 }
 
 // TestRefusesForeignDeleteDynamoDB enrols dynamodb in the D439 gate. A table delete takes

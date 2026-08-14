@@ -633,11 +633,15 @@ func (d *Driver) observeGCS(capability, providerID string) ([]provider.Observati
 		// can only verify from recorded reality if observe emits the path.
 		obs = append(obs, provider.Observation{Path: "retention.minimum",
 			Value: secs + "s", Derivation: "measured"})
-		// retention.locked is meaningful only WITH a retention policy — emit its
-		// measured isLocked (WORM on or off). Absent a policy, the path is absent.
-		obs = append(obs, provider.Observation{Path: "retention.locked",
-			Value: b.RetentionPolicy.IsLocked, Derivation: "measured"})
 	}
+	// D1057: retention.locked (WORM) is read from the same buckets.get response and a
+	// bucket with no retention policy is necessarily NOT locked — a MEASURED false, not
+	// an absence. Emitting it only alongside a policy let a `retention.locked: true`
+	// candidate be adopted over a bucket whose objects are freely deletable, a PERMANENT
+	// false WORM assurance no converge can correct (retention lock is set-once). The S3
+	// sibling emits false when Object Lock is entirely absent (D1041); match it.
+	obs = append(obs, provider.Observation{Path: "retention.locked",
+		Value: b.RetentionPolicy.IsLocked, Derivation: "measured"})
 	// retention.maximum reverse-maps a lifecycle Delete-by-age rule (whole days).
 	for _, r := range b.Lifecycle.Rule {
 		if r.Action.Type == "Delete" && r.Condition.Age != nil {
