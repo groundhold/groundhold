@@ -34792,3 +34792,44 @@ key replacement loses access to everything encrypted under it, so the reason nam
 out of band and says not to replace the key. An unreadable `GetKeyRotationStatus` stays unknown (never
 a fabricated "rotation off"), naming its cause per D306. `adoptControlDebt` is now EMPTY — the class is
 enforced by the gate rather than tracked by a list, and the empty map stays as the shape of the check.
+
+## D1068 — the sync guard asked the wrong direction, and I walked into the gap twice
+
+D714 built a refusal: a sync must not bury work authored on the PUBLIC side. It asks
+"did anything land there after our last sync?", answers it correctly, and has never
+been wrong.
+
+It says nothing about the direction that actually bites when two sessions share one
+private branch. An export is a WHOLE-TREE snapshot, so it is authoritative for every
+path it covers — and it can be built from a private commit OLDER than the one the
+mirror was last synced from. Nothing was authored publicly, so D714's guard stays
+quiet, and the export deletes already-synced private work with the script reporting
+success.
+
+Twice today. First with PR #49: staged, CI green, and GitHub's merge conflict was the
+only thing between it and reverting six commits — the conflict was the guard, and there
+is no guard in a conflict. Then again while syncing D1063-D1065: the staged diff showed
+349 deletions across driver files I had never touched, and reading that number is the
+only reason it stopped. Both times the other session had already carried my work to the
+mirror, so the correct sync was NO sync — a state the script had no way to express.
+
+The marker makes it answerable exactly. `.github/sync-source` names the private commit
+each export came from, so: if that commit is not an ancestor of HEAD, everything between
+is missing from this export, and the export replaces the tree. The script now refuses
+with the list of commits that would be lost, by subject, and says the two ways out —
+rebase onto them, or recognise that the change is already published and stop. An unknown
+marker commit (a rewritten branch) downgrades to a note rather than a refusal: it cannot
+prove a revert, and a guard that fires when it cannot tell teaches people to pass it.
+
+Teeth-checked in both directions, which took two attempts and the first one was worth
+recording: I ran the "before" case against a tree that still held the OLD script, because
+the edit was uncommitted and a `git stash` I had typed to get a clean tree took it with
+it. The run passed, which I could have read as "the guard is too weak" instead of "the
+guard was not there" — a false negative from a mutant that never got installed. Re-run
+from a clean worktree at the exact stale commit, it refuses and names all nine commits;
+from the current HEAD it stages normally.
+
+The class this belongs to is the one this record keeps returning to: a check that
+answers a real question, whose SCOPE is narrower than the reassurance people take from
+it. D714 was never wrong. It just was not the whole question, and nobody asked what
+else could bury work.
