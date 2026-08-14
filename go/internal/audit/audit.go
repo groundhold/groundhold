@@ -407,6 +407,10 @@ var securityNamespaces = []string{
 	"immutable.tags",          // registry.image: tag immutability (supply-chain)
 	"viewer.protocol",         // cdn.distribution: HTTPS-only vs plaintext viewer access
 	"integrity.logValidation", // audit.trail: tamper-evident log-file validation
+	// D1076: found by a self-review of the D1075 lint's own caveat — two security
+	// controls whose names dodged every keyword, so the regex was widened to reach them.
+	"key.exportable",      // identity.serviceaccount: a DOWNLOADABLE long-lived private key
+	"audience.restricted", // identity.oauth-client: tokens carry an audience restriction
 }
 
 // isSecurityPath reports whether a constraint path names a security control that must be

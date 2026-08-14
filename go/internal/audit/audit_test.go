@@ -146,7 +146,7 @@ func TestSecurityFloorCoversEverySecurityPostureAttr(t *testing.T) {
 		`\brotat|retention.?lock|\bworm\b|immutab|\bhsm\b|deletion.?protect|privileg|\bmfa\b|` +
 		`second factor|sso.*enforc|password.?bypass|password auth|redirect|\bpkce\b|dkim|` +
 		`signed|provenance|refresh.?token|replay|implicit grant|confidential.*client|` +
-		`envelope.?encrypt|byok`)
+		`envelope.?encrypt|byok|exportable|downloadable|audience`)
 	// reviewed and NOT a floored security control (matched a keyword incidentally). Each
 	// entry is a deliberate decision — config/tuning/durability/naming/cost, not a
 	// dangerous-direction control witnessing would protect. The set only shrinks by
@@ -304,7 +304,7 @@ func TestIsSecurityPath(t *testing.T) {
 		"security.podSecurity", "dnssec.enabled", "image.signedProvenance",
 		"ingress.public", "egress.internet", "serviceAccess.private", "interconnect.private",
 		"access.mutating", "role.permissions", "immutable.tags", "viewer.protocol",
-		"integrity.logValidation",
+		"integrity.logValidation", "key.exportable", "audience.restricted",
 	} {
 		if !isSecurityPath(p) {
 			t.Errorf("%q must classify as a security path (it carries a security posture)", p)
