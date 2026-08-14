@@ -34988,3 +34988,57 @@ sentence that was true when written and is falsified by a routine event nobody
 connected to it. D1064 was the documented OUTPUT going stale when the runtime changed;
 this is the documented INPUT going stale when the release changes. The remedy is the
 same both times — make the routine event check the sentence.
+## D1074 — the witnessed-security list was gap-prone by construction: a completeness sweep of it
+D1072 fixed one omission in the hand-maintained security-path list (the identity vocabularies). That
+one omission was evidence, not an accident — a list maintained by hand, listing "the security paths",
+will drift from the vocabulary it is meant to shadow. So this swept the whole vocabulary for
+security-posture attributes the list still omitted, and found five more, two of them the same
+declared-only worst case D1072 was:
+- `refreshToken.rotation` (identity.oauth-client, DECLARED-ONLY) — refresh-token replay detection; like
+  the D1072 identity paths, no observer can ever measure it, so a hard constraint on it was ALWAYS
+  satisfied by declared intent. I missed it in D1072's own identity pass — the list is that easy to
+  under-fill.
+- `sourceProvenance` (compute.image, DECLARED-ONLY) — a signed build attestation; same worst case.
+- `network.apiExposure` (cluster.kubernetes) — a public Kubernetes API-server endpoint (observed).
+- `authentication.dkim` (email.sending) — the sending domain is DKIM-signed (observed).
+- `retention.lockMode` (backup.vault) — WORM/compliance immutability of backups (observed).
+
+All five now floor. The observed three were protected against a one-state driver bug; the two
+declared-only ones were live false-secures with no measured path at all. `verify` is unaffected, so the
+D55 identity cases stay green.
+
+The honest conclusion, recorded rather than deferred: a hand-maintained Go list is the wrong shape for
+this — D1072 and this entry are the same defect twice. The right shape is to DERIVE the floor from the
+vocabulary, where every attribute is defined exactly once, with the Go list demoted to the `--no-vocab`
+fail-closed fallback and a lint asserting the two agree. That is the systemic close (Fable recommended
+it at D1071; I judged it low-value and was wrong twice over). It is the next slice; these five are the
+admissible dangerous-direction fixes that could not wait for it.
+
+## D1075 — a forcing function for the security floor, and the dozen paths it immediately caught
+D1072 and D1074 fixed the same defect twice — the hand-maintained security-path list omitting a
+security-posture attribute, which silently reopens the false-secure D1071 closed. Two rounds of "fix the
+list by hand" is the signal that the SHAPE is wrong: a list that shadows the vocabulary by hand will
+always drift from it. The fix is a forcing function, not more careful hand-maintenance.
+
+`TestSecurityFloorCoversEverySecurityPostureAttr` reads every attribute of the embedded vocabulary and,
+when the path or its description signals a security posture (a keyword scan — encryption, exposure, TLS,
+rotation, WORM, HSM, MFA, redirect, DKIM, signed/provenance, privilege, …), requires the path to be
+floored by `isSecurityPath` OR explicitly waived in a reviewed allowlist. A NEW security attribute now
+fails the build until someone classifies it; the omission can no longer be silent. It is the readdiag-
+ratchet shape (D306) applied to the security floor: the allowlist is a set of deliberate
+"reviewed, not a floored control" decisions (cost/naming/durability/tuning that matched a keyword
+incidentally), and it only shrinks by fixing a real classifier.
+
+Standing it up immediately caught a DOZEN more security controls the hand-enumeration of D1074 had
+still missed — the whole point: `security.podSecurity`, `dnssec.enabled`, `image.signedProvenance`,
+the `network.private` family (`ingress.public`, `egress.internet`, `serviceAccess.private`,
+`interconnect.private`), `access.mutating` and `role.permissions` (authorization), `immutable.tags`
+(supply-chain), `viewer.protocol` (CDN plaintext), and `integrity.logValidation` (tamper-evident audit
+logs). All now floor. `verify` is unaffected, so the cases stay green.
+
+The keyword scan is a heuristic and its allowlist is a judgement each entry records, so this is not a
+proof of completeness — a security attribute whose name and prose dodge every keyword could still slip.
+But it converts the failure mode from "silently forgotten" (D1072/D1074, invisible until an adversarial
+hunt) to "flagged unless consciously waived", which is the difference between a gate and a good
+intention. This is the honest end of the "derive it from the vocabulary" idea: the vocabulary is the
+enumeration, and the lint reads all of it.

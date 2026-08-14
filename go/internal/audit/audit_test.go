@@ -3,10 +3,12 @@ package audit
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 
 	"groundhold/internal/contract"
 	"groundhold/internal/ledger"
+	"groundhold/internal/vocab"
 )
 
 // seedObs populates the per-source projection audit reads (D191), keyed by
@@ -127,6 +129,69 @@ constraints:
 	}
 }
 
+// TestSecurityFloorCoversEverySecurityPostureAttr is the forcing function the
+// hand-maintained securityNamespaces list needed (D1072 and D1074 were the SAME
+// omission defect twice — a list that shadows the vocabulary by hand drifts from it).
+// It reads every vocabulary attribute and, when the path or its description signals a
+// security posture, requires the path to be floored by isSecurityPath OR explicitly
+// waived here as reviewed-non-security. So a NEW security attribute fails the build
+// until someone classifies it — the omission can no longer be silent.
+func TestSecurityFloorCoversEverySecurityPostureAttr(t *testing.T) {
+	all, err := vocab.Embedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signal := regexp.MustCompile(`(?i)encrypt|customer.?managed.?key|\btls\b|plaintext|` +
+		`public.*(expos|internet|reachable|read path|network path|publish path)|api.?exposure|` +
+		`\brotat|retention.?lock|\bworm\b|immutab|\bhsm\b|deletion.?protect|privileg|\bmfa\b|` +
+		`second factor|sso.*enforc|password.?bypass|password auth|redirect|\bpkce\b|dkim|` +
+		`signed|provenance|refresh.?token|replay|implicit grant|confidential.*client|` +
+		`envelope.?encrypt|byok`)
+	// reviewed and NOT a floored security control (matched a keyword incidentally). Each
+	// entry is a deliberate decision — config/tuning/durability/naming/cost, not a
+	// dangerous-direction control witnessing would protect. The set only shrinks by
+	// fixing a real classifier.
+	allow := map[string]bool{
+		"capability.messaging.queue::reliability.deadLetter":       true, // delivery reliability, not security
+		"capability.messaging.queue::ordering.enabled":             true, // message ordering
+		"capability.authorization.role::cost.monthly":              true, // cost projection
+		"capability.key.encryption::cost.monthly":                  true, // cost projection
+		"capability.key.encryption::location.region":               true, // residency (matched "HSM/vault" in prose)
+		"capability.dns.record::dns.proxied":                       true, // CDN/proxy routing toggle, not a compliance control
+		"capability.storage.object::replication.enabled":           true, // durability/DR, not security
+		"capability.backup.plan::retention.duration":               true, // a retention floor (S3-precedent: no floor to witness)
+		"capability.cdn.distribution::origin.domain":               true, // an origin hostname
+		"capability.streaming.pipe::retention.window":              true, // a retention window (durability)
+		"capability.identity.oauth-client::refreshToken.lifetime":  true, // a token-lifetime duration (tuning)
+		"capability.identity.oauth-client::refreshToken.issued":    true, // whether refresh tokens are issued at all
+		"capability.identity.podidentity::workload.serviceAccount": true, // which SA (an identity binding, not a toggle)
+		"capability.authorization.grant::cost.monthly":             true, // cost projection
+		"capability.identity.serviceaccount::display.name":         true, // a display name
+		"capability.gitops.application::source.repoURL":            true, // a repository URL
+	}
+	count := 0
+	for capType, v := range all {
+		for path, attr := range v.Attributes {
+			desc, _ := attr["description"].(string)
+			if !signal.MatchString(path + " " + desc) {
+				continue
+			}
+			count++
+			if isSecurityPath(path) || allow[capType+"::"+path] {
+				continue
+			}
+			t.Errorf("%s::%s reads as a security-posture attribute but is NOT floored by "+
+				"isSecurityPath and NOT allowlisted — classify it (add to securityNamespaces) "+
+				"or waive it here as reviewed-non-security. An unfloored security path is a "+
+				"silent false-secure (D1072/D1074).", capType, path)
+		}
+	}
+	if count < 20 {
+		t.Fatalf("the security-signal scan matched only %d attributes — the regex or the vocab "+
+			"load broke, and this gate would pass over an unfloored set (D328)", count)
+	}
+}
+
 // TestAuditIdentitySecurityPathRejectsDeclaredIntent pins the identity-vocab gap the
 // D323/D325-class hunt found: the identity capabilities (sso, oauth-client) are
 // declared-ONLY (no observer driver), so a hard identity security control could ONLY
@@ -233,6 +298,13 @@ func TestIsSecurityPath(t *testing.T) {
 		"sso.enforced", "mfa.required", "assertions.signed",
 		"pkce.required", "client.authentication", "redirects.exactMatch",
 		"redirects.wildcardsAllowed", "token.asymmetricSigning", "grants.implicit",
+		"refreshToken.rotation", "sourceProvenance", "network.apiExposure",
+		"authentication.dkim", "retention.lockMode",
+		// D1075 (found by the keyword lint):
+		"security.podSecurity", "dnssec.enabled", "image.signedProvenance",
+		"ingress.public", "egress.internet", "serviceAccess.private", "interconnect.private",
+		"access.mutating", "role.permissions", "immutable.tags", "viewer.protocol",
+		"integrity.logValidation",
 	} {
 		if !isSecurityPath(p) {
 			t.Errorf("%q must classify as a security path (it carries a security posture)", p)

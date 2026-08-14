@@ -99,10 +99,12 @@ func Run(c *contract.Contract, led *ledger.Ledger, ledgerPath, at string,
 		// the resource may lack. Raise the effective runtime bar for a hard security path
 		// to provider-api, so declared intent (rank 0) is insufficient and blocks. A real
 		// measured reading still satisfies/violates; only intent is refused. The floor is
-		// keyed on a fail-closed Go namespace predicate (survives --no-vocab), pinned by
-		// TestIsSecurityPath; it is maintained by hand and MUST list every capability's
-		// security-posture paths — an omitted path is a silently-reopened false-secure
-		// (that was the identity-vocab gap the D323/D325-class hunt found).
+		// keyed on a fail-closed Go namespace predicate (survives --no-vocab). It is still
+		// a hand-maintained list, but no longer an unguarded one:
+		// TestSecurityFloorCoversEverySecurityPostureAttr reads the whole vocabulary and
+		// fails the build if a security-posture attribute is neither floored nor explicitly
+		// waived — the forcing function that D1072/D1074/D1075 needed, because the list was
+		// under-filled three times before it existed.
 		method := cn.RuntimeMethod
 		raised := false
 		if cn.Severity == "hard" && isSecurityPath(cn.Path) && methodRank(method) < methodRank("provider-api") {
@@ -384,6 +386,27 @@ var securityNamespaces = []string{
 	"redirects.wildcardsAllowed", // open-redirect surface
 	"token.asymmetricSigning",    // asymmetric (not shared-secret) token signing
 	"grants.implicit",            // the deprecated, token-leaking implicit grant
+	"refreshToken.rotation",      // replay detection on refresh-token reuse (declared-only)
+	// more security-posture paths a completeness sweep found the list omitted (D1072
+	// proved the hand-list is gap-prone). Two are declared-only worst-cases:
+	"sourceProvenance",    // compute.image: a signed build attestation (declared-only)
+	"network.apiExposure", // cluster.kubernetes: a public API-server endpoint
+	"authentication.dkim", // email.sending: the sending domain is DKIM-signed
+	"retention.lockMode",  // backup.vault: WORM/compliance immutability of backups
+	// D1075: the keyword lint (TestSecurityFloorCoversEverySecurityPostureAttr) found a
+	// dozen more the hand-enumeration still missed — the whole reason the lint exists.
+	"security.podSecurity",    // cluster.namespace: pod-security enforcement level
+	"dnssec.enabled",          // dns.zone: DNSSEC signing of the zone
+	"image.signedProvenance",  // workload.container: signed build provenance
+	"ingress.public",          // network.private: a public ingress path
+	"egress.internet",         // network.private: unrestricted egress to the internet
+	"serviceAccess.private",   // network.private: private service endpoints
+	"interconnect.private",    // network.private: private (non-internet) interconnect
+	"access.mutating",         // authorization.role: a role that can mutate, not just read
+	"role.permissions",        // authorization.role: the permission set (least-privilege crown)
+	"immutable.tags",          // registry.image: tag immutability (supply-chain)
+	"viewer.protocol",         // cdn.distribution: HTTPS-only vs plaintext viewer access
+	"integrity.logValidation", // audit.trail: tamper-evident log-file validation
 }
 
 // isSecurityPath reports whether a constraint path names a security control that must be
