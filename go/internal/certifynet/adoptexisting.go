@@ -282,12 +282,15 @@ var knownNoAdoptRead = map[string]bool{}
 // MissingControl cases). It is the campaign's remaining work made VISIBLE and two-way:
 // the moment a driver here declares AdoptControls, `CertifyCreateAdoptsExisting` FAILS
 // ("remove it from the debt list"), so wiring a driver forces its removal and the list
-// can only shrink. The systemic 409-adopt false-success audit found 23 drivers; DynamoDB
-// is wired (off this list); GCS/Filestore fail-loud INLINE (D1047/D1048) but are still
-// listed until migrated to the comparator + given gate cases. When this map is empty the
-// class is closed and gate-enforced.
+// can only shrink. The systemic 409-adopt false-success audit found 23 drivers; all but
+// one are now wired to the shared comparator with gate cases.
+//
+// The last entry, `aws/kms`, is DEFERRED rather than pending: its only adopt-time inline
+// control is rotation.period, a DURATION whose safe direction is a CEILING (a shorter
+// rotation is more secure), which the comparator has no Direction for yet — adding one is
+// a design change larger than a wiring slice, so it waits. (protection.level=hsm is
+// const-true for every AWS KMS key, so it is not a control that can be missing.) When
+// even this is wired the map is empty and the class is fully gate-enforced.
 var adoptControlDebt = map[string]bool{
-	"aws/kms":           true,
-	"gcp/bigquery":      true,
-	"gcp/secretmanager": true, "gcp/gcs": true, "gcp/filestore": true,
+	"aws/kms": true,
 }

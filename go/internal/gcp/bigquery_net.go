@@ -13,8 +13,19 @@ import (
 	"net/http"
 	"strings"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/provider"
 )
+
+// bqAdoptControls (D1062): a dataset's default CMEK (defaultEncryptionConfiguration
+// .kmsKeyName) is set INLINE at datasets.insert and never applied to a dataset that
+// already exists. BigQuery has no wired in-place update, so a live dataset on the
+// Google-managed default key where we declared CMEK cannot be reconciled: FAILED,
+// never a silent adopt that claims a customer key the dataset does not carry. The
+// dataset location (residency) is already checked separately on the adopt path.
+var bqAdoptControls = []adoptcheck.Control{
+	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue}, // unwired update → failed on miss
+}
 
 const bigQueryBaseURL = "https://bigquery.googleapis.com/bigquery/v2"
 
@@ -113,6 +124,19 @@ func (d *Driver) createBigQuery(capability, environment string,
 			return provider.CreateResult{Status: "failed", Reason: fmt.Sprintf(
 				"existing dataset location %q does not match desired %q and update is not wired",
 				doc.Location, plan.Location)}
+		}
+		// the default CMEK (set inline at insert) never applied to this pre-existing
+		// dataset, so verify it before reporting the adopt a success (D1062).
+		obs, _, oerr := d.observeBigQuery(capability, pid)
+		if oerr != nil {
+			return provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "adopted dataset re-observe gave no answer — reconcile: " + oerr.Error()}
+		}
+		switch v := adoptcheck.Compare(attrs, obs, bqAdoptControls); v.Status {
+		case "failed":
+			return provider.CreateResult{Status: "failed", Reason: v.Reason}
+		case "unknown":
+			return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
 		}
 		return provider.CreateResult{ProviderID: pid, Status: "succeeded"} // ours, present
 	case st >= 500:

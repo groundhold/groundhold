@@ -209,30 +209,43 @@ func gcpRESTRole(req *http.Request, _ []byte) certifynet.Role {
 	return certifynet.RoleMutateOpaque
 }
 
+// bqAdoptServer serves an already-ours dataset for the adopt checks: datasets.insert
+// answers 409, and the GET reports the given location and (iff cmekKey is non-empty) a
+// default CMEK. Read-only past the refused insert (D1062).
+func bqAdoptServer(location, cmekKey string) func() *httptest.Server {
+	return func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/datasets"):
+					w.WriteHeader(http.StatusConflict)
+					_, _ = w.Write([]byte(`{"error":{"code":409,"message":"Already Exists"}}`))
+				case r.Method == "GET":
+					doc := `{"datasetReference":{"datasetId":"pv_lake_prod_x","projectId":"acme-prod"},` +
+						`"location":"` + location + `","labels":{"groundhold-capability":"lake","groundhold-environment":"prod"}`
+					if cmekKey != "" {
+						doc += `,"defaultEncryptionConfiguration":{"kmsKeyName":"` + cmekKey + `"}`
+					}
+					doc += `}`
+					_, _ = w.Write([]byte(doc))
+				default:
+					w.WriteHeader(404)
+				}
+			}))
+	}
+}
+
+const bqCMKName = "projects/acme-prod/locations/us/keyRings/r/cryptoKeys/k"
+
 // TestAdoptsExistingBigQuery enrols bigquery in the D391/D413 gate. A dataset id is
 // deterministic, so a re-converge meets a 409 and the driver must recognise its own
 // labels and bind rather than fail against an estate that is already correct.
 func TestAdoptsExistingBigQuery(t *testing.T) {
 	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
-	doc := `{"datasetReference":{"datasetId":"pv_lake_prod_x","projectId":"acme-prod"},` +
-		`"location":"US","labels":{"groundhold-capability":"lake","groundhold-environment":"prod"}}`
 	p := &certifynet.ExistingProbe{
-		Name:     "gcp/bigquery",
-		Classify: gcpRESTRole,
-		ExistingServer: func() *httptest.Server {
-			return httptest.NewServer(http.HandlerFunc(
-				func(w http.ResponseWriter, r *http.Request) {
-					switch {
-					case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/datasets"):
-						w.WriteHeader(http.StatusConflict)
-						_, _ = w.Write([]byte(`{"error":{"code":409,"message":"Already Exists"}}`))
-					case r.Method == "GET":
-						_, _ = w.Write([]byte(doc))
-					default:
-						w.WriteHeader(404)
-					}
-				}))
-		},
+		Name:           "gcp/bigquery",
+		Classify:       gcpRESTRole,
+		ExistingServer: bqAdoptServer("US", ""), // base candidate declares no CMEK
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver("acme-prod")
 			d.HTTP = &http.Client{Transport: rt}
@@ -246,6 +259,22 @@ func TestAdoptsExistingBigQuery(t *testing.T) {
 			return pr.Create("bigquery", "lake", "prod", bqAttrs(), nil, "k", 1)
 		},
 		AllowedMutations: 1, // the refused create
+		// D1062: the default CMEK is fixed at insert and BigQuery has no wired update,
+		// so adopting a dataset on the Google-managed key though we declared CMEK FAILS.
+		AdoptControls: bqAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			{Path: "encryption.customerManagedKeys", Server: bqAdoptServer("US", ""),
+				Create: func(pr provider.Provider) provider.CreateResult {
+					a := bqAttrs()
+					a["encryption.customerManagedKeys"] = true
+					return pr.Create("bigquery", "lake", "prod", a,
+						map[string]any{"kms_key_name": bqCMKName}, "k", 1)
+				},
+				WantStatus: "failed", WantMutations: 1},
+		},
+		// live dataset carries a CMEK though the base candidate does not require one —
+		// the safe direction must still adopt clean.
+		MoreSecure: bqAdoptServer("US", bqCMKName),
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

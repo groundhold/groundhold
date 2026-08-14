@@ -11,8 +11,20 @@ import (
 	"net/http"
 	"strings"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/provider"
 )
+
+// gsecretAdoptControls (D1062): a secret's CMEK lives in its create-time replication
+// policy and its public exposure is an IAM grant — both set inline at create and never
+// applied to a secret that already exists. CMEK is immutable (the replication policy
+// cannot change), so a live secret on a Google-managed key where we declared CMEK
+// FAILS. Public exposure is re-assertable (updateSecret / setSecretPrivate), so a live
+// public secret where we declared private is unknown+bound and converge reconciles it.
+var gsecretAdoptControls = []adoptcheck.Control{
+	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "network.publicExposure", Direction: adoptcheck.SecureFalse, UpdateWired: true},
+}
 
 func (d *Driver) secretBase() string {
 	if d.SecretBaseURL != "" {
@@ -79,6 +91,7 @@ func (d *Driver) createSecret(capability, environment string,
 	pid := gsecretProviderID(d.Project, plan.Name)
 	url := fmt.Sprintf("%s/projects/%s/secrets?secretId=%s", d.secretBase(), d.Project, plan.Name)
 	st, body, err := d.call("POST", url, plan.createBody(capability, environment))
+	adopted := false
 	switch {
 	case err != nil:
 		return provider.CreateResult{ProviderID: pid, Status: "unknown",
@@ -95,7 +108,10 @@ func (d *Driver) createSecret(capability, environment string,
 			doc.Labels["groundhold-environment"] != sanitizeLabel(environment) {
 			return provider.CreateResult{Status: "failed", Reason: "a secret with this name exists and is not ours (labels do not match)"}
 		}
-		// ours — fall through to re-assert exposure
+		// ours — fall through to re-assert exposure. The create body (CMEK in the
+		// replication policy) never applied to this pre-existing secret, so its declared
+		// controls are verified below before the adopt is called a success (D1062).
+		adopted = true
 	case st >= 500:
 		return provider.CreateResult{ProviderID: pid, Status: "unknown",
 			Reason: fmt.Sprintf("create HTTP %d (server error — may have landed) — reconcile", st)}
@@ -113,6 +129,19 @@ func (d *Driver) createSecret(capability, environment string,
 				s = "unknown"
 			}
 			return provider.CreateResult{ProviderID: pid, Status: s, Reason: "secret created but public grant: " + e.Error()}
+		}
+	}
+	if adopted {
+		obs, _, oerr := d.observeSecret(capability, pid)
+		if oerr != nil {
+			return provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "adopted secret re-observe gave no answer — reconcile: " + oerr.Error()}
+		}
+		switch v := adoptcheck.Compare(attrs, obs, gsecretAdoptControls); v.Status {
+		case "failed":
+			return provider.CreateResult{Status: "failed", Reason: v.Reason}
+		case "unknown":
+			return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
 		}
 	}
 	return provider.CreateResult{ProviderID: pid, Status: "succeeded"}

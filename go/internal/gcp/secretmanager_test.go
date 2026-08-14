@@ -155,6 +155,40 @@ func TestDeleteSecretForeignRefused(t *testing.T) {
 	}
 }
 
+// umReplicaNoCMK is a single-region user-managed replica WITHOUT a customer key — a
+// measured CMEK false, the dangerous direction for a CMEK-declaring candidate (D1062).
+const umReplicaNoCMK = `{"userManaged":{"replicas":[{"location":"europe-west1"}]}}`
+
+// gsecretAdoptServer serves an already-ours secret: secrets.create answers 409, the GET
+// reports the given replication policy (CMEK on/off, region), and getIamPolicy reports a
+// public allUsers grant iff public. Read-only past the refused create (D1062).
+func gsecretAdoptServer(replica string, public bool) func() *httptest.Server {
+	return func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == "POST" && strings.Contains(r.URL.RawQuery, "secretId="):
+					w.WriteHeader(http.StatusConflict)
+					_, _ = w.Write([]byte(`{"error":{"code":409,"message":"already exists"}}`))
+				// readSecretPublic issues a GET on :getIamPolicy — match it BEFORE the
+				// generic GET, or the secret doc is parsed as a policy (no bindings = false).
+				case strings.HasSuffix(r.URL.Path, ":getIamPolicy"):
+					if public {
+						_, _ = w.Write([]byte(`{"etag":"abc","bindings":[{"role":"roles/secretmanager.secretAccessor","members":["allUsers"]}]}`))
+					} else {
+						_, _ = w.Write([]byte(`{"etag":"abc","bindings":[]}`))
+					}
+				case r.Method == "GET":
+					_, _ = w.Write([]byte(`{"name":"projects/acme-prod/secrets/x",` +
+						`"labels":{"groundhold-capability":"dbcreds","groundhold-environment":"prod"},` +
+						`"replication":` + replica + `}`))
+				default:
+					w.WriteHeader(404)
+				}
+			}))
+	}
+}
+
 // TestAdoptsExistingSecret enrols secretmanager in the D391/D413 gate. A secret id is
 // deterministic; a re-converge against one that already exists must bind it rather than
 // fail, and the labels are what license the binding. Nothing here reads or writes the
@@ -163,26 +197,9 @@ func TestDeleteSecretForeignRefused(t *testing.T) {
 func TestAdoptsExistingSecret(t *testing.T) {
 	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
 	p := &certifynet.ExistingProbe{
-		Name:     "gcp/secretmanager",
-		Classify: gcpRESTRole,
-		ExistingServer: func() *httptest.Server {
-			return httptest.NewServer(http.HandlerFunc(
-				func(w http.ResponseWriter, r *http.Request) {
-					switch {
-					case r.Method == "POST" && strings.Contains(r.URL.RawQuery, "secretId="):
-						w.WriteHeader(http.StatusConflict)
-						_, _ = w.Write([]byte(`{"error":{"code":409,"message":"already exists"}}`))
-					case r.Method == "POST" && strings.HasSuffix(r.URL.Path, ":getIamPolicy"):
-						_, _ = w.Write([]byte(`{"etag":"abc","bindings":[]}`))
-					case r.Method == "GET":
-						_, _ = w.Write([]byte(`{"name":"projects/acme-prod/secrets/x",` +
-							`"labels":{"groundhold-capability":"dbcreds","groundhold-environment":"prod"},` +
-							`"replication":` + umReplica + `}`))
-					default:
-						w.WriteHeader(404)
-					}
-				}))
-		},
+		Name:           "gcp/secretmanager",
+		Classify:       gcpRESTRole,
+		ExistingServer: gsecretAdoptServer(umReplica, false), // CMEK + private — matches secretAttrs
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver("acme-prod")
 			d.HTTP = &http.Client{Transport: rt}
@@ -193,6 +210,18 @@ func TestAdoptsExistingSecret(t *testing.T) {
 			return pr.Create("secretmanager", "dbcreds", "prod", secretAttrs(), secretImpl(), "k", 1)
 		},
 		AllowedMutations: 2, // the refused create + the IAM posture read/assert
+		// D1062: CMEK lives in the immutable replication policy (a miss FAILS); public
+		// exposure is re-assertable (a miss is unknown+bound, converge re-scopes it).
+		AdoptControls: gsecretAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			// live secret is on a Google-managed key though we declared CMEK.
+			{Path: "encryption.customerManagedKeys", Server: gsecretAdoptServer(umReplicaNoCMK, false),
+				WantStatus: "failed", WantMutations: 2},
+			// live secret is granted to allUsers though we declared private.
+			{Path: "network.publicExposure", Server: gsecretAdoptServer(umReplica, true),
+				WantStatus: "unknown", WantMutations: 2},
+		},
+		MoreSecure: gsecretAdoptServer(umReplica, false), // CMEK + private — adopts clean
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

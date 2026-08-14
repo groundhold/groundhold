@@ -133,11 +133,9 @@ func TestAdoptsExistingFilestore(t *testing.T) {
 	p := &certifynet.ExistingProbe{
 		Name:     "gcp/filestore",
 		Classify: gcpReadRole,
+		// D1062: the existing instance carries the customer key fsAttrs declares (CMEK on).
 		ExistingServer: func() *httptest.Server {
-			// D1048: the existing instance must serve the SAME customer key fsImpl declares,
-			// or the 409-adopt correctly refuses (a key mismatch is not a match to adopt).
-			return conflictOnCreate(t, filestoreServer(t, "shared", "ENTERPRISE",
-				"projects/acme-prod/locations/europe-west1/keyRings/r/cryptoKeys/k"), postCreate)
+			return conflictOnCreate(t, filestoreServer(t, "shared", "ENTERPRISE", fsCMKName), postCreate)
 		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver("acme-prod")
@@ -151,9 +149,24 @@ func TestAdoptsExistingFilestore(t *testing.T) {
 			return pr.Create("filestore", "shared", "prod", fsAttrs(), fsImpl(), "k", 1)
 		},
 		AllowedMutations: 1,
+		// D1062: CMEK is fixed at create and Filestore has no wired update, so adopting an
+		// instance on the Google-managed key though we declared CMEK FAILS.
+		AdoptControls: filestoreAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			{Path: "encryption.customerManagedKeys",
+				Server: func() *httptest.Server {
+					return conflictOnCreate(t, filestoreServer(t, "shared", "ENTERPRISE", ""), postCreate)
+				},
+				WantStatus: "failed", WantMutations: 1},
+		},
+		MoreSecure: func() *httptest.Server {
+			return conflictOnCreate(t, filestoreServer(t, "shared", "ENTERPRISE", fsCMKName), postCreate)
+		},
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }
+
+const fsCMKName = "projects/acme-prod/locations/europe-west1/keyRings/r/cryptoKeys/k"
 
 func TestAdoptsExistingCloudDNS(t *testing.T) {
 	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
@@ -440,41 +453,80 @@ func TestAdoptsExistingPubSubTopic(t *testing.T) {
 // whose ownership proof is NOT labels — bucket names are a global namespace and labels
 // are forgeable cross-project, so the authoritative check is the live projectNumber
 // (D82). The fixture pins the project number the driver was given.
+// gcsAdoptServer serves an already-ours bucket for the adopt checks: the insert 409s,
+// and the bucket GET reports the given versioning + CMEK (a non-empty kmsKey means a
+// customer key). Location/PAP are held at the compliant values so the inline residency
+// and public-access checks pass and only the comparator control under test varies
+// (D1062). Read-only past the refused insert.
+func gcsAdoptServer(versioning bool, kmsKey string) func() *httptest.Server {
+	return func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodPost && !hasSuffix(r.URL.Path, "/iam"):
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(`{"error":{"code":409,"message":"already own it"}}`))
+			case hasSuffix(r.URL.Path, "/iam") && r.Method == http.MethodGet:
+				_, _ = w.Write([]byte(`{"etag":"e1","version":3,"bindings":[]}`))
+			case r.Method == http.MethodGet:
+				enc := ""
+				if kmsKey != "" {
+					enc = `"encryption":{"defaultKmsKeyName":"` + kmsKey + `"},`
+				}
+				_, _ = w.Write([]byte(`{"name":"pv-assets-prod-x","projectNumber":"111",` +
+					`"location":"EUROPE-WEST1","versioning":{"enabled":` + boolJSON(versioning) + `},` + enc +
+					`"iamConfiguration":{"publicAccessPrevention":"enforced",` +
+					`"uniformBucketLevelAccess":{"enabled":true}},` +
+					`"labels":{"groundhold-capability":"assets","groundhold-environment":"prod"}}`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	}
+}
+
+func boolJSON(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
 func TestAdoptsExistingGCS(t *testing.T) {
 	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
+	newGCS := func(happyURL string, rt http.RoundTripper) provider.Provider {
+		d := NewDriver("acme-prod")
+		d.HTTP = &http.Client{Transport: rt}
+		d.GcsBaseURL = happyURL
+		d.ProjNumber = "111" // pre-resolved (D82): the authoritative ownership proof
+		return d
+	}
 	p := &certifynet.ExistingProbe{
-		Name:     "gcp/gcs",
-		Classify: gcpReadRole,
-		ExistingServer: func() *httptest.Server {
-			return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case r.Method == http.MethodPost && !hasSuffix(r.URL.Path, "/iam"):
-					w.WriteHeader(http.StatusConflict)
-					_, _ = w.Write([]byte(`{"error":{"code":409,"message":"already own it"}}`))
-				case hasSuffix(r.URL.Path, "/iam") && r.Method == http.MethodGet:
-					_, _ = w.Write([]byte(`{"etag":"e1","version":3,"bindings":[]}`))
-				case r.Method == http.MethodGet:
-					_, _ = w.Write([]byte(`{"name":"pv-assets-prod-x","projectNumber":"111",` +
-						`"location":"EUROPE-WEST1","versioning":{"enabled":true},` +
-						`"iamConfiguration":{"publicAccessPrevention":"enforced",` +
-						`"uniformBucketLevelAccess":{"enabled":true}},` +
-						`"labels":{"groundhold-capability":"assets","groundhold-environment":"prod"}}`))
-				default:
-					w.WriteHeader(404)
-				}
-			}))
-		},
-		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
-			d := NewDriver("acme-prod")
-			d.HTTP = &http.Client{Transport: rt}
-			d.GcsBaseURL = happyURL
-			d.ProjNumber = "111" // pre-resolved (D82): the authoritative ownership proof
-			return d
-		},
+		Name:           "gcp/gcs",
+		Classify:       gcpReadRole,
+		ExistingServer: gcsAdoptServer(true, ""), // base candidate declares versioning, no CMEK
+		New:            newGCS,
 		Create: func(pr provider.Provider) provider.CreateResult {
 			return pr.Create("gcs", "assets", "prod", gcsAdoptAttrs(), nil, "k", 1)
 		},
 		AllowedMutations: 1, // the refused create
+		// D1062: CMEK and versioning are ignored by GCS on a name conflict and gcs update
+		// is not wired, so adopting a bucket that lacks either FAILS.
+		AdoptControls: gcsAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			// live bucket has versioning off though we declared it on.
+			{Path: "versioning.enabled", Server: gcsAdoptServer(false, ""),
+				WantStatus: "failed", WantMutations: 1},
+			// live bucket is on the Google-managed key though we declared CMEK.
+			{Path: "encryption.customerManagedKeys", Server: gcsAdoptServer(true, ""),
+				Create: func(pr provider.Provider) provider.CreateResult {
+					a := gcsAdoptAttrs()
+					a["encryption.customerManagedKeys"] = true
+					return pr.Create("gcs", "assets", "prod", a,
+						map[string]any{"kms_key": "projects/acme-prod/locations/europe-west1/keyRings/r/cryptoKeys/k"}, "k", 1)
+				},
+				WantStatus: "failed", WantMutations: 1},
+		},
+		MoreSecure: gcsAdoptServer(true, "projects/acme-prod/locations/europe-west1/keyRings/r/cryptoKeys/k"),
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

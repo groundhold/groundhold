@@ -13,8 +13,27 @@ import (
 	"net/http"
 	"strings"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/provider"
 )
+
+// gcsAdoptControls (D1062): the CMEK and object versioning a create body sets are
+// IGNORED by GCS on a name conflict, so a bucket that exists-and-is-ours but lacks a
+// declared control was reported succeeded with the control unlanded (D1047 fixed this
+// inline; this migrates it to the shared comparator). GCS has no wired in-place update,
+// so both are immutable: a live bucket on the Google-managed default key where we
+// declared CMEK, or with versioning off where we declared it on, FAILS.
+//
+// The bucket's RESIDENCY (location / dual-region placement) and its PUBLIC-ACCESS
+// posture stay checked inline below: residency is a dual-region PAIR comparison the
+// comparator has no direction for, and the public-access check asserts the STRICTER
+// property that prevention is `enforced` (not merely that no public IAM grant exists
+// today), which observeGCS's outcome-level publicExposure does not capture. retention
+// is likewise a duration floor, the deferred-kms class.
+var gcsAdoptControls = []adoptcheck.Control{
+	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "versioning.enabled", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+}
 
 func (d *Driver) gcsBase() string {
 	if d.GcsBaseURL != "" {
@@ -123,12 +142,11 @@ func (d *Driver) createGCS(capability, environment string,
 	wantLocation, _ := attrs["location.region"].(string)
 	replEnabled, _ := attrs["replication.enabled"].(bool)
 	wantDest, _ := attrs["replication.destinationRegion"].(string)
-	// D1047: the declared controls the 409-adopt branch below must re-check. GCS ignores
-	// the insert body's encryption/versioning/retention on a name conflict, so a bucket
-	// that exists-and-is-ours but lacks a DECLARED control was reported succeeded with the
-	// control unlanded. Compare each and fail loud (gcs update is not wired), like PAP.
-	wantCMK, _ := attrs["encryption.customerManagedKeys"].(bool)
-	wantVersioning, _ := attrs["versioning.enabled"].(bool)
+	// D1047/D1062: the declared controls the 409-adopt branch below must re-check. GCS
+	// ignores the insert body's encryption/versioning/retention on a name conflict, so a
+	// bucket that exists-and-is-ours but lacks a DECLARED control was reported succeeded
+	// with the control unlanded. CMEK + versioning are compared via the shared adopt
+	// comparator (gcsAdoptControls); the retention floor stays a duration-floor check here.
 	_, wantRetentionFloor := attrs["retention.minimum"]
 	req.URL = d.gcsBase() + "/b?project=" + d.Project // rebuild for test base
 
@@ -178,20 +196,25 @@ func (d *Driver) createGCS(capability, environment string,
 				"existing bucket public-access-prevention %q does not match "+
 					"desired %q and gcs update is not wired",
 				doc.IAMConfiguration.PublicAccessPrevention, wantPrevention)}
-		case wantCMK && doc.Encryption.DefaultKmsKeyName == "":
-			return provider.CreateResult{Status: "failed", Reason: "existing bucket has no " +
-				"customer-managed encryption key but the contract declares one, and gcs " +
-				"update is not wired (GCS ignored the insert body's encryption on the name " +
-				"conflict) — reconcile"}
-		case wantVersioning && !doc.Versioning.Enabled:
-			return provider.CreateResult{Status: "failed", Reason: "existing bucket has " +
-				"versioning disabled but the contract declares it, and gcs update is not " +
-				"wired — reconcile"}
 		case wantRetentionFloor && (doc.RetentionPolicy.RetentionPeriod == "" ||
 			doc.RetentionPolicy.RetentionPeriod == "0"):
 			return provider.CreateResult{Status: "failed", Reason: "existing bucket has no " +
 				"retention floor but the contract declares retention.minimum, and gcs update " +
 				"is not wired — reconcile"}
+		}
+		// D1062: the CMEK and versioning the create body sets are ignored on a name
+		// conflict, so verify them against the bucket's own measured observations before
+		// reporting the adopt a success (residency/PAP/retention handled inline above).
+		obs, _, oerr := d.observeGCS(capability, pid)
+		if oerr != nil {
+			return provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "adopted bucket re-observe gave no answer — reconcile: " + oerr.Error()}
+		}
+		switch v := adoptcheck.Compare(attrs, obs, gcsAdoptControls); v.Status {
+		case "failed":
+			return provider.CreateResult{Status: "failed", Reason: v.Reason}
+		case "unknown":
+			return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
 		}
 	case status >= 400:
 		res := mutationResult("create", status, body)
