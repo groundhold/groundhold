@@ -4462,7 +4462,16 @@ capabilities:
   - id: db
     type: capability.database.relational   # see 'groundhold parity' for types
 constraints:
-  hard:                                     # unknown/violated here BLOCKS apply
+  # HARD means the world must be WITNESSED to satisfy it: an attribute the provider
+  # cannot read back is unknown, and unknown BLOCKS. So a hard constraint is only
+  # useful where the provider you run against can observe it.
+  hard:
+    - { id: managed, subject: db, path: service.managed, op: equals, value: true, verify: { method: static } }
+  # SOFT is verified and reported, never blocking. Region and public exposure belong
+  # under hard on a real cloud — they are soft here because the built-in fake provider,
+  # which is what a first run uses, witnesses neither. Move them up when you point this
+  # at aws/gcp/azure.
+  soft:
     - { id: eu,   subject: db, path: location.region,         op: equals, value: eu-central-1, verify: { method: static } }
     - { id: priv, subject: db, path: network.publicExposure,  op: equals, value: false,        verify: { method: static } }
 `
@@ -4504,11 +4513,21 @@ func scaffoldCandidate(contractPath string) int {
 	// intended shape: its contract constrains one path and its candidate declares
 	// exactly that one.
 	asked := map[string]map[string]bool{}
+	// D1087: where the contract PINS a literal (`op: equals`), the scaffold proposes
+	// that literal. Without this the placeholder came from the attribute's KIND, and a
+	// bool's kind default is `false` — so a contract requiring `service.managed: true`
+	// was answered by a scaffold declaring `false`, and the tool's own two documents
+	// refused each other on the reader's first run.
+	pinned := map[string]map[string]any{}
 	for _, con := range c.Constraints {
 		if asked[con.Subject] == nil {
 			asked[con.Subject] = map[string]bool{}
+			pinned[con.Subject] = map[string]any{}
 		}
 		asked[con.Subject][con.Path] = true
+		if con.Op == "equals" && con.Value != nil {
+			pinned[con.Subject][con.Path] = con.Value
+		}
 	}
 
 	var b strings.Builder
@@ -4578,8 +4597,12 @@ func scaffoldCandidate(contractPath string) int {
 			if !asked[capID][path] {
 				prefix = "      # " // offered, not asserted
 			}
+			value := sampleForAttr(attr, kind)
+			if v, ok := pinned[capID][path]; ok {
+				value = pinnedLiteral(v, kind)
+			}
 			fmt.Fprintf(&b, "%s%s: %s  # %s%s\n",
-				prefix, path, sampleForAttr(attr, kind), kind, descSuffix(desc))
+				prefix, path, value, kind, descSuffix(desc))
 		}
 		if offered > 0 {
 			fmt.Fprintf(&b, "      # ^ %d more attribute(s) this type supports, commented out: the\n"+
@@ -4595,6 +4618,18 @@ func descSuffix(desc string) string {
 		return ""
 	}
 	return " — " + desc
+}
+
+// pinnedLiteral renders a value the CONTRACT already fixed, so the scaffold answers
+// the question instead of guessing at it. Strings are quoted; everything else is
+// printed as the contract stated it (bools, numbers, durations already carry their
+// own syntax). A value the contract pinned is not a placeholder and is deliberately
+// not left blank — the reader has nothing to decide about it.
+func pinnedLiteral(v any, kind string) string {
+	if kind == "string" || kind == "money" || kind == "protocol" {
+		return fmt.Sprintf("%q", fmt.Sprintf("%v", v))
+	}
+	return fmt.Sprintf("%v", v)
 }
 
 // sampleForAttr picks a scaffold placeholder that will LOAD: an enum-bound

@@ -35377,3 +35377,82 @@ case pins exit 99 → `FAILED`/red alongside the existing `TestPickNeverGreensNo
 that such an exit is not green). The registry is additive-only by its own rule, and this is an addition of
 a word that already existed in the code — closing the gap between "closed set" as published and as
 enforced.
+
+## D1086 — the served tool set is pinned; what the documents say it is was not
+
+D593 pinned the MCP tool set, so a seventh tool cannot appear unremarked: the membership
+is a safety boundary, read-mostly by default, with `groundhold_apply` existing only
+under an environment variable behind a hash-pinned two-step.
+
+Nothing pinned what the PUBLISHED pages say that set is. Two documents name the tools —
+the MCP page and the README — and both carry the safety claim that apply is absent
+unless the variable is set. An operator wiring an autonomous client reads those pages to
+decide what it can reach. Three ways they could go wrong, and only one of them is
+cosmetic: a tool added and not documented is a default-surface capability nobody
+reviewed; a tool removed and still documented is an unknown-method error for a reader
+who trusted the page; and the gating claim going stale while apply became reachable
+would leave both pages asserting that infrastructure mutation is off by default. The
+third is the dangerous direction, and it is why this is a gate rather than a note.
+
+A sibling gate already binds ONE published sentence to the code — that the confirmation
+token does not authenticate a human. This binds the list and the gating claim the same
+way: every documented name must be a tool the server serves, every default tool must be
+documented, and a page naming apply must name the variable that keeps it off the default
+surface. It also asserts the underlying property directly rather than trusting the
+sibling, so a failure here names the document rather than sending the reader hunting.
+
+Vacuity guarded on both ends: a page that names no tool at all fails rather than passing
+(the D328 shape), and the README's `groundhold_linux_amd64` download asset is excluded
+by name rather than by a looser pattern that would have swallowed a real phantom.
+
+Teeth-checked with one mutant per arm — a documented tool the server does not serve, a
+served tool the page drops, and the environment variable renamed out of the page. All
+three fail, each naming what broke.
+
+## D1087 — nothing walked the newcomer path, and by the time anyone looked it was broken
+
+D1063 rewrote the README so a reader with a downloaded binary and no clone can reach a
+converged run: `example contract`, `example candidate`, fill the blank, `converge`
+twice. That sequence was walked once, by hand — which is how the defect it replaced was
+found. Nothing walked it since.
+
+The examples harness checks the files this repository SHIPS, and every one of them
+exists only in a clone. The newcomer path starts from an empty directory and uses
+documents the tool writes about itself, and it is the single most-executed thing a
+stranger does. It now runs on every `make check`, in the harness rather than in a Go
+test, because `converge` re-executes the binary for each phase and a test binary
+driving it in-process spawns itself — diagnosed by watching a goroutine block on
+`SelfRunner` for ten minutes.
+
+**It failed on its first run, and not because of anything in this slice.** D1079 landed
+today and is correct: converge now BLOCKS on a hard constraint it cannot witness, where
+before it exited 0. The scaffolded contract pins `location.region` and
+`network.publicExposure` as hard, and the built-in fake provider — which is what a
+first run uses, and the only provider a reader without a cloud account has — witnesses
+neither. So the published sixty-second path ended BLOCKED, on a page live since this
+morning. A correct fix in one place falsified a document in another, and the only reason
+anyone found out is that this gate exists.
+
+Two fixes, both at the mechanism.
+
+**The starter contract's hard constraint is now one that can be witnessed.**
+`service.managed` is what the curated laptop example constrains, and it is the one
+attribute the fake provider observes — that is not a coincidence, it is why that example
+converges. Region and exposure move to `soft`, where they are still verified and
+reported, with a comment saying plainly that they belong under `hard` on a real cloud
+and are soft here only because the demo provider cannot witness them. The scaffold now
+teaches the rule D1079 enforces: hard means witnessed, so a hard constraint is only
+useful where the provider can observe it.
+
+**The candidate scaffold answers a pinned contract instead of guessing.** With the
+constraint moved, the next run VIOLATED: the contract required `service.managed: true`
+and the scaffold declared `false` — the kind default for a bool, from D1063's own
+placeholder logic. The tool's two documents refused each other on the reader's first
+run. Where the contract fixes a literal (`op: equals`), the scaffold now proposes that
+literal; a value the contract already decided is not something the reader has anything
+to decide about. Only the provider's service token is left blank, and the README says so.
+
+The wider point is the one this record keeps arriving at from new directions: a
+published sequence that nothing executes is a claim nobody checked. This one was
+written, reviewed, gated for its wording, published — and broken within a day by a
+change in a different file that no one could have connected to it.
