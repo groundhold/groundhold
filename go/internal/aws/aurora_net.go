@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/caplens"
 	"groundhold/internal/provider"
 )
@@ -196,6 +197,7 @@ func (d *Driver) createAurora(region, account, environment, capability string,
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	pid := auroraProviderID(region, plan.ClusterID)
+	adopted := false
 
 	// ownership pre-read: refuse a foreign cluster already at our (deterministic)
 	// name. not-found continues to a fresh create; ours-already repairs (ensures
@@ -210,7 +212,7 @@ func (d *Driver) createAurora(region, account, environment, capability string,
 			return provider.CreateResult{Status: "failed",
 				Reason: "a cluster with this name exists and is not ours (tags do not match) — refusing to adopt it"}
 		}
-		return d.ensureAuroraInstances(region, pid, plan)
+		return d.ensureAuroraInstances(region, pid, plan, true, attrs, capability)
 	}
 
 	// D288: a derived TLS parameter group stands BEFORE the cluster that
@@ -256,7 +258,8 @@ func (d *Driver) createAurora(region, account, environment, capability string,
 			return provider.CreateResult{Status: "failed",
 				Reason: "a cluster with this name exists but is not ours (tags do not match)"}
 		}
-		// ours — continue to the member instances
+		// ours — continue to the member instances, then re-check controls (D1062)
+		adopted = true
 	case st >= 500:
 		return provider.CreateResult{ProviderID: pid, Status: "unknown",
 			Reason: fmt.Sprintf("CreateDBCluster HTTP %d (server error — may have landed): %s", st, mutDetail(body))}
@@ -265,7 +268,20 @@ func (d *Driver) createAurora(region, account, environment, capability string,
 			Reason: fmt.Sprintf("CreateDBCluster HTTP %d (%s): %s", st, rdsErrCode(body), mutDetail(body))}
 	}
 
-	return d.ensureAuroraInstances(region, pid, plan)
+	return d.ensureAuroraInstances(region, pid, plan, adopted, attrs, capability)
+}
+
+// auroraAdoptControls mirror RDS (D1062): storage encryption, its customer key and
+// TLS enforcement are fixed at cluster creation (a change is a replacement or a
+// separate cluster-parameter-group binding — classifyAuroraChange returns immutable/
+// unsupported), so a missing one FAILS the adopt; member public exposure is an online
+// ModifyDBInstance (mutable+wired), so a missing one is unknown+bound and converge
+// patches it.
+var auroraAdoptControls = []adoptcheck.Control{
+	{Path: "encryption.atRest", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "encryption.inTransit", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "network.publicExposure", Direction: adoptcheck.SecureFalse, UpdateWired: true},
 }
 
 // ensureAuroraInstances creates the writer (and, when regional, the reader) then
@@ -273,7 +289,8 @@ func (d *Driver) createAurora(region, account, environment, capability string,
 // cluster is created but a member instance create fails -> unknown WITH the pid,
 // never a bare "failed" that implies nothing was created and never a silent
 // success of a half-provisioned cluster.
-func (d *Driver) ensureAuroraInstances(region, pid string, plan AuroraPlan) provider.CreateResult {
+func (d *Driver) ensureAuroraInstances(region, pid string, plan AuroraPlan,
+	adopted bool, attrs map[string]any, capability string) provider.CreateResult {
 	if res := d.ensureAuroraInstance(region, pid, plan, plan.WriterID); res != nil {
 		return *res
 	}
@@ -288,6 +305,25 @@ func (d *Driver) ensureAuroraInstances(region, pid string, plan AuroraPlan) prov
 	for {
 		cl, found, rerr := d.describeCluster(region, plan.ClusterID)
 		if rerr == nil && found && cl.Status == "available" {
+			// D1062: an ADOPTED cluster (409/pre-read, ours) never received the
+			// CreateDBCluster body's inline controls — encryption at rest, its KMS key,
+			// TLS enforcement, member public exposure. Re-check them against this driver's
+			// OWN measured observations (cmek KMS-traced) before reporting succeeded: an
+			// immutable control the cluster lacks fails, a mutable one a wired update can
+			// patch is unknown+bound and converge reconciles it.
+			if adopted {
+				obs, _, oerr := d.observeAurora(capability, pid)
+				if oerr != nil {
+					return provider.CreateResult{ProviderID: pid, Status: "unknown",
+						Reason: "adopted cluster re-observe gave no answer — reconcile: " + oerr.Error()}
+				}
+				switch v := adoptcheck.Compare(attrs, obs, auroraAdoptControls); v.Status {
+				case "failed":
+					return provider.CreateResult{Status: "failed", Reason: v.Reason}
+				case "unknown":
+					return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
+				}
+			}
 			return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
 		}
 		if d.Now().After(deadline) {

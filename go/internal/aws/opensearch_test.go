@@ -300,7 +300,48 @@ func osRESTRole(req *http.Request, _ []byte) certifynet.Role {
 	if req.Method == http.MethodGet {
 		return certifynet.RoleRead
 	}
+	// the adopt-check's KMS key trace is a POST to KMS (X-Amz-Target: TrentService.
+	// DescribeKey) — a READ despite the method, or it inflates the mutation count (D1062).
+	if strings.HasSuffix(req.Header.Get("X-Amz-Target"), ".DescribeKey") {
+		return certifynet.RoleRead
+	}
 	return certifynet.RoleMutateOpaque
+}
+
+// osAdoptSrv builds a 409-adopt fixture: our domain already standing, with the
+// encryption controls set however the case needs (D1062).
+func osAdoptSrv(atRest, https bool, kmsKeyId, keyManager string) func() *httptest.Server {
+	return func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.Header.Get("X-Amz-Target"), ".DescribeKey") {
+				km := keyManager
+				if km == "" {
+					km = "CUSTOMER"
+				}
+				_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"` + km + `"}}`))
+				return
+			}
+			switch {
+			case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/domain"):
+				w.WriteHeader(409)
+				_, _ = w.Write([]byte(`{"__type":"ResourceAlreadyExistsException","message":"ResourceAlreadyExists"}`))
+			case r.Method == "GET" && strings.Contains(r.URL.Path, "/tags"):
+				_, _ = w.Write([]byte(`{"TagList":[{"Key":"groundhold-capability","Value":"search"},` +
+					`{"Key":"groundhold-environment","Value":"prod"}]}`))
+			case r.Method == "GET" && strings.Contains(r.URL.Path, "/domain/"):
+				kms := ""
+				if kmsKeyId != "" {
+					kms = `,"KmsKeyId":"` + kmsKeyId + `"`
+				}
+				_, _ = w.Write([]byte(`{"DomainStatus":{"DomainName":"d","Processing":false,"Created":true,` +
+					`"EncryptionAtRestOptions":{"Enabled":` + boolStr(atRest) + kms + `},` +
+					`"DomainEndpointOptions":{"EnforceHTTPS":` + boolStr(https) + `},` +
+					`"ClusterConfig":{"ZoneAwarenessEnabled":true}}}`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	}
 }
 
 // TestAdoptsExistingOpenSearch enrols opensearch in the D391 gate. The domain name is
@@ -309,29 +350,9 @@ func TestAdoptsExistingOpenSearch(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 	p := &certifynet.ExistingProbe{
-		Name:     "aws/opensearch",
-		Classify: osRESTRole,
-		ExistingServer: func() *httptest.Server {
-			return httptest.NewServer(http.HandlerFunc(
-				func(w http.ResponseWriter, r *http.Request) {
-					switch {
-					case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/domain"):
-						w.WriteHeader(409)
-						_, _ = w.Write([]byte(`{"__type":"ResourceAlreadyExistsException",` +
-							`"message":"ResourceAlreadyExists"}`))
-					case r.Method == "GET" && strings.Contains(r.URL.Path, "/tags"):
-						_, _ = w.Write([]byte(`{"TagList":[{"Key":"groundhold-capability","Value":"search"},` +
-							`{"Key":"groundhold-environment","Value":"prod"}]}`))
-					case r.Method == "GET" && strings.Contains(r.URL.Path, "/domain/"):
-						_, _ = w.Write([]byte(`{"DomainStatus":{"DomainName":"d","Processing":false,"Created":true,` +
-							`"EncryptionAtRestOptions":{"Enabled":true},` +
-							`"DomainEndpointOptions":{"EnforceHTTPS":true},` +
-							`"ClusterConfig":{"ZoneAwarenessEnabled":true}}}`))
-					default:
-						w.WriteHeader(404)
-					}
-				}))
-		},
+		Name:           "aws/opensearch",
+		Classify:       osRESTRole,
+		ExistingServer: osAdoptSrv(true, true, "arn:aws:kms:eu-central-1:000000000000:key/abc", "CUSTOMER"),
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver("eu-central-1")
 			d.HTTP = &http.Client{Transport: rt}
@@ -347,6 +368,17 @@ func TestAdoptsExistingOpenSearch(t *testing.T) {
 			return pr.Create("opensearch", "search", "prod", osAttrs(), osImpl(), "search", 1)
 		},
 		AllowedMutations: 1, // the refused create
+		// D1062: at-rest/in-transit encryption and the customer key are fixed at create.
+		AdoptControls: osAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			{Path: "encryption.atRest", WantStatus: "failed", WantMutations: 1,
+				Server: osAdoptSrv(false, true, "arn:aws:kms:eu-central-1:000000000000:key/abc", "CUSTOMER")},
+			{Path: "encryption.inTransit", WantStatus: "failed", WantMutations: 1,
+				Server: osAdoptSrv(true, false, "arn:aws:kms:eu-central-1:000000000000:key/abc", "CUSTOMER")},
+			{Path: "encryption.customerManagedKeys", WantStatus: "failed", WantMutations: 1,
+				Server: osAdoptSrv(true, true, "arn:aws:kms:eu-central-1:000000000000:key/abc", "AWS")}, // AWS-managed → not customer
+		},
+		MoreSecure: osAdoptSrv(true, true, "arn:aws:kms:eu-central-1:000000000000:key/abc", "CUSTOMER"),
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

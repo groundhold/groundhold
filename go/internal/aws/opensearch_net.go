@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/provider"
 )
 
@@ -152,6 +153,17 @@ func (d *Driver) openSearchTags(region, account, domain string) (map[string]stri
 	return m, nil
 }
 
+// osAdoptControls are the controls OpenSearch sets INLINE in the create body, so on a
+// 409-adopt they never applied to the pre-existing domain (D1062). At-rest and
+// in-transit encryption (EnforceHTTPS) and the customer key are fixed at create, so a
+// missing one FAILS the adopt. VPC placement (network.publicExposure) is also fixed at
+// create but the default candidate declares public — a follow-up, not wired here.
+var osAdoptControls = []adoptcheck.Control{
+	{Path: "encryption.atRest", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "encryption.inTransit", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+}
+
 func (d *Driver) createOpenSearch(region, account, environment, capability string,
 	attrs, impl map[string]any, generation int) provider.CreateResult {
 	plan, err := BuildOpenSearch(environment, capability, attrs, impl, generation)
@@ -159,6 +171,7 @@ func (d *Driver) createOpenSearch(region, account, environment, capability strin
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	pid := openSearchProviderID(region, account, plan.Domain)
+	adopted := false
 	body, _ := json.Marshal(plan.createBody(region, account, capability, environment))
 	st, resp, err := d.openSearchDo("POST", region, openSearchPath+"/domain", body)
 	switch {
@@ -177,7 +190,8 @@ func (d *Driver) createOpenSearch(region, account, environment, capability strin
 			return provider.CreateResult{Status: "failed",
 				Reason: "a domain with this name exists and is not ours (tags do not match)"}
 		}
-		// ours — fall through to poll
+		// ours — poll, then re-check declared controls (D1062)
+		adopted = true
 	case st >= 500:
 		return provider.CreateResult{ProviderID: pid, Status: "unknown",
 			Reason: fmt.Sprintf("create HTTP %d (server error — may have landed): %s", st, mutDetail(resp))}
@@ -193,6 +207,23 @@ func (d *Driver) createOpenSearch(region, account, environment, capability strin
 	for {
 		dom, found, rerr := d.describeDomain(region, plan.Domain)
 		if rerr == nil && found && !dom.Processing {
+			// D1062: an ADOPTED domain (409, ours) never received the create body's
+			// inline controls — at-rest/in-transit encryption and its KMS key, fixed at
+			// create. Re-check against this driver's OWN measured observations (cmek
+			// KMS-traced) before reporting succeeded; a missing immutable control fails.
+			if adopted {
+				obs, _, oerr := d.observeOpenSearch(capability, pid)
+				if oerr != nil {
+					return provider.CreateResult{ProviderID: pid, Status: "unknown",
+						Reason: "adopted domain re-observe gave no answer — reconcile: " + oerr.Error()}
+				}
+				switch v := adoptcheck.Compare(attrs, obs, osAdoptControls); v.Status {
+				case "failed":
+					return provider.CreateResult{Status: "failed", Reason: v.Reason}
+				case "unknown":
+					return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
+				}
+			}
 			return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
 		}
 		if d.Now().After(deadline) {

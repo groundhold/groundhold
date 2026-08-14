@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/provider"
 )
 
@@ -127,6 +128,18 @@ func (d *Driver) ecacheTags(region, account, id string) (map[string]string, erro
 	return m, nil
 }
 
+// ecacheAdoptControls are the controls ElastiCache sets INLINE in the create body,
+// so on a 409-adopt they never applied to the pre-existing replication group (D1062).
+// At-rest and in-transit encryption and the customer key are fixed at create (a drift
+// is a replacement — classifyElastiCache treats them as immutable/unsupported), so a
+// missing one FAILS the adopt. availability.class (MultiAZ/AutomaticFailover) is a
+// resilience control read carefully (D955) — a follow-up, not wired here yet.
+var ecacheAdoptControls = []adoptcheck.Control{
+	{Path: "encryption.atRest", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "encryption.inTransit", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+}
+
 func (d *Driver) createElastiCache(region, account, environment, capability string,
 	attrs, impl map[string]any, generation int) provider.CreateResult {
 	plan, err := BuildElastiCacheCreate(account, environment, capability, attrs, impl, generation)
@@ -134,6 +147,7 @@ func (d *Driver) createElastiCache(region, account, environment, capability stri
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	pid := ecacheProviderID(region, account, plan.ID)
+	adopted := false
 	// D278: a derived cache subnet group stands BEFORE the replication group
 	// that places into it — nothing else has landed yet, so an ensure failure
 	// is a clean per-action refusal, and a leftover group self-heals via the
@@ -162,7 +176,8 @@ func (d *Driver) createElastiCache(region, account, environment, capability stri
 			return provider.CreateResult{Status: "failed",
 				Reason: "a replication group with this id exists and is not ours (tags do not match)"}
 		}
-		// ours — poll to available
+		// ours — poll to available, then re-check declared controls (D1062)
+		adopted = true
 	case st >= 500:
 		return provider.CreateResult{ProviderID: pid, Status: "unknown",
 			Reason: fmt.Sprintf("create: HTTP %d (server error — may have landed): %s", st, mutDetail(resp))}
@@ -180,6 +195,24 @@ func (d *Driver) createElastiCache(region, account, environment, capability stri
 		if rerr == nil && found {
 			switch rg.Status {
 			case "available":
+				// D1062: an ADOPTED group (409, ours) never received the create body's
+				// inline controls — at-rest/in-transit encryption and its KMS key, all
+				// fixed at create. Re-check them against this driver's OWN measured
+				// observations (cmek KMS-traced) before reporting succeeded; a missing
+				// immutable control fails rather than lying that encryption is in place.
+				if adopted {
+					obs, _, oerr := d.observeElastiCache(capability, pid)
+					if oerr != nil {
+						return provider.CreateResult{ProviderID: pid, Status: "unknown",
+							Reason: "adopted group re-observe gave no answer — reconcile: " + oerr.Error()}
+					}
+					switch v := adoptcheck.Compare(attrs, obs, ecacheAdoptControls); v.Status {
+					case "failed":
+						return provider.CreateResult{Status: "failed", Reason: v.Reason}
+					case "unknown":
+						return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
+					}
+				}
 				return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
 			case "create-failed":
 				return provider.CreateResult{ProviderID: pid, Status: "failed",
