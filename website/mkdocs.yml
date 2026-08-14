@@ -26,4 +26,5 @@ nav:
   - Providers and drivers: drivers.md
   - Extending groundhold (dev guide): extending.md
   - Versioning and licenses: versioning.md
+  - 'Field note: one page, and when it is never enough': paging.md
 markdown_extensions: [admonition, pymdownx.superfences, tables]
