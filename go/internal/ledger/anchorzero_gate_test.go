@@ -50,6 +50,36 @@ func TestZeroEventAnchorDoesNotVerifyANonEmptyLedger(t *testing.T) {
 	}
 }
 
+// TestManifestlessPartialAnchorIsUnverifiable (D1059): a manifest-less (pre-D185 /
+// external) anchor that pins only PART of the current ledger cannot make the
+// complete-forest guarantee — the manifest guard needs a manifest, the tip-only heads
+// guard needs whole-ledger coverage, and the positional head commits only to the
+// sub-chain owning its own line. So a count-preserving rewrite of an independent
+// capability's tail inside the anchored prefix would slip past as "verified". "I could
+// not check" is not "I checked" — the verdict is unverifiable, as the zero-event case is.
+func TestManifestlessPartialAnchorIsUnverifiable(t *testing.T) {
+	led := &Ledger{EventHashes: []string{"sha256:1", "sha256:2", "sha256:3",
+		"sha256:4", "sha256:5"}}
+	// anchor pins the first 3 events, no manifest; the positional head matches.
+	res := CheckAnchor(led, &Anchor{Events: 3, Head: "sha256:3"})
+	if res.Status == "verified" {
+		t.Error("a manifest-less anchor over PART of the ledger claimed a forest guarantee " +
+			"it never checked — an independent capability's tail inside the prefix could be " +
+			"rewritten count-preservingly and this would not see it")
+	}
+	if res.Status != "unverifiable" {
+		t.Errorf("status = %q, want unverifiable — silent, not wrong", res.Status)
+	}
+	if len(res.Reasons) == 0 {
+		t.Error("no reason given")
+	}
+	// A manifest-less anchor covering the WHOLE ledger still verifies (positional + heads
+	// own that case): the refusal is specific to partial coverage without a manifest.
+	if got := CheckAnchor(led, &Anchor{Events: 5, Head: "sha256:5"}); got.Status != "verified" {
+		t.Errorf("full-coverage manifest-less anchor = %q, want verified", got.Status)
+	}
+}
+
 func TestForeignAnchorDoesNotWitnessThisLedger(t *testing.T) {
 	led := &Ledger{EventHashes: []string{"sha256:aaaa"}}
 	res := CheckAnchor(led, &Anchor{Events: 1, Head: "sha256:whatever",

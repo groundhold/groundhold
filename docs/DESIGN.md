@@ -34460,3 +34460,95 @@ Nothing here establishes that no other internal artefact is cited in the publish
 — the class-leak scan covers identifiers and account numbers, not documents. What it does
 establish is that these three cannot return silently: the boundary refuses them, and the
 refusal was demonstrated by running the export, not asserted.
+## D1054 — an update/create reference could inject an operand the candidate never declared
+The fold path re-derives every fold's slot->producer binding from the hash-pinned candidate
+(`foldMatchesCandidateRef`, D1039/D962): a fold naming a slot the candidate declared as a literal —
+or a $ref to a different producer/output — is refused as forged. The live-reference sibling
+(`resolveActionRefs`, D275) never got that guard. It substitutes `resolved[slot]` with a same-run
+producer's receipted output for every entry in the plan's `references[]`, checking only the value's
+KIND and re-running the driver `Validate` — never that the pinned candidate wires that slot to that
+(capability, output). Under the forged-plan threat model (D959: apply anchors only contractHash +
+candidateHash, the action set is not hashed) an attacker adds one `references` entry naming a slot
+the candidate declared as a LITERAL and overwrites it with an arbitrary producer output, defeating
+the candidateHash anchor for any slot they choose. The compiler wires a reference ONLY from a
+candidate $ref operand (wireReferences.handleRef), so a legitimate reference's slot in the candidate
+IS a $ref to exactly (capability, output) — the same invariant the fold guard rests on. Now
+`resolveActionRefs` calls `foldMatchesCandidateRef` for every reference and refuses before any driver
+call. Found by an apply-side forged-plan audit; the parity gap the D1039 fix left open.
+
+## D1055 — a forged plan could run a replacement's delete before (or instead of) its create
+Create-before-destroy (D48) and fail-isolation are enforced ENTIRELY through the plan's `dependsOn`:
+`topoOrder` places an action once its deps are done, `depFailed` skips an action whose dep did not
+succeed. Both read `dependsOn` verbatim, and the action array is not part of the anchor. So a
+forged/stale plan that drops a replacement's delete->create edge — and reorders the array to put the
+delete first — runs `Delete(old)` before the create (destroying a live stateful resource before its
+successor exists), or, if the create fails, runs the delete anyway (old destroyed, no replacement).
+The consent (allow_replace_stateful) is re-derived, but the SAFETY property that consent ASSUMES is
+plan-controlled. `enforceReplaceOrdering` re-derives the edge structurally before ordering: a
+capability carrying BOTH a create and a delete in one plan is a replacement by construction (the
+compiler emits the pair only there), so its delete must depend on its create — the edge is injected
+if the plan omitted it, and both topoOrder and depFailed then honor it. Found by the same apply-side
+forged-plan audit.
+
+## D1056 — the D723 re-adopt backstop hung off the create's forgeable `replaces` field
+The D723 backstop refuses a replacement create that comes back holding the identity it is replacing
+(a tag-adopting driver found the gen-1 resource, returned its id with no mutation — the following
+delete would then destroy it). It fired only when the create action carried a `replaces` map. A
+forged plan that removes `replaces` (hashes unchanged) skips the backstop, the binding is written to
+the old id, and the paired delete destroys it. `replacedIDByCap` re-derives the identity being
+replaced from the paired same-capability delete's `targetProviderId` — the delete pins exactly the id
+it will destroy — so the backstop's `old` comes from the plan field OR, when forged away, from the
+structure. Blanking the delete's target instead neutralizes the delete itself (its stale gate refuses
+an unbound/mismatched target), so there is no residual path. Third of the apply-side forged-plan
+findings.
+
+## D1057 — three more false-secure omit-on-empty sites, and DynamoDB traced like its siblings
+The false-secure class (D1003/D1040/D1041/D1050 — a security bool emitted only for the secure state,
+so an adopt over an insecure resource keeps the candidate's declared `true`) had three sites left
+outside the earlier sweeps:
+- **Azure Log Analytics** (`loganalytics_net.go`): a workspace linked to a dedicated cluster that was
+  READ successfully but carries no key vault key emitted a DIAGNOSTIC, not `customerManagedKeys=false`.
+  The empty `keyVaultProperties` is the same field the `true` arm reads — a measured false. D1046
+  closed the standalone-workspace case and left this linked-cluster-keyless branch. Now measured false.
+- **AWS DynamoDB** (`dynamodb_net.go`): the lone AWS driver that emitted `customerManagedKeys` NOWHERE.
+  A default owned-key table (SSEType != "KMS") is definitively not customer-managed, read straight from
+  DescribeTable — now a measured false. An SSE-KMS table's key ARN is now TRACED to KMS (DescribeKey ->
+  KeyManager) exactly as RDS/OpenSearch/EFS do (D800), so a real CMK is measured true rather than
+  punted as an "indistinguishable" diagnostic (the prior comment's claim that RDS refuses this was
+  wrong — RDS traces).
+- **GCP GCS** (`gcs_net.go`): `retention.locked` (WORM) was emitted only alongside a retention policy;
+  a bucket with no policy is necessarily not locked — a measured false read from the same buckets.get
+  response. Emitting nothing let a `retention.locked: true` candidate be adopted over a freely-deletable
+  bucket, a permanent false WORM assurance (retention lock is set-once). The S3 sibling was fixed in
+  D1041; GCS now matches. Found by an omit-on-empty sweep of every observe/discover reverse-map;
+  Hetzner/k8s-egress/etc confirmed clean (honest omission of genuinely unmeasurable attributes).
+
+## D1058 — DynamoDB's 409-adopt reported succeeded for an unlanded declared control
+S3's 409-adopt (BucketAlreadyOwnedByYou, tags match) falls through and RE-ASSERTS every declared
+control idempotently — tagging, public-access-block, versioning, object-lock — on the adopted
+bucket. DynamoDB's 409-adopt (ResourceInUseException, tags match) re-asserted only PITR (a separate
+post-create call); SSE/customer-key and deletion protection are set INLINE in the CreateTable body,
+which never applies to a pre-existing table. So a table adopted with encryption OFF or deletion
+protection OFF reported `succeeded` while the candidate declared them ON — a create claiming a
+security control that is not there (the D1047/D1048 class, GCS/Filestore). The adopt path now
+re-checks the two inline-set controls against the live table read it already performs (poll to
+ACTIVE) and returns unknown/reconcile on the DANGEROUS direction only — a declared control the table
+LACKS (declared protection ON but live OFF; declared customer-key but no SSE-KMS). A table MORE
+protected than declared adopts cleanly (the safe direction), and a later converge reconciles the
+declared-lower drift in place via the mutable update path. Found by a manual 409-adopt-completeness
+check against the S3 reference.
+
+## D1059 — a manifest-less anchor claimed a forest guarantee it never checked
+`CheckAnchor` returns "verified" after two forest guards: the complete-forest manifest recomputation
+(D185), gated on a non-empty `Manifest`, and a tip-only per-capability heads check, gated on the
+anchor covering the WHOLE current ledger. A manifest-less (pre-D185 or externally produced) anchor
+that pins only PART of the current ledger — events were appended after it was cut — passes NEITHER:
+all that remains is the positional Head, which commits solely to the sub-chain owning its own line.
+A count-preserving rewrite of an independent capability's tail inside the anchored prefix (the exact
+D185 scenario) slips past as "verified", and `attest` republishes that word. Every anchor this binary
+builds carries a manifest (`BuildAnchor` always populates it), so the gap needs a legacy/external
+artifact held by the receiver — but a verification verb returning "verified" over history it cannot
+witness is the D613 shape: "I could not check" is not "I checked". A manifest-less anchor over a
+partial ledger is now `unverifiable` (which the CLI exits 5 on, and EnforceAnchor fails closed),
+mirroring the D613 zero-event fix. Found by an evidence-integrity adversarial hunt (its one plausible
+lead; the rest of the capsule/sig/anchor/restore surface traced clean).

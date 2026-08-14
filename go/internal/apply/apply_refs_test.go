@@ -234,6 +234,104 @@ func TestApplyResolvesIntraPlanReference(t *testing.T) {
 	}
 }
 
+// TestApplyRefusesForgedReference (D1054): a hand-authored/stale plan whose
+// contract+candidate hashes are untouched, but whose reference names a slot the
+// candidate does not wire to that (capability, output), injects an arbitrary
+// producer output into the operand — the live-producer twin of the closed fold
+// hole (D1039). Apply must re-derive the binding from the pinned candidate and
+// refuse before any driver call, exactly as the fold path does.
+func TestApplyRefusesForgedReference(t *testing.T) {
+	c, cand, plan := setupRefPlan(t)
+	// Forge: the candidate wires db.subnetIds to network.privateSubnetIds; rewrite
+	// the sealed reference to claim network.endpoint instead. Hashes unchanged.
+	p := plan["plan"].(map[string]any)
+	forged := false
+	for _, it := range p["actions"].([]any) {
+		a := it.(map[string]any)
+		refs, _ := a["references"].([]any)
+		for _, ri := range refs {
+			r := ri.(map[string]any)
+			if r["slot"] == "subnetIds" {
+				r["output"] = "endpoint"
+				forged = true
+			}
+		}
+	}
+	if !forged {
+		t.Fatal("test setup: no subnetIds reference to forge")
+	}
+	spy := newRefSpy()
+	lp := freshLedger(t)
+	res := Apply(c, cand, nil, plan, lp, spy, pfAt, false)
+	if res.Status != "failed" || res.Code != perr.ReferenceUnresolved {
+		t.Fatalf("status/code = %s/%s, want failed/%s (%v)",
+			res.Status, res.Code, perr.ReferenceUnresolved, res.Reasons)
+	}
+	if len(res.Reasons) == 0 || !strings.Contains(res.Reasons[0], "forged plan") {
+		t.Fatalf("refusal %v does not name the forged reference", res.Reasons)
+	}
+	for _, call := range spy.log {
+		if call == "create:db" {
+			t.Fatal("consumer create ran on a forged reference")
+		}
+	}
+}
+
+// TestEnforceReplaceOrdering (D1055): a forged plan that drops a replacement's
+// create->delete edge and sorts the delete first must not be able to run the
+// delete before (or independently of) the create. The structural pass re-injects
+// the edge, so topoOrder places the create first and depFailed can skip the delete
+// on a failed create.
+func TestEnforceReplaceOrdering(t *testing.T) {
+	// forged: delete BEFORE create in the array, delete carries no dependsOn.
+	actions := []any{
+		map[string]any{"id": "a-delete-db-g1", "capability": "db",
+			"operation": "delete", "dependsOn": []any{}},
+		map[string]any{"id": "a-create-db-g2", "capability": "db",
+			"operation": "create"},
+	}
+	enforceReplaceOrdering(actions)
+	del := actions[0].(map[string]any)
+	deps, _ := del["dependsOn"].([]any)
+	if len(deps) != 1 || deps[0] != "a-create-db-g2" {
+		t.Fatalf("replacement delete dependsOn = %v, want [a-create-db-g2]", deps)
+	}
+	order := topoOrder(actions)
+	if strings.Join(order, ",") != "a-create-db-g2,a-delete-db-g1" {
+		t.Fatalf("order = %v, want create before destroy", order)
+	}
+	// a plain retire (delete with no paired create) is untouched.
+	retire := []any{map[string]any{"id": "a-delete-x", "capability": "x",
+		"operation": "delete", "dependsOn": []any{}}}
+	enforceReplaceOrdering(retire)
+	if d, _ := retire[0].(map[string]any)["dependsOn"].([]any); len(d) != 0 {
+		t.Fatalf("a plain retire must gain no edge, got %v", d)
+	}
+}
+
+// TestReplacedIDByCap (D1056): the D723 backstop must not depend on the create's
+// forgeable `replaces` field. replacedIDByCap re-derives the identity a replacement
+// is destroying from the paired same-capability delete's targetProviderId, so a
+// plan that forged `replaces` away still supplies the backstop's `old`. A delete
+// with no paired create (a plain retire) yields no entry.
+func TestReplacedIDByCap(t *testing.T) {
+	actions := []any{
+		map[string]any{"id": "a-create-db-g2", "capability": "db", "operation": "create"},
+		map[string]any{"id": "a-delete-db-g1", "capability": "db", "operation": "delete",
+			"targetProviderId": "fake:old-db"},
+		// a plain retire: delete with no paired create -> not a replacement
+		map[string]any{"id": "a-delete-cache", "capability": "cache", "operation": "delete",
+			"targetProviderId": "fake:cache"},
+	}
+	got := replacedIDByCap(actions)
+	if got["db"] != "fake:old-db" {
+		t.Fatalf("replacedID[db] = %q, want fake:old-db (the paired delete's target)", got["db"])
+	}
+	if _, ok := got["cache"]; ok {
+		t.Fatalf("a plain retire must yield no replaced-id entry, got %q", got["cache"])
+	}
+}
+
 func TestApplyMissingDeclaredOutputConcludesUnknown(t *testing.T) {
 	c, cand, plan := setupRefPlan(t)
 	spy := newRefSpy()
