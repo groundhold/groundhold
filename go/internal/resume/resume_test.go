@@ -298,6 +298,30 @@ func TestCreateConcludedWritesBinding(t *testing.T) {
 	}
 }
 
+// TestCreateConcludedPreservesGenerationTwo: resume reads the receipt's generation from
+// a JSON-REPLAYED ledger, and `receipt["generation"].(int)` (resume.go) is only safe
+// because ledger.normalize (replay.go) converts json.Unmarshal's float64 back to int for
+// integral values. Every other resume test used generation 1, where a hypothetical
+// float64→(int)-fails→0→default-1 would coincidentally still be right; this pins a
+// generation-TWO resume end to end, so a change to resume's generation read or a bypass
+// of the replay normalization (which would silently record the wrong generation for
+// every replaced resource) fails loudly here.
+func TestCreateConcludedPreservesGenerationTwo(t *testing.T) {
+	w, path := seedWriter(t)
+	seedReceipt(t, w, "db", map[string]any{"operationId": "op1",
+		"operation": "create", "idempotencyKey": "k1", "target": "fake.fakedb/db",
+		"generation": 2})
+	res := runResume(t, path, &provider.Fake{}, resumeAt)
+	if res.Status != "resumed" || res.Exit != 0 {
+		t.Fatalf("got status=%q exit=%d, want resumed/0", res.Status, res.Exit)
+	}
+	led := replay(t, path)
+	if got := led.BoundGenerations()["db"]; got != 2 {
+		t.Fatalf("resumed gen-2 create recorded generation %d, want 2 — a JSON-replayed "+
+			"generation is float64 and receipt[\"generation\"].(int) silently read 0", got)
+	}
+}
+
 // INVARIANT (four-valued): an unknown outcome never becomes a boolean.
 // The receipt stays pending, no binding is written, and resume blocks
 // with exit 3 / reconcile-pending — it never guesses success.
