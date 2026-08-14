@@ -602,8 +602,11 @@ func TestPartialMissingCapabilityRestoresRest(t *testing.T) {
 	restoredPath := filepath.Join(t.TempDir(), "restored.jsonl")
 	rep, code := Run(Options{Out: restoredPath, AnchorPath: anchorPath,
 		CapsulePaths: capsules, Partial: true})
-	if code != ExitOK {
-		t.Fatalf("partial restore must succeed, got %d: %v", code, rep.Reasons)
+	// D1082: a partial that left a capability unprovable exits NON-ZERO (the
+	// set does not hold together) even though the recovered subset is still written
+	// — automation must not read a knowingly-incomplete estate as a whole recovery.
+	if code != ExitRefused {
+		t.Fatalf("a partial restore with an unprovable capability must exit non-zero, got %d: %v", code, rep.Reasons)
 	}
 	if rep.Status != "partial" {
 		t.Fatalf("status = %q, want partial", rep.Status)
@@ -623,6 +626,12 @@ func TestPartialMissingCapabilityRestoresRest(t *testing.T) {
 	}
 	if _, ok := restored.Heads["cache-net"]; ok {
 		t.Fatalf("cache-net must be ABSENT from a partial restore, not fabricated")
+	}
+	// D1082: the recovered LEDGER is kept (--partial's deliverable, replayed above), but
+	// its fresh anchor must be REMOVED — a self-verifying anchor over the recovered subset
+	// would let `anchor --check`/`attest` promote a partial as a whole recovered estate.
+	if _, err := os.Stat(ledger.AnchorPath(restoredPath)); !os.IsNotExist(err) {
+		t.Fatalf("a partial restore must remove the fresh anchor (it would falsely verify a subset as whole), stat err=%v", err)
 	}
 }
 
@@ -652,8 +661,10 @@ func TestPartialTamperedIsUnknown(t *testing.T) {
 	restoredPath := filepath.Join(t.TempDir(), "restored.jsonl")
 	rep, code := Run(Options{Out: restoredPath, AnchorPath: anchorPath,
 		CapsulePaths: capsules, Partial: true})
-	if code != ExitOK {
-		t.Fatalf("partial restore must succeed, got %d: %v", code, rep.Reasons)
+	// D1082: a tampered capsule leaves cache-net unprovable — a partial that did
+	// not fully hold together exits non-zero, though the sound capability is written.
+	if code != ExitRefused {
+		t.Fatalf("a partial restore with a tampered capsule must exit non-zero, got %d: %v", code, rep.Reasons)
 	}
 	if !hasCapStatus(rep.Partial, "cache-net", "unknown", "capsule-tampered") {
 		t.Fatalf("cache-net must be unknown/capsule-tampered: %+v", rep.Partial)

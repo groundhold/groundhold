@@ -343,6 +343,36 @@ func Run(opts Options) (*RestoreReport, int) {
 			"certify as a recovered estate.")
 		return rep, ExitRefused
 	}
+	// D1082: a NON-empty partial recovered some capabilities and left others
+	// `unknown`. D618 established that the danger is the AFTERMATH — the recovered
+	// ledger and its fresh anchor sit on disk, and `attest`/`anchor --check` certify
+	// them from the next minute on, so an exit-0 read as "recovered" over a subset a
+	// later check will bless as whole. D618 closed only the all-zero case above; the
+	// same reasoning reaches any-unknown. `--partial` means "give me what can be proven
+	// and tell me what cannot" — so the recovered subset IS kept (unlike all-zero, which
+	// is removed) — but the process exits NON-ZERO so automation never reads a
+	// knowingly-incomplete estate as a whole recovery. This is the converge blocked-caps
+	// shape (apply what is reconcilable, then a non-zero exit; D249). ExitRefused is its
+	// own documented meaning: "the set does not hold together — a capsule failed."
+	if opts.Partial && rep.Status == "partial" {
+		// The fresh anchor cut above (BuildAnchor over the RECOVERED subset) is
+		// self-consistent, so `anchor --check` and `attest` on the output would answer
+		// "verified" and promote a subset as a whole recovered estate — gating the exit
+		// code alone protects only the consumer that reads it, not the two that
+		// re-derive "whole history" from the artefact (the divergence D313 warns of, and
+		// the all-zero sibling above avoids by removing its artefacts). Remove the
+		// anchor — KEEP the recovered ledger, which IS --partial's deliverable — so the
+		// only completeness check left is `anchor --check` against the ORIGINAL off-host
+		// anchor, which names the capabilities this recovery is missing.
+		os.Remove(ledger.AnchorPath(opts.Out))
+		rep.Reasons = append(rep.Reasons, "--partial recovered some capabilities and left "+
+			"others unprovable (see partial[]). The recovered ledger was written but its "+
+			"fresh anchor was REMOVED — an anchor over a subset would let `attest`/`anchor "+
+			"--check` certify it as a whole recovered history. Exits non-zero; check the "+
+			"recovered ledger against the ORIGINAL anchor, and supply the missing or "+
+			"repaired capsules to complete it.")
+		return rep, ExitRefused
+	}
 	return rep, ExitOK
 }
 
