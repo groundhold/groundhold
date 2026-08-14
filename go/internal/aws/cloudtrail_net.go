@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"strings"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/provider"
 )
 
@@ -181,6 +182,17 @@ func (d *Driver) trailTags(region, arn string) (map[string]string, error) {
 // unknown WITH the providerId (a standing-but-not-logging trail to reconcile), never a
 // silent success and never a bare "failed". A name conflict re-reads ownership: ours
 // (tags match) repairs the partial (idempotent StartLogging); foreign is refused.
+// cloudtrailAdoptControls: CloudTrail sets the KMS key, log-file validation and
+// multi-region scope INLINE in the create body, so on a 409-adopt they never applied
+// (D1062). All three are re-assertable in place via UpdateTrail (classifyCloudTrail:
+// mutable, updateCloudTrail wires them), so a missing one is unknown+bound and converge
+// patches it. delivery.assured (StartLogging) is re-asserted on the adopt path already.
+var cloudtrailAdoptControls = []adoptcheck.Control{
+	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, UpdateWired: true},
+	{Path: "integrity.logValidation", Direction: adoptcheck.SecureTrue, UpdateWired: true},
+	{Path: "scope.multiRegion", Direction: adoptcheck.SecureTrue, UpdateWired: true},
+}
+
 func (d *Driver) createCloudTrail(region, environment, capability string,
 	attrs, impl map[string]any, generation int) provider.CreateResult {
 	plan, err := BuildCloudTrail(environment, capability, attrs, impl, generation)
@@ -209,7 +221,29 @@ func (d *Driver) createCloudTrail(region, environment, capability string,
 				Reason: "a trail with this name exists and is not ours (tags do not match) — refusing to adopt it"}
 		}
 		// ours already — ensure it is logging (repair a partial composite).
-		return d.ensureTrailLogging(region, pid, plan)
+		res := d.ensureTrailLogging(region, pid, plan)
+		if res.Status != "succeeded" {
+			return res
+		}
+		// D1062: an ADOPTED trail (409, ours) never received the create body's inline
+		// controls — the KMS key, log-file validation and multi-region scope. Logging is
+		// re-asserted above, but these are not; re-check them against this driver's OWN
+		// measured observations. All three are re-assertable in place via UpdateTrail
+		// (classifyCloudTrailChange: mutable), so a missing one is unknown+bound and
+		// converge patches it — never a false succeeded that hides an unencrypted or
+		// unvalidated audit trail.
+		obs, _, oerr := d.observeCloudTrail(capability, pid)
+		if oerr != nil {
+			return provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "adopted trail re-observe gave no answer — reconcile: " + oerr.Error()}
+		}
+		switch v := adoptcheck.Compare(attrs, obs, cloudtrailAdoptControls); v.Status {
+		case "failed":
+			return provider.CreateResult{Status: "failed", Reason: v.Reason}
+		case "unknown":
+			return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
+		}
+		return res
 	}
 
 	// CreateTrail. The pid is knowable before the response (deterministic), so

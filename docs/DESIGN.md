@@ -34686,3 +34686,44 @@ an error — and the attestation is real: the downloaded binary's digest is a su
 an attestation signed by `release.yml@refs/tags/v0.1.7`. Recorded because "silence means
 success" is exactly the reading this project refuses everywhere else, and a reader
 following the README's verification line meets it with no way to tell.
+
+## D1064 — D766 corrected the tool and left the published example teaching the old lie
+
+The front-door walk continued onto the website. Every command on every page was
+extracted and the concrete ones were run. They work. What does not is the terminal
+output pasted BENEATH a command, which nothing has ever checked.
+
+The README and the quickstart both showed a `verify` verdict reading
+`… equals europe-central2: observed europe-central2` — over values that came out of
+the candidate DOCUMENT. The tool prints `declared` there, and has since D766.
+
+D766 is why this matters and it came from the field with money attached: `verify`
+rendered `observed <value>` whatever the provenance was, so a budget constraint
+compared a number the author had written against a threshold the author had written
+and reported `observed 6 EUR` while the bill was 2.4× that. The reporter's sentence is
+in that entry — a constraint resting on a number you wrote yourself is not a
+constraint, it is a repetition of your own assumption. The runtime was fixed: nothing
+observes a declaration, and the verb now follows the basis.
+
+The published examples were not fixed. Four lines across the two documents a newcomer
+reads FIRST went on teaching the exact sentence D766 had just called false — and
+teaching it about `verify`, the verb D622 and D1063 both caught inviting readers to
+believe more than it checked. A reader learns that a green `verify` means reality was
+consulted. It means the documents agree with each other.
+
+**The gate is the point, not the four words.** This project gates every published
+NUMBER (D324) and every published VERB (docrefs), and neither looks at the output block
+underneath, which is where the load-bearing claims are: a verdict line states what the
+tool concluded AND on what evidence. `TestDocumentedVerifyOutputIsWhatTheToolPrints`
+finds documented `verify` invocations whose operands this repository actually ships,
+RUNS them, and requires every line of the following block to be a line the tool really
+prints. Not equality — the blocks are honest excerpts that drop the header — but no
+documented line may be absent from reality. Teeth-checked by restoring the exact D766
+wording, which the gate rejects by name.
+
+What it deliberately does NOT cover, said plainly rather than left to be discovered:
+invocations whose operands are written INLINE in the page (the quickstart pastes its
+two documents into the prose) have no paths to resolve, so they are skipped rather than
+guessed at — gating a fiction is worse than gating nothing. Those four words were fixed
+by hand and are unguarded. The vacuity guard counts what it checked and fails at zero,
+so the day the shipped-file examples disappear this gate says so instead of going quiet.
