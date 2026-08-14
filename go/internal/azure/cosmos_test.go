@@ -370,3 +370,38 @@ func TestCosmosZoneRedundancyIsBuiltAndRead(t *testing.T) {
 		})
 	}
 }
+
+// D1045: a multi-region Cosmos account replicates to every location, so it WITHHOLDS
+// location.region and diagnoses the replica set — a single-region residency constraint
+// must not read satisfied while the data also sits in the other regions.
+func TestCosmosMultiRegionResidencyWithheld(t *testing.T) {
+	old := cosmosLocations
+	cosmosLocations = `,"locations":[{"locationName":"westeurope","isZoneRedundant":true},` +
+		`{"locationName":"eastus","isZoneRedundant":false}]`
+	defer func() { cosmosLocations = old }()
+	srv := cosmosServer(t, "sessions", "Continuous", "")
+	defer srv.Close()
+	d := cosmosDriver(t, srv)
+	res := d.createCosmos("prod", "sessions", cosmosAttrs(), cosmosImpl(), 1)
+	if res.Status != "succeeded" {
+		t.Fatalf("create: %+v", res)
+	}
+	obs, diags, err := d.observeCosmos("sessions", res.ProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range obs {
+		if o.Path == "location.region" {
+			t.Fatalf("a multi-region account must WITHHOLD location.region, got %v", o.Value)
+		}
+	}
+	found := false
+	for _, dg := range diags {
+		if strings.Contains(dg, "eastus") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a multi-region account must diagnose its replica set: %v", diags)
+	}
+}

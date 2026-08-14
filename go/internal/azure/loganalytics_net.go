@@ -157,6 +157,14 @@ func (d *Driver) observeLogAnalytics(capability, providerID string) ([]provider.
 		default:
 			diags = append(diags, "encryption.customerManagedKeys not observed: the linked cluster carries no key vault key (platform-managed, not BYOK)")
 		}
+	} else {
+		// D1046: a STANDALONE workspace (no linked dedicated cluster) can carry no customer
+		// key at all — BYOK requires a dedicated cluster — so this is a MEASURED false, not
+		// an absence. D985's caution is about not inferring a false TRUE from a cluster
+		// LINKAGE; a workspace with NO cluster is the definitively-false case it does not
+		// cover, and omitting it let an adopt certify a BYOK control that cannot exist.
+		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+			Value: false, Derivation: "measured"})
 	}
 	return obs, diags, nil
 }

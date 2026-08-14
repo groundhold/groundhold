@@ -112,10 +112,24 @@ func (d *Driver) observeCosmos(capability, providerID string) ([]provider.Observ
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 		{Path: "backup.pointInTimeRecovery", Value: doc.Properties.BackupPolicy.Type == "Continuous", Derivation: "measured"},
 	}
-	if region != "" {
+	var diags []string
+	switch {
+	case len(doc.Properties.Locations) > 1:
+		// D1045: a Cosmos account replicates data to EVERY configured location, not just
+		// the write region. Emitting only Locations[0] as location.region let a single-
+		// region residency constraint read satisfied while the data also sits in the other
+		// regions. Withhold + diagnose (the availability.class D753 discipline) so a hard
+		// residency constraint blocks as unknown rather than passing over multi-region data.
+		names := make([]string, len(doc.Properties.Locations))
+		for i, l := range doc.Properties.Locations {
+			names[i] = l.LocationName
+		}
+		diags = append(diags, "location.region not observed: this Cosmos account replicates "+
+			"to "+strings.Join(names, ", ")+" — a single-region residency constraint cannot be "+
+			"confirmed on a multi-region account")
+	case region != "":
 		obs = append(obs, provider.Observation{Path: "location.region", Value: strings.ToLower(region), Derivation: "measured"})
 	}
-	var diags []string
 	// D753. This emitted the constant "regional" with derivation config-intent, while
 	// the create sent `isZoneRedundant: false` — so the tool built a single-zone account
 	// and reported the class the vocabulary defines as "replicated across zones in one

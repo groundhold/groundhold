@@ -123,6 +123,13 @@ func (d *Driver) createGCS(capability, environment string,
 	wantLocation, _ := attrs["location.region"].(string)
 	replEnabled, _ := attrs["replication.enabled"].(bool)
 	wantDest, _ := attrs["replication.destinationRegion"].(string)
+	// D1047: the declared controls the 409-adopt branch below must re-check. GCS ignores
+	// the insert body's encryption/versioning/retention on a name conflict, so a bucket
+	// that exists-and-is-ours but lacks a DECLARED control was reported succeeded with the
+	// control unlanded. Compare each and fail loud (gcs update is not wired), like PAP.
+	wantCMK, _ := attrs["encryption.customerManagedKeys"].(bool)
+	wantVersioning, _ := attrs["versioning.enabled"].(bool)
+	_, wantRetentionFloor := attrs["retention.minimum"]
 	req.URL = d.gcsBase() + "/b?project=" + d.Project // rebuild for test base
 
 	status, body, err := d.call(req.Method, req.URL, req.Body)
@@ -171,6 +178,20 @@ func (d *Driver) createGCS(capability, environment string,
 				"existing bucket public-access-prevention %q does not match "+
 					"desired %q and gcs update is not wired",
 				doc.IAMConfiguration.PublicAccessPrevention, wantPrevention)}
+		case wantCMK && doc.Encryption.DefaultKmsKeyName == "":
+			return provider.CreateResult{Status: "failed", Reason: "existing bucket has no " +
+				"customer-managed encryption key but the contract declares one, and gcs " +
+				"update is not wired (GCS ignored the insert body's encryption on the name " +
+				"conflict) — reconcile"}
+		case wantVersioning && !doc.Versioning.Enabled:
+			return provider.CreateResult{Status: "failed", Reason: "existing bucket has " +
+				"versioning disabled but the contract declares it, and gcs update is not " +
+				"wired — reconcile"}
+		case wantRetentionFloor && (doc.RetentionPolicy.RetentionPeriod == "" ||
+			doc.RetentionPolicy.RetentionPeriod == "0"):
+			return provider.CreateResult{Status: "failed", Reason: "existing bucket has no " +
+				"retention floor but the contract declares retention.minimum, and gcs update " +
+				"is not wired — reconcile"}
 		}
 	case status >= 400:
 		res := mutationResult("create", status, body)

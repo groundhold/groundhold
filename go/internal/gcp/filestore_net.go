@@ -104,6 +104,15 @@ func (d *Driver) createFilestore(environment, capability string,
 			return provider.CreateResult{Status: "failed",
 				Reason: "an instance with this name exists and is not ours (labels do not match)"}
 		}
+		if plan.KmsKey != "" && doc.KmsKeyName != plan.KmsKey {
+			// D1048: the contract declares a customer key but the existing instance's key
+			// differs (or is absent), and Filestore has no update path — GCP set the key at
+			// create time and this adopt cannot change it. Fail rather than report succeeded
+			// for a control that did not land (the 409 branch checked only ownership labels).
+			return provider.CreateResult{Status: "failed",
+				Reason: "existing Filestore instance's encryption key does not match the " +
+					"declared customer-managed key and filestore update is not wired — reconcile"}
+		}
 		return provider.CreateResult{ProviderID: pid, Status: "succeeded"} // ours, already present
 	case st >= 500:
 		return provider.CreateResult{ProviderID: pid, Status: "unknown",

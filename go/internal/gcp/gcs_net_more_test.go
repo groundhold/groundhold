@@ -219,14 +219,33 @@ func TestGCSCreateConflictPAPMismatch(t *testing.T) {
 }
 
 func TestGCSCreateConflictIdempotentMatch(t *testing.T) {
+	// D1047: a MATCHING conflict must include the declared controls — gcsAttrs declares
+	// versioning.enabled=true, so the existing bucket must have it for the adopt to be a
+	// true idempotent match (else the 409 branch correctly fails: gcs update is not wired).
 	bucket := `{"projectNumber":"111","labels":{"groundhold-capability":"assets","groundhold-environment":"prod"},` +
-		`"location":"EUROPE-CENTRAL2","iamConfiguration":{"publicAccessPrevention":"enforced"}}`
+		`"location":"EUROPE-CENTRAL2","iamConfiguration":{"publicAccessPrevention":"enforced"},` +
+		`"versioning":{"enabled":true}}`
 	srv := gcsConflictServer(t, 200, bucket)
 	defer srv.Close()
 	d := gcsDriver(t, srv)
 	res := d.createGCS("assets", "prod", gcsAttrs(), nil, 1)
 	if res.Status != "succeeded" {
 		t.Fatalf("a matching conflict (idempotent adopt) must succeed, got %+v", res)
+	}
+}
+
+// D1047: a same-name bucket that is ours but has versioning OFF while the contract
+// declares it must FAIL — GCS ignores the insert body's versioning on a name conflict
+// and update is not wired, so reporting succeeded would claim a control that did not land.
+func TestGCSCreateConflictVersioningMismatch(t *testing.T) {
+	bucket := `{"projectNumber":"111","labels":{"groundhold-capability":"assets","groundhold-environment":"prod"},` +
+		`"location":"EUROPE-CENTRAL2","iamConfiguration":{"publicAccessPrevention":"enforced"}}`
+	srv := gcsConflictServer(t, 200, bucket)
+	defer srv.Close()
+	d := gcsDriver(t, srv)
+	res := d.createGCS("assets", "prod", gcsAttrs(), nil, 1) // declares versioning.enabled=true
+	if res.Status != "failed" || !strings.Contains(res.Reason, "versioning") {
+		t.Fatalf("a versioning mismatch on a 409-adopt must fail, got %+v", res)
 	}
 }
 
