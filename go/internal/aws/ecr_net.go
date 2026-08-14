@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/provider"
 )
 
@@ -80,6 +81,19 @@ func (d *Driver) ecrTags(region, arn string) (map[string]string, error) {
 	return m, nil
 }
 
+// ecrAdoptControls are the controls ECR sets INLINE in CreateRepository, so on a
+// 409-adopt they never applied to the pre-existing repo (D1062). The customer key is
+// fixed at create (classifyECRChange: immutable), so a miss FAILS; tag immutability
+// and scan-on-push are re-assertable in place (PutImageTagMutability /
+// PutImageScanningConfiguration — classifyECRChange: mutable, and updateECR wires
+// them), so a miss is unknown+bound and converge patches it. retention.maximum is
+// re-asserted on the adopt path (ecrApplyLifecycle) already, so it is not here.
+var ecrAdoptControls = []adoptcheck.Control{
+	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "immutable.tags", Direction: adoptcheck.SecureTrue, UpdateWired: true},
+	{Path: "security.scanOnPush", Direction: adoptcheck.SecureTrue, UpdateWired: true},
+}
+
 func (d *Driver) createECR(region, account, environment, capability string,
 	attrs, impl map[string]any, generation int) provider.CreateResult {
 	plan, err := BuildECR(environment, capability, attrs, impl, generation)
@@ -108,6 +122,24 @@ func (d *Driver) createECR(region, account, environment, capability string,
 		}
 		if r := d.ecrApplyLifecycle(region, pid, plan); r != nil {
 			return *r
+		}
+		// D1062: the create body's inline controls — tag immutability, scan-on-push and
+		// the customer key — never applied to the pre-existing repo. Re-check them against
+		// this driver's OWN measured observations (cmek KMS-traced, so encryptionType=KMS
+		// with the account default key is NOT a customer key) before reporting succeeded:
+		// the customer key is immutable and fails on a miss; tag immutability and
+		// scan-on-push are mutable in place (PutImageTagMutability/PutImageScanningConfig),
+		// so a miss is unknown+bound and converge patches it.
+		obs, _, oerr := d.observeECR(capability, pid)
+		if oerr != nil {
+			return provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "adopted repository re-observe gave no answer — reconcile: " + oerr.Error()}
+		}
+		switch v := adoptcheck.Compare(attrs, obs, ecrAdoptControls); v.Status {
+		case "failed":
+			return provider.CreateResult{Status: "failed", Reason: v.Reason}
+		case "unknown":
+			return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
 		}
 		return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
 	case st >= 500:

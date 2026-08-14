@@ -260,40 +260,53 @@ func TestDeleteECRForeignRefused(t *testing.T) {
 	}
 }
 
-// ecrExistingServer: the repository already exists at our deterministic name and
-// carries our tags, so CreateRepository is answered RepositoryAlreadyExists and the
-// driver must recognise and bind it.
-func ecrExistingServer(t *testing.T, tagCap string) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
+func ecrTargetRole(req *http.Request, _ []byte) certifynet.Role {
+	tgt := req.Header.Get("X-Amz-Target")
+	switch tgt[strings.LastIndex(tgt, ".")+1:] {
+	case "DescribeRepositories", "ListTagsForResource", "DescribeKey": // D1062: the KMS trace is a read
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// ecrAdoptSrv builds a 409-adopt fixture: our repository already standing, with the
+// controls set however the case needs (D1062).
+func ecrAdoptSrv(immutableTags, scanOnPush bool, kmsKey, keyManager string) func() *httptest.Server {
+	return func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			target := r.Header.Get("X-Amz-Target")
 			switch target[strings.LastIndex(target, ".")+1:] {
 			case "CreateRepository":
 				w.WriteHeader(400)
-				_, _ = w.Write([]byte(`{"__type":"RepositoryAlreadyExistsException",` +
-					`"message":"RepositoryAlreadyExists"}`))
+				_, _ = w.Write([]byte(`{"__type":"RepositoryAlreadyExistsException","message":"RepositoryAlreadyExists"}`))
 			case "DescribeRepositories":
-				_, _ = w.Write([]byte(`{"repositories":[{"imageTagMutability":"IMMUTABLE",` +
-					`"encryptionConfiguration":{"encryptionType":"KMS"}}]}`))
+				tm := "MUTABLE"
+				if immutableTags {
+					tm = "IMMUTABLE"
+				}
+				enc := `"encryptionConfiguration":{"encryptionType":"KMS"`
+				if kmsKey != "" {
+					enc += `,"kmsKey":"` + kmsKey + `"`
+				}
+				enc += `}`
+				_, _ = w.Write([]byte(`{"repositories":[{"imageTagMutability":"` + tm + `",` +
+					`"imageScanningConfiguration":{"scanOnPush":` + boolStr(scanOnPush) + `},` + enc + `}]}`))
 			case "ListTagsForResource":
-				_, _ = w.Write([]byte(`{"tags":[{"Key":"groundhold-capability","Value":"` + tagCap + `"},` +
+				_, _ = w.Write([]byte(`{"tags":[{"Key":"groundhold-capability","Value":"images"},` +
 					`{"Key":"groundhold-environment","Value":"prod"}]}`))
-			case "PutImageScanningConfiguration", "PutImageTagMutability", "TagResource":
+			case "DescribeKey":
+				km := keyManager
+				if km == "" {
+					km = "CUSTOMER"
+				}
+				_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"` + km + `"}}`))
+			case "PutImageScanningConfiguration", "PutImageTagMutability", "TagResource", "PutLifecyclePolicy":
 				_, _ = w.Write([]byte(`{}`))
 			default:
 				w.WriteHeader(400)
 			}
 		}))
-}
-
-func ecrTargetRole(req *http.Request, _ []byte) certifynet.Role {
-	tgt := req.Header.Get("X-Amz-Target")
-	switch tgt[strings.LastIndex(tgt, ".")+1:] {
-	case "DescribeRepositories", "ListTagsForResource":
-		return certifynet.RoleRead
 	}
-	return certifynet.RoleMutateOpaque
 }
 
 // TestAdoptsExistingECR enrols ecr in the D391 gate. A repository is name-addressed and
@@ -304,11 +317,12 @@ func TestAdoptsExistingECR(t *testing.T) {
 	p := &certifynet.ExistingProbe{
 		Name:           "aws/ecr",
 		Classify:       ecrTargetRole,
-		ExistingServer: func() *httptest.Server { return ecrExistingServer(t, "images") },
+		ExistingServer: ecrAdoptSrv(true, false, "arn:aws:kms:eu-central-1:000000000000:key/abc", "CUSTOMER"),
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver("eu-central-1")
 			d.HTTP = &http.Client{Transport: rt}
 			d.ECRBaseURL = happyURL
+			d.KMSBaseURL = happyURL    // D1062: the adopt-check traces the repo's KMS key
 			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
 			return d
 		},
@@ -316,6 +330,23 @@ func TestAdoptsExistingECR(t *testing.T) {
 			return pr.Create("ecr", "images", "prod", ecrAttrs(), ecrImpl(), "images", 1)
 		},
 		AllowedMutations: 2, // the refused CreateRepository + convergence
+		// D1062: the customer key is immutable; tag immutability and scan-on-push are
+		// mutable in place.
+		AdoptControls: ecrAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			{Path: "encryption.customerManagedKeys", WantStatus: "failed", WantMutations: 2,
+				Server: ecrAdoptSrv(true, false, "", "")}, // KMS with no key = account default = not customer
+			{Path: "immutable.tags", WantStatus: "unknown", WantMutations: 2,
+				Server: ecrAdoptSrv(false, false, "arn:aws:kms:eu-central-1:000000000000:key/abc", "CUSTOMER")},
+			{Path: "security.scanOnPush", WantStatus: "unknown", WantMutations: 2,
+				Server: ecrAdoptSrv(true, false, "arn:aws:kms:eu-central-1:000000000000:key/abc", "CUSTOMER"),
+				Create: func(pr provider.Provider) provider.CreateResult {
+					a := ecrAttrs()
+					a["security.scanOnPush"] = true // this case requires scan-on-push
+					return pr.Create("ecr", "images", "prod", a, ecrImpl(), "images", 1)
+				}},
+		},
+		MoreSecure: ecrAdoptSrv(true, true, "arn:aws:kms:eu-central-1:000000000000:key/abc", "CUSTOMER"),
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }
