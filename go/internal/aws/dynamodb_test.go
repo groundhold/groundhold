@@ -436,7 +436,8 @@ func TestMetamorphicDynamoDBRoundTrip(t *testing.T) {
 func ddbRole(req *http.Request, _ []byte) certifynet.Role {
 	full := req.Header.Get("X-Amz-Target")
 	switch full[strings.LastIndex(full, ".")+1:] {
-	case "DescribeTable", "ListTagsOfResource", "DescribeContinuousBackups", "ListTables":
+	case "DescribeTable", "ListTagsOfResource", "DescribeContinuousBackups", "ListTables",
+		"DescribeKey": // D1062: the adopt-check's KMS key trace is a READ
 		return certifynet.RoleRead
 	}
 	return certifynet.RoleMutateOpaque
@@ -499,8 +500,68 @@ func TestAdoptsExistingDynamoDB(t *testing.T) {
 			return pr.Create("dynamodb", "sessions", "prod", dynamoAttrs(), dynamoImpl(), "sessions", 1)
 		},
 		AllowedMutations: 3, // the refused create + backup/protection convergence
+		// D1062: the control-completeness half. The candidate declares CMEK (immutable)
+		// and deletion protection is mutable+wired; each must block an adopt that lacks
+		// it, and a MORE-secure resource must still adopt clean.
+		AdoptControls: ddbAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			{Path: "encryption.customerManagedKeys", Server: dynamoAdoptSrv(false, true),
+				WantStatus: "failed", WantMutations: 1}, // no SSE-KMS → immutable miss
+			{Path: "deletion.protection", Server: dynamoAdoptSrv(true, false),
+				WantStatus: "unknown", WantMutations: 1, // CMEK ok, protection off → mutable miss
+				Create: func(pr provider.Provider) provider.CreateResult {
+					a := dynamoAttrs()
+					a["deletion.protection"] = true // this case requires protection
+					return pr.Create("dynamodb", "sessions", "prod", a, dynamoImpl(), "sessions", 1)
+				}},
+		},
+		MoreSecure: dynamoAdoptSrv(true, true), // CMEK satisfied, protection ON though declared off
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
+
+// dynamoAdoptSrv builds a 409-adopt fixture for a table that already exists and is
+// ours, configurable by whether it carries SSE-KMS (CMEK) and deletion protection —
+// so the adopt gate can serve the resource stripped of, or exceeding, a declared
+// control (D1062).
+func dynamoAdoptSrv(hasKMS, delProt bool) func() *httptest.Server {
+	return func() *httptest.Server {
+		target := func(r *http.Request) string {
+			full := r.Header.Get("X-Amz-Target")
+			return full[strings.LastIndex(full, ".")+1:]
+		}
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch target(r) {
+			case "CreateTable":
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`{"__type":"ResourceInUseException","message":"exists"}`))
+			case "DescribeTable":
+				sse := ""
+				if hasKMS {
+					sse = `,"SSEDescription":{"Status":"ENABLED","SSEType":"KMS","KMSMasterKeyArn":"arn:aws:kms:eu-central-1:000000000000:key/abc"}`
+				}
+				dp := "false"
+				if delProt {
+					dp = "true"
+				}
+				_, _ = w.Write([]byte(`{"Table":{"TableStatus":"ACTIVE",` +
+					`"TableArn":"arn:aws:dynamodb:eu-central-1:000000000000:table/t",` +
+					`"DeletionProtectionEnabled":` + dp + sse + `}}`))
+			case "ListTagsOfResource":
+				_, _ = w.Write([]byte(`{"Tags":[{"Key":"groundhold-capability","Value":"sessions"},` +
+					`{"Key":"groundhold-environment","Value":"prod"}]}`))
+			case "DescribeContinuousBackups":
+				_, _ = w.Write([]byte(`{"ContinuousBackupsDescription":` +
+					`{"PointInTimeRecoveryDescription":{"PointInTimeRecoveryStatus":"ENABLED"}}}`))
+			case "DescribeKey":
+				_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"CUSTOMER"}}`))
+			case "UpdateContinuousBackups", "UpdateTable", "TagResource":
+				_, _ = w.Write([]byte(`{}`))
+			default:
+				w.WriteHeader(400)
+			}
+		}))
+	}
 }
 
 // TestAdoptDynamoDBRefusesUnlandedImmutableControl (D1062): a 409-adopted table with

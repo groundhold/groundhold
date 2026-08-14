@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/provider"
 )
 
@@ -56,6 +57,41 @@ type ExistingProbe struct {
 	// "defers by design" and "silently stopped adopting" is exactly what this gate
 	// exists to notice.
 	ConcludesUnknown bool
+	// MissingControl (D1062) proves the CONTROL-COMPLETENESS half of adoption: a
+	// create that adopts a resource LACKING a declared control (its create body set
+	// the control inline, so it never applied to the pre-existing resource) must NOT
+	// report succeeded. Each case serves the owned resource STRIPPED of one declared
+	// control; the driver must return WantStatus (failed for an immutable control it
+	// cannot fix, unknown for a mutable one converge can patch) and send no more than
+	// WantMutations. Without this, an adopt silently certifies a security control that
+	// is not there (the 23-driver systemic finding).
+	MissingControl []ControlCase
+	// MoreSecure serves the owned resource EXCEEDING the declaration (a control ON
+	// though not required). Adoption must still SUCCEED — the safe direction is not a
+	// lie, and false-failing it would block a legitimate takeover. Pins the safe
+	// direction as a regression test, not a review comment.
+	MoreSecure func() *httptest.Server
+	// AdoptControls is the driver's OWN runtime adopt-critical control table (the same
+	// one it passes to adoptcheck.Compare), so the gate's expectations cannot drift
+	// from what the driver actually enforces. A driver that declares controls here MUST
+	// prove every one with a MissingControl case and pin the safe direction with
+	// MoreSecure — that is what turns the control-completeness invariant from a
+	// convention into an enforced gate (D1062). A driver with no controls leaves it nil.
+	AdoptControls []adoptcheck.Control
+}
+
+// ControlCase is one missing-control scenario for the adopt control-completeness
+// check (D1062): the estate serves the owned resource without a declared control.
+type ControlCase struct {
+	Path   string // the declared control the served resource LACKS
+	Server func() *httptest.Server
+	// Create overrides the probe's Create for this case — a control is only
+	// exercised when the candidate DECLARES it, so a case for a control the base
+	// candidate leaves permissive supplies a candidate that requires it. Falls back
+	// to the probe's Create when nil.
+	Create        func(provider.Provider) provider.CreateResult
+	WantStatus    string // "failed" (immutable) | "unknown" (mutable, converge patches)
+	WantMutations int    // adopting must not half-fix; default 0
 }
 
 func CertifyCreateAdoptsExisting(t TestingT, p *ExistingProbe) {
@@ -117,6 +153,80 @@ func CertifyCreateAdoptsExisting(t TestingT, p *ExistingProbe) {
 			"a second paid key, and neither one in the ledger.",
 			p.Name, rt.mutations, p.AllowedMutations)
 	}
+
+	// D1062: the CONTROL-COMPLETENESS half — an adopt of a resource missing a declared
+	// control must not report succeeded. Two-way enforcement so the class cannot silently
+	// reopen: a driver wired to the shared comparator declares AdoptControls (its own
+	// runtime table) and must prove EVERY control with a MissingControl case + pin the
+	// safe direction with MoreSecure, and must be OFF the debt list; an unwired driver
+	// with a security control set inline stays on adoptControlDebt (documented, tracked)
+	// until a campaign slice wires it. The list can only shrink.
+	if len(p.AdoptControls) > 0 {
+		if adoptControlDebt[p.Name] {
+			t.Errorf("%s: declares AdoptControls (wired to the comparator) but is still on "+
+				"adoptControlDebt — remove it; the debt list only shrinks.", p.Name)
+		}
+		covered := map[string]bool{}
+		for _, cc := range p.MissingControl {
+			covered[cc.Path] = true
+		}
+		for _, c := range p.AdoptControls {
+			if !covered[c.Path] {
+				t.Errorf("%s: adopt-critical control %q has no MissingControl case — every "+
+					"declared control must be proven to block an adopt that lacks it, or the "+
+					"gate certifies a control it never tested.", p.Name, c.Path)
+			}
+		}
+		if p.MoreSecure == nil {
+			t.Errorf("%s: declares AdoptControls but no MoreSecure case — the safe direction "+
+				"(a resource more secure than declared) must be pinned so a fix cannot start "+
+				"false-failing a legitimate adopt.", p.Name)
+		}
+	} else if adoptControlDebt[p.Name] && len(p.MissingControl) > 0 {
+		t.Errorf("%s: on adoptControlDebt but declares MissingControl cases — it is wired; "+
+			"remove it from the debt list.", p.Name)
+	}
+
+	for _, cc := range p.MissingControl {
+		cs := cc.Server()
+		crt := &countRT{inner: http.DefaultTransport, classify: p.Classify}
+		create := p.Create
+		if cc.Create != nil {
+			create = cc.Create
+		}
+		cres := create(p.New(cs.URL, crt))
+		cs.Close()
+		if cres.Status != cc.WantStatus {
+			t.Errorf("%s: adopting a resource missing declared control %q must be %q — a "+
+				"create must never claim a control the live resource lacks; got %q reason=%q",
+				p.Name, cc.Path, cc.WantStatus, cres.Status, cres.Reason)
+		}
+		if cc.WantStatus == "failed" && cres.ProviderID != "" {
+			t.Errorf("%s: an immutable missing control (%q) must not bind an unusable "+
+				"resource (a replacement may be needed), got pid %q", p.Name, cc.Path, cres.ProviderID)
+		}
+		if cc.WantStatus == "unknown" && cres.ProviderID == "" {
+			t.Errorf("%s: a mutable missing control (%q) must keep the handle so converge "+
+				"reconciles it, got no pid", p.Name, cc.Path)
+		}
+		if crt.mutations > cc.WantMutations {
+			t.Errorf("%s: adopting a resource missing control %q sent %d mutation(s) (allowed "+
+				"%d) — fail-loud must not half-fix; remediation is converge's job.",
+				p.Name, cc.Path, crt.mutations, cc.WantMutations)
+		}
+	}
+
+	if p.MoreSecure != nil {
+		ms := p.MoreSecure()
+		mrt := &countRT{inner: http.DefaultTransport, classify: p.Classify}
+		mres := p.Create(p.New(ms.URL, mrt))
+		ms.Close()
+		if mres.Status != "succeeded" {
+			t.Errorf("%s: adopting a resource MORE secure than declared must succeed — the "+
+				"safe direction is not a lie; false-failing it blocks a legitimate takeover. "+
+				"Got %q reason=%q", p.Name, mres.Status, mres.Reason)
+		}
+	}
 }
 
 // knownNoAdoptRead names the adopt probes where NO successful read happened, so
@@ -165,3 +275,21 @@ func CertifyCreateAdoptsExisting(t TestingT, p *ExistingProbe) {
 // an entry can only be added deliberately, and the two-way rule means it can only ever
 // shrink again.
 var knownNoAdoptRead = map[string]bool{}
+
+// adoptControlDebt (D1062) names the drivers that set a security control INLINE in
+// their create body — so a 409-adopt never applied it — and whose control-completeness
+// is NOT YET proven by this gate (they are not wired to the shared comparator with
+// MissingControl cases). It is the campaign's remaining work made VISIBLE and two-way:
+// the moment a driver here declares AdoptControls, `CertifyCreateAdoptsExisting` FAILS
+// ("remove it from the debt list"), so wiring a driver forces its removal and the list
+// can only shrink. The systemic 409-adopt false-success audit found 23 drivers; DynamoDB
+// is wired (off this list); GCS/Filestore fail-loud INLINE (D1047/D1048) but are still
+// listed until migrated to the comparator + given gate cases. When this map is empty the
+// class is closed and gate-enforced.
+var adoptControlDebt = map[string]bool{
+	"aws/rds": true, "aws/aurora": true, "aws/elasticache": true, "aws/opensearch": true,
+	"aws/ecr": true, "aws/msk": true, "aws/backupvault": true, "aws/cloudtrail": true,
+	"aws/iam": true, "aws/loadbalancer": true, "aws/kms": true, "aws/secretsmanager": true,
+	"gcp/memorystore": true, "gcp/artifactregistry": true, "gcp/bigquery": true,
+	"gcp/secretmanager": true, "gcp/gcs": true, "gcp/filestore": true,
+}
