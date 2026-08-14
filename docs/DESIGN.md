@@ -34350,3 +34350,62 @@ false claim (observe reads it back truthfully), but a default-insecure posture a
 inconsistency. Added the same unconditional `StorageEncrypted: "true"` baseline (a customer-key
 case still overrides `KmsKeyId`; absent that, the account's default aws/rds key encrypts it) —
 encrypt-by-default, consistent with the sibling.
+
+## D1050 — Upstash at-rest encryption was omitted when the addon was off, not read as false
+The `false-secure omit-on-empty` class (D1040/D1041/D1003) had one more site outside the AWS/GCP/
+Azure sweep: `mapRedisDB` in the Upstash discover driver emitted `encryption.atRest: true` ONLY
+inside `if db.SecurityAddons.EncryptionAtRest`. The flag comes back on the SAME account-global list
+response that carries every other field the driver reads — so its absence is a MEASURED false, not
+an unknown. Omitting it is the adopt-lie hole: a candidate declaring `encryption.atRest: true`,
+adopted over a database without the addon, keeps its declared `true` because observe emitted
+nothing to contradict it. Now the bool is emitted unconditionally as `measured` — `false` blocks or
+refuses the adoption instead, the safe direction even if the field were ever absent from the
+response. Two test assertions that ENCODED the omit (asserting the observation was absent with no
+addon) were corrected to require the measured `false` (invariants-were-conditional). Swept the
+sibling Hetzner discover driver in the same pass: it emits only `service.managed` + a conditional
+`location.region`, and DELIBERATELY omits ingress/firewall/flow-log bools (D44) because a Hetzner
+network carries no readable per-network flag — an honest author-vs-witness omission of an
+UNMEASURABLE attribute, not the omit-on-empty of a measurable one. Left as-is.
+
+## D1051 — RBAC access.privileged read false for a cluster-admin-equivalent role
+`permPrivileged` (k8s rbacrole.go) is the driver's sharpest least-privilege signal, and it
+reported a DEFINITE `access.privileged: false` (derivation `measured`, no `unknown` cushion — the
+role path always emits a bool) for roles that are effectively cluster-admin. Two gaps, both the
+unclosed remainder of the D988 class:
+- The full-wildcard check fired only for the LITERAL verb `*` (`verb == "*" && res == "*"`). A role
+  spelling out its verbs to look scoped — `apiGroups:["*"] resources:["*"] verbs:[get,list,watch,
+  create,update,patch,delete]` — has every permission shaped `*/*:<verb>` with `verb != "*"`, so
+  nothing fired. That role can create a ClusterRoleBinding and re-grant anything. A mutating
+  permission over `res == "*"` is admin-shaped over that group (it subsumes rbac objects) — now
+  privileged, same intent D988 established, over-reporting a full-control-of-one-CRD-group role,
+  the safe direction.
+- The rbac-write re-grant branch matched only the LITERAL apiGroup `rbac.authorization.k8s.io`; a
+  wildcard apiGroup `*`, which the API server resolves to include the rbac group, slipped past
+  (`*/clusterrolebindings:create`, `*/rolebindings:*`). The branch now also matches group `*`.
+A contract with `access.privileged == false` as a hard constraint read SATISFIED against a genuine
+admin; a person acting on that signal was worse off than with no signal (D694 shape). Two
+asymmetric cases pinned (`enumerated-wildcard-write`, `wildcard-group-rbac-write`) — the suite only
+covered the literal-`*` case before. Namespace `security.podSecurity` measured-vs-config-intent
+(the k8s hunt's MEDIUM) is a real inconsistency but not a dangerous-direction FALSE (PSA is enabled
+by default since 1.25, so `measured` is defensible in the common case) — recorded, not fixed here.
+
+## D1052 — an update could rewire a live consumer to a producer the same plan destroys
+The create path refuses a `$ref` whose producer this plan DELETES: wireReferences builds a
+`deleting` set and returns `ref-producer-retiring` (a value from a resource being destroyed is a
+lie). The UPDATE fold path — `foldDriftRefs`, called at compiler.go:770 to carry resolved literals
+for a wired operand so a config re-push (Lambda's UpdateFunctionConfiguration) does not STRIP the
+env var (D283/D961/D962) — sees only bindings/outputs/clock, never the action set, so it folded a
+literal read from a producer being retired or replaced in the very same plan. Reachable with a real
+driver (Lambda is an OperandDrifter): contract binds `api.environment.DB_HOST = {$ref db.endpoint}`;
+`db` is retired (delete) or hit an immutable change (replace = delete of the old gen + create of a
+new one), `api` has independent drift so it classifies as an update. The fold pins the OLD endpoint,
+apply deletes `db`, then re-pushes `DB_HOST` pointing at the destroyed resource and reports
+succeeded — the foldStaleReason freshness re-check passes because the observation WAS fresh;
+"the producer is being destroyed this plan" is a different fact the staleness gate cannot see. This
+is a silent wrong answer in the dangerous direction. `refuseUpdateFoldsRetiringProducer` runs after
+every action is composed (so the delete/replace set is complete regardless of capability ordering)
+and applies the create path's guard to update Folds. The two paths' own contract said they must
+stay in sync and this is exactly where they diverged. (The compiler hunt's two LOW notes — a
+swallowed foldDriftRefs error for a hypothetical non-OperandDrifter body-re-pusher, and update
+actions not participating in DAG ordering — are recorded; neither is a demonstrated dangerous-
+direction FALSE today.)

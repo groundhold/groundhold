@@ -104,9 +104,13 @@ func TestListDiscoversOneRedisDB(t *testing.T) {
 	if o := m["location.region"]; o.Value != "us-east-1" || o.Derivation != "measured" {
 		t.Errorf("location.region = %+v, want us-east-1/measured", o)
 	}
-	// at-rest addon absent => the observation is OMITTED (unknown != false).
-	if _, ok := m["encryption.atRest"]; ok {
-		t.Error("encryption.atRest asserted with no addon present")
+	// at-rest addon absent => the bool is emitted as a MEASURED false (D1050),
+	// not omitted: the list response carries the addon flag, so its absence is a
+	// read false, not an unknown. Omitting it let a `true` candidate be adopted.
+	if o, ok := m["encryption.atRest"]; !ok {
+		t.Error("encryption.atRest must be emitted as measured false when addon absent")
+	} else if o.Value != false || o.Derivation != "measured" {
+		t.Errorf("encryption.atRest = %+v, want false/measured", o)
 	}
 	// eviction/type/state are noise — never observations.
 	for _, noise := range []string{"eviction", "type", "state", "cost.monthly", "availability.class"} {
@@ -215,8 +219,9 @@ func TestMapRedisDB(t *testing.T) {
 				"location.region":        "us-east-1",
 				"encryption.inTransit":   true,
 				"network.publicExposure": true,
+				"encryption.atRest":      false, // D1050: addon off => measured false, not omitted
 			},
-			absent:  []string{"encryption.atRest", "availability.class", "cost.monthly"},
+			absent:  []string{"availability.class", "cost.monthly"},
 			diagLen: 1,
 		},
 		{

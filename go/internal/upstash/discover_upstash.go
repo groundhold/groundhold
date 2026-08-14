@@ -107,11 +107,12 @@ func mapRedisDB(db redisDB) ([]provider.Observation, []string) {
 		{Path: "network.publicExposure",
 			Value:      !(db.SecurityAddons.PrivateLink || db.SecurityAddons.VPCPeering),
 			Derivation: "measured"},
-	}
-	// at-rest encryption is a security addon — only assert it when present.
-	if db.SecurityAddons.EncryptionAtRest {
-		obs = append(obs, provider.Observation{
-			Path: "encryption.atRest", Value: true, Derivation: "measured"})
+		// D1050: at-rest encryption is a security addon read from the same list response,
+		// so its absence is a MEASURED false, not an unknown — emit the bool for BOTH
+		// states (D1040/D1003). Emitting only the true case let an `encryption.atRest: true`
+		// candidate be adopted over a database without the addon; a false here blocks/refuses
+		// instead, the safe direction even if the field were ever absent from the response.
+		{Path: "encryption.atRest", Value: db.SecurityAddons.EncryptionAtRest, Derivation: "measured"},
 	}
 	// engine.protocol: Upstash is Redis-compatible but the list endpoint reports
 	// no explicit version, and availability.class (multi-regional) has no single
