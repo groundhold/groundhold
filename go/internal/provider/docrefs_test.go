@@ -39,15 +39,15 @@ var (
 // publishedDocs returns every markdown file that crosses the export boundary,
 // mirroring the whitelist in scripts/export-public.sh (D63/D345).
 //
-// Explicit, never a walk from the repo root: the root holds CLAUDE.md (the
-// internal agent doc, deliberately NOT exported) and .claude/worktrees, which
+// Explicit, never a walk from the repo root: the root holds the standing instructions
+// (deliberately NOT exported) and .claude/worktrees, which
 // can hold stale copies of the whole tree. Gating those would report failures
 // about documents no stranger will ever read — and would make this test's own
 // description false, which is the exact failure it exists to prevent.
 // publishedDocs returns every markdown file that crosses the export boundary — DERIVED
 // from the exporter's own INCLUDE list, never a second copy of it.
 //
-// It used to be a second copy: root markdown except CLAUDE.md, four named docs/ files,
+// It used to be a second copy: root markdown except those instructions, four named docs/ files,
 // and four whole trees. That list and the exporter's had drifted (D497). Four markdown
 // files crossed the boundary and no gate looked at them — the three GitHub issue/PR
 // templates, which make claims about the project's maturity to the first stranger who

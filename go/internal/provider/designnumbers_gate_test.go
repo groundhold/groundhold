@@ -18,13 +18,13 @@ import (
 //
 // Three numbers are currently used twice, all from parallel sessions appending at the
 // same time. They are NOT renumbered: D329 and D330 are each cited from several Go
-// files and from docs/canary.md, and rewriting a number breaks references that are
+// files and from the canary runbook, and rewriting a number breaks references that are
 // correct for one of the two meanings and wrong for the other — the fix would create
 // exactly the ambiguity it removes. They are recorded here instead, and the gate stops
 // a FOURTH from arriving unnoticed.
 var knownDuplicateDecisions = map[int]string{
 	94:  "messaging-topic residency vs verdict provability — two D94s from parallel work",
-	329: "OAC dual invoke vs the banner registry — cited from apireq and canary.md",
+	329: "OAC dual invoke vs the banner registry — cited from apireq and the canary runbook",
 	330: "reachability probe vs the routing-contract artefacts — cited from azure/contract",
 }
 
