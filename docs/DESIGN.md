@@ -34612,3 +34612,77 @@ first into DynamoDB (replacing the D1058 inline check, which had a precedence ga
 unknown where an immutable CMEK miss should FAIL). Next slices: extend CertifyCreateAdoptsExisting
 with missing-control + more-secure fixtures and a parity meta-gate (every adopt-enrolled driver must
 carry both, on a debt list that only shrinks), then wire the remaining 22 drivers cloud by cloud.
+
+## D1063 — the published front door, walked with nothing but a downloaded binary
+
+Nobody had ever done what a stranger does. The gates test what the code does, the
+cross-driver sweeps test what the drivers do, and D550-D584 established that neither
+reads the sentences the system hands an operator — but that walk was the OPERATOR'S
+path, on an estate, with the repository already cloned. The FRONT DOOR — download a
+release, verify it, follow the README's first sixty seconds — had never been walked at
+all. Traffic says as much: fourteen days, one unique visitor, zero asset downloads.
+
+Two defects, one negative result, and one thing worth writing down about the
+instrument.
+
+**The sixty-second promise is not deliverable by the audience it names.** The README
+says "see it work in 60 seconds" and "Grab a binary — no toolchain, no clone", and the
+only runnable demo below it reads `examples/laptop/laptop.contract.yaml`, which exists
+only in a clone. Followed literally with a downloaded binary it produces
+`converge error: open examples/laptop/laptop.contract.yaml: no such file or directory`.
+The README is not lying about any single fact — the binary DOES work identically, which
+is what the sentence claims — but the composition it invites cannot be executed, and the
+reader meets that inside the minute the heading promises.
+
+**The scaffold hands that reader a document no provider can build.** `example candidate`
+is the binary-only alternative: it scaffolds a candidate from the vocabulary. It wrote
+EVERY attribute of the type as a live line with the placeholder for its kind, and for a
+bool that placeholder is `false` — so a database candidate declared
+`service.managed: false` one line under the `provider: aws` the scaffold itself
+recommends. The RDS driver refuses that exact value, correctly and by name
+("service.managed=false cannot be honored by RDS"). The consequence on the documented
+loop: `converge` APPLIED on the first pass and REFUSED on every pass after it, forever.
+Deleting that one line turned it into APPLIED → CONVERGED.
+
+This is the D622 argument applied one field further. That entry fixed the scaffold's
+`provider:` line, writing that "a default that reads as a recommendation must not name a
+cloud that cannot do the job" — and left the VALUES the same generator writes, which
+have the identical problem. It also recorded, and did not act on, the fact that the
+scaffold's next-step line points at `verify`: a document check that says PROVEN about
+this pair. It still did. `verify` reported `2 satisfied, 0 violated, PROVEN` on a
+candidate that cannot be built.
+
+**The fix is the shape the curated example already had.** `examples/laptop` is the proof
+of the intended form: its contract constrains one path, and its candidate declares
+exactly that one attribute — `service.managed: true`. A candidate ANSWERS a contract;
+declaring an attribute ASSERTS the implementation has that property. Scaffolding the
+whole vocabulary manufactures assertions nobody chose, and eventually one of them is
+wrong. So the scaffold now writes the attributes the contract ASKS ABOUT as live lines
+and OFFERS the rest commented out, with a count and a sentence saying that uncommenting
+one is asserting it. Seeing the palette is the scaffold's teaching value; an offer is not
+a declaration. The header now names both questions and what each answers — `verify` for
+"do the documents agree", `preflight` for "can this be built" — because the reader had no
+way to tell which placeholder was a landmine, and the tool sent them to the check that
+cannot see it.
+
+Gated over the OUTPUT rather than the generator, so it survives a rewrite, with both
+halves driven red: a scaffold that dumps the vocabulary fails, and a scaffold that
+declares nothing fails too (the vacuity half, D328 — without it the gate passes on an
+empty candidate). The landmine is named in the failure message so a regression says what
+it broke.
+
+**The negative result belongs here too.** `preflight` reports one refusal per capability
+and its help says "every capability's missing implementation operands ... in ONE pass",
+which reads as "all of them at once". On a single capability the two are
+indistinguishable, and supplying the named operand only produces the next refusal. A
+two-capability contract settles it: both were reported in one run. The claim is about
+capabilities, it is true, and it is NOT a defect — recorded because the suspicion was
+reasonable and the test that killed it is cheap to re-run.
+
+**On the instrument.** `gh attestation verify` prints NOTHING on success outside a
+terminal and exits 0, which is indistinguishable from not having run. The negative
+controls settle it — a wrong repository and a one-byte-tampered binary both exit 1 with
+an error — and the attestation is real: the downloaded binary's digest is a subject of
+an attestation signed by `release.yml@refs/tags/v0.1.7`. Recorded because "silence means
+success" is exactly the reading this project refuses everywhere else, and a reader
+following the README's verification line meets it with no way to tell.

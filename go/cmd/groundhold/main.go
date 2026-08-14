@@ -4486,9 +4486,27 @@ func scaffoldCandidate(contractPath string) int {
 		fmt.Fprintf(os.Stderr, "vocab error: %v\n", err)
 		return 1
 	}
+	// D1063: which attributes the CONTRACT asks about. A candidate ANSWERS a
+	// contract; declaring an attribute asserts the implementation has that
+	// property, so scaffolding every attribute in the vocabulary manufactures
+	// assertions the author never made. The curated example is the proof of the
+	// intended shape: its contract constrains one path and its candidate declares
+	// exactly that one.
+	asked := map[string]map[string]bool{}
+	for _, con := range c.Constraints {
+		if asked[con.Subject] == nil {
+			asked[con.Subject] = map[string]bool{}
+		}
+		asked[con.Subject][con.Path] = true
+	}
+
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Candidate scaffold for contract %q — fill in provider,\n"+
-		"# service and the attribute values, then: groundhold verify <contract> <this>\n",
+	fmt.Fprintf(&b, "# Candidate scaffold for contract %q — fill in provider, service\n"+
+		"# and the attribute values, then ask BOTH questions:\n"+
+		"#   groundhold verify <contract> <this>                 — do the documents agree?\n"+
+		"#   groundhold preflight <contract> <this> --provider <p> — can it actually be built?\n"+
+		"# They answer different things: verify is a document check and can say PROVEN\n"+
+		"# about a pair no provider can honour (D622, D1063).\n",
 		c.ID)
 	b.WriteString("apiVersion: candidate/v0.1\n")
 	b.WriteString("kind: ImplementationCandidate\n")
@@ -4513,7 +4531,30 @@ func scaffoldCandidate(contractPath string) int {
 			b.WriteString("    attributes: {}          # no vocabulary attributes for this type\n")
 			continue
 		}
-		b.WriteString("    attributes:\n")
+		// D1063: the attributes the contract asks about are LIVE; the rest of the
+		// vocabulary is offered COMMENTED OUT, so the reader still sees the whole
+		// palette (that is the scaffold's teaching value) without the document
+		// asserting properties nobody chose. The walk that found this: the dumped
+		// form wrote `service.managed: false` — the kind default for a bool, and
+		// the one value no managed service can honour — one line under a
+		// `provider: aws` the scaffold itself recommends, so `converge` applied
+		// once and then REFUSED every later pass. Same argument as the D622
+		// comment above, applied to the values rather than the provider: a
+		// placeholder that reads as a declaration must not assert what the
+		// recommended cloud cannot do.
+		live, offered := 0, 0
+		for _, path := range sortedKeys(voc.Attributes) {
+			if asked[capID][path] {
+				live++
+			} else {
+				offered++
+			}
+		}
+		if live == 0 {
+			b.WriteString("    attributes: {}          # the contract constrains none of this type's attributes\n")
+		} else {
+			b.WriteString("    attributes:\n")
+		}
 		for _, path := range sortedKeys(voc.Attributes) {
 			attr := voc.Attributes[path]
 			kind, _ := attr["kind"].(string)
@@ -4522,8 +4563,16 @@ func scaffoldCandidate(contractPath string) int {
 			if len(desc) > 60 {
 				desc = desc[:60] + "…"
 			}
-			fmt.Fprintf(&b, "      %s: %s  # %s%s\n",
-				path, sampleForAttr(attr, kind), kind, descSuffix(desc))
+			prefix := "      "
+			if !asked[capID][path] {
+				prefix = "      # " // offered, not asserted
+			}
+			fmt.Fprintf(&b, "%s%s: %s  # %s%s\n",
+				prefix, path, sampleForAttr(attr, kind), kind, descSuffix(desc))
+		}
+		if offered > 0 {
+			fmt.Fprintf(&b, "      # ^ %d more attribute(s) this type supports, commented out: the\n"+
+				"      #   contract does not ask about them. Uncomment one only to ASSERT it.\n", offered)
 		}
 	}
 	fmt.Print(b.String())
