@@ -43,6 +43,13 @@ const (
 	Floor
 	// Exact: the measured value must equal the declared (residency / location.region).
 	Exact
+	// Set: the measured value must equal the declared as an UNORDERED SET of strings —
+	// an IAM role's `trust.principals` (who may assume it) is a set, and a live role
+	// trusting a DIFFERENT or BROADER set than declared is the dangerous direction
+	// (confused-deputy). Both sides are normalised to sorted string slices before
+	// comparing, so element order never causes a false mismatch; a value that is not a
+	// list of strings on either side is unverifiable.
+	Set
 )
 
 // Control is one adopt-critical control a driver declares for a capability. The set
@@ -167,8 +174,50 @@ func satisfies(dir Direction, want, got any) (ok, comparable bool) {
 		return gi >= wi, true
 	case Exact:
 		return fmt.Sprint(want) == fmt.Sprint(got), true
+	case Set:
+		ws, wok := toStringSet(want)
+		gs, gok := toStringSet(got)
+		if !wok || !gok {
+			return false, false
+		}
+		return equalSortedStrings(ws, gs), true
 	}
 	return false, false
+}
+
+// toStringSet normalises a []any or []string into a SORTED []string, so two sets that
+// differ only in element order compare equal. A non-list, or a list with a non-string
+// element, is not comparable as a set (returns ok=false → unverifiable).
+func toStringSet(v any) ([]string, bool) {
+	var out []string
+	switch xs := v.(type) {
+	case []string:
+		out = append(out, xs...)
+	case []any:
+		for _, e := range xs {
+			s, ok := e.(string)
+			if !ok {
+				return nil, false
+			}
+			out = append(out, s)
+		}
+	default:
+		return nil, false
+	}
+	sort.Strings(out)
+	return out, true
+}
+
+func equalSortedStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func toInt(v any) (int, bool) {
