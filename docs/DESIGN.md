@@ -35187,3 +35187,68 @@ ran exit 0 before the fix — the proof the gate distinguishes). Decision consul
 skeptical review confirmed the gap is reachable and guarded nowhere on the converge path (not
 pre-apply verify, not the compiler), and a design pass chose relaying audit over a severity check
 converge would maintain itself.
+## D1080 — `v*` means a published release, and the source repository stops minting them
+
+D1078 recorded the collision and could not end it: two sequences shared the `v0.1.x`
+namespace, and neither could be renamed after the fact. This is the owner's decision on
+which one yields, taken 2026-08-14 after the alternatives were laid out.
+
+**The development line yields, because nobody outside sees it.** A `v*` tag now means a
+published release and nothing else. Build markers, if one is needed, are `build-<n>`.
+The historical `v0.1.0`–`v0.1.17` tags stay exactly where they are — the record is not
+rewritten — and the CHANGELOG's existing table explains them.
+
+**The next published release is `v0.1.18`, not `v0.1.9`.** The decision as first framed
+would not have worked immediately, and finding that out was the useful part of
+implementing it: the development line reached `v0.1.17` while the release line is at
+`v0.1.8`, so releases 9 through 17 would each have landed on an existing entry of the
+same name. Nine more collisions, in the numbers a reader is most likely to hold. Public
+numbering therefore continues past the high-water mark, and the CHANGELOG states that
+the gap is the old overlap rather than missing releases — an unexplained jump would
+itself be a small dishonesty on the download page.
+
+Two alternatives were declined and are recorded so the choice is not re-litigated from
+scratch. A banded scheme (`v0.1.801`, `802`, …) works mechanically — nothing in this
+codebase parses or compares a version string; it is stamped and printed — and needs no
+rename, but it puts a number on the download page that reads as 801 patches and leaves a
+rule to remember forever. Moving public releases to `0.2.x` is ordinary semver but
+invites a maturity reading this project has no business implying while MATURITY says
+what it says.
+
+**Gated, because a convention in a document does not stop anyone typing `git tag`.**
+`TestTheSourceRepositoryMintsNoNewVersionTags` fails on any `v*` tag above the
+high-water mark in this repository, and on any version-shaped tag it does not recognise.
+The constant is a closed historical fact, which is what makes hardcoding it safe. It
+carries the D328 vacuity guard: the historical tags are known to exist, so a listing
+that returns too few fails rather than passing on an empty set. Teeth-checked by minting
+`v0.1.18` here — it fails, naming the tag — and it goes green again when the tag is
+removed. The consequence a mistake would otherwise have is silent twice over: the
+collision re-opens, and `v*` is the release workflow's trigger.
+
+## D1081 — attest reported an invalidated tail signature in a field and exited 0
+`attest` is the union integrity reporter (D1020): chain + anchor + snapshot + archive +
+signatures, and D1020 made its exit code reflect the report so a cron using it as a one-pass
+integrity check could not read all-clear over a corrupted off-host witness. `attestIntegrityHealthy`
+gates the anchor, snapshot (including the snapshot's own signature self-verifying) and archive arms.
+It did not gate the SIGNATURES arm — the one D1020's own comment names as part of the union. A tail
+event whose detached signature envelope is PRESENT but does not self-verify against its own claimed
+key is counted as `signatures.envelopePresentButInvalid` and described in the code as tamper evidence,
+its own fact; it is reachable through replay precisely because the `sig` envelope is excluded from
+event identity (D102), so an invalidated signature does not break the chain and the exit-5 chain gate
+never fires. So the report body showed `envelopePresentButInvalid: 1` and the process still exited 0.
+
+This is a direct sibling of D1020, left open by the same fix, and the same D1020/D965/D966/D1079 shape:
+an honest machine FIELD beside an exit code that says the opposite, on the surface automation gates on.
+The asymmetry gives it away — the SNAPSHOT signature failing to self-verify already returns unhealthy
+(exit 5), while a TAIL signature failing to self-verify exited 0, for no reason the code could state.
+The automation cost: a cron runs `attest` as its integrity check, an attacker or bit-rot invalidates
+the detached signature on a signed tail event (the body's meaning unchanged, but the cryptographic
+attestation that a trusted key vouched for it destroyed), and attest exits 0 — the signed-evidence
+guarantee silently downgraded to unsigned, no alarm. Fix: `attestIntegrityHealthy` returns false when
+`Signatures.EnvelopePresentButInvalid > 0`, mirroring the snapshot-signature arm. It is pure
+self-consistency (no trust policy), and `Unsigned` (a legitimately unsigned ledger, D102) and
+`SelfVerified` do not increment it, so an unsigned or fully-signed ledger stays healthy. The conformance
+case that publishes a signed tail event, tampers its signature, and asserts the counting (tamper is
+never counted as coverage) now also asserts exit 5 — it asserted exit 0 before, the proof the gate was
+missing. Found by the fifth sweep of this class (after D1079 showed D958's exit-honesty sweep was not
+exhaustive); the audit of the other verbs came back clean, each already gating its own problem field.

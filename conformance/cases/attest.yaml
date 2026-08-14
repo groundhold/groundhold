@@ -30,6 +30,11 @@ cases:
       D139 honesty core: a present signature that does NOT verify
       against its own key is EnvelopePresentButInvalid, never counted
       as coverage. Tamper cannot inflate the signed number.
+      D1081: and it BLOCKS — a present-but-invalid tail signature is the
+      same corruption class as a snapshot signature that does not
+      self-verify, so attest exits 5 (not 0). A cron gating on the exit
+      code must not read all-clear over an invalidated signature. Unsigned
+      (below) and self-verified events stay exit 0.
     impl: go
     signing:
       steps:
@@ -38,7 +43,7 @@ cases:
         - tamperEventSig: { line: 1 }
         - attest: {}
           expect:
-            exit: 0
+            exit: 5
             fields:
               signatures.selfVerified: 0
               signatures.envelopePresentButInvalid: 1

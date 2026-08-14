@@ -3943,6 +3943,17 @@ func attestIntegrityHealthy(rep *ledger.IntegrityReport) bool {
 			return false
 		}
 	}
+	// D1081: the signatures arm of the union D1020 named (chain+anchor+snapshot+
+	// archive+SIGNATURES). A tail event whose detached envelope is PRESENT but does not
+	// self-verify is tamper evidence (attest.go) — the same corruption class the
+	// snapshot-signature check above already gates on, and pure self-consistency (no
+	// trust policy). It was reported in a field and exited 0; a cron reading exit 0
+	// over an invalidated signature downgrades signed evidence to unsigned in silence.
+	// Unsigned (D102) and self-verified events do not increment this, so a legitimately
+	// unsigned or fully-signed ledger stays healthy.
+	if rep.Signatures.EnvelopePresentButInvalid > 0 {
+		return false
+	}
 	return true
 }
 

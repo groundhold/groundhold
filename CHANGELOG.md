@@ -24,6 +24,14 @@ the mirror commit it was built from, so anything you downloaded can be traced to
 tree you can check out — `BUILDINFO.txt` inside every release states the same
 commit, the exact toolchain and the build command.
 
+**This ends with the next release, and here is the rule that replaces it.** A `v*`
+tag now means a published release and nothing else: the development line has stopped
+using version-shaped names, so there is only one sequence left that looks like a
+version, and it is the one you can download. Because the two sequences overlapped up
+to `[v0.1.17]`, the next published release is **`v0.1.18`** — numbering continues past
+the highest build number rather than walking back through nine more collisions. The
+gap between `v0.1.8` and `v0.1.18` is that overlap, not missing releases.
+
 | release | published | built from | contains |
 |---|---|---|---|
 | `v0.1.8` | 2026-08-14 | `00fa5c1e` | everything through `[v0.1.17]` below, plus the work recorded in `docs/DESIGN.md` up to D1073. Rebuilt on Go 1.26.6 for stdlib fixes; `v0.1.7` predates that toolchain. |
