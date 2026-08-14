@@ -34243,15 +34243,14 @@ priority over feature work. The launch posture is a different axis and is unchan
 experimental `v0.x`, gathering feedback, not pushing GA (MATURITY's "what ready would
 mean" is the higher bar and none of it moved).
 
-**The part worth keeping is how long the stale instruction survived.** `CLAUDE.md` went
-on saying "This repo is private, pre-launch" and "The runtime is FROZEN" for three days
-after both stopped being true, while both parallel sessions read that file as binding at
-the start of every session. This is the D287 shape — a document that stops being true
-keeps being believed by exactly the readers who obey it — with an edge D287 did not
-have: the readers are agents, and an agent does not argue with its instructions the way
-a person eventually does. One session flagged the drift twice before it was corrected;
-neither session simply ignored the false line, which is the correct behaviour and
-precisely why a false instruction is expensive.
+**The part worth keeping is how long the stale instruction survived.** The standing
+instructions read at the start of every working session went on carrying both retired
+claims for three days after each stopped being true. This is the D287 shape — a document
+that stops being true keeps being believed by exactly the readers who obey it — and it is
+sharper for instructions than for prose, because an instruction is followed rather than
+weighed. The drift was flagged twice before it was corrected, and the false line was never
+simply ignored in the meantime, which is the correct behaviour and precisely why a false
+instruction is expensive.
 
 No code changed. The gap this closes is that the decision record now carries the
 decision.
@@ -34289,3 +34288,65 @@ also mis-drives adopt and drift. `customerManagedKeys: true` means ALL the insta
 under a customer key, so the read now inspects every attached disk: any disk without a
 `DiskEncryptionKey.KmsKeyName` makes the whole `false` (an empty disk list is `false`). Matches
 how a separately-bound persistent disk reads its own single key truthfully.
+
+## D1045 — a multi-region Cosmos account no longer passes a single-region residency constraint
+
+`observeCosmos` collapsed a globally-distributed account to `Properties.Locations[0]` (the
+write region) and emitted it as `location.region`, `measured`. A Cosmos account replicates
+data to EVERY configured location, so a brownfield account `[westeurope(write), eastus(read)]`
+adopted under an EU-only contract with a hard `location.region == westeurope` read SATISFIED
+while the data physically sat in `eastus` too — a silent wrong answer on a residency
+constraint, reachable via adopt/discover (BuildCosmos refuses multi-regional on create, so
+groundhold-made accounts are single-region). The function already had the full `Locations`
+array in hand (it reads it for `availability.class`). Now, when `len(Locations) > 1`, it
+WITHHOLDS `location.region` and diagnoses the replica set (the D753 availability-class
+discipline) so a hard residency constraint blocks as unknown instead of passing. Single-region
+accounts are unchanged.
+
+## D1046 — a standalone Log Analytics workspace reads customerManagedKeys=false, not nothing
+
+D985 correctly killed the false-TRUE (a linked dedicated cluster reported as BYOK from the
+linkage alone, before confirming a key). But it left the CMK read entirely inside
+`if clusterResourceId != ""`, so a STANDALONE workspace — no linked cluster, the common case —
+emitted no `customerManagedKeys` observation at all. A Log Analytics workspace can only carry a
+customer key through a dedicated cluster, so "no cluster" is not unknown: it is definitively,
+measurably `false`. Omitting it let a `customerManagedKeys: true` candidate be ADOPTED over a
+standalone workspace, certifying a BYOK control that provably cannot exist. The `else` branch now
+emits a measured `false`. D985's caution (do not infer a false true from a cluster linkage) is
+untouched — the cluster-read-with-no-key case still diagnoses rather than asserting.
+
+## D1047 — GCS create reports succeeded for a 409-adopted bucket missing a DECLARED control
+
+A create-builder audit found a class: a `409/AlreadyExists` re-adopt continuation that reports
+`succeeded` after re-checking only SOME of the declared create-time controls. S3 does it right
+(re-asserts every control idempotently). GCS's 409-ours branch (`gcs_net.go`) failed loud on a
+dual-region/location/public-access-prevention mismatch but had NO case for `encryption.customer
+ManagedKeys`, `versioning`, or the `retention.minimum` floor — so a bucket that exists-and-is-ours
+but lacks a declared control fell through to `succeeded`. GCS ignores the insert body's
+encryption/versioning/retention on a name conflict (they are create-time), so the create claimed
+success for a bucket with, e.g., no customer-managed key. A bare `apply` (no converge verify) gets
+the uncorrected lie; a later observe reads the control back as `measured` so converge would catch
+it, which is why this is MEDIUM. Fixed: added the three missing cases — declared-but-absent CMK,
+versioning, or retention floor now fails loud (`gcs update is not wired — reconcile`), matching
+the existing PAP case.
+
+## D1048 — Filestore create reports succeeded for a 409-adopted instance with the wrong key
+
+The sibling of D1047, found by expanding the class. Filestore's 409 branch (`filestore_net.go`)
+checked ONLY the ownership labels before returning `succeeded` — it compared neither the customer
+key nor anything else. A contract declaring a customer key, adopted onto an existing instance
+whose key differs or is absent, reported success for a control that never landed (Filestore has no
+update path, so this is the terminal word). Fixed: the branch now fails when `plan.KmsKey != "" &&
+doc.KmsKeyName != plan.KmsKey`.
+
+## D1049 — Aurora encrypts at rest by default, matching RDS
+
+`BuildAurora` initialised the CreateDBCluster params with NO `StorageEncrypted` baseline; it was
+set only inside the `encryption.atRest`/`customerManagedKeys` cases. The sibling RDS driver sets
+`StorageEncrypted: "true"` unconditionally (`rds.go`), and Aurora Serverless v2's provider default
+is `false` — so a `capability.database.relational` on Aurora that was silent on `encryption.atRest`
+shipped an UNENCRYPTED cluster while the identical capability on plain RDS shipped encrypted. Not a
+false claim (observe reads it back truthfully), but a default-insecure posture and a cross-driver
+inconsistency. Added the same unconditional `StorageEncrypted: "true"` baseline (a customer-key
+case still overrides `KmsKeyId`; absent that, the account's default aws/rds key encrypts it) —
+encrypt-by-default, consistent with the sibling.

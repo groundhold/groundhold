@@ -243,6 +243,13 @@ func BuildAurora(account, environment, capability string,
 		"Action":              "CreateDBCluster",
 		"Version":             rdsVersion,
 		"DBClusterIdentifier": clusterID,
+		// D1049: encryption.atRest baseline, matching the sibling RDS driver (rds.go).
+		// Aurora Serverless v2's provider default is StorageEncrypted=false, so without
+		// this an Aurora contract silent on encryption.atRest shipped an UNENCRYPTED
+		// cluster while the same capability on plain RDS is encrypted. A customer-key
+		// case below overrides KmsKeyId; absent that, this encrypts with the account's
+		// default aws/rds key (encrypt-by-default, the safe and consistent posture).
+		"StorageEncrypted": "true",
 		// ownership tags (D52) — ownership lives on the CLUSTER
 		"Tags.member.1.Key":   "groundhold-capability",
 		"Tags.member.1.Value": sanitizeTag(capability),

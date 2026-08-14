@@ -108,7 +108,10 @@ func TestAdoptsExistingFilestore(t *testing.T) {
 		Name:     "gcp/filestore",
 		Classify: gcpReadRole,
 		ExistingServer: func() *httptest.Server {
-			return conflictOnCreate(t, filestoreServer(t, "shared", "ENTERPRISE", ""), postCreate)
+			// D1048: the existing instance must serve the SAME customer key fsImpl declares,
+			// or the 409-adopt correctly refuses (a key mismatch is not a match to adopt).
+			return conflictOnCreate(t, filestoreServer(t, "shared", "ENTERPRISE",
+				"projects/acme-prod/locations/europe-west1/keyRings/r/cryptoKeys/k"), postCreate)
 		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver("acme-prod")

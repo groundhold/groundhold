@@ -228,6 +228,38 @@ func TestObserveLogAnalyticsCMKConfirmedAgainstCluster(t *testing.T) {
 	}
 }
 
+// D1046: a STANDALONE workspace (no linked dedicated cluster) reads customerManagedKeys
+// =false — BYOK requires a dedicated cluster, so no cluster is a MEASURED false, not an
+// omission that would let an adopt certify a control that cannot exist. D985 (the
+// cluster-linkage no-false-true caution) is untouched.
+func TestObserveLogAnalyticsStandaloneCMKIsFalse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// a workspace with NO clusterResourceId in features
+		_, _ = w.Write([]byte(`{"location":"eastus",` +
+			`"tags":{"groundhold-capability":"app-logs","groundhold-environment":"prod"},` +
+			`"properties":{"provisioningState":"Succeeded","features":{}}}`))
+	}))
+	defer srv.Close()
+	d := laDriver(t, srv)
+	pid := laProviderID(testSub, "rg1", azResourceName("pv-la", "prod", "app-logs", 1))
+	obs, _, err := d.observeLogAnalytics("app-logs", pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, o := range obs {
+		if o.Path == "encryption.customerManagedKeys" {
+			found = true
+			if o.Value != false {
+				t.Fatalf("a standalone workspace must read customerManagedKeys=false, got %v", o.Value)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("a standalone workspace must EMIT customerManagedKeys=false, not omit it (D1046)")
+	}
+}
+
 func TestCreateObserveDeleteLogAnalytics(t *testing.T) {
 	srv := laServer(t, "app-logs", 90)
 	defer srv.Close()
