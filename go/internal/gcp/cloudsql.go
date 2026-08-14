@@ -222,7 +222,7 @@ func BuildCreateRequest(project, environment, capability string,
 	// binaryLogEnabled; a Postgres instance rejects binaryLogEnabled ("Binary log can
 	// only be enabled for MySQL instances", 400). The old body sent
 	// pointInTimeRecoveryEnabled for EVERY engine, so it was uncreatable for MySQL —
-	// the flagship engine (CLAUDE.md's first real-cloud run) — while the golden test
+	// the flagship engine (the roadmap's first real-cloud run) — while the golden test
 	// only exercised Postgres and stayed green.
 	if haveRPO {
 		dv, _ := body["databaseVersion"].(string)

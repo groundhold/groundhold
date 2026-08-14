@@ -106,7 +106,8 @@ func TestPythonReferenceImportsStdlibOnly(t *testing.T) {
 	sort.Strings(foreign)
 	if len(foreign) > 0 {
 		t.Errorf("the reference implementation imports outside stdlib + PyYAML: %v\n"+
-			"CLAUDE.md and the README both say stdlib + PyYAML only; a third-party import "+
+			"the standing instructions and the README both say stdlib + PyYAML only; a "+
+			"third-party import "+
 			"in the VERIFIER is a transitive audit surface the design exists to avoid.",
 			foreign)
 	}

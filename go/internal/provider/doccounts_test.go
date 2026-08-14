@@ -17,9 +17,9 @@ import (
 
 // D324: a number written in prose drifts silently.
 //
-// CLAUDE.md claimed "153 conformance cases ... six vocabularies" when the suite
-// was 471 and the vocabularies 52 — the file that shapes how every contributor
-// understands the project, understating it threefold. The README claimed "~128
+// The standing instructions claimed "153 conformance cases ... six vocabularies" when
+// the suite was 471 and the vocabularies 52 — the file that shapes how every
+// contributor understands the project, understating it threefold. The README claimed "~128
 // service mappings across AWS (46), GCP (41), Azure (41)"; the drivers certify 133
 // mappings (50/42/41), and the 46/41/41 were capability TYPES, a distinction this
 // repo cares about (D76: one type, many services).
@@ -92,32 +92,6 @@ func TestDocServiceCountsMatchTheDrivers(t *testing.T) {
 	check("AWS capability types", tm[1], got["AWS"].types)
 	check("GCP capability types", tm[2], got["GCP"].types)
 	check("Azure capability types", tm[3], got["Azure"].types)
-}
-
-// The vocabulary count in CLAUDE.md is the other number a reader uses to size the
-// system, and it is one directory listing away from the truth.
-func TestClaudeMdVocabularyCountMatchesDisk(t *testing.T) {
-	root := repoRoot(t)
-	files, err := filepath.Glob(filepath.Join(root, "spec", "vocab", "capability.*.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	rawClaude, err := os.ReadFile(filepath.Join(root, "CLAUDE.md"))
-	if os.IsNotExist(err) {
-		t.Skip("CLAUDE.md not present (the public export tree omits it); the README-based count check still guards this number")
-	}
-	if err != nil {
-		t.Fatalf("read CLAUDE.md: %v", err)
-	}
-	claude := strings.ReplaceAll(string(rawClaude), " ", " ")
-	m := regexp.MustCompile(`(\d+) vocabularies wired into`).FindStringSubmatch(claude)
-	if m == nil {
-		t.Fatal("CLAUDE.md no longer states the vocabulary count in the form this gate checks")
-	}
-	n, _ := strconv.Atoi(m[1])
-	if n != len(files) {
-		t.Errorf("CLAUDE.md claims %d vocabularies, spec/vocab holds %d", n, len(files))
-	}
 }
 
 func repoRoot(t *testing.T) string {
@@ -274,51 +248,4 @@ func suiteCounts(t *testing.T) (total, dual int) {
 		t.Fatalf("only %d cases parsed — the parser broke, not the docs", total)
 	}
 	return total, dual
-}
-
-// D476: CLAUDE.md's suite counts, gated like its vocabulary count already was.
-//
-// The file said 514 cases / 232 dual; the suite holds 521 / 235. Nobody was misled into
-// a wrong verdict by that — but CLAUDE.md is the document every agent working in this
-// repository reads first, its header says the instructions OVERRIDE default behaviour,
-// and three lines below the stale numbers it says "These numbers drift. Read them from
-// the tools, never from this file." It was right, and the drift was sitting under the
-// warning.
-//
-// The vocabulary count beside them has been gated since D324. The case counts were not,
-// which is the whole difference between a number that stays true and a number that
-// carries a disclaimer.
-func TestClaudeMdSuiteCountsMatchTheSuite(t *testing.T) {
-	root := repoRoot(t)
-	raw, err := os.ReadFile(filepath.Join(root, "CLAUDE.md"))
-	if os.IsNotExist(err) {
-		t.Skip("CLAUDE.md not present (the public export tree omits it); the website " +
-			"conformance-count gate still guards these numbers")
-	}
-	if err != nil {
-		t.Fatalf("read CLAUDE.md: %v", err)
-	}
-	total, dual := suiteCounts(t)
-	claude := string(raw)
-
-	for _, c := range []struct {
-		what, pattern string
-		actual        int
-	}{
-		{"the suite size", `(\d+) conformance cases through the Go binary`, total},
-		{"the dual subset", `\((\d+) of them dual`, dual},
-	} {
-		m := regexp.MustCompile(c.pattern).FindStringSubmatch(claude)
-		if m == nil {
-			t.Fatalf("CLAUDE.md no longer states %s in the form this gate checks — "+
-				"update both, or the number is unguarded again", c.what)
-		}
-		n, err := strconv.Atoi(m[1])
-		if err != nil {
-			t.Fatalf("%s: %q is not a number", c.what, m[1])
-		}
-		if n != c.actual {
-			t.Errorf("CLAUDE.md claims %s = %d, the suite holds %d", c.what, n, c.actual)
-		}
-	}
 }

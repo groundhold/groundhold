@@ -14,7 +14,7 @@ import (
 // "additive-only; a published word never changes meaning". A closed set with no
 // gate is the D311/D327 shape, and here it has an extra edge: the console is a
 // SEPARATE repository that implements against this same glossary ("one glossary,
-// no drift", CLAUDE.md), so a word that exists only in code reaches a consumer
+// no drift"), so a word that exists only in code reaches a consumer
 // that never learned it.
 //
 // The gate asks the CODE for its set (exercising Pick across the verb/exit matrix

@@ -84,8 +84,9 @@ func TestVerificationCoreIsDeterministic(t *testing.T) {
 	}
 }
 
-// The Python reference is the other half of the dual verifier, and CLAUDE.md states
-// the same rule for it by name. Text-level, because the point is the same: nothing
+// The Python reference is the other half of the dual verifier, and the standing
+// instructions state the same rule for it by name. Text-level, because the point is
+// the same: nothing
 // in the reference may reach outside its inputs.
 func TestPythonReferenceIsDeterministic(t *testing.T) {
 	dir := filepath.Join(filepath.Dir(goRoot(t)), "ref", "groundholdlib")

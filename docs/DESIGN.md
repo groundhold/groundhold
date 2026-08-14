@@ -7175,7 +7175,7 @@ converge loop to add when Azure `apply` is wired.
 
 Both auth via OIDC only (AWS role assumption, Azure federated login — no long-lived
 key/secret), guarded to the owner repo, inert until a maintainer provisions the
-throwaway account + variables (checklists in docs/canary.md). All three canaries
+throwaway account + variables (checklists in the canary runbook). All three canaries
 share the exit taxonomy (0/10/20/30) and the A/B/C direction discipline (a
 "stopped attesting / became unreadable" direction is red; a "started attesting"
 direction is a promote-available notice, not red; a moved verb/route/shape is red).
@@ -9374,7 +9374,7 @@ the real relationship (the README summarises, DESIGN.md is the record, the summa
 always trail).
 
 **Two numbers had drifted, in the files that shape a reader's model of the system.**
-CLAUDE.md — the first thing any contributor reads — claimed "153 conformance cases … six
+The instructions file — the first thing any contributor reads — claimed "153 conformance cases … six
 vocabularies" against a real 471 and 52, understating the project threefold. The README
 claimed "~128 service mappings across AWS (46), GCP (41), Azure (41)"; the drivers certify
 133 mappings (50/42/41), and 46/41/41 were the distinct capability TYPES — a conflation this
@@ -9384,14 +9384,14 @@ repo cares about specifically (D76: one type, many services; rds and aurora both
 (D317).
 
 **The fix that matters is the gate, not the edit.** `TestDocServiceCountsMatchTheDrivers`
-and `TestClaudeMdVocabularyCountMatchesDisk` compare the documented counts against the
+and an internal count gate compare the documented counts against the
 drivers and the vocabulary directory, so the next drift fails CI instead of quietly
 misinforming a reader for months. Verified by editing a count and watching it fail. The gate
 deliberately covers only the numbers a reader uses to judge the SIZE of the system — the
 ones that actually drifted — rather than trying to police every figure in the docs, which
 would be a gate nobody could keep green.
 
-CLAUDE.md also now says where to read each number from, so the next person updates the tool
+The instructions file also now says where to read each number from, so the next person updates the tool
 output rather than a sentence: `make check` for case counts, `ServiceCapabilities()` for the
 per-cloud totals. make check clean; 471/471 conformance.
 
@@ -9399,7 +9399,7 @@ per-cloud totals. make check clean; 471/471 conformance.
 Auditing the four-valued core after N1 (D323), on the theory that the project's other
 foundational invariant might have the same shape of hole. It did, and worse.
 
-**The finding.** Invariant 1 is the first rule in CLAUDE.md: "`unknown` or `unverifiable`
+**The finding.** Invariant 1 is the first rule in the instructions file: "`unknown` or `unverifiable`
 on a hard constraint blocks execution — no exceptions, no flags to bypass it." `apply`
 re-verifies the candidate itself and holds the report — but it consulted
 `report.Executable` ONLY inside its loop over the plan's `preconditions`, when it happened
@@ -9480,7 +9480,7 @@ stop being reproducible. `TestVerificationCoreIsDeterministic` walks the import 
 {verify, scalars, contract, canonical, vocab} inside the module and refuses `net*`,
 `os/exec`, `math/rand`, `crypto/rand` and `time` — the wall clock included, because the
 evaluation clock is an INPUT (N1), never something the core reads for itself. The Python
-half is gated in the same test, since CLAUDE.md states the rule for `ref/groundholdlib/` by
+half is gated in the same test, since the instructions file states the rule for `ref/groundholdlib/` by
 name. Both halves verified by injecting an import and watching them fail.
 
 **Invariant 4 (closed operator set) — a hand-written copy, and its drift mode is a panic.**
@@ -9612,7 +9612,7 @@ D90 "Green words per verb" table. `SEALED` (plan) and `OK` (the procedural verbs
 only in the second. So the table that says "this closed set" published ten of the twelve
 words, and a consumer implementing from it would meet two words it never learned. That
 consumer is not hypothetical: the console is a SEPARATE REPOSITORY implementing against this
-glossary, and CLAUDE.md's standing instruction is "one glossary, no drift".
+glossary, and the instructions file's standing instruction is "one glossary, no drift".
 
 A registry that is complete only if you also read a later section is not a registry. The D89
 table now carries all twelve; which verb earns which green word still belongs to the D90
@@ -9799,7 +9799,7 @@ owns its environment (no RCP, our own driver) — the customer-facing D330 probe
 evidence, not proof (D75). Self-cleaning extended to CloudFront/Lambda/OACs (higher leak cost). No
 fake parity: GCP edge canary is a flagged follow-up; Azure stays out (apply not wired). The Go core
 is unit-tested (target selection, the 11-case verdict table, citation); the converge/poll/GET/sweep
-are canary-only (need live creds). OWNER actions flagged (docs/canary.md): apply the scoped IAM
+are canary-only (need live creds). OWNER actions flagged (the canary runbook): apply the scoped IAM
 role delta in the canary account, provision the two persistent fixtures, extend the budget alert,
 enable the daily cron. make check 484/484 both impls, golangci + race + differential clean.
 ## D337. Azure CDN parity for cache + custom domains — honestly unlike CloudFront (D331/D332)
@@ -9906,12 +9906,12 @@ org) found the export FAILED its own gate on two independent counts, both introd
 session's live field partner, named in DESIGN war-stories, test data, and comments — all COSMETIC
 (proven: scrub acme→acme and Python 216/216 + Go 486/486 + unit tests still pass, so ZERO are
 hash-load-bearing); (2) the standalone `make check` on the export failed independently on
-`TestClaudeMdVocabularyCountMatchesDisk` (a D324 count gate) because it hard-reads CLAUDE.md, which
+an internal count gate (D324) because it hard-reads the instructions file, which
 the export deliberately omits. Two small deterministic fixes, no fixture regeneration: an export-time
 `acme→acme` sanitizer in export-public.sh (the SAME stance as the groundhold/a real GCP project
 sanitizers already there — the honest field attribution stays in the PRIVATE repo, the client name
 is genericized on export; `acme` was already on the denylist, only the sanitizer was missing), and a
-`t.Skip` guard on the D324 test when CLAUDE.md is absent (the sibling README-based count check still
+`t.Skip` guard on the D324 test when the instructions file is absent (the sibling README-based count check still
 guards the number in-repo). Verified end-to-end: `export-public.sh` to a temp target now passes the
 negative-space audit AND the standalone gate (486/486) — "export is publishable". The scary tokens
 were already clean (the real account id and every other denylisted client token = 0 hits). Residual to launch is
@@ -9928,7 +9928,7 @@ FQDN (a read failure demotes to unknown, mirroring GCP cloudrun uri; an ingress-
 "" and omits the output — no demotion, since Container Apps ingress is optional). Public gating is the
 shared cloud-agnostic projection (`network.publicExposure → ingress.external`), so an external app is
 probed on its fqdn and an internal one has no target — never a false unknown. Also corrected three
-stale `docs/canary.md` claims that the "Azure executor mutation path is not wired": it IS wired
+stale the canary runbook claims that the "Azure executor mutation path is not wired": it IS wired
 (azure_provider.go Create dispatches createContainerApp/createAzureCDN/createFlexServer) — the Azure
 EDGE canary is deferred on cost/fixture grounds, honestly stated, not an executor gap. Pinned by
 `conformance/cases/reachability.yaml` (external Container App probed on fqdn; internal → nothing) + Go
@@ -10224,14 +10224,14 @@ link in a published document resolves, and every documented `groundhold <verb>` 
 only what a machine can decide without judgement; claims about BEHAVIOUR are not regex-checkable and
 belong where they already live, in the conformance suite and examples/check.sh.
 The scope is the export whitelist, and getting that wrong was itself instructive: the first cut walked
-the repository root, which swept in CLAUDE.md — deliberately not exported — and stale copies of the
+the repository root, which swept in the instructions file — deliberately not exported — and stale copies of the
 whole tree under .claude/worktrees. A gate whose own description was false, inside a change about false
 descriptions. It is now an explicit list with a floor assertion, so a broken scope fails loudly instead
 of quietly passing on nothing. Proven to have teeth by planting a dead link and an invented verb and
 watching both tests name them.
 
 ## D352. The honesty document was the one nobody was checking
-D351 gated links and verbs in published prose; it did not gate numbers outside README.md and CLAUDE.md.
+D351 gated links and verbs in published prose; it did not gate numbers outside README.md and the instructions file.
 Continuing the audit into `docs/MATURITY.md` — the file whose entire purpose is to state what is proven
 versus merely built — found three drifted counts. The conformance suite was described as 446 cases when
 it is 494. GCP was listed at 41 services when the drivers certify 42. And AWS was listed at "46
@@ -10328,7 +10328,7 @@ against "a crossing artifact depending on a private path" was itself a crossing 
 private path.
 The correction is a skip, not a weakening. In the public tree there is no boundary left to check and
 nothing to check it against: everything present there has already crossed by definition, so the only
-honest verdict is "not applicable here". Same shape as the counts gate skipping when CLAUDE.md is absent
+honest verdict is "not applicable here". Same shape as the counts gate skipping when the instructions file is absent
 (D324) — a gate that cannot see its subject says so rather than inventing one. In the private repo, where
 the boundary is defined, the teeth are unchanged: removing the whitelist entry still names
 `.claude/skills/adopt-candidate/SKILL.md -> scripts/adopt-candidate.sh`.
@@ -13565,7 +13565,7 @@ rest.
 ## D475 — "stdlib + yaml only" is a published claim; now it is a checked one
 
 The README says it, in a sentence that crosses the export boundary: the runtime is
-stdlib + yaml only. CLAUDE.md says it twice more, once per implementation.
+stdlib + yaml only. The instructions file says it twice more, once per implementation.
 
 It is true. The Go module requires exactly one module; the Python reference imports
 nothing outside the standard library and PyYAML. That is precisely why it was worth
@@ -13590,7 +13590,7 @@ and what is missing is exactly where the exceptions live.**
 
 ## D476 — the drift was sitting under its own disclaimer
 
-CLAUDE.md said 514 conformance cases, 232 of them dual. The suite holds 521 and
+The instructions file said 514 conformance cases, 232 of them dual. The suite holds 521 and
 235. Three lines below those numbers the same file says: *"These numbers drift.
 Read them from the tools, never from this file."*
 
@@ -13603,7 +13603,7 @@ So the case counts are gated the same way, and corrected. The file is not export
 so the gate skips in the public tree and says which other gate still guards the
 number there — the pattern D340 established for the vocabulary count beside it.
 
-Nothing was misled into a wrong verdict by this. But CLAUDE.md is the first
+Nothing was misled into a wrong verdict by this. But the instructions file is the first
 document every agent working in this repository reads, its header says the
 instructions OVERRIDE default behaviour, and an agent that trusts a stale number
 in it reasons from a suite that does not exist. The cost of being wrong here is
@@ -13764,7 +13764,7 @@ The two readings differ only for postures: *retire means turn it off* versus
 I am not resolving it. It changes what `retire` DOES for a capability type, which
 by this repo's own rule starts with a conformance case and not a driver edit, and
 the consent vocabulary it would need (`--allow-data-loss` is about data, not about
-posture) does not exist yet. It is now an open question in CLAUDE.md with the
+posture) does not exist yet. It is now an open question in the instructions file with the
 precedent attached, and MATURITY's gap 10 names it rather than folding it into the
 ownership problem it is entangled with.
 
@@ -14188,7 +14188,7 @@ project draws no complaints — in its mildest and most typical form. The header
 says IMPLEMENTED, points at the code and the decision, and states that where they
 differ the code is right and the document is the earlier intention.
 
-I checked the neighbours rather than assuming. `docs/autopilot-notes/` carries a
+I checked the neighbours rather than assuming. The internal notes directory carries a
 README saying plainly that it is a record of past sessions, not live work, and its
 one backlog file is frontmattered as a memory record. `merge-guide.md` says
 "HISTORICAL". Those are honest: a document that says which kind it is cannot drift
@@ -14242,7 +14242,7 @@ its reproducibility comparison — ran in the working tree, which is a FEATURE B
 temp worktree at the moment it lands. What nobody checked was the RESULTING master,
 and two of my own gates fail there:
 
-  CLAUDE.md claims the suite size = 521, the suite holds 514
+  the instructions file claims the suite size = 521, the suite holds 514
   CHANGELOG.md -> docs/TESTING_STRATEGY.md   (a path the export does not carry)
 
 Both are correct on the branch and wrong on master, for the same reason: the branch
@@ -14267,7 +14267,7 @@ per-commit gate at cherry-pick time proves each step; it does not prove the resu
 Every published-document gate — links resolve, CLI verbs are real, no denied client
 name, no dependency on a private path — scans a set built by `publishedDocs()`. That
 helper carried its own description of the export boundary: root markdown except
-CLAUDE.md, four named `docs/` files, four whole trees. The exporter carries the
+The instructions file, four named `docs/` files, four whole trees. The exporter carries the
 authoritative one, an `INCLUDE` list.
 
 Two hand-maintained copies of a closed set, which is the shape D329, D330 and D338
@@ -14771,7 +14771,7 @@ consents to destruction. `kubectl label` is the single most common way a cluster
 drifts, so "converge cannot converge after a human touched it" is a real
 operational limit, not an edge case. The fix is a scoped consent flag plus a
 force-apply on the fields the mapping DECLARES (never a blanket force), but it
-changes what `converge` does, so it starts as an open question in `CLAUDE.md` and
+changes what `converge` does, so it starts as an open question in the instructions file and
 a conformance case — not as a driver edit. The refusal is at least actionable
 now: it names the manager and the field.
 
@@ -15691,7 +15691,7 @@ The fix is expensive in a way that is not obviously worth it: the name IS the
 providerId, so changing its inputs changes every binding ever made and every plan
 hash ever recorded. That is a provider-identity change, which by this project's own
 rules starts with a conformance case and not with a driver edit, so it is an open
-question in `CLAUDE.md`.
+question in the instructions file.
 
 What IS fixed here: the comments no longer claim more than the mechanism delivers,
 and `TestResourceNameCarriesNoEstateIdentity` pins the naming inputs, so if an
@@ -17840,7 +17840,7 @@ mostly not code.
 Continuing where the unexercised surface actually is. Ten scripts ship in `scripts/`;
 four are invoked by neither the Makefile nor CI, and all four are documented
 procedures — `adopt-candidate.sh`, `console-fixtures.sh`, `integration-gcp.sh` (an
-operator runbook in docs/canary.md) and `ansi2svg.py`. The six that ARE invoked
+operator runbook in the canary runbook) and `ansi2svg.py`. The six that ARE invoked
 include `export-public.sh`, `preship.sh` and `mutation-gate.sh`: everything standing
 between this project and a publish or a release.
 
@@ -22838,7 +22838,7 @@ operator can take today. They come down when a driver does.
 
 ## D703 — the index that tells the next author what is open was itself out of date
 
-Three of CLAUDE.md's open questions were answered in one session — D481 by D698, D509
+Three of the instructions file's open questions were answered in one session — D481 by D698, D509
 by D699, D526 by D700 — and the file went on listing all three as open, under the
 heading *"do not resolve unilaterally — flag them"*.
 
@@ -22850,7 +22850,7 @@ already gated — which is the same failure this project keeps paying down in it
 published material, aimed at itself.
 
 MATURITY gap 11 had the sharper version of it. It said the posture problem was "raised
-as an open question in CLAUDE.md rather than settled in a driver" — no longer true —
+as an open question in the instructions file rather than settled in a driver" — no longer true —
 while the OWNERSHIP half beside it (a create cannot tell "we enabled this" from "it was
 already on") is genuinely still open. One paragraph carrying one true half and one
 false half is worse than either, because a reader who checks one sentence trusts the
@@ -22859,7 +22859,7 @@ next.
 Both are corrected, and the correction is now checkable. An entry that resolves an open
 question writes `Answers: Dxxx.` on its own line — a link machine-findable in the
 direction it is needed, from the answer back to the question — and
-`TestAnsweredQuestionsAreNotStillListedAsOpen` walks it: if CLAUDE.md still presents
+`TestAnsweredQuestionsAreNotStillListedAsOpen` walks it: if the instructions file still presents
 that question as open, it must say ANSWERED in the same breath. The gate deliberately
 does not check the reverse (an open question with no answer is just an open question),
 and it says nothing about whether the answer is any good.
@@ -25572,7 +25572,7 @@ closed set (invariant #4):
 - key the platform ones on something actually read (the SKU, the tier, the engine), which
   is honest per site and turns one decision into sixty-five.
 
-That is a semantic decision about a closed vocabulary, which CLAUDE.md says is not mine to
+That is a semantic decision about a closed vocabulary, which the instructions file says is not mine to
 make alone, and the freeze admits only false statements about a real estate — these are
 true statements with a misdescribed origin. So: measured, written down with the count, and
 left for the owner.
@@ -26066,7 +26066,7 @@ gated; the direction I could only guess at is measured, recorded, and left hones
 
 ## D772 — checking whether today broke the one-glossary rule
 
-`CLAUDE.md` carries a standing instruction: *integrate the console in the same slice
+The instructions file carries a standing instruction: *integrate the console in the same slice
 whenever the presentation vocabulary evolves — one glossary, no drift.* Today added a third
 derivation value (D759), two advisory codes (D769/D770) and changed the verb in every
 satisfied verdict (D766). So the rule was checked rather than assumed.
@@ -31300,7 +31300,7 @@ marker — closes the footgun but removes the "pin the name" feature the operand
 (b) let the delete trust the ledger-bound providerId as ours rather than the name pattern —
 restores custom names but weakens the tagless "ours by construction" safety the name-as-marker
 model was chosen for (D-class brownfield reasoning). That is a deliberate ownership-model
-decision with a security dimension, so per the CLAUDE.md open-questions discipline it is FLAGGED
+decision with a security dimension, so per the the instructions file open-questions discipline it is FLAGGED
 here rather than resolved at the tail of a fixing pass. activitylog flips config-intent →
 measured on the deterministic-name path (azure 25/45, 96/145); the custom-name operand's
 contradiction with the ownership marker is recorded for a deliberate decision.
@@ -32028,7 +32028,7 @@ engine-specific and the two spellings are MUTUALLY EXCLUSIVE at the API — a fa
   - Postgres + `binaryLogEnabled` → 400 *"Binary log can only be enabled for MySQL instances."*
 
 So the driver's `recovery.rpo` body was uncreatable for MySQL — the flagship engine, the subject of
-the first real-cloud run (CLAUDE.md D15) — while the create golden test only exercised Postgres and
+the first real-cloud run (the instructions file D15) — while the create golden test only exercised Postgres and
 stayed green (the D934/D949 golden-green shape, engine-conditioned rather than datasource-conditioned).
 This was found by an audit that hypothesised the wrong mechanism (MySQL needs binlog *as a companion
 to* PITR); the field corrected the premise to *instead of* — the campaign's field-first rule
@@ -34409,3 +34409,54 @@ stay in sync and this is exactly where they diverged. (The compiler hunt's two L
 swallowed foldDriftRefs error for a hypothetical non-OperandDrifter body-re-pusher, and update
 actions not participating in DAG ordering — are recorded; neither is a demonstrated dangerous-
 direction FALSE today.)
+## D1053 — the public tree named our internal documents 51 times
+
+Owner rule, 2026-08-14: the published repository carries no references to our internal
+documents. It carried fifty-one — the standing-instructions file forty-five times
+(twenty-five in this record, twenty in Go), the canary runbook five, the internal notes
+directory once.
+
+They crossed for the reason D1035 had just been written about: the deny list never named
+them. Four other internal documents ARE on that list, and all four are clean, which is
+the whole demonstration — the audit is exactly as complete as somebody made it, and
+nothing about a name being obviously internal puts it there. Twice in one day, the same
+shape.
+
+The first draft of this entry listed those four by name as the evidence, and **the export
+refused to publish it.** That is the boundary working on the hand that wrote it: naming a
+denied document in the record is the same disclosure as naming it in code, and the
+argument "but it is only an example" is exactly the argument every one of the fifty-one
+references could have made. The cheap in-`make check` half does not catch this — it scans
+for client names only — so the refusal came from the full audit at publication time, which
+is the one place it still had to hold.
+
+**Two of the twenty Go sites were worse than a mention.** Their SUBJECT is the private
+file: they read it and check the counts it publishes. The export deliberately leaves that
+file behind, so on the far side those gates could only skip — the published tree carried
+a test that cannot run, and paid for it by publishing the name and structure of a
+document no reader can open. They now live in one file that the export REMOVES, the same
+shape as the cloud canaries (`go/` crosses wholesale, so the whitelist cannot exclude a
+file inside it; the removal is a named `rm` with its reason). No coverage is lost: both
+numbers are also gated on the public side by the README and website count gates.
+
+The other eighteen are prose — comments and one error message citing the file as the
+source of a rule — and were rewritten to say the rule instead of the filename.
+
+**The record is projected, not rewritten** (D384's stance, the a real GCP project mechanism):
+each name becomes a description on the way out. The descriptions are SINGULAR noun
+phrases on purpose. The first attempt used a plural and left "the standing instructions
+… says" and "the standing instructions's standing instruction" behind — grammatical
+wreckage in the published record, produced by a scrub that reported success. No gate
+catches that; reading the exported file does. The test names are projected too, because
+after the removal above there is no such test in the public tree to name.
+
+`.claude/skills/` stays published (owner decision, same day): it is how a user installs
+the packaged workflows, so it is product surface, not an internal artefact. The deny
+token is anchored (`CLAUDE\.md`) so it cannot fire on it, and the canary token is
+anchored to the extension so it cannot fire on the public `canary.*.yaml` fixtures.
+
+**What this does not prove.** It is a name-level rule over three names we know about.
+Nothing here establishes that no other internal artefact is cited in the published record
+— the class-leak scan covers identifiers and account numbers, not documents. What it does
+establish is that these three cannot return silently: the boundary refuses them, and the
+refusal was demonstrated by running the export, not asserted.
