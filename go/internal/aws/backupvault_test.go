@@ -238,32 +238,37 @@ func bkvRole(req *http.Request, _ []byte) certifynet.Role {
 // recovery points: standing one up twice does not just cost money, it SPLITS the backup
 // estate, so the second vault looks empty while the real one is unmanaged. The name is
 // the address and the tags are the ownership check.
+// bkvAdoptSrv builds a 409-adopt fixture: our vault already standing, with the given
+// EncryptionKeyArn (D1062). "aws/backup" reads as the AWS-managed key (cmek false),
+// a KMS key arn reads as a customer key (cmek true).
+func bkvAdoptSrv(encKeyArn string) func() *httptest.Server {
+	return func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "PUT" && strings.HasSuffix(r.URL.Path, "/vault-lock"):
+				_, _ = w.Write([]byte(`{}`))
+			case r.Method == "PUT":
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`{"__type":"AlreadyExistsException","Message":"AlreadyExists"}`))
+			case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/tags/"):
+				_, _ = w.Write([]byte(`{"Tags":{"groundhold-capability":"vault","groundhold-environment":"prod"}}`))
+			case r.Method == "GET":
+				_, _ = w.Write([]byte(`{"BackupVaultArn":"arn:aws:backup:eu-central-1:000000000000:backup-vault:v",` +
+					`"Locked":true,"MinRetentionDays":90,"EncryptionKeyArn":"` + encKeyArn + `"}`))
+			default:
+				w.WriteHeader(400)
+			}
+		}))
+	}
+}
+
 func TestAdoptsExistingBackupVault(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 	p := &certifynet.ExistingProbe{
-		Name:     "aws/backupvault",
-		Classify: bkvRole,
-		ExistingServer: func() *httptest.Server {
-			return httptest.NewServer(http.HandlerFunc(
-				func(w http.ResponseWriter, r *http.Request) {
-					switch {
-					case r.Method == "PUT" && strings.HasSuffix(r.URL.Path, "/vault-lock"):
-						_, _ = w.Write([]byte(`{}`))
-					case r.Method == "PUT":
-						w.WriteHeader(400)
-						_, _ = w.Write([]byte(`{"__type":"AlreadyExistsException","Message":"AlreadyExists"}`))
-					case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/tags/"):
-						_, _ = w.Write([]byte(`{"Tags":{"groundhold-capability":"vault",` +
-							`"groundhold-environment":"prod"}}`))
-					case r.Method == "GET":
-						_, _ = w.Write([]byte(`{"BackupVaultArn":"arn:aws:backup:eu-central-1:000000000000:backup-vault:v",` +
-							`"Locked":true,"MinRetentionDays":90,"EncryptionKeyArn":"aws/backup"}`))
-					default:
-						w.WriteHeader(400)
-					}
-				}))
-		},
+		Name:           "aws/backupvault",
+		Classify:       bkvRole,
+		ExistingServer: bkvAdoptSrv("aws/backup"), // AWS-managed key = cmek false, not required by bkvAttrs
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver("eu-central-1")
 			d.HTTP = &http.Client{Transport: rt}
@@ -277,6 +282,19 @@ func TestAdoptsExistingBackupVault(t *testing.T) {
 			return pr.Create("backupvault", "vault", "prod", bkvAttrs(), nil, "vault", 1)
 		},
 		AllowedMutations: 2, // the refused PUT + the retention lock
+		// D1062: the customer key is fixed at create — its absence fails the adopt.
+		AdoptControls: bkvAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			{Path: "encryption.customerManagedKeys", Server: bkvAdoptSrv("aws/backup"), // AWS-managed = not customer
+				WantStatus: "failed", WantMutations: 2,
+				Create: func(pr provider.Provider) provider.CreateResult {
+					a := bkvAttrs()
+					a["encryption.customerManagedKeys"] = true
+					return pr.Create("backupvault", "vault", "prod", a,
+						map[string]any{"kms_key_arn": "arn:aws:kms:eu-central-1:000000000000:key/abc"}, "vault", 1)
+				}},
+		},
+		MoreSecure: bkvAdoptSrv("arn:aws:kms:eu-central-1:000000000000:key/customer"), // customer key though not declared
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

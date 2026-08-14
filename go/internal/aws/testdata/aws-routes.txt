@@ -34,6 +34,7 @@ backup	DELETE	/backup/plans/plan-abc/selections/sel-1
 backup	GET	/backup-vaults
 backup	GET	/backup-vaults/pv-archive-prod-jvaldlkf
 backup	GET	/backup-vaults/pv-vault-1
+backup	GET	/backup-vaults/pv-vault-prod-ncgwmurm
 backup	GET	/backup/plans/
 backup	GET	/backup/plans/plan-abc/
 backup	GET	/backup/plans/plan-abc/selections/

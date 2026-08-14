@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/provider"
 )
 
@@ -114,6 +115,14 @@ func (d *Driver) bkvTags(region, arn string) (map[string]string, error) {
 	return r.Tags, nil
 }
 
+// bkvAdoptControls: the vault's EncryptionKeyArn (customer key) is set INLINE in the
+// create body and is fixed at create (D1062), so on a 409-adopt it never applied — a
+// missing customer key FAILS the adopt. The retention lock is re-asserted on the adopt
+// path already (clean), so retention is not an adopt control here.
+var bkvAdoptControls = []adoptcheck.Control{
+	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+}
+
 func (d *Driver) createBackupVault(region, account, environment, capability string,
 	attrs, impl map[string]any, generation int) provider.CreateResult {
 	plan, err := BuildBackupVault(environment, capability, attrs, impl, generation)
@@ -124,6 +133,7 @@ func (d *Driver) createBackupVault(region, account, environment, capability stri
 		region = plan.Region
 	}
 	pid := bkvProviderID(region, account, plan.Name)
+	adopted := false
 	body, _ := json.Marshal(plan.createBody(capability, environment))
 	st, resp, err := d.backupCall("PUT", region, "/backup-vaults/"+plan.Name, body)
 	switch {
@@ -142,7 +152,8 @@ func (d *Driver) createBackupVault(region, account, environment, capability stri
 			return provider.CreateResult{Status: "failed",
 				Reason: "a vault with this name exists and is not ours (tags do not match)"}
 		}
-		// ours — fall through to (idempotently) ensure the lock
+		// ours — fall through to (idempotently) ensure the lock, then re-check controls (D1062)
+		adopted = true
 	case st >= 500:
 		return provider.CreateResult{ProviderID: pid, Status: "unknown",
 			Reason: fmt.Sprintf("CreateBackupVault HTTP %d (server error — may have landed): %s", st, ecsErr(resp))}
@@ -176,6 +187,24 @@ func (d *Driver) createBackupVault(region, account, environment, capability stri
 			}
 			return provider.CreateResult{ProviderID: pid, Status: "failed",
 				Reason: fmt.Sprintf("vault created but retention lock failed (retention NOT enforced): HTTP %d (%s)", st, ecsErr(resp))}
+		}
+	}
+	// D1062: an ADOPTED vault (409, ours) never received the create body's inline
+	// EncryptionKeyArn — the customer key is fixed at create. The retention lock above
+	// is re-asserted on both paths (clean), but the key is not; re-check it against this
+	// driver's OWN measured observation before reporting succeeded. A missing customer
+	// key is immutable and fails rather than lying that BYOK is in place.
+	if adopted {
+		obs, _, oerr := d.observeBackupVault(capability, pid)
+		if oerr != nil {
+			return provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "adopted vault re-observe gave no answer — reconcile: " + oerr.Error()}
+		}
+		switch v := adoptcheck.Compare(attrs, obs, bkvAdoptControls); v.Status {
+		case "failed":
+			return provider.CreateResult{Status: "failed", Reason: v.Reason}
+		case "unknown":
+			return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
 		}
 	}
 	return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
