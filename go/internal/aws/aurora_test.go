@@ -72,6 +72,7 @@ type fakeAurora struct {
 	engineVersion      string
 	storageEncrypted   bool
 	kmsKeyId           string
+	keyManager         string // KMS DescribeKey KeyManager for the adopt-check trace (default CUSTOMER)
 	backupRetention    int
 	deletionProtection bool
 	publiclyAccessible bool
@@ -216,6 +217,16 @@ func (f *fakeAurora) handler(t *testing.T, rec *capture) *httptest.Server {
 		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		// D1062: the adopt-check's KMS key trace is a JSON-protocol call (X-Amz-Target:
+		// TrentService.DescribeKey), not a Query Action= — answer it before the switch.
+		if tgt := r.Header.Get("X-Amz-Target"); strings.HasSuffix(tgt, "DescribeKey") {
+			km := f.keyManager
+			if km == "" {
+				km = "CUSTOMER"
+			}
+			_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"` + km + `"}}`))
+			return
+		}
 		form := parseForm(body)
 		switch form["Action"] {
 		case "CreateDBCluster":
@@ -501,19 +512,14 @@ func TestAuroraObserveReverseMap(t *testing.T) {
 	if got["network.publicExposure"] != false {
 		t.Fatalf("network.publicExposure = %v, want false", got["network.publicExposure"])
 	}
-	// CMEK is deliberately NOT emitted (a KmsKeyId cannot prove a customer key).
-	if _, has := got["encryption.customerManagedKeys"]; has {
-		t.Fatalf("CMEK must not be a measured observation, got %v", got["encryption.customerManagedKeys"])
+	// D1062: the fixture's KmsKeyId is traced to KMS (DescribeKey -> KeyManager=CUSTOMER
+	// by default), so CMEK is a MEASURED true — the KmsKeyId is no longer punted as
+	// "cannot prove a customer key"; the trace proves it (the same read the adopt-check
+	// relies on).
+	if got["encryption.customerManagedKeys"] != true {
+		t.Fatalf("CMEK = %v, want measured true (traced customer key)", got["encryption.customerManagedKeys"])
 	}
-	sawCMEKdiag := false
-	for _, dg := range diags {
-		if strings.Contains(dg, "customerManagedKeys") {
-			sawCMEKdiag = true
-		}
-	}
-	if !sawCMEKdiag {
-		t.Fatalf("expected a CMEK diagnostic, got %v", diags)
-	}
+	_ = diags
 }
 
 // TestAuroraCreateForeignRefuses: a cluster already at our name whose tags are
@@ -1094,6 +1100,31 @@ func rdsQueryRole(req *http.Request, body []byte) certifynet.Role {
 	return certifynet.RoleMutateOpaque
 }
 
+// auroraAdoptSrv builds a 409/pre-read adopt fixture: our cluster (writer+reader
+// both standing, so no member creation) configured by cfg (D1062).
+func auroraAdoptSrv(t *testing.T, clusterID string, cfg func(*fakeAurora)) func() *httptest.Server {
+	return func() *httptest.Server {
+		f := newFakeAurora()
+		f.clusterExists = true
+		f.storageEncrypted = true // the candidate declares encryption.atRest
+		f.engine = "aurora-postgresql"
+		f.engineVersion = "16.3" // so observe can pick the TLS parameter name (rds.force_ssl)
+		f.tags = map[string]string{
+			"groundhold-capability":  sanitizeTag("db"),
+			"groundhold-environment": sanitizeTag("prod"),
+		}
+		f.instances[clusterID+"-writer"] = true
+		f.instances[clusterID+"-reader"] = true
+		f.endpoint = clusterID + ".cluster-abc123.eu-central-1.rds.amazonaws.com"
+		f.readerEndpoint = clusterID + ".cluster-ro-abc123.eu-central-1.rds.amazonaws.com"
+		f.port = 5432
+		if cfg != nil {
+			cfg(f)
+		}
+		return f.handler(t, nil)
+	}
+}
+
 // TestAdoptsExistingAurora enrols aurora in the D391 gate. Aurora is a COMPOSITE
 // (cluster plus member instances) whose foreign case already had a test; the OURS case —
 // our own cluster already standing, which is what every re-converge meets — did not.
@@ -1101,37 +1132,65 @@ func TestAdoptsExistingAurora(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 	clusterID := DBIdentifier("000000000000", "prod", "db", 1)
+	newDriver := func(happyURL string, rt http.RoundTripper) provider.Provider {
+		d := NewDriver("eu-central-1")
+		d.HTTP = &http.Client{Transport: rt}
+		d.RDSBaseURL = happyURL
+		d.KMSBaseURL = happyURL
+		d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
+		d.PollInterval = 0
+		d.PollTimeout = 2 * time.Second
+		return d
+	}
 	p := &certifynet.ExistingProbe{
-		Name:     "aws/aurora",
-		Classify: rdsQueryRole,
-		ExistingServer: func() *httptest.Server {
-			f := newFakeAurora()
-			f.clusterExists = true
-			f.tags = map[string]string{
-				"groundhold-capability":  sanitizeTag("db"),
-				"groundhold-environment": sanitizeTag("prod"),
-			}
-			f.instances[clusterID+"-writer"] = true
-			f.endpoint = clusterID + ".cluster-abc123.eu-central-1.rds.amazonaws.com"
-			f.readerEndpoint = clusterID + ".cluster-ro-abc123.eu-central-1.rds.amazonaws.com"
-			f.port = 5432
-			return f.handler(t, nil)
-		},
-		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
-			d := NewDriver("eu-central-1")
-			d.HTTP = &http.Client{Transport: rt}
-			d.RDSBaseURL = happyURL
-			d.KMSBaseURL = happyURL
-			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
-			d.PollInterval = 0
-			d.PollTimeout = 2 * time.Second
-			return d
-		},
+		Name:           "aws/aurora",
+		Classify:       rdsQueryRole,
+		ExistingServer: auroraAdoptSrv(t, clusterID, nil),
+		New:            newDriver,
 		Create: func(pr provider.Provider) provider.CreateResult {
 			return pr.Create("aurora", "db", "prod", auroraAttrs(), auroraImpl(), "db", 1)
 		},
 		PID:              auroraProviderID("eu-central-1", clusterID),
 		AllowedMutations: 4, // parameter-group + tag convergence onto the standing cluster
+		// D1062: mirror RDS — encryption at rest, its customer key and TLS enforcement
+		// are immutable; member public exposure is a mutable ModifyDBInstance.
+		AdoptControls: auroraAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			{Path: "encryption.atRest", WantStatus: "failed", WantMutations: 4,
+				Server: auroraAdoptSrv(t, clusterID, func(f *fakeAurora) { f.storageEncrypted = false })},
+			{Path: "encryption.customerManagedKeys", WantStatus: "failed", WantMutations: 4,
+				Server: auroraAdoptSrv(t, clusterID, func(f *fakeAurora) {
+					f.kmsKeyId = "arn:aws:kms:eu-central-1:000000000000:key/abc"
+					f.keyManager = "AWS"
+				}),
+				Create: func(pr provider.Provider) provider.CreateResult {
+					a := auroraAttrs()
+					a["encryption.customerManagedKeys"] = true
+					im := auroraImpl()
+					im["kms_key_id"] = "arn:aws:kms:eu-central-1:000000000000:key/abc"
+					return pr.Create("aurora", "db", "prod", a, im, "db", 1)
+				}},
+			{Path: "encryption.inTransit", WantStatus: "failed", WantMutations: 4,
+				Server: auroraAdoptSrv(t, clusterID, func(f *fakeAurora) {
+					f.clusterParamGroup = "pg-tls"
+					f.forceSSL = "0"
+				}),
+				Create: func(pr provider.Provider) provider.CreateResult {
+					a := auroraAttrs()
+					a["encryption.inTransit"] = true
+					im := auroraImpl()
+					im["db_cluster_parameter_group"] = "pg-tls"
+					return pr.Create("aurora", "db", "prod", a, im, "db", 1)
+				}},
+			{Path: "network.publicExposure", WantStatus: "unknown", WantMutations: 4,
+				Server: auroraAdoptSrv(t, clusterID, func(f *fakeAurora) { f.publiclyAccessible = true })},
+		},
+		MoreSecure: auroraAdoptSrv(t, clusterID, func(f *fakeAurora) {
+			f.kmsKeyId = "arn:aws:kms:eu-central-1:000000000000:key/abc"
+			f.keyManager = "CUSTOMER"
+			f.clusterParamGroup = "pg-tls"
+			f.forceSSL = "1"
+		}),
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

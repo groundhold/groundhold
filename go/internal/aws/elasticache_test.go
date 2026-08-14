@@ -375,6 +375,49 @@ func TestEnsureCacheSubnetGroupContentCheck(t *testing.T) {
 	}
 }
 
+// ecacheAdoptSrv builds a 409-adopt fixture: our replication group already standing,
+// with the encryption controls set however the case needs (D1062).
+func ecacheAdoptSrv(atRest, transit bool, kmsKeyId, keyManager string) func() *httptest.Server {
+	return func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.Header.Get("X-Amz-Target"), ".DescribeKey") {
+				km := keyManager
+				if km == "" {
+					km = "CUSTOMER"
+				}
+				_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"` + km + `"}}`))
+				return
+			}
+			body, _ := io.ReadAll(r.Body)
+			form, _ := url.ParseQuery(string(body))
+			switch form.Get("Action") {
+			case "CreateReplicationGroup":
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`<ErrorResponse><Error><Code>ReplicationGroupAlreadyExists</Code></Error></ErrorResponse>`))
+			case "DescribeReplicationGroups":
+				kmsX := ""
+				if kmsKeyId != "" {
+					kmsX = "<KmsKeyId>" + kmsKeyId + "</KmsKeyId>"
+				}
+				_, _ = w.Write([]byte(`<DescribeReplicationGroupsResponse><DescribeReplicationGroupsResult>` +
+					`<ReplicationGroups><ReplicationGroup><Status>available</Status>` +
+					`<AtRestEncryptionEnabled>` + boolStr(atRest) + `</AtRestEncryptionEnabled>` +
+					`<TransitEncryptionEnabled>` + boolStr(transit) + `</TransitEncryptionEnabled>` +
+					`<AutomaticFailover>enabled</AutomaticFailover><MultiAZ>enabled</MultiAZ>` + kmsX +
+					`</ReplicationGroup></ReplicationGroups>` +
+					`</DescribeReplicationGroupsResult></DescribeReplicationGroupsResponse>`))
+			case "ListTagsForResource":
+				_, _ = w.Write([]byte(`<ListTagsForResourceResponse><ListTagsForResourceResult><TagList>` +
+					`<Tag><Key>groundhold-capability</Key><Value>sessions</Value></Tag>` +
+					`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag>` +
+					`</TagList></ListTagsForResourceResult></ListTagsForResourceResponse>`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	}
+}
+
 // TestAdoptsExistingElastiCache enrols elasticache in the D391 gate. The replication
 // group id is deterministic and client-assigned, so a second create is answered
 // ReplicationGroupAlreadyExists and the tags decide. This driver carries the F28 scar:
@@ -385,36 +428,9 @@ func TestAdoptsExistingElastiCache(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 	p := &certifynet.ExistingProbe{
-		Name:     "aws/elasticache",
-		Classify: rdsQueryRole,
-		ExistingServer: func() *httptest.Server {
-			return httptest.NewServer(http.HandlerFunc(
-				func(w http.ResponseWriter, r *http.Request) {
-					body, _ := io.ReadAll(r.Body)
-					form, _ := url.ParseQuery(string(body))
-					switch form.Get("Action") {
-					case "CreateReplicationGroup":
-						w.WriteHeader(400)
-						_, _ = w.Write([]byte(`<ErrorResponse><Error>` +
-							`<Code>ReplicationGroupAlreadyExists</Code></Error></ErrorResponse>`))
-					case "DescribeReplicationGroups":
-						_, _ = w.Write([]byte(`<DescribeReplicationGroupsResponse><DescribeReplicationGroupsResult>` +
-							`<ReplicationGroups><ReplicationGroup><Status>available</Status>` +
-							`<AtRestEncryptionEnabled>true</AtRestEncryptionEnabled>` +
-							`<TransitEncryptionEnabled>true</TransitEncryptionEnabled>` +
-							`<AutomaticFailover>enabled</AutomaticFailover>` +
-							`</ReplicationGroup></ReplicationGroups>` +
-							`</DescribeReplicationGroupsResult></DescribeReplicationGroupsResponse>`))
-					case "ListTagsForResource":
-						_, _ = w.Write([]byte(`<ListTagsForResourceResponse><ListTagsForResourceResult><TagList>` +
-							`<Tag><Key>groundhold-capability</Key><Value>sessions</Value></Tag>` +
-							`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag>` +
-							`</TagList></ListTagsForResourceResult></ListTagsForResourceResponse>`))
-					default:
-						w.WriteHeader(404)
-					}
-				}))
-		},
+		Name:           "aws/elasticache",
+		Classify:       rdsQueryRole,
+		ExistingServer: ecacheAdoptSrv(true, true, "arn:aws:kms:eu-central-1:000000000000:key/abc", "CUSTOMER"),
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver("eu-central-1")
 			d.HTTP = &http.Client{Transport: rt}
@@ -430,6 +446,18 @@ func TestAdoptsExistingElastiCache(t *testing.T) {
 			return pr.Create("elasticache", "sessions", "prod", ecAttrs(), ecImpl(), "sessions", 1)
 		},
 		AllowedMutations: 1, // the refused CreateReplicationGroup
+		// D1062: at-rest/in-transit encryption and the customer key are fixed at create;
+		// each must block an adopt that lacks it.
+		AdoptControls: ecacheAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			{Path: "encryption.atRest", WantStatus: "failed", WantMutations: 1,
+				Server: ecacheAdoptSrv(false, true, "arn:aws:kms:eu-central-1:000000000000:key/abc", "CUSTOMER")},
+			{Path: "encryption.inTransit", WantStatus: "failed", WantMutations: 1,
+				Server: ecacheAdoptSrv(true, false, "arn:aws:kms:eu-central-1:000000000000:key/abc", "CUSTOMER")},
+			{Path: "encryption.customerManagedKeys", WantStatus: "failed", WantMutations: 1,
+				Server: ecacheAdoptSrv(true, true, "arn:aws:kms:eu-central-1:000000000000:key/abc", "AWS")}, // AWS-managed key → not customer
+		},
+		MoreSecure: ecacheAdoptSrv(true, true, "arn:aws:kms:eu-central-1:000000000000:key/abc", "CUSTOMER"),
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }
