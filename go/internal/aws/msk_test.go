@@ -13,6 +13,8 @@ import (
 	"groundhold/internal/provider"
 )
 
+const arn = "arn:aws:kafka:eu-central-1:000000000000:cluster/pv-c/uuid-1"
+
 func readJSONBody(r *http.Request) map[string]any {
 	b, _ := io.ReadAll(r.Body)
 	m := map[string]any{}
@@ -95,10 +97,15 @@ func TestBuildMSKRefusals(t *testing.T) {
 
 func mskServer(t *testing.T, capLabel, kafkaVersion string, cmek bool) *httptest.Server {
 	t.Helper()
-	const arn = "arn:aws:kafka:eu-central-1:000000000000:cluster/pv-c/uuid-1"
 	deleted := false
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
+			// D1062: the adopt-check / observe traces the cluster's KMS key (X-Amz-Target:
+			// TrentService.DescribeKey) — a customer key by default in this fixture.
+			if strings.HasSuffix(r.Header.Get("X-Amz-Target"), ".DescribeKey") {
+				_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"CUSTOMER"}}`))
+				return
+			}
 			// once deleted, the cluster is GONE — the delete's poll-to-absence (D974)
 			// must be able to confirm an empty cluster list.
 			if deleted && r.Method == "GET" && strings.Contains(r.URL.Path, "/api/v2/clusters") {
@@ -145,6 +152,7 @@ func mskDriver(t *testing.T, srv *httptest.Server) *Driver {
 	d := NewDriver("eu-central-1")
 	d.Account = "000000000000"
 	d.MSKBaseURL = srv.URL
+	d.KMSBaseURL = srv.URL // D1062: observe traces the cluster's KMS key
 	d.Now = time.Now
 	d.PollInterval = time.Millisecond
 	d.PollTimeout = 2 * time.Second
@@ -171,10 +179,11 @@ func TestCreateObserveDeleteMSK(t *testing.T) {
 		got["encryption.inTransit"] != true {
 		t.Fatalf("observe: %+v", got)
 	}
-	// customerManagedKeys is unobservable via ListClustersV2 (managed vs customer
-	// KMS key indistinguishable by ARN, the RDS case) — never fabricated.
-	if _, has := got["encryption.customerManagedKeys"]; has {
-		t.Fatalf("cmek must not be observed, got %v", got["encryption.customerManagedKeys"])
+	// D1062: the cluster's DataVolumeKMSKeyId is traced to KMS (DescribeKey ->
+	// KeyManager=CUSTOMER), so CMEK is a MEASURED true — no longer punted as
+	// indistinguishable; the trace proves it, the read the adopt-check relies on.
+	if got["encryption.customerManagedKeys"] != true {
+		t.Fatalf("cmek = %v, want measured true (traced customer key)", got["encryption.customerManagedKeys"])
 	}
 	if del := d.deleteMSK("bus", "prod", res.ProviderID); del.Status != "succeeded" {
 		t.Fatalf("delete: %+v", del)
@@ -197,7 +206,6 @@ func TestDeleteMSKForeignRefused(t *testing.T) {
 // never a terminal "succeeded" that tombstones a data-bearing Kafka cluster
 // still live.
 func TestDeleteMSKAsyncNotGoneIsUnknown(t *testing.T) {
-	const arn = "arn:aws:kafka:eu-central-1:000000000000:cluster/pv-c/uuid-1" // same as mskServer: keep the delete route already route-captured
 	srv := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			switch {
@@ -236,10 +244,13 @@ func TestMetamorphicMSKRoundTrip(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			const arn = "arn:aws:kafka:eu-central-1:000000000000:cluster/pv-c/uuid-1"
 			var kafkaVersion, kms string
 			srv := httptest.NewServer(http.HandlerFunc(
 				func(w http.ResponseWriter, r *http.Request) {
+					if strings.HasSuffix(r.Header.Get("X-Amz-Target"), ".DescribeKey") {
+						_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"CUSTOMER"}}`))
+						return
+					}
 					switch {
 					case r.Method == "POST":
 						body := readJSONBody(r)
@@ -295,21 +306,12 @@ func TestMetamorphicMSKRoundTrip(t *testing.T) {
 			if got["engine.protocol"] != c.wantProto {
 				t.Errorf("protocol round-trip: want %q got %v", c.wantProto, got["engine.protocol"])
 			}
-			// customerManagedKeys is unobservable: the DataVolumeKMSKeyId ARN does
-			// not distinguish the AWS-managed key from a customer key (the RDS case).
-			// observe never reports it; a KMS key emits a diagnostic instead.
-			if _, has := got["encryption.customerManagedKeys"]; has {
-				t.Errorf("cmek must be unobservable, got %v (fabricated)", got["encryption.customerManagedKeys"])
+			// D1062: CMEK is MEASURED — a KMS-key cluster traces to KeyManager=CUSTOMER
+			// (true), a keyless cluster reads the account default as a definitive false.
+			if got["encryption.customerManagedKeys"] != c.cmek {
+				t.Errorf("cmek round-trip: want measured %v got %v", c.cmek, got["encryption.customerManagedKeys"])
 			}
-			hasDiag := false
-			for _, dg := range diags {
-				if strings.Contains(dg, "customerManagedKeys not observed") {
-					hasDiag = true
-				}
-			}
-			if c.cmek && !hasDiag {
-				t.Errorf("a CMEK cluster must emit a customerManagedKeys diagnostic, got %v", diags)
-			}
+			_ = diags
 		})
 	}
 }
@@ -318,7 +320,48 @@ func mskRESTRole(req *http.Request, _ []byte) certifynet.Role {
 	if req.Method == http.MethodGet {
 		return certifynet.RoleRead
 	}
+	// the adopt-check's KMS trace is a POST to KMS (X-Amz-Target: TrentService.
+	// DescribeKey) — a READ despite the method (D1062).
+	if strings.HasSuffix(req.Header.Get("X-Amz-Target"), ".DescribeKey") {
+		return certifynet.RoleRead
+	}
 	return certifynet.RoleMutateOpaque
+}
+
+// mskAdoptSrv builds a 409-adopt fixture: our cluster already standing, with the
+// customer key set however the case needs (D1062).
+func mskAdoptSrv(cmek bool, keyManager string) func() *httptest.Server {
+	return func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.Header.Get("X-Amz-Target"), ".DescribeKey") {
+				km := keyManager
+				if km == "" {
+					km = "CUSTOMER"
+				}
+				_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"` + km + `"}}`))
+				return
+			}
+			switch {
+			case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/api/v2/clusters"):
+				w.WriteHeader(409)
+				_, _ = w.Write([]byte(`{"message":"Conflict: cluster already exists"}`))
+			case r.Method == "GET" && strings.Contains(r.URL.Path, "/api/v2/clusters"):
+				reqName := r.URL.Query().Get("clusterNameFilter")
+				enc := ""
+				if cmek {
+					enc = `"dataVolumeKMSKeyId":"arn:aws:kms:eu-central-1:000000000000:key/abc"`
+				}
+				_, _ = w.Write([]byte(`{"clusterInfoList":[{"clusterArn":"` + arn +
+					`","clusterName":"` + reqName + `","state":"ACTIVE",` +
+					`"tags":{"groundhold-capability":"events","groundhold-environment":"prod"},` +
+					`"provisioned":{"currentBrokerSoftwareInfo":{"kafkaVersion":"3.6.0"},` +
+					`"encryptionInfo":{"encryptionInTransit":{"clientBroker":"TLS"},` +
+					`"encryptionAtRest":{` + enc + `}}}}]}`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	}
 }
 
 // TestAdoptsExistingMSK enrols msk in the D391 gate. The cluster name is deterministic,
@@ -327,35 +370,16 @@ func mskRESTRole(req *http.Request, _ []byte) certifynet.Role {
 func TestAdoptsExistingMSK(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
-	const arn = "arn:aws:kafka:eu-central-1:000000000000:cluster/pv-c/uuid-1"
 	p := &certifynet.ExistingProbe{
-		Name:     "aws/msk",
-		Classify: mskRESTRole,
-		ExistingServer: func() *httptest.Server {
-			return httptest.NewServer(http.HandlerFunc(
-				func(w http.ResponseWriter, r *http.Request) {
-					switch {
-					case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/api/v2/clusters"):
-						w.WriteHeader(409)
-						_, _ = w.Write([]byte(`{"message":"Conflict: cluster already exists"}`))
-					case r.Method == "GET" && strings.Contains(r.URL.Path, "/api/v2/clusters"):
-						reqName := r.URL.Query().Get("clusterNameFilter")
-						_, _ = w.Write([]byte(`{"clusterInfoList":[{"clusterArn":"` + arn +
-							`","clusterName":"` + reqName + `","state":"ACTIVE",` +
-							`"tags":{"groundhold-capability":"events","groundhold-environment":"prod"},` +
-							`"provisioned":{"currentBrokerSoftwareInfo":{"kafkaVersion":"3.6.0"},` +
-							`"encryptionInfo":{"encryptionInTransit":{"clientBroker":"TLS"},` +
-							`"encryptionAtRest":{}}}}]}`))
-					default:
-						w.WriteHeader(404)
-					}
-				}))
-		},
+		Name:           "aws/msk",
+		Classify:       mskRESTRole,
+		ExistingServer: mskAdoptSrv(true, "CUSTOMER"),
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver("eu-central-1")
 			d.HTTP = &http.Client{Transport: rt}
 			d.Account = "000000000000" // no STS round-trip: the gate must not leave the fake
 			d.MSKBaseURL = happyURL
+			d.KMSBaseURL = happyURL // D1062: the adopt-check traces the cluster's KMS key
 			d.Now = time.Now
 			d.PollInterval = time.Millisecond
 			d.PollTimeout = 2 * time.Second
@@ -365,6 +389,13 @@ func TestAdoptsExistingMSK(t *testing.T) {
 			return pr.Create("msk", "events", "prod", mskAttrs(), mskImpl(), "events", 1)
 		},
 		AllowedMutations: 1, // the refused create
+		// D1062: the customer key is fixed at create — its absence fails the adopt.
+		AdoptControls: mskAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			{Path: "encryption.customerManagedKeys", Server: mskAdoptSrv(false, ""),
+				WantStatus: "failed", WantMutations: 1}, // no customer key → immutable miss
+		},
+		MoreSecure: mskAdoptSrv(true, "CUSTOMER"),
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

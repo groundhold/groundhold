@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/provider"
 )
 
@@ -119,6 +120,14 @@ func (d *Driver) getMSKByName(region, name string) (mskCluster, bool, error) {
 	return mskCluster{}, false, nil
 }
 
+// mskAdoptControls: MSK sets the customer key INLINE in CreateClusterV2, so on a
+// 409-adopt it never applied to the pre-existing cluster (D1062). At-rest encryption
+// with a customer key is fixed at create, so a miss FAILS. In-transit encryption is
+// always TLS-enforced on MSK (the audit's moot case), so it is not an adopt control.
+var mskAdoptControls = []adoptcheck.Control{
+	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+}
+
 func (d *Driver) createMSK(region, account, environment, capability string,
 	attrs, impl map[string]any, generation int) provider.CreateResult {
 	plan, err := BuildMSK(environment, capability, attrs, impl, generation)
@@ -126,6 +135,7 @@ func (d *Driver) createMSK(region, account, environment, capability string,
 		return provider.CreateResult{Status: "failed", Reason: err.Error()}
 	}
 	pid := mskProviderID(region, account, plan.Cluster)
+	adopted := false
 	body, _ := json.Marshal(plan.createBody(capability, environment))
 	st, resp, err := d.mskDo("POST", region, mskPath, body)
 	switch {
@@ -144,7 +154,8 @@ func (d *Driver) createMSK(region, account, environment, capability string,
 			return provider.CreateResult{Status: "failed",
 				Reason: "a cluster with this name exists and is not ours (tags do not match)"}
 		}
-		// ours — fall through to poll
+		// ours — poll, then re-check declared controls (D1062)
+		adopted = true
 	case st >= 500:
 		return provider.CreateResult{ProviderID: pid, Status: "unknown",
 			Reason: fmt.Sprintf("create HTTP %d (server error — may have landed): %s", st, mutDetail(resp))}
@@ -162,6 +173,23 @@ func (d *Driver) createMSK(region, account, environment, capability string,
 		if rerr == nil && found {
 			switch c.State {
 			case "ACTIVE":
+				// D1062: an ADOPTED cluster (409, ours) never received the create body's
+				// inline customer key — fixed at create. Re-check it against this driver's
+				// OWN measured observation (cmek KMS-traced) before reporting succeeded; a
+				// missing customer key fails rather than lying that BYOK is in place.
+				if adopted {
+					obs, _, oerr := d.observeMSK(capability, pid)
+					if oerr != nil {
+						return provider.CreateResult{ProviderID: pid, Status: "unknown",
+							Reason: "adopted cluster re-observe gave no answer — reconcile: " + oerr.Error()}
+					}
+					switch v := adoptcheck.Compare(attrs, obs, mskAdoptControls); v.Status {
+					case "failed":
+						return provider.CreateResult{Status: "failed", Reason: v.Reason}
+					case "unknown":
+						return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
+					}
+				}
 				return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
 			case "FAILED":
 				return provider.CreateResult{ProviderID: pid, Status: "failed",
@@ -234,13 +262,24 @@ func (d *Driver) observeMSK(capability, providerID string) ([]provider.Observati
 		obs = append(obs, provider.Observation{Path: "engine.protocol",
 			Value: "kafka/" + strings.SplitN(v, ".", 2)[0], Derivation: "measured"})
 	}
-	// DataVolumeKMSKeyId is an opaque ARN — MSK always encrypts at rest and, with
-	// no key specified, uses an AWS-managed key whose ARN is indistinguishable from
-	// a customer key (the RDS/DynamoDB case). Refuse rather than false-certify BYOK.
-	if c.Provisioned.EncryptionInfo.EncryptionAtRest.DataVolumeKMSKeyId != "" {
-		diags = append(diags, "encryption.customerManagedKeys not observed: the "+
-			"DataVolumeKMSKeyId ARN cannot distinguish the AWS-managed key from a customer "+
-			"key without a KMS DescribeKey (KeyManager) lookup — probe/reconcile")
+	// encryption.customerManagedKeys: MSK always encrypts at rest with SOME key; with
+	// no key specified it uses the account default aws/kafka key, whose ARN is
+	// indistinguishable from a customer key WITHOUT a KMS trace. Trace DataVolumeKMSKeyId
+	// to KMS (DescribeKey -> KeyManager) so a real CMK is MEASURED, not punted — the same
+	// fix as RDS/DynamoDB (D954/D1057) and the read the adopt-check needs. An unreadable
+	// trace stays a diagnostic, never a false; an absent key id (no at-rest key reported)
+	// is definitively not a customer key → a measured false (D1040/D1003).
+	if kid := c.Provisioned.EncryptionInfo.EncryptionAtRest.DataVolumeKMSKeyId; kid != "" {
+		if customer, kerr := d.kmsKeyIsCustomerManaged(region, kid); kerr == nil {
+			obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+				Value: customer, Derivation: "measured"})
+		} else {
+			diags = append(diags, "encryption.customerManagedKeys not observed on the "+
+				"cluster's KMS key: "+kerr.Error()+" — probe/reconcile")
+		}
+	} else {
+		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+			Value: false, Derivation: "measured"})
 	}
 	return obs, diags, nil
 }
