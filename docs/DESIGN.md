@@ -34221,3 +34221,71 @@ Confirmed both-states-clean and left alone: the full `publicExposure` set across
 providers, `encryption.atRest`, the `inTransit`/`tls.enforced` family (bar the two above),
 `versioning`, and the deletion/protection flags. No inverse false-secure default (safe-value on an
 inconclusive read) was found — every inconclusive read routes to a diagnostic.
+
+## D1042 — the freeze ended at the launch, and the record never said so
+
+D716 declared the code freeze and, unusually for a policy, declared its admitted class
+before anything tested it: a defect where the tool says something FALSE about a real
+estate in the dangerous direction, tested by "would a person acting on what the tool
+said be worse off than if it had said nothing?"
+
+Nothing declared its END. The freeze in fact stopped binding when the project launched
+public on 2026-08-11, and the first place that appears in this record is a PARENTHESIS
+inside an entry about something else: D1024's "BUILT 2026-08-13 (freeze lifted
+post-launch)". Everything after it — D1025 through D1041, a dozen runtime changes
+including two adversarial-audit classes — was built under a policy no entry names.
+
+The owner's decision, stated 2026-08-14 and recorded here so it stops living in a
+parenthesis: **the freeze is lifted.** Runtime changes flow through the ordinary gates.
+What survives from D716 is its TEST, promoted from a gate on what MAY change to a rule
+about what comes FIRST: a dangerous-direction falsehood is always admissible and takes
+priority over feature work. The launch posture is a different axis and is unchanged —
+experimental `v0.x`, gathering feedback, not pushing GA (MATURITY's "what ready would
+mean" is the higher bar and none of it moved).
+
+**The part worth keeping is how long the stale instruction survived.** `CLAUDE.md` went
+on saying "This repo is private, pre-launch" and "The runtime is FROZEN" for three days
+after both stopped being true, while both parallel sessions read that file as binding at
+the start of every session. This is the D287 shape — a document that stops being true
+keeps being believed by exactly the readers who obey it — with an edge D287 did not
+have: the readers are agents, and an agent does not argue with its instructions the way
+a person eventually does. One session flagged the drift twice before it was corrected;
+neither session simply ignored the false line, which is the correct behaviour and
+precisely why a false instruction is expensive.
+
+No code changed. The gap this closes is that the decision record now carries the
+decision.
+
+## D1043 — the multi-region residency honesty guard propagated beyond Firestore
+
+D799 taught that a GCP `location.region` can be a MULTI-REGION (US, EU, ASIA, nam5, eur3…)
+rather than a single region, and that reporting the multi-region identifier as if it were a
+region lets a residency constraint compare against a name that stands for several regions at
+once — an exclusion like `location.region not-in ["asia-southeast1"]` reads SATISFIED over an
+`"asia"` multi-region bucket while the bytes physically reside there (false-secure, and it hits
+the DEFAULT configuration). D799 fixed only Firestore. An audit found the identical shape,
+unguarded, on every sibling that emits `location.region` from a multi-region-capable field:
+
+- **BigQuery** (`bigquery_net.go`) — a dataset's `Location` is `"US"`/`"EU"` by default.
+- **GCS** (`gcs_net.go`) — `"US"/"EU"/"ASIA"` multi-region is the default bucket location.
+- **Compute image** (`computeimage_net.go`) — `StorageLocations[0]` was emitted and the tail
+  silently dropped; a storage location can itself be a multi-region and an image can carry
+  several.
+
+Extracted Firestore's check into `residencyMultiRegionDiag(loc, what)` (package-level, beside
+`gcpRegionID`) and called it at all three sites; the image also diagnoses `len(storageLocations)
+> 1` rather than dropping the rest. The value stays `measured` (it is what the provider reports);
+the diagnostic is what keeps a residency constraint from silently passing over multi-region data.
+The classic BUG_HUNTING §4 "the fix is almost always too narrow" — D799 two files away, three
+times.
+
+## D1044 — Compute Engine customerManagedKeys reads EVERY disk, not just the boot disk
+
+`observeGCPInstance` read `encryption.customerManagedKeys` from the boot disk alone: it set
+`true` on the first boot disk carrying a CMEK and stopped. An instance whose boot disk uses a
+customer key while an attached DATA disk uses the Google-managed default then reported
+`customerManagedKeys=true` — a false-secure over the data disk, and (being a present value) it
+also mis-drives adopt and drift. `customerManagedKeys: true` means ALL the instance's data sits
+under a customer key, so the read now inspects every attached disk: any disk without a
+`DiskEncryptionKey.KmsKeyName` makes the whole `false` (an empty disk list is `false`). Matches
+how a separately-bound persistent disk reads its own single key truthfully.

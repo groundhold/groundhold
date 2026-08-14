@@ -159,9 +159,16 @@ func (d *Driver) observeBigQuery(capability, providerID string) ([]provider.Obse
 		{Path: "encryption.atRest", Value: true, Derivation: "platform-invariant"}, // BigQuery always encrypts
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
+	var diags []string
 	if doc.Location != "" {
 		obs = append(obs, provider.Observation{Path: "location.region",
 			Value: strings.ToLower(doc.Location), Derivation: "measured"})
+		// D1043: a BigQuery dataset's location is "US"/"EU" (a multi-region) BY DEFAULT —
+		// diagnose it so a residency constraint is not silently satisfied over data that
+		// spans several regions (D799, propagated from Firestore).
+		if d := residencyMultiRegionDiag(doc.Location, "dataset"); d != "" {
+			diags = append(diags, d)
+		}
 	}
 	// a customer key is present iff the dataset carries a default KMS key; the
 	// Google-managed default does NOT satisfy the constraint. D1003: that is a
@@ -171,7 +178,8 @@ func (d *Driver) observeBigQuery(capability, providerID string) ([]provider.Obse
 		Value: doc.DefaultEncryptionConfiguration != nil && doc.DefaultEncryptionConfiguration.KmsKeyName != "", Derivation: "measured"})
 	// network.publicExposure is deliberately NOT observed: a BigQuery dataset has no
 	// network exposure mode (the honest gap the builder refuses on create).
-	return obs, []string{"network.publicExposure not observed: BigQuery datasets have no network boundary (IAM-gated global endpoint)"}, nil
+	diags = append(diags, "network.publicExposure not observed: BigQuery datasets have no network boundary (IAM-gated global endpoint)")
+	return obs, diags, nil
 }
 
 func (d *Driver) deleteBigQuery(capability, environment, providerID string) provider.CreateResult {

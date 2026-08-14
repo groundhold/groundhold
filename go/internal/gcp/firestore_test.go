@@ -257,3 +257,19 @@ func TestFirestoreMultiRegionIsNotCalledRegional(t *testing.T) {
 		}
 	}
 }
+
+// D1043: the shared multi-region residency guard. A single region does not diagnose;
+// a multi-region (US, EU, ASIA, nam5, eur3) does — else a residency constraint compares
+// against a name standing for several regions and can pass over data resident elsewhere.
+func TestResidencyMultiRegionDiag(t *testing.T) {
+	for _, r := range []string{"europe-west1", "us-central1", "asia-southeast1", ""} {
+		if d := residencyMultiRegionDiag(r, "x"); d != "" {
+			t.Errorf("%q is a single region (or empty) and must NOT diagnose, got: %q", r, d)
+		}
+	}
+	for _, m := range []string{"US", "EU", "ASIA", "nam5", "eur3"} {
+		if residencyMultiRegionDiag(m, "bucket") == "" {
+			t.Errorf("%q is a MULTI-REGION and must diagnose", m)
+		}
+	}
+}
