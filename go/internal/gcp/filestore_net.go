@@ -14,8 +14,19 @@ import (
 	"strings"
 	"time"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/provider"
 )
+
+// filestoreAdoptControls (D1062): a Filestore instance's CMEK is set at create and
+// GCP does not apply the insert body's key to an instance that already exists.
+// Filestore has no wired in-place update, so a live instance on the Google-managed
+// default key where we declared CMEK cannot be reconciled: FAILED (D1048 fixed this
+// inline; this migrates it to the shared comparator, aligning Filestore's CMEK with
+// the bool the whole fleet — and observe — uses).
+var filestoreAdoptControls = []adoptcheck.Control{
+	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+}
 
 func (d *Driver) filestoreBase() string {
 	if d.FilestoreBaseURL != "" {
@@ -104,14 +115,19 @@ func (d *Driver) createFilestore(environment, capability string,
 			return provider.CreateResult{Status: "failed",
 				Reason: "an instance with this name exists and is not ours (labels do not match)"}
 		}
-		if plan.KmsKey != "" && doc.KmsKeyName != plan.KmsKey {
-			// D1048: the contract declares a customer key but the existing instance's key
-			// differs (or is absent), and Filestore has no update path — GCP set the key at
-			// create time and this adopt cannot change it. Fail rather than report succeeded
-			// for a control that did not land (the 409 branch checked only ownership labels).
-			return provider.CreateResult{Status: "failed",
-				Reason: "existing Filestore instance's encryption key does not match the " +
-					"declared customer-managed key and filestore update is not wired — reconcile"}
+		// D1048/D1062: the CMEK the create body sets never applied to this pre-existing
+		// instance (Filestore ignores it on a name conflict), so verify it against the
+		// instance's own measured observation before reporting the adopt a success.
+		obs, _, oerr := d.observeFilestore(capability, pid)
+		if oerr != nil {
+			return provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "adopted instance re-observe gave no answer — reconcile: " + oerr.Error()}
+		}
+		switch v := adoptcheck.Compare(attrs, obs, filestoreAdoptControls); v.Status {
+		case "failed":
+			return provider.CreateResult{Status: "failed", Reason: v.Reason}
+		case "unknown":
+			return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
 		}
 		return provider.CreateResult{ProviderID: pid, Status: "succeeded"} // ours, already present
 	case st >= 500:
