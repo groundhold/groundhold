@@ -76,6 +76,34 @@ jobs:
       - name: Gate (make check)
         run: make check
 
+      # D1073: the README's download line names an exact tag, deliberately — every
+      # build here is a prerelease and GitHub excludes those from /releases/latest,
+      # so a "latest" URL would 404 rather than work. The cost of naming one is that
+      # it goes stale the moment this workflow succeeds, and nothing noticed: after
+      # v0.1.8 was cut to replace binaries built with a toolchain that had since been
+      # patched, the README still handed a newcomer the v0.1.7 line — the copy-paste
+      # path served exactly the artefact the release existed to supersede.
+      #
+      # Checkable here and nowhere else: only at release time do we know the tag. A
+      # repository gate cannot, since the public tags do not exist in the source tree.
+      - name: The README's download line names THIS tag
+        run: |
+          set -euo pipefail
+          named="$(grep -oE 'gh release download v[0-9]+\.[0-9]+\.[0-9]+' README.md \
+                   | head -1 | awk '{print $NF}')"
+          if [ -z "$named" ]; then
+            echo "::error::README has no 'gh release download <tag>' line — either it was" \
+                 "reworded (update this gate with it) or the download path lost its tag."
+            exit 1
+          fi
+          if [ "$named" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::README tells readers to download $named, but this release is" \
+                 "${GITHUB_REF_NAME}. Publishing now would leave the copy-paste path on the" \
+                 "older artefact. Bump the README, merge, then re-tag."
+            exit 1
+          fi
+          echo "README names ${GITHUB_REF_NAME}"
+
       # D626: the gates a release runs, rather than the gates the repository has.
       #
       # `ci.yml`, `security.yml`, `lint.yml` and `codeql.yml` all trigger on

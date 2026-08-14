@@ -127,6 +127,54 @@ constraints:
 	}
 }
 
+// TestAuditIdentitySecurityPathRejectsDeclaredIntent pins the identity-vocab gap the
+// D323/D325-class hunt found: the identity capabilities (sso, oauth-client) are
+// declared-ONLY (no observer driver), so a hard identity security control could ONLY
+// ever be witnessed by the candidate's declared word — the worst false-secure, because
+// there is no measured path at all. mfa.required declared and recorded as intent must
+// BLOCK, exactly like the encryption case, now that the floor covers identity paths.
+func TestAuditIdentitySecurityPathRejectsDeclaredIntent(t *testing.T) {
+	td := t.TempDir()
+	cpath := filepath.Join(td, "c.yaml")
+	if err := os.WriteFile(cpath, []byte(`
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta: { id: idp, environment: test, version: 1 }
+capabilities:
+  - id: sso
+    type: capability.identity.sso
+constraints:
+  hard:
+    - id: c-mfa
+      subject: sso
+      path: mfa.required
+      op: equals
+      value: true
+      verify: { method: static }
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := contract.LoadContract(cpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	led := ledger.New()
+	seedObs(led, "sso", map[string]ledger.ObsRecord{
+		"mfa.required": {Value: true, ObservedAt: "2026-07-15T12:00:00Z",
+			TTLSeconds: 86400, Derivation: "declared", Source: "candidate-declared"},
+	})
+	res, err := Run(c, led, filepath.Join(td, "l.jsonl"),
+		"2026-07-15T12:05:00Z", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != "violations-found" || res.Violations != 1 {
+		t.Fatalf("a hard identity security control witnessed only by declared intent MUST "+
+			"block (no observer can ever measure it), got status=%q violations=%d verdicts=%+v",
+			res.Status, res.Violations, res.Verdicts)
+	}
+}
+
 // TestAuditNonSecurityPathStillSatisfiesAtStatic proves the security floor does NOT
 // over-fire: a NON-security path (cost.monthly) with a declared-intent observation
 // still satisfies the static bar exactly as before — the floor bites security paths
@@ -179,6 +227,12 @@ func TestIsSecurityPath(t *testing.T) {
 		"encryption.customerManagedKeys", "encryption.atRest", "encryption.inTransit",
 		"network.publicExposure", "tls.enforced", "rotation.enabled", "rotation.period",
 		"retention.locked", "protection.level", "deletion.protection", "access.privileged",
+		// identity.sso / identity.oauth-client (D55) — declared-only, so a hard
+		// constraint on these could ONLY ever be satisfied by intent; flooring them is
+		// what stops audit certifying an unwitnessed MFA/SSO/redirect control as proven.
+		"sso.enforced", "mfa.required", "assertions.signed",
+		"pkce.required", "client.authentication", "redirects.exactMatch",
+		"redirects.wildcardsAllowed", "token.asymmetricSigning", "grants.implicit",
 	} {
 		if !isSecurityPath(p) {
 			t.Errorf("%q must classify as a security path (it carries a security posture)", p)

@@ -99,9 +99,10 @@ func Run(c *contract.Contract, led *ledger.Ledger, ledgerPath, at string,
 		// the resource may lack. Raise the effective runtime bar for a hard security path
 		// to provider-api, so declared intent (rank 0) is insufficient and blocks. A real
 		// measured reading still satisfies/violates; only intent is refused. The floor is
-		// keyed on a fail-closed Go namespace predicate (survives --no-vocab / a vocab
-		// override that omits the marker); the vocab `security:` marker + lint keep the
-		// set honest and drift-free.
+		// keyed on a fail-closed Go namespace predicate (survives --no-vocab), pinned by
+		// TestIsSecurityPath; it is maintained by hand and MUST list every capability's
+		// security-posture paths — an omitted path is a silently-reopened false-secure
+		// (that was the identity-vocab gap the D323/D325-class hunt found).
 		method := cn.RuntimeMethod
 		raised := false
 		if cn.Severity == "hard" && isSecurityPath(cn.Path) && methodRank(method) < methodRank("provider-api") {
@@ -349,14 +350,20 @@ func methodRank(method string) int {
 	}
 }
 
-// securityNamespaces are the vocabulary path prefixes whose value carries a SECURITY
-// posture — one value is secure, the other dangerous. A hard constraint on such a path
-// must be WITNESSED (provider-api or better), never satisfied by the candidate's own
-// declared word (the D1003/D1040 false-secure). This Go predicate is the FAIL-CLOSED
-// authority: it is present even under --no-vocab or a custom vocab that omits the
-// per-path `security:` marker (Codex review — a vocab-only signal fails open). The
-// vocab marker + its lint exist to keep this set honest and catch a NEW security path,
-// and the lint asserts the two never diverge.
+// securityNamespaces are the vocabulary paths whose value carries a SECURITY posture —
+// one value is secure, the other dangerous. A hard constraint on such a path must be
+// WITNESSED (provider-api or better), never satisfied by the candidate's own declared
+// word (the D1003/D1040/D1071 false-secure). This Go predicate is the FAIL-CLOSED
+// authority: it is present even under --no-vocab (a vocab-only marker would fail open,
+// Codex review). It is HAND-MAINTAINED and pinned by TestIsSecurityPath — there is no
+// vocab `security:` marker and no parity lint (assessed low-value: a per-path marker only
+// syncs docs for already-floored paths and cannot force a new namespace unless the author
+// volunteers it — the same vigilance as this list). So the discipline is: EVERY
+// capability's security-posture attributes must be listed here, and an omission is a
+// silently-reopened false-secure. The identity paths below were exactly such an omission,
+// found by the D323/D325-class hunt — worst-case, because the identity capabilities are
+// declared-ONLY (no observer driver), so a hard identity security constraint could ONLY
+// ever be satisfied by intent, i.e. it was ALWAYS false-secure without this floor.
 var securityNamespaces = []string{
 	"encryption.",            // customerManagedKeys, atRest, inTransit
 	"network.publicExposure", // public reachability
@@ -366,6 +373,17 @@ var securityNamespaces = []string{
 	"protection.level",       // HSM vs software key protection
 	"deletion.protection",    // delete-guard on a stateful resource
 	"access.privileged",      // over-privileged identity
+	// identity.sso (D55) — declared-only, no observer:
+	"sso.enforced",      // no local-password bypass
+	"mfa.required",      // a second factor is required
+	"assertions.signed", // SAML assertions are signed
+	// identity.oauth-client (D55) — declared-only, no observer:
+	"pkce.required",              // PKCE on the authorization-code flow
+	"client.authentication",      // confidential vs `none` (public) client
+	"redirects.exactMatch",       // redirect URIs matched exactly
+	"redirects.wildcardsAllowed", // open-redirect surface
+	"token.asymmetricSigning",    // asymmetric (not shared-secret) token signing
+	"grants.implicit",            // the deprecated, token-leaking implicit grant
 }
 
 // isSecurityPath reports whether a constraint path names a security control that must be

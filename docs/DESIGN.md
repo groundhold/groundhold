@@ -34929,3 +34929,62 @@ brand-new security namespace outside them would not yet be floored. The recorded
 diverge — the forcing function that makes a NEW security path classify itself in the diff that creates
 it. The per-driver both-states tests (D1069/D1070) stay as regression pins; they are good, but they are
 not the systemic mechanism, and this is.
+
+## D1072 — the witnessed-security floor omitted the identity vocabularies, and its own comment lied
+An adversarial hunt for the D323/D325 class — a stated hard invariant silently weakened by a default —
+found the freshest instance in D1071's own floor. The witnessed-security rule (a hard security control
+must be measured, never satisfied by the candidate's declared word) is enforced by raising the runtime
+evidence bar for any path a hand-maintained namespace list recognises. That list covered
+encryption/exposure/tls/rotation/retention/protection/deletion/privileged but OMITTED every
+security-posture attribute of the identity vocabularies (D55): `sso.enforced`, `mfa.required`,
+`assertions.signed`, `pkce.required`, `client.authentication`, `redirects.exactMatch`,
+`redirects.wildcardsAllowed`, `token.asymmetricSigning`, `grants.implicit`.
+
+This is the WORST case of the class, not a marginal one: the identity capabilities are declared-ONLY —
+no observer driver reads them anywhere in the tree — so a hard identity security constraint could ONLY
+ever be recorded as declared intent (adopt fills it at the `candidate-declared` source, rank 0), and
+without the floor that intent satisfied the default static bar. So `audit` (and `posture`, which folds
+its verdicts) certified "MFA enforced", "no wildcard redirects", "confidential client" as PROVEN
+against reality when nothing measured them and the live IdP/client may lack the control entirely — a
+scheduled unattended run reading clean/exit-0 is worse off than with no answer. The fix adds the
+identity paths to the list; `verify` (candidate-on-paper) is unaffected, so the D55 identity cases stay
+green, and the mechanism was already conformance-pinned by D1071's encryption case. A direct audit test
+pins the identity path end to end.
+
+The hunt also caught a SECOND defect in the same code, of the published-claims-need-gates class on my
+own fresh work (the D961/D962 lesson): D1071's comment asserted a vocab `security:` marker "+ its lint
+… assert the two never diverge" — but that marker and lint were assessed low-value and never built (a
+per-path marker only syncs docs for already-floored paths and cannot force a new namespace unless the
+author volunteers it — the same vigilance as the list). The comment described a mechanism that does not
+exist. Corrected to state the truth: the Go namespace list is the fail-closed authority, hand-maintained
+and pinned by `TestIsSecurityPath`, and the discipline is that EVERY capability's security-posture paths
+must be listed — an omission is a silently-reopened false-secure, which is exactly what this was.
+## D1073 — the release replaced the binary and the README kept handing out the old one
+
+v0.1.8 was cut for one reason: v0.1.7's binaries were built with a Go toolchain that
+had since been patched for stdlib CVEs, and the bump was already on the public tree.
+The build is correct — BUILDINFO reports `go1.26.6`, checksums verify, the attestation
+verifies, `version` reports the tag.
+
+And the README still said `gh release download v0.1.7`. The copy-paste line a newcomer
+uses — the one D1063 rewrote to actually work — served precisely the artefact the
+release existed to supersede. Cutting the release would have achieved nothing for the
+only audience that matters, and the run reported success at every step.
+
+The pinned tag is deliberate and stays: every build here is a prerelease, GitHub
+excludes prereleases from `/releases/latest`, and the README says so — a "latest" URL
+would 404 rather than work. What was missing is that a deliberate pin goes stale by
+construction, on a schedule nobody watches, and nothing was watching.
+
+The check belongs in the release workflow and nowhere else: only there is the tag
+known. A repository gate cannot do it, because the public tags do not exist in this
+tree at all — the same reason D1064's gate runs the tool instead of reading about it.
+The workflow now compares the tag the README names against the tag being released and
+refuses the release if they differ, before anything is published. Both branches
+exercised by hand against the real file.
+
+The shape is the one this walk keeps finding: not a wrong computation, but a published
+sentence that was true when written and is falsified by a routine event nobody
+connected to it. D1064 was the documented OUTPUT going stale when the runtime changed;
+this is the documented INPUT going stale when the release changes. The remedy is the
+same both times — make the routine event check the sentence.
