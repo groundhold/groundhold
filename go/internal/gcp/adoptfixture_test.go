@@ -78,13 +78,19 @@ func postCreate(r *http.Request) bool {
 // ---- D415 enrolments: five GCP services, each against its OWN happy fixture with the
 // create refused. The estate is the one the driver's existing tests already trust.
 
+// redisCMKName is a customer-managed key the standing instance reports, so the
+// adopt control-completeness fixtures can serve CMEK on or off (D1062).
+const redisCMKName = "projects/p/locations/europe-west1/keyRings/r/cryptoKeys/k"
+
 func TestAdoptsExistingMemorystore(t *testing.T) {
 	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
 	p := &certifynet.ExistingProbe{
 		Name:     "gcp/memorystore",
 		Classify: gcpReadRole,
+		// the candidate (redisAttrs) declares TLS + CMEK; the standing instance must
+		// carry both for a clean adopt (D1062).
 		ExistingServer: func() *httptest.Server {
-			return conflictOnCreate(t, redisServer(t, "sessions", "STANDARD_HA", "SERVER_AUTHENTICATION", ""), postCreate)
+			return conflictOnCreate(t, redisServer(t, "sessions", "STANDARD_HA", "SERVER_AUTHENTICATION", redisCMKName), postCreate)
 		},
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver("acme-prod")
@@ -97,7 +103,27 @@ func TestAdoptsExistingMemorystore(t *testing.T) {
 		Create: func(pr provider.Provider) provider.CreateResult {
 			return pr.Create("memorystore", "sessions", "prod", redisAttrs(), redisImpl(), "k", 1)
 		},
-		AllowedMutations: 1,
+		AllowedMutations: 1, // the refused create POST
+		// D1062: TLS and CMEK are fixed at create (Memorystore has no in-place update),
+		// so adopting an instance that lacks either FAILS — it cannot be reconciled.
+		AdoptControls: memorystoreAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			// live instance is Google-managed though we declared CMEK.
+			{Path: "encryption.customerManagedKeys",
+				Server: func() *httptest.Server {
+					return conflictOnCreate(t, redisServer(t, "sessions", "STANDARD_HA", "SERVER_AUTHENTICATION", ""), postCreate)
+				},
+				WantStatus: "failed", WantMutations: 1},
+			// live instance speaks plaintext though we declared TLS.
+			{Path: "encryption.inTransit",
+				Server: func() *httptest.Server {
+					return conflictOnCreate(t, redisServer(t, "sessions", "STANDARD_HA", "DISABLED", redisCMKName), postCreate)
+				},
+				WantStatus: "failed", WantMutations: 1},
+		},
+		MoreSecure: func() *httptest.Server {
+			return conflictOnCreate(t, redisServer(t, "sessions", "STANDARD_HA", "SERVER_AUTHENTICATION", redisCMKName), postCreate)
+		},
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

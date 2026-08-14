@@ -11,8 +11,21 @@ import (
 	"strings"
 	"time"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/provider"
 )
+
+// arAdoptControls (D1062): a repository's CMEK (kmsKeyName) and tag immutability are
+// set INLINE at create and never applied to a repository that already exists. The
+// conflict-ours adopt path re-asserts public exposure and scanning, but not these two:
+// CMEK is fixed at creation and immutable.tags has no wired in-place update, so a live
+// repository on a Google-managed key where we declared CMEK, or with mutable tags where
+// we declared immutable (a supply-chain tag-overwrite vector), FAILS rather than being
+// bound as a success it is not.
+var arAdoptControls = []adoptcheck.Control{
+	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "immutable.tags", Direction: adoptcheck.SecureTrue}, // patchable in principle, not wired → failed
+}
 
 func (d *Driver) arBase() string {
 	if d.ARBaseURL != "" {
@@ -199,7 +212,22 @@ func (d *Driver) createARRepo(capability, environment string,
 			doc.Labels["groundhold-environment"] != sanitizeLabel(environment) {
 			return provider.CreateResult{Status: "failed", Reason: "a repository with this id exists and is not ours (labels do not match)"}
 		}
-		// ours — fall through to re-assert public exposure + scanning posture
+		// ours — but CMEK and tag immutability were set inline at create and never
+		// applied to this pre-existing repository (CMEK immutable, tags unwired). Verify
+		// them BEFORE re-asserting the mutable posture: a repository we must reject for
+		// an unfixable control should not be mutated first (D1062).
+		obs, _, oerr := d.observeARRepo(capability, pid)
+		if oerr != nil {
+			return provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "adopted repository re-observe gave no answer — reconcile: " + oerr.Error()}
+		}
+		switch v := adoptcheck.Compare(attrs, obs, arAdoptControls); v.Status {
+		case "failed":
+			return provider.CreateResult{Status: "failed", Reason: v.Reason}
+		case "unknown":
+			return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
+		}
+		// controls in place — re-assert the mutable public-exposure + scanning posture.
 		if r := d.applyARPublic(plan, pid); r != nil {
 			return *r
 		}

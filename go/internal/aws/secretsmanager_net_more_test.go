@@ -1,12 +1,101 @@
 package aws
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"groundhold/internal/certifynet"
+	"groundhold/internal/provider"
 )
+
+// asmAdoptServer serves an already-ours secret for the D1062 adopt control checks:
+// CreateSecret answers ResourceExists (the secret is already standing), DescribeSecret
+// carries our ownership tags and the given KmsKeyId (CMEK iff a non-default key), and
+// GetResourcePolicy returns the given policy (empty = private). Read-only past the
+// refused create, so adopting sends no mutation but the refused CreateSecret itself.
+func asmAdoptServer(kmsKeyID, policy string) func() *httptest.Server {
+	return func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			action := r.Header.Get("X-Amz-Target")
+			action = action[strings.LastIndex(action, ".")+1:]
+			switch action {
+			case "CreateSecret":
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`{"__type":"ResourceExistsException","message":"already exists"}`))
+			case "DescribeSecret":
+				_, _ = w.Write([]byte(`{"ARN":"arn:aws:secretsmanager:eu-central-1:000000000000:secret:x-AbCdEf",` +
+					`"Name":"x","KmsKeyId":"` + kmsKeyID + `",` +
+					`"Tags":[{"Key":"groundhold-capability","Value":"dbcreds"},` +
+					`{"Key":"groundhold-environment","Value":"prod"}]}`))
+			case "GetResourcePolicy":
+				if policy == "" {
+					_, _ = w.Write([]byte(`{"Name":"x"}`))
+				} else {
+					enc, _ := json.Marshal(policy)
+					_, _ = w.Write([]byte(`{"Name":"x","ResourcePolicy":` + string(enc) + `}`))
+				}
+			default:
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`{"__type":"UnknownOperationException"}`))
+			}
+		}))
+	}
+}
+
+// asmRole classifies Secrets Manager calls for the adopt gate's mutation counter:
+// the action rides in the X-Amz-Target header, and Describe/Get/List are reads.
+func asmRole(r *http.Request, _ []byte) certifynet.Role {
+	a := r.Header.Get("X-Amz-Target")
+	a = a[strings.LastIndex(a, ".")+1:]
+	if strings.HasPrefix(a, "Describe") || strings.HasPrefix(a, "Get") || strings.HasPrefix(a, "List") {
+		return certifynet.RoleRead
+	}
+	return certifynet.RoleMutateOpaque
+}
+
+// TestAdoptsExistingSecretsManager enrols secretsmanager in the D391/D1062 gate. A
+// secret's CMEK key and public-exposure posture are set inline at create and never
+// applied to one already standing; both are re-assertable in place, so a live secret
+// less protected than declared is unknown+bound (converge reconciles), never a silent
+// adopt that claims a control the secret lacks.
+func TestAdoptsExistingSecretsManager(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	const customerKey = "arn:aws:kms:eu-central-1:000000000000:key/abc"
+	p := &certifynet.ExistingProbe{
+		Name:           "aws/secretsmanager",
+		Classify:       asmRole,
+		ExistingServer: asmAdoptServer(customerKey, ""), // CMEK + private — matches the candidate
+		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
+			d := NewDriver("eu-central-1")
+			d.HTTP = &http.Client{Transport: rt}
+			d.SecretsManagerBaseURL = happyURL
+			return d
+		},
+		Create: func(pr provider.Provider) provider.CreateResult {
+			return pr.Create("secretsmanager", "dbcreds", "prod", asmAttrs(), asmImpl(), "k", 1)
+		},
+		PID:              asmProviderID("eu-central-1", ASMSecretName("prod", "dbcreds", 1)),
+		AllowedMutations: 1, // the refused CreateSecret
+		AdoptControls:    asmAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			// live secret on the AWS-default key though we declared CMEK — mutable,
+			// converge re-keys via UpdateSecret, so unknown+bound (not a silent success).
+			{Path: "encryption.customerManagedKeys", Server: asmAdoptServer(asmDefaultKeyAlias, ""),
+				WantStatus: "unknown", WantMutations: 1},
+			// live secret with a public resource policy though we declared private —
+			// mutable, converge re-scopes via PutResourcePolicy, so unknown+bound.
+			{Path: "network.publicExposure", Server: asmAdoptServer(customerKey, asmPublicPolicy("")),
+				WantStatus: "unknown", WantMutations: 1},
+		},
+		MoreSecure: asmAdoptServer(customerKey, ""), // fully compliant — adopts clean
+	}
+	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
 
 // This file rounds out secretsmanager_net.go coverage: classifyASMChange,
 // asmDeletePolicy and updateASM were all previously untested (0% each).

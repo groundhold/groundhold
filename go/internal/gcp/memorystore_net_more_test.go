@@ -159,7 +159,12 @@ func TestCreateMemorystoreConflictOursIdempotent(t *testing.T) {
 		case r.Method == "POST":
 			w.WriteHeader(http.StatusConflict)
 		case r.Method == "GET":
-			_, _ = w.Write([]byte(`{"name":"x","labels":{"groundhold-capability":"sessions","groundhold-environment":"prod"}}`))
+			// the standing instance carries the declared controls (TLS + CMEK), so the
+			// idempotent adopt is a clean success (D1062: an instance missing them would
+			// fail rather than silently bind).
+			_, _ = w.Write([]byte(`{"name":"x","labels":{"groundhold-capability":"sessions","groundhold-environment":"prod"},` +
+				`"redisVersion":"REDIS_7_0","tier":"STANDARD_HA","transitEncryptionMode":"SERVER_AUTHENTICATION",` +
+				`"customerManagedKey":"projects/p/locations/europe-west1/keyRings/r/cryptoKeys/k"}`))
 		}
 	}))
 	defer srv.Close()

@@ -14,8 +14,21 @@ import (
 	"net/http"
 	"strings"
 
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/provider"
 )
+
+// asmAdoptControls (D1062): a secret's CMEK key and its public-exposure posture are
+// set INLINE at CreateSecret (KmsKeyId) / by the resource policy, and a create that
+// finds the secret already ours never applied them to it. Both are re-assertable in
+// place (updateASM wires UpdateSecret KmsKeyId and PutResourcePolicy), so a live
+// secret on the AWS-default key where we declared CMEK, or with a public policy where
+// we declared private, is unknown+bound — converge reconciles it through the consented
+// update, never a silent adopt that claims a control the secret lacks.
+var asmAdoptControls = []adoptcheck.Control{
+	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, UpdateWired: true},
+	{Path: "network.publicExposure", Direction: adoptcheck.SecureFalse, UpdateWired: true},
+}
 
 const asmTarget = "secretsmanager"
 
@@ -135,6 +148,7 @@ func (d *Driver) createASM(region, environment, capability string,
 		return provider.CreateResult{ProviderID: pid, Status: "unknown",
 			Reason: fmt.Sprintf("create outcome unknown (may have landed): %v", err)}
 	}
+	adopted := false
 	switch {
 	case st == http.StatusOK:
 		// created — the ownership re-check below is belt-and-suspenders
@@ -149,7 +163,10 @@ func (d *Driver) createASM(region, environment, capability string,
 			return provider.CreateResult{Status: "failed",
 				Reason: "a secret with this name exists and is not ours (tags do not match) — refusing"}
 		}
-		// ours — fall through to re-assert exposure
+		// ours — fall through to re-assert exposure. The CreateSecret body (KmsKeyId)
+		// never applied to this pre-existing secret, so its declared controls must be
+		// re-verified before we call the adopt a success (D1062).
+		adopted = true
 	case st >= 500:
 		return provider.CreateResult{ProviderID: pid, Status: "unknown",
 			Reason: fmt.Sprintf("create HTTP %d (server error — may have landed): %s", st, ecsErr(resp))}
@@ -167,6 +184,19 @@ func (d *Driver) createASM(region, environment, capability string,
 	if plan.Public {
 		if r := d.asmPutPolicy(region, plan.Name, "", pid); r != nil {
 			return *r
+		}
+	}
+	if adopted {
+		obs, _, oerr := d.observeASM(capability, pid)
+		if oerr != nil {
+			return provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "adopted secret re-observe gave no answer — reconcile: " + oerr.Error()}
+		}
+		switch v := adoptcheck.Compare(attrs, obs, asmAdoptControls); v.Status {
+		case "failed":
+			return provider.CreateResult{Status: "failed", Reason: v.Reason}
+		case "unknown":
+			return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
 		}
 	}
 	return provider.CreateResult{ProviderID: pid, Status: "succeeded"}

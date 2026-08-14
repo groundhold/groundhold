@@ -171,6 +171,39 @@ func elbRole(_ *http.Request, body []byte) certifynet.Role {
 	return certifynet.RoleMutateOpaque
 }
 
+// lbAdoptFixture serves an already-ours, fully-standing load balancer whose exposure
+// posture is set by the caller: the Scheme (internet-facing/internal) and the single
+// listener's Protocol (HTTPS/HTTP) are the two knobs the D1062 control-completeness
+// cases turn. Read-only — DescribeLoadBalancers, DescribeTags, DescribeListeners — so
+// adopting it sends no mutation and the check is on the adopt verdict alone.
+func lbAdoptFixture(scheme, listenerProto string) func() *httptest.Server {
+	return func() *httptest.Server {
+		lbArn := "arn:aws:elasticloadbalancing:eu-central-1:000000000000:loadbalancer/app/" + lbTestName + "/50dc6c495c0c9188"
+		lisArn := "arn:aws:elasticloadbalancing:eu-central-1:000000000000:listener/app/" + lbTestName + "/50dc6c495c0c9188/abc"
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			switch formAction(string(b)) {
+			case "DescribeLoadBalancers":
+				_, _ = w.Write([]byte(`<DescribeLoadBalancersResponse><DescribeLoadBalancersResult><LoadBalancers><member>` +
+					`<LoadBalancerArn>` + lbArn + `</LoadBalancerArn><LoadBalancerName>` + lbTestName + `</LoadBalancerName>` +
+					`<Scheme>` + scheme + `</Scheme><Type>application</Type><State><Code>active</Code></State>` +
+					`</member></LoadBalancers></DescribeLoadBalancersResult></DescribeLoadBalancersResponse>`))
+			case "DescribeTags":
+				_, _ = w.Write([]byte(`<DescribeTagsResponse><DescribeTagsResult><TagDescriptions><member><ResourceArn>` + lbArn + `</ResourceArn><Tags>` +
+					`<member><Key>groundhold-capability</Key><Value>` + lbCap + `</Value></member>` +
+					`<member><Key>groundhold-environment</Key><Value>prod</Value></member>` +
+					`</Tags></member></TagDescriptions></DescribeTagsResult></DescribeTagsResponse>`))
+			case "DescribeListeners":
+				_, _ = w.Write([]byte(`<DescribeListenersResponse><DescribeListenersResult><Listeners><member>` +
+					`<ListenerArn>` + lisArn + `</ListenerArn><Protocol>` + listenerProto + `</Protocol>` +
+					`</member></Listeners></DescribeListenersResult></DescribeListenersResponse>`))
+			default:
+				w.WriteHeader(http.StatusBadRequest)
+			}
+		}))
+	}
+}
+
 // TestAdoptsExistingLoadBalancer enrols loadbalancer in the D391 gate. An ALB is a
 // COMPOSITE — load balancer plus target group plus listener — so the property here is
 // partial: the standing pieces must be bound and only the MISSING piece created. That
@@ -206,6 +239,28 @@ func TestAdoptsExistingLoadBalancer(t *testing.T) {
 		},
 		PID:              elbv2ProviderID("eu-central-1", lbTestName),
 		AllowedMutations: 2, // tag/attribute convergence onto the standing composite
+		// D1062: the exposure posture is set inline at create and never reapplied to a
+		// standing LB; both controls are fixed at creation (updateLoadBalancer refuses
+		// them in place), so a live LB more exposed than declared FAILS.
+		AdoptControls: lbAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			// declared INTERNAL over a live internet-facing LB — a public front door we
+			// cannot make internal in place.
+			{Path: "network.publicExposure", Server: lbAdoptFixture("internet-facing", "HTTPS"),
+				Create: func(pr provider.Provider) provider.CreateResult {
+					a, im := httpsLBCandidate()
+					a["network.publicExposure"] = false
+					return pr.Create("loadbalancer", lbCap, "prod", a, im, "k", 1)
+				},
+				WantStatus: "failed", WantMutations: 0},
+			// declared TLS over a live plaintext (HTTP) listener — an unencrypted front
+			// door we cannot re-terminate in place.
+			{Path: "encryption.inTransit", Server: lbAdoptFixture("internet-facing", "HTTP"),
+				WantStatus: "failed", WantMutations: 0},
+		},
+		// declared public but the live LB is INTERNAL (more secure) and TLS matches —
+		// the safe direction must still adopt clean.
+		MoreSecure: lbAdoptFixture("internal", "HTTPS"),
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }
