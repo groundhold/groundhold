@@ -165,6 +165,47 @@ for cand in "${CANDIDATES[@]}"; do
   fi
 done
 
+# ---------------------------------------------------------------------------
+# The NEWCOMER PATH (D1063): what someone with a downloaded binary and no clone
+# does. Everything above checks files this repository SHIPS — every one of which
+# exists only in a clone. The published sixty-second path starts from an empty
+# directory and uses documents the tool writes about itself, and until now nothing
+# walked it.
+#
+# D1063 is the proof that it breaks silently: the scaffold emitted an attribute no
+# provider can honour, so `converge` APPLIED once and REFUSED every pass after —
+# from documents the tool had just written for the reader. Found by hand; nothing
+# would have found it again.
+#
+# It lives here rather than in a Go test because `converge` re-executes the binary
+# for each phase, so it cannot be driven in-process: a test binary would spawn
+# itself. This harness already has the built CLI, which is what a reader has too.
+NEW="$(mktemp -d)"
+trap 'rm -rf "$NEW"' EXIT
+"$CLI" example contract > "$NEW/my.contract.yaml" 2>/dev/null
+"$CLI" example candidate "$NEW/my.contract.yaml" > "$NEW/my.candidate.yaml" 2>/dev/null
+
+# Exactly the blank the README tells the reader to fill — no more, no fewer. A
+# second one means the published instruction is wrong and a reader lands on a
+# refusal without being told which field is missing. Everything the contract PINS
+# is answered by the scaffold itself (D1087), so only the provider's service token
+# is left to decide.
+blanks="$(grep -oE '^[[:space:]]*[A-Za-z.]+: ""' "$NEW/my.candidate.yaml" \
+          | sed -E 's/^[[:space:]]*//; s/: ""//' | paste -sd, -)"
+report "newcomer scaffold leaves the documented blank" "service" "$blanks"
+
+sed -i 's|service: ""|service: "rds"|' "$NEW/my.candidate.yaml"
+
+first="$("$CLI" converge "$NEW/my.contract.yaml" "$NEW/my.candidate.yaml" \
+  --ledger "$NEW/try.jsonl" --provider fake --at "$AT" --yes 2>&1 | tail -1 || true)"
+report "newcomer path: first converge applies" APPLIED "$first"
+
+# The one that matters. A scaffold that declares what no provider can honour
+# applies once and then never converges on its own output.
+second="$("$CLI" converge "$NEW/my.contract.yaml" "$NEW/my.candidate.yaml" \
+  --ledger "$NEW/try.jsonl" --provider fake --at "$AT" --yes 2>&1 | tail -1 || true)"
+report "newcomer path: second converge is a no-op" CONVERGED "$second"
+
 echo
 if [ "$fail" -gt 0 ]; then
   echo "$pass passed, $fail FAILED — a shipped example does not work"

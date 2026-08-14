@@ -56,7 +56,7 @@ Now the loop, with **only** that binary — the tool writes its own documents:
 ```sh
 ./groundhold_linux_amd64 example contract > my.contract.yaml
 ./groundhold_linux_amd64 example candidate my.contract.yaml > my.candidate.yaml
-# fill in the two blanks the scaffold leaves: service, and location.region
+# fill in the one blank the scaffold leaves: the provider's service token
 ./groundhold_linux_amd64 converge my.contract.yaml my.candidate.yaml \
   --ledger state/try.jsonl --provider fake \
   --at "$(date -u +%FT%TZ)" --yes

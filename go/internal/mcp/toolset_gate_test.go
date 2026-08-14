@@ -1,6 +1,9 @@
 package mcp
 
 import (
+	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -84,4 +87,85 @@ func diff(a, b []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// D1086. D593 pins the SET the server serves, so a seventh tool cannot appear
+// unremarked. Nothing pins what the DOCUMENTS say that set is.
+//
+// Two published surfaces name these tools — the MCP page and the README — and both
+// also carry the safety claim that `groundhold_apply` is absent unless
+// GROUNDHOLD_MCP_ALLOW_APPLY is set. An agent operator reads those pages to decide
+// what an autonomous client can reach. Add a tool and the pages under-list it; remove
+// one and they promise a tool that answers "unknown method"; flip the apply gating and
+// the pages go on saying infrastructure mutation is off by default, which is the
+// dangerous direction and the reason this is worth a gate rather than a note.
+//
+// The sibling gate above already binds one published sentence (the token claim) to the
+// code. This binds the list and the gating claim the same way.
+func TestPublishedToolListsMatchTheServedSet(t *testing.T) {
+	root := repoRootFromMCP(t)
+	deflt := toolNames(t, false)
+	withApply := toolNames(t, true)
+
+	served := map[string]bool{}
+	for _, n := range withApply {
+		served[n] = true
+	}
+	// The property under test is that apply is NOT in the default set. Assert it here
+	// rather than trusting the sibling: this gate's message is about the documents, and
+	// a reader must not have to guess which test failed.
+	for _, n := range deflt {
+		if n == "groundhold_apply" {
+			t.Fatal("groundhold_apply is in the DEFAULT tool set — the published pages " +
+				"say it appears only under GROUNDHOLD_MCP_ALLOW_APPLY, and that is now false")
+		}
+	}
+
+	name := regexp.MustCompile(`groundhold_[a-z]+`)
+	for _, rel := range []string{
+		filepath.Join("website", "pages", "mcp.md"),
+		"README.md",
+	} {
+		raw, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			continue // a document this tree does not carry is not this gate's business
+		}
+		text := string(raw)
+
+		mentioned := map[string]bool{}
+		for _, m := range name.FindAllString(text, -1) {
+			// The README's download line contains `groundhold_linux_amd64`; the regex
+			// stops at the underscore-digit boundary, so filter to names the server
+			// could plausibly have. Anything else is either a real tool or a phantom.
+			if strings.HasPrefix(m, "groundhold_linux") || strings.HasPrefix(m, "groundhold_darwin") {
+				continue
+			}
+			mentioned[m] = true
+		}
+		if len(mentioned) == 0 {
+			t.Errorf("%s names no MCP tool at all — either the page stopped documenting "+
+				"them (then this gate watches nothing) or the naming changed", rel)
+			continue
+		}
+
+		for m := range mentioned {
+			if !served[m] {
+				t.Errorf("%s documents %q, which the server does not serve even with "+
+					"apply enabled. A reader wiring an agent to it gets an unknown-method "+
+					"error from a tool the docs promised.", rel, m)
+			}
+		}
+		for _, n := range deflt {
+			if !mentioned[n] {
+				t.Errorf("%s does not mention %q, which every client gets by default. "+
+					"An undocumented tool on the default surface is one nobody reviewed.",
+					rel, n)
+			}
+		}
+		// The gating claim itself, in whatever words each page uses for it.
+		if mentioned["groundhold_apply"] && !strings.Contains(text, "GROUNDHOLD_MCP_ALLOW_APPLY") {
+			t.Errorf("%s names groundhold_apply without naming the environment variable "+
+				"that is the only thing keeping it off the default surface", rel)
+		}
+	}
 }
