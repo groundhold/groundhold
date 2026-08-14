@@ -508,6 +508,39 @@ func cloudTrailRole(req *http.Request, _ []byte) certifynet.Role {
 // adopted: logging is ensured and the binding returns succeeded. D804 replaced a fixture
 // that modelled a RACE instead — see TestCloudTrailRaceConcludesUnknown below, which
 // keeps that case rather than losing it.
+// cloudtrailAdoptSrv builds a 409-adopt fixture: our trail already standing and
+// logging, with the controls set however the case needs (D1062).
+func cloudtrailAdoptSrv(multiRegion, logValidation, cmek bool) func() *httptest.Server {
+	return func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch cloudTrailAction(r) {
+			case "CreateTrail":
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`{"__type":"TrailAlreadyExistsException","Message":"exists"}`))
+			case "GetTrail":
+				kms := ""
+				if cmek {
+					kms = `"KmsKeyId":"` + cloudTrailTestKms + `",`
+				}
+				_, _ = w.Write([]byte(`{"Trail":{"Name":"pv-x","TrailARN":"` + cloudTrailArn("pv-x") +
+					`","HomeRegion":"eu-central-1","IsMultiRegionTrail":` + boolStr(multiRegion) +
+					`,"LogFileValidationEnabled":` + boolStr(logValidation) + `,` + kms +
+					`"S3BucketName":"` + cloudTrailTestBucket + `"}}`))
+			case "ListTags":
+				_, _ = w.Write([]byte(`{"ResourceTagList":[{"ResourceId":"` + cloudTrailArn("pv-x") +
+					`","TagsList":[{"Key":"groundhold-capability","Value":"audit"},` +
+					`{"Key":"groundhold-environment","Value":"prod"}]}]}`))
+			case "GetTrailStatus":
+				_, _ = w.Write([]byte(`{"IsLogging":true,"LatestDeliveryTime":1700000000}`))
+			case "StartLogging":
+				_, _ = w.Write([]byte(`{}`))
+			default:
+				w.WriteHeader(400)
+			}
+		}))
+	}
+}
+
 func TestAdoptsExistingCloudTrail(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
@@ -522,30 +555,7 @@ func TestAdoptsExistingCloudTrail(t *testing.T) {
 		//
 		// The estate now SERVES the trail, carrying our tags, so the probe exercises the
 		// real pre-read and the create adopts. The race keeps its own test below.
-		ExistingServer: func() *httptest.Server {
-			return httptest.NewServer(http.HandlerFunc(
-				func(w http.ResponseWriter, r *http.Request) {
-					switch cloudTrailAction(r) {
-					case "GetTrail":
-						_, _ = w.Write([]byte(`{"Trail":{"Name":"pv-x","TrailARN":"` +
-							cloudTrailArn("pv-x") + `","HomeRegion":"eu-central-1",` +
-							`"IsMultiRegionTrail":true,"LogFileValidationEnabled":true,` +
-							`"KmsKeyId":"` + cloudTrailTestKms + `","S3BucketName":"` +
-							cloudTrailTestBucket + `"}}`))
-					case "ListTags":
-						_, _ = w.Write([]byte(`{"ResourceTagList":[{"ResourceId":"` +
-							cloudTrailArn("pv-x") + `","TagsList":[` +
-							`{"Key":"groundhold-capability","Value":"audit"},` +
-							`{"Key":"groundhold-environment","Value":"prod"}]}]}`))
-					case "GetTrailStatus":
-						_, _ = w.Write([]byte(`{"IsLogging":true,"LatestDeliveryTime":1700000000}`))
-					case "StartLogging":
-						_, _ = w.Write([]byte(`{}`))
-					default:
-						w.WriteHeader(400)
-					}
-				}))
-		},
+		ExistingServer: cloudtrailAdoptSrv(true, true, true),
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver("eu-central-1")
 			d.HTTP = &http.Client{Transport: rt}
@@ -559,6 +569,18 @@ func TestAdoptsExistingCloudTrail(t *testing.T) {
 			return pr.Create("cloudtrail", "audit", "prod", cloudTrailAttrs(), cloudTrailImpl(), "audit", 1)
 		},
 		AllowedMutations: 1, // the refused CreateTrail
+		// D1062: KMS key, log validation and multi-region scope are all re-assertable in
+		// place (UpdateTrail), so a miss is unknown+bound and converge patches it.
+		AdoptControls: cloudtrailAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			{Path: "encryption.customerManagedKeys", Server: cloudtrailAdoptSrv(true, true, false),
+				WantStatus: "unknown", WantMutations: 1},
+			{Path: "integrity.logValidation", Server: cloudtrailAdoptSrv(true, false, true),
+				WantStatus: "unknown", WantMutations: 1},
+			{Path: "scope.multiRegion", Server: cloudtrailAdoptSrv(false, true, true),
+				WantStatus: "unknown", WantMutations: 1},
+		},
+		MoreSecure: cloudtrailAdoptSrv(true, true, true),
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

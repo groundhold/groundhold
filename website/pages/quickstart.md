@@ -73,8 +73,8 @@ bin/groundhold-go verify db.contract.yaml db.candidate.yaml
 
 ```
 contract orders v1
-  ✓ c-region                     satisfied     location.region equals europe-central2: observed europe-central2
-  ✓ c-private                    satisfied     network.publicExposure equals false: observed false
+  ✓ c-region                     satisfied     location.region equals europe-central2: declared europe-central2
+  ✓ c-private                    satisfied     network.publicExposure equals false: declared false
 
   2 satisfied, 0 violated, 0 unknown, 0 unverifiable
   PROVEN

@@ -189,8 +189,8 @@ bin/groundhold-go verify \
 ```
 
 ```
-  ✓ c-db-managed                 satisfied     service.managed equals true: observed true
-  ✗ c-eu-only                    violated      location.region in [eu-central-1 eu-west-1]: observed us-east-1
+  ✓ c-db-managed                 satisfied     service.managed equals true: declared true
+  ✗ c-eu-only                    violated      location.region in [eu-central-1 eu-west-1]: declared us-east-1
       location.region — Primary region of the instance
 
   1 satisfied, 1 violated, 0 unknown, 0 unverifiable
