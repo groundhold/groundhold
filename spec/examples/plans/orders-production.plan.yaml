@@ -10,8 +10,8 @@ plan:
   environment: production
 
   reads:
-    contractHash: "sha256:019ca3ba2b24d0a49459384b88f4bc4066a7d35412aa32ad166046b0f7ece1ef"
-    candidateHash: "sha256:3ba96d8396881fa867f4bf1e28541b5fbc56f2c49d308a248061f2cb2ea10564"
+    contractHash: "sha256:e39bbba5bef27992f1e3609b5388eb435150f17f744031d21856a4037c23de96"
+    candidateHash: "sha256:62e9bcae17cec6827c9fea8209a927c3b822636316ecbd6147aad60b66f60568"
     heads:
       orders-db: genesis
     vocabularies:
@@ -50,6 +50,12 @@ plan:
       target: cloudsql.instance/primary
       idempotencyKey: orders-db-pitr-7f3a
       dependsOn: [a-create-primary]
+      # D46: an update is a REVIEWED change-set, never an implicit diff. The
+      # executor patches the listed paths from the hash-pinned candidate; from/to
+      # are denormalized audit fields. This action is what makes c-rpo (<= 5m)
+      # reachable — point-in-time recovery is off on a fresh instance.
+      changes:
+        - { path: recovery.rpo, from: 24h, to: 5m }
       requiredPermissions:                 # D75
         - cloudsql.instances.get
         - cloudsql.instances.update

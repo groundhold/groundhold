@@ -166,6 +166,40 @@ for cand in "${CANDIDATES[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
+# Shipped PLAN documents. Contracts and candidates are discovered and checked
+# above; plans were not, and the one this repository ships had been INVALID since
+# the rule that an update carries a reviewed change-set (D46) — a month, in the
+# directory an independent implementer is invited to measure against.
+#
+# Its header states the property this checks, and stated it falsely: "the reads
+# block pins the ACTUAL hashes of the example contract and candidate in this repo
+# — `groundhold hash` on those files reproduces them". Neither did. The document
+# told the reader exactly how to catch it out.
+mapfile -t PLANS < <(find examples spec/examples -name '*.plan.yaml' | sort)
+if [ "${#PLANS[@]}" -lt 1 ]; then
+  echo "found no shipped plan documents — the scan broke"
+  exit 1
+fi
+for plan in "${PLANS[@]}"; do
+  # It must LOAD. forecast is the reader's way in, and it validates the plan before
+  # anything else; the candidate is the one this repository ships.
+  got=0
+  "$CLI" forecast "$plan" spec/examples/candidates/gcp-cloudsql.candidate.yaml \
+    --at "$AT" >/dev/null 2>&1 || got=$?
+  report "plan loads $(basename "$plan")" 0 "$got"
+
+  # And the hashes it pins must be the ones `groundhold hash` produces, which is
+  # what the file says about itself.
+  for pair in "contractHash spec/examples/orders-production.contract.yaml" \
+              "candidateHash spec/examples/candidates/gcp-cloudsql.candidate.yaml"; do
+    set -- $pair
+    pinned="$(grep -oE "$1: \"sha256:[0-9a-f]+\"" "$plan" | grep -oE 'sha256:[0-9a-f]+' || true)"
+    actual="$("$CLI" hash "$2" 2>/dev/null | tail -1)"
+    report "plan $1 reproduces" "$actual" "$pinned"
+  done
+done
+
+# ---------------------------------------------------------------------------
 # The NEWCOMER PATH (D1063): what someone with a downloaded binary and no clone
 # does. Everything above checks files this repository SHIPS — every one of which
 # exists only in a clone. The published sixty-second path starts from an empty
