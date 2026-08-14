@@ -104,6 +104,26 @@ jobs:
           fi
           echo "README names ${GITHUB_REF_NAME}"
 
+      # D1078: the CHANGELOG's version headings are BUILD versions and the release
+      # tags are a separate, slower sequence — two lines sharing the `v0.1.x` shape.
+      # They collided: entry `[v0.1.8]` (2026-08-02, CloudWatch operands) and release
+      # `v0.1.8` (2026-08-14, a toolchain rebuild) are different artefacts under the
+      # same string, on the page a reader opens to find out what they downloaded.
+      # The published-releases table now states each release and the commit it came
+      # from; a release missing from it leaves the collision unexplained for exactly
+      # the version someone is holding.
+      - name: The CHANGELOG's published-releases table lists THIS tag
+        run: |
+          set -euo pipefail
+          if ! grep -qE "^\| \`${GITHUB_REF_NAME}\` \|" CHANGELOG.md; then
+            echo "::error::CHANGELOG has no published-releases row for ${GITHUB_REF_NAME}." \
+                 "Its version headings are build numbers that collide with release tags," \
+                 "so a reader who downloaded this release would land on an unrelated entry." \
+                 "Add the row (release | published | built from | contains), merge, re-tag."
+            exit 1
+          fi
+          echo "CHANGELOG lists ${GITHUB_REF_NAME}"
+
       # D626: the gates a release runs, rather than the gates the repository has.
       #
       # `ci.yml`, `security.yml`, `lint.yml` and `codeql.yml` all trigger on

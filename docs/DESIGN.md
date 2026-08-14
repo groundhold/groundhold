@@ -35083,3 +35083,62 @@ load balancer was confirmed OURS; when the LB is gone we leave the target group 
 than risk destroying a resource we cannot prove is ours — the per-companion ownership skip GCP
 (`markerOurs`) and Azure (`deleteCompanionIfOurs`, D943) already do. The cost is a leaked target group
 in the rare LB-gone partial, never a foreign resource deleted.
+
+## D1078 — two version sequences, one namespace, on the page that says what you downloaded
+
+Cutting v0.1.8 exposed something the release itself did not cause. The CHANGELOG ships
+publicly and its headings are BUILD versions of the source repository; the release tags
+are a separate, slower sequence. Both are `v0.1.x`. They do not correspond.
+
+The dates prove they never did: private `v0.1.4` is 2026-07-30, published `v0.1.4` is
+2026-07-26 — the public one is EARLIER, so it cannot be that tree. And the collision is
+live at the top of the list: entry `[v0.1.8] - 2026-08-02` describes CloudWatch alarm
+operands, while release `v0.1.8` was published 2026-08-14 as a rebuild on a patched Go
+toolchain. A reader who downloads a release and opens the changelog to see what is in it
+— the ordinary reason to open a changelog — finds an entry with the right version string,
+a plausible date, and the wrong contents. Nothing signals the mismatch.
+
+The header made it worse than silence by asserting the opposite: "the tags below are
+public prereleases". They are not, and that sentence is the one a careful reader would
+have used to resolve their doubt.
+
+**Not fixable by renumbering.** Published tags cannot be re-cut, and rewriting the
+development entries would falsify a record this project keeps append-only. So the fix is
+to state the structure instead of hiding it: the header now says the two sequences exist,
+names the exact collision, and carries a table of every published release with the mirror
+commit it was built from — traceable by the reader, since `BUILDINFO.txt` inside each
+release states the same commit and the build command.
+
+The table also settles what each release CONTAINS, which turned out to be one sentence
+for all four: everything through `[v0.1.17]`. That is because the version-by-version
+entries stop on 2026-08-06 while the work did not — eight days and roughly seventy
+decision entries later, `[Unreleased]` is still empty. The page now says that in its own
+voice and points at `docs/DESIGN.md`, rather than letting a reader infer from a
+2026-08-06 top entry that nothing has happened since.
+
+Gated where it is checkable: the release workflow, which is the only place the tag is
+known (D1073's argument, second application). A release whose tag has no row in the
+published-releases table is refused before publishing, with a message that explains the
+collision rather than just naming a missing string.
+
+**What this does not fix, deliberately.** The two sequences still share a namespace, so
+`v0.1.9` as a release and `[v0.1.9]` as a build number will collide the same way. Ending
+that means choosing a numbering scheme for published releases, which is the owner's call
+and not a walk's — recorded here so the choice is made deliberately rather than
+discovered again by whoever next matches a version number.
+
+The existing changelog gate (D548) does not catch any of this and reads correct: it asks
+whether every tag appears as a heading, and on both sides it does — the public tags find
+the development line's headings of the same name. A gate that passes because two
+different things share a string is the D1068 shape again, and naming it here is the only
+guard the walk can leave.
+
+**It did catch something, though, and the something was mine.** D548 exempts the three
+tags that predate the file, and each exemption re-derives its evidence: the sentence
+justifying it must still be present. The sentence it quoted was "the tags below are
+public prereleases, not" — the very sentence removed here for being false. So deleting a
+falsehood broke three exemptions, loudly, which is the re-derivation doing its job. The
+narrower lesson is about what an anchor should be: an exemption inherits the truth of the
+sentence it quotes, so it must quote the claim that actually accounts for it — here, that
+the file starts at `[v0.1.3]` — rather than whatever nearby prose was quotable at the
+time. Anchored on a false sentence, the exemption was resting on nothing.

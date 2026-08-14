@@ -2,13 +2,44 @@
 
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project is
-**experimental (`v0.x`)** — the tags below are public prereleases, not a
-supported or LTS release line.
+**experimental (`v0.x`)**, not a supported or LTS release line.
 See [`docs/MATURITY.md`](docs/MATURITY.md) for what is proven vs merely built.
 
 The authoritative, rationale-carrying decision log is
 [`docs/DESIGN.md`](docs/DESIGN.md) (append-only). This file is the human-facing
 summary; DESIGN.md is the record.
+
+## Read this before matching a version number
+
+**The `## [v0.1.x]` headings below are BUILD versions, not the releases you can
+download.** They are two independent sequences that happen to share the `v0.1.x`
+shape, and they do not line up — the same string means a different artefact in
+each. `[v0.1.8]` below is dated 2026-08-02 and is about CloudWatch alarm
+operands; the release tagged `v0.1.8` was published 2026-08-14 and is a rebuild
+on a patched Go toolchain. Neither is wrong; they are simply not the same thing,
+and the collision was live on this page until D1078.
+
+Published releases are cut on their own, slower cadence. Each is listed here with
+the mirror commit it was built from, so anything you downloaded can be traced to a
+tree you can check out — `BUILDINFO.txt` inside every release states the same
+commit, the exact toolchain and the build command.
+
+| release | published | built from | contains |
+|---|---|---|---|
+| `v0.1.8` | 2026-08-14 | `00fa5c1e` | everything through `[v0.1.17]` below, plus the work recorded in `docs/DESIGN.md` up to D1073. Rebuilt on Go 1.26.6 for stdlib fixes; `v0.1.7` predates that toolchain. |
+| `v0.1.7` | 2026-08-13 | `5238973b` | everything through `[v0.1.17]` below, plus DESIGN entries up to ~D1024 |
+| `v0.1.6` | 2026-08-13 | `45c4e548` | everything through `[v0.1.17]` below |
+| `v0.1.5` | 2026-08-11 | `b3d650a9` | everything through `[v0.1.17]` below |
+| `v0.1.4` | 2026-07-26 | (predates `BUILDINFO.txt`) | superseded — tagged from a commit whose gate was red, which is why `v0.1.5` exists |
+
+The entries below begin at `[v0.1.3]`: the build tags before it predate this file and
+have no section of their own.
+
+**The version-by-version entries below stop at `[v0.1.17]` (2026-08-06) and the
+development line has continued past it.** For anything newer, `docs/DESIGN.md` is
+the complete record — every change lands there with its reasoning, numbered, before
+it reaches a release. This page trails it by design; it should not trail it silently,
+which is what the table above and this paragraph exist to prevent.
 
 ## [Unreleased]
 
