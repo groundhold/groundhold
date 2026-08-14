@@ -35042,3 +35042,44 @@ But it converts the failure mode from "silently forgotten" (D1072/D1074, invisib
 hunt) to "flagged unless consciously waived", which is the difference between a gate and a good
 intention. This is the honest end of the "derive it from the vocabulary" idea: the vocabulary is the
 enumeration, and the lint reads all of it.
+
+## D1076 — the lint's own caveat, proven: two security controls whose names dodged every keyword
+D1075 shipped the security-floor lint with an honest caveat: the keyword scan is a heuristic, so a
+security attribute whose name and prose dodge every keyword could still slip. A self-review of that
+caveat — reading the bool/enum attributes the scan does NOT match — turned the caveat into a finding.
+Two genuine security controls were sitting unfloored, unflagged:
+- `identity.serviceaccount::key.exportable` — whether the identity has a DOWNLOADABLE long-lived
+  private key. `true` is a credential-exfiltration risk (the vocabulary refuses it at create, but a
+  BROWNFIELD adopt of a pre-existing service account with an exportable key, where the driver does not
+  witness the attribute, would have adopt fill `key.exportable: false` as intent and audit certify the
+  identity "keyless" over one whose private key can be downloaded). The regex matched no keyword in
+  "key.exportable" or "downloadable private key".
+- `identity.oauth-client::audience.restricted` — whether tokens carry an audience restriction (an
+  unrestricted token is usable against services it was never meant for). Declared-only, no observer.
+
+Both now floor, and the regex is widened (`exportable|downloadable|audience`) so the lint reaches them
+and their kin. The lesson is the one the caveat predicted and D1072/D1074/D1075 kept teaching: a
+heuristic classifier finds most of a set, never all of it, so the value is in re-running it against its
+own blind spots — which is what a self-review of the caveat is. The floor is now ~30 controls; the honest
+statement remains that this is coverage improving by iteration, not a completeness proof.
+
+## D1077 — a load balancer's target-group cleanup could delete a foreign resource when the LB was gone
+A read-only sweep of the DELETE surface across all four clouds (prompted by the 409-adopt campaign
+having touched ~22 create paths) found the delete family uniformly correct — every driver reads
+ownership before deleting, treats NotFound as idempotent success, polls an async delete to a confirmed
+absence, targets the pinned providerId, and refuses a protected stateful delete. The campaign wiring
+introduced no delete regression (the create-path adopt helpers are not shared with delete paths). One
+companion-ownership gap survived, of the class GCP and Azure had already closed.
+
+`deleteLoadBalancer` cleans three things in order: listeners, the load balancer, then its target
+group. The load balancer's ownership is checked by reading its tags and refusing a foreign one. But
+the target group is created UNTAGGED — its ownership rode the load balancer's — and step 3 resolved it
+by the load balancer's (shared, global) name and deleted it REGARDLESS of whether the LB was found.
+When the LB was already gone (deleted out of band), the ownership block was skipped, so a FOREIGN
+target group that had reused our name would be deleted: routing breakage, not data loss, and low
+reachability (it needs the LB absent and a foreign target group at its exact pinned name), which is why
+it is a parity fix rather than a freeze-priority one. The target group delete now runs only when the
+load balancer was confirmed OURS; when the LB is gone we leave the target group for reconcile rather
+than risk destroying a resource we cannot prove is ours — the per-companion ownership skip GCP
+(`markerOurs`) and Azure (`deleteCompanionIfOurs`, D943) already do. The cost is a leaked target group
+in the rare LB-gone partial, never a foreign resource deleted.

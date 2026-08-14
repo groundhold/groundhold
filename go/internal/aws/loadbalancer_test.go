@@ -459,6 +459,33 @@ func TestDeleteLoadBalancerAsyncNotGoneIsUnknown(t *testing.T) {
 	}
 }
 
+// TestDeleteLoadBalancerGoneLeavesTargetGroupUntouched: when the load balancer is
+// ALREADY GONE, its ownership check cannot run, and a target group carries no ownership
+// tag of its own (ownership lives on the LB). Deleting a target group at our shared name
+// then would risk destroying a FOREIGN one that reused the name — routing breakage. The
+// delete must leave the target group for reconcile, never issue DeleteTargetGroup it
+// cannot show is ours (the delete-ownership sweep's finding; the GCP/Azure per-companion
+// skip, D943). The trade is a leaked target group in this rare partial, not a foreign
+// resource deleted.
+func TestDeleteLoadBalancerGoneLeavesTargetGroupUntouched(t *testing.T) {
+	f := newFakeELB()
+	f.lbCreated = false // the LB is gone (DescribeLoadBalancers → LoadBalancerNotFound)
+	f.tgCreated = true  // a target group at our name is present (possibly foreign)
+	srv := f.handler(t, nil)
+	defer srv.Close()
+	d := lbProvDriver(t, srv)
+	del := d.Delete("loadbalancer", lbCap, "prod", elbv2ProviderID("eu-central-1", lbTestName), "k")
+	if del.Status != "succeeded" {
+		t.Fatalf("a gone load balancer is idempotent-succeeded, got %+v", del)
+	}
+	for _, a := range f.order {
+		if a == "DeleteTargetGroup" {
+			t.Fatal("the target group was deleted while the LB was gone — we cannot prove " +
+				"it is ours, so it must be left, never destroyed as a possible foreign resource")
+		}
+	}
+}
+
 // TestLoadBalancerCreate_MissingOperandRefuses: a required operand missing is a
 // refuse-BEFORE-mutate — failed, no ELBv2 call, honest reason. Covers both the cert
 // (HTTPS with no certificateArn) and the subnets (<2) refusals.

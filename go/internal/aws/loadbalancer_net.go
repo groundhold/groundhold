@@ -525,15 +525,25 @@ func (d *Driver) deleteLoadBalancer(capability, environment, providerID string) 
 			time.Sleep(d.PollInterval)
 		}
 	}
-	// (3) DeleteTargetGroup — resolved by the shared name (independent of the LB, so a
-	// partial where the LB is gone but the target group leaked is still cleaned).
-	tgArn, tgFound, tgErr := d.describeTargetGroupArn(region, name)
-	if tgErr != nil {
-		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: "pre-delete target group gave no answer — reconcile: " + tgErr.Error()}
-	}
-	if tgFound {
-		if res := d.deleteOne(region, providerID, "DeleteTargetGroup", "TargetGroupArn", tgArn); res != nil {
-			return *res
+	// (3) DeleteTargetGroup — its ownership RIDES the load balancer's. A target group is
+	// created UNTAGGED (tag-based ownership lives on the LB), so we can only delete it
+	// once we confirmed the LB itself is OURS above. When the LB is already GONE, we
+	// cannot prove that a target group at our (shared, global) name is not a FOREIGN one
+	// that reused the name — deleting it by name would break someone else's routing — so
+	// we leave it for reconcile rather than risk destroying a resource we cannot show is
+	// ours. This is the per-companion ownership skip GCP (markerOurs) and Azure
+	// (deleteCompanionIfOurs, D943) already do; the AWS companion lacked it (found by the
+	// delete-ownership sweep). The cost is a leaked target group in the rare LB-gone
+	// partial, reconciled manually — never a foreign resource deleted.
+	if found {
+		tgArn, tgFound, tgErr := d.describeTargetGroupArn(region, name)
+		if tgErr != nil {
+			return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: "pre-delete target group gave no answer — reconcile: " + tgErr.Error()}
+		}
+		if tgFound {
+			if res := d.deleteOne(region, providerID, "DeleteTargetGroup", "TargetGroupArn", tgArn); res != nil {
+				return *res
+			}
 		}
 	}
 	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
