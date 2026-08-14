@@ -35290,3 +35290,24 @@ its artefacts (D313). The only completeness check left is `anchor --check` again
 anchor, which names the missing capabilities. The two `--partial` tests that asserted exit 0 now assert
 non-zero and that the fresh anchor is gone; every substantive assertion — the sound capability restored,
 the unknown one absent-not-fabricated, the recovered ledger still on disk — is unchanged.
+
+## D1083 — the run-status parity contract did not cover the empty-capability lease, so the console drifted on it
+The console re-implements `DeriveRunStatus` (it cannot import the runtime's internal package), and a shared
+golden fixture — `runstatus_parity.json`, pinned by SHA in BOTH repos — is the contract that keeps the two
+in step; drift is the exact failure mode D656/D641/D676 were about. But the fixture had fifteen cases and
+none exercised the empty-capability branch of `sharesCap`, the D676 fail-safe: a well-formed lease event
+carries a non-empty capability set, so an empty one is a reader that could not see it, and "cannot tell"
+must not silently mean "not mine" for a LIVENESS signal (`len(mine)==0 || len(theirs)==0 → true`). The
+runtime holds that guard; the console had dropped it and returned false, so an unattributable
+`lease.released` read the run as `running` (a live writer, wait) where the runtime read `stalled` (the
+writer is gone, run `resume`) — a person watching the console waits forever on a dead writer over a possible
+orphan. The guard was untested on BOTH sides: the runtime carried it but no case pinned it, and the shared
+fixture's silence is precisely what let the console's omission pass every gate.
+
+This adds the empty-capability case to the shared fixture (a lease over `db`, then a release carrying no
+capabilities, mid-TTL — `running` without the guard, `stalled` with it) and re-pins the SHA in both repos.
+The runtime already produces `stalled`; the console did not until its `sharesCap` was given the same guard.
+The fix is the fixture, not just the two lines of code: a parity contract that is silent on a branch does
+not prevent drift on that branch, which is the same lesson as a gate that never runs on the thing it
+guards. The console change (the guard plus a local regression test) lives in its own repo; this entry
+records the runtime half — the shared case that makes the omission un-repeatable in either direction.

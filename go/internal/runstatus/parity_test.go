@@ -25,7 +25,7 @@ import (
 // To change the cases: edit this fixture, run this test (the runtime is the
 // authority — it proves each expected state against the real derivation), copy
 // the JSON verbatim to the console, and update BOTH constants. (D1021.)
-const runstatusParitySHA256 = "e33e4e6dca73532c407e947bca675606d977d5a750df000cd0d582db344da77a"
+const runstatusParitySHA256 = "6ba3a5e08c94f36388cac5da17fbf1a7317db01f7975abd24369e83e0b77cf9c"
 
 type parityEvent struct {
 	Type         string         `json:"type"`
