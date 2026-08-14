@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"groundhold/internal/adoptcheck"
 	"groundhold/internal/provider"
 	"net/http"
 	"net/url"
@@ -171,6 +172,16 @@ func (d *Driver) getRole(roleName string) (iamRole, bool, error) {
 	return r.Role, true, nil
 }
 
+// iamAdoptControls: an IAM role's trust policy (AssumeRolePolicyDocument) is set INLINE
+// in CreateRole, so on an EntityAlreadyExists adopt it never applied (D1062).
+// trust.principals — WHO may assume the role — is compared as an unordered SET; a live
+// role trusting a different or broader set than declared is a confused-deputy vector.
+// This driver wires no in-place trust update (UpdateAssumeRolePolicy is not plumbed), so
+// a mismatch FAILS (reconcile) rather than binding a role with the wrong trust.
+var iamAdoptControls = []adoptcheck.Control{
+	{Path: "trust.principals", Direction: adoptcheck.Set},
+}
+
 func (d *Driver) createIAMRole(account, environment, capability string,
 	attrs, impl map[string]any, generation int) provider.CreateResult {
 	plan, err := BuildIAMRole(account, environment, capability, attrs, impl, generation)
@@ -194,6 +205,33 @@ func (d *Driver) createIAMRole(account, environment, capability string,
 		if !found || !groundholdTagsMatch(role.tags(), capability, environment) {
 			return provider.CreateResult{Status: "failed",
 				Reason: "a role with this name exists and is not ours (tags do not match)"}
+		}
+		// D1062: an ADOPTED role (EntityAlreadyExists, ours) never received the create
+		// body's inline AssumeRolePolicyDocument — the TRUST POLICY that names who may
+		// assume it. A pre-existing role trusting a different or broader set of principals
+		// is a confused-deputy vector, so re-check trust.principals against this driver's
+		// OWN measured observation before reporting succeeded. This driver wires no
+		// in-place trust update, so a mismatch fails (reconcile) rather than lying that
+		// the declared trust is in place.
+		obs, _, oerr := d.observeIAMRole(capability, pid)
+		if oerr != nil {
+			return provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "adopted role re-observe gave no answer — reconcile: " + oerr.Error()}
+		}
+		// The candidate declares the trust policy via implementation (assume_role_policy /
+		// trust_service), not as a `trust.principals` attribute, so derive the EXPECTED
+		// principal set from the plan's own trust document — the same decode observe uses —
+		// and compare that against the live role. If the plan's trust does not decode we
+		// cannot compare, so bind as before rather than invent a set.
+		exp, ok := (iamRole{AssumeRolePolicyDocument: url.QueryEscape(plan.TrustPolicy)}).trustPrincipals()
+		if !ok {
+			return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
+		}
+		switch v := adoptcheck.Compare(map[string]any{"trust.principals": exp}, obs, iamAdoptControls); v.Status {
+		case "failed":
+			return provider.CreateResult{Status: "failed", Reason: v.Reason}
+		case "unknown":
+			return provider.CreateResult{ProviderID: pid, Status: "unknown", Reason: v.Reason}
 		}
 		return provider.CreateResult{ProviderID: pid, Status: "succeeded"} // ours, present
 	case st >= 500:

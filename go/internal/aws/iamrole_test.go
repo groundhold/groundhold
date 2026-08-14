@@ -231,29 +231,45 @@ func TestBuildIAMRoleExplicitName(t *testing.T) {
 // second create cannot duplicate — it is answered EntityAlreadyExists — and the tags on
 // the standing role are what license binding it. An unowned role at our name is refused,
 // which is the case that already had a test.
+// iamAdoptSrv builds an EntityAlreadyExists adopt fixture: our role already standing,
+// serving the given trust document (D1062). The clean case serves a lambda trust
+// matching the candidate; a case for a role that trusts a DIFFERENT set serves another.
+const iamLambdaTrust = `{"Version":"2012-10-17","Statement":[{"Effect":"Allow",` +
+	`"Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}`
+const iamRootTrust = `{"Version":"2012-10-17","Statement":[{"Effect":"Allow",` +
+	`"Principal":{"AWS":"arn:aws:iam::000000000000:root"},"Action":"sts:AssumeRole"}]}`
+
+func iamAdoptSrv(trustDoc string) func() *httptest.Server {
+	return func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b := make([]byte, r.ContentLength)
+			_, _ = r.Body.Read(b)
+			switch queryAction(b) {
+			case "CreateRole":
+				w.WriteHeader(409)
+				_, _ = w.Write([]byte(`<ErrorResponse><Error><Code>EntityAlreadyExists</Code></Error></ErrorResponse>`))
+			case "GetRole":
+				_, _ = w.Write([]byte(`<GetRoleResponse><GetRoleResult><Role>` +
+					`<RoleName>pv-runner-prod-x</RoleName>` +
+					`<AssumeRolePolicyDocument>` + url.QueryEscape(trustDoc) + `</AssumeRolePolicyDocument>` +
+					`<Arn>arn:aws:iam::000000000000:role/pv-runner-prod-x</Arn><Description>batch runner</Description>` +
+					`<Tags><member><Key>groundhold-capability</Key><Value>runner</Value></member>` +
+					`<member><Key>groundhold-environment</Key><Value>prod</Value></member></Tags>` +
+					`</Role></GetRoleResult></GetRoleResponse>`))
+			default:
+				w.WriteHeader(400)
+			}
+		}))
+	}
+}
+
 func TestAdoptsExistingIAMRole(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 	p := &certifynet.ExistingProbe{
-		Name:     "aws/iam",
-		Classify: iamQueryRole,
-		ExistingServer: func() *httptest.Server {
-			return httptest.NewServer(http.HandlerFunc(
-				func(w http.ResponseWriter, r *http.Request) {
-					b := make([]byte, r.ContentLength)
-					_, _ = r.Body.Read(b)
-					switch queryAction(b) {
-					case "CreateRole":
-						w.WriteHeader(409)
-						_, _ = w.Write([]byte(`<ErrorResponse><Error>` +
-							`<Code>EntityAlreadyExists</Code></Error></ErrorResponse>`))
-					case "GetRole":
-						_, _ = w.Write([]byte(iamRoleXML("GetRole", "runner", "prod")))
-					default:
-						w.WriteHeader(400)
-					}
-				}))
-		},
+		Name:           "aws/iam",
+		Classify:       iamQueryRole,
+		ExistingServer: iamAdoptSrv(iamLambdaTrust), // matches the candidate's lambda trust
 		New: func(happyURL string, rt http.RoundTripper) provider.Provider {
 			d := NewDriver("eu-central-1")
 			d.HTTP = &http.Client{Transport: rt}
@@ -267,6 +283,14 @@ func TestAdoptsExistingIAMRole(t *testing.T) {
 			return pr.Create("iam", "runner", "prod", iamRoleAttrs(), iamRoleImpl(nil), "runner", 1)
 		},
 		AllowedMutations: 1, // the refused CreateRole
+		// D1062: the trust policy (who may assume the role) is fixed at create and this
+		// driver wires no in-place trust update, so a role trusting a different set fails.
+		AdoptControls: iamAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			{Path: "trust.principals", Server: iamAdoptSrv(iamRootTrust), // trusts account root, not lambda
+				WantStatus: "failed", WantMutations: 1},
+		},
+		MoreSecure: iamAdoptSrv(iamLambdaTrust), // a role whose trust matches adopts clean
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }

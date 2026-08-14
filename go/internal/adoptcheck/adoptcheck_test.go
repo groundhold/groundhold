@@ -170,6 +170,38 @@ func TestCompareNoDeclaredControlsIsClean(t *testing.T) {
 	}
 }
 
+func TestCompareSetUnordered(t *testing.T) {
+	ctrl := []Control{{Path: "trust.principals", Direction: Set}} // immutable/unwired → failed on miss
+	// same set, different order → clean (order must not cause a false mismatch).
+	if v := Compare(
+		map[string]any{"trust.principals": []any{"a", "b"}},
+		[]provider.Observation{measured("trust.principals", []string{"b", "a"})},
+		ctrl); v.Status != "clean" {
+		t.Fatalf("same set different order must be clean, got %+v", v)
+	}
+	// broader live set (extra principal can assume) → dangerous → failed.
+	if v := Compare(
+		map[string]any{"trust.principals": []any{"a", "b"}},
+		[]provider.Observation{measured("trust.principals", []string{"a", "b", "c"})},
+		ctrl); v.Status != "failed" {
+		t.Fatalf("a broader trust set must fail, got %+v", v)
+	}
+	// narrower live set (declared principal missing) → also a mismatch → failed.
+	if v := Compare(
+		map[string]any{"trust.principals": []any{"a", "b"}},
+		[]provider.Observation{measured("trust.principals", []string{"a"})},
+		ctrl); v.Status != "failed" {
+		t.Fatalf("a narrower trust set must fail, got %+v", v)
+	}
+	// a non-list observation is unverifiable, never a silent pass.
+	if v := Compare(
+		map[string]any{"trust.principals": []any{"a"}},
+		[]provider.Observation{measured("trust.principals", "a")},
+		ctrl); v.Status != "unknown" || len(v.Unverifiable) != 1 {
+		t.Fatalf("a non-list measured value must be unverifiable, got %+v", v)
+	}
+}
+
 func TestCompareReasonNamesThePaths(t *testing.T) {
 	v := Compare(
 		map[string]any{"encryption.customerManagedKeys": true},
