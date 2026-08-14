@@ -35142,3 +35142,48 @@ narrower lesson is about what an anchor should be: an exemption inherits the tru
 sentence it quotes, so it must quote the claim that actually accounts for it — here, that
 the file starts at `[v0.1.3]` — rather than whatever nearby prose was quotable at the
 time. Anchored on a false sentence, the exemption was resting on nothing.
+
+## D1079 — converge exited 0 for a hard constraint it could not witness, where audit exits 2
+Invariant #1 says `unknown` or `unverifiable` on a hard constraint blocks execution, "no exceptions".
+`audit` enforces this: `Violations` counts a hard constraint that is `violated` OR `unknown` OR
+`unverifiable`, and the verb exits 2 when any exist — including the D1071 security floor, which raises
+a hard security path to a provider-api evidence bar so a control witnessed by nothing but the
+candidate's declared value reads `unknown` and blocks. `posture` (D965) and `react` (D966) were both
+brought to that same exit-2 parity. `converge` — the one-verb, full-loop porcelain a CI gates on
+alone — was not, and nothing in the code made it: its post-apply convergence check runs the `plan`
+sub-verb, whose compiler carries a non-observable or intent-only attribute as `unverified` (D249) and
+does not implement the floor (the floor lives only in `audit`). So a hard constraint backed only by the
+candidate's word — an identity control like `mfa.required` that has no observer driver (D1072), or any
+security attribute a driver cannot yet witness — painted the world `applied`/`inconclusive` at exit 0,
+a green banner and a green exit, while `audit` on the identical ledger exited 2.
+
+This is the D1020/D965/D966 shape exactly: an honest machine FIELD (`convergence: inconclusive`) beside
+a LYING exit code and a green banner, on the surface automation actually reads. D1071's own entry
+claimed "posture, converge, react consume audit's verdict, so the fix reaches them without
+re-derivation" — for converge that was false (its only reference to `audit` was a comment), so the
+false-secure D1071 closed stayed open through this consumer. The self-verification behind D1071 checked
+that converge reports `inconclusive` not `converged` in the BANNER WORD, and stopped there; it did not
+check the exit code — the D1072 lesson (a gap in one's own fresh fix), reached again.
+
+Fix: after the post-apply observe, and before every "converged" emitter, converge re-witnesses reality
+with a read-only `audit` at the run's clock (`witnessReality`). Any hard constraint audit does not
+witness as satisfied blocks with exit 2, `convergence: inconclusive`, and a BLOCKED/VIOLATED banner
+built from audit's own rollup (D194); a clean audit lets the existing verdict stand. Converge RELAYS
+audit's verdict and blocking code (D624) rather than re-deriving the floor — one canon, no sibling
+re-derivation (the trap D965/D966 name). The audit runs `record=false`: it never writes, so the
+alarm-transition channel stays `audit --record` (D54) and there is no interaction with the D935 pending
+guard. Every success emitter is gated, not just the post-apply one — the D939 lesson that closing a
+fail-open on one emitter while its siblings stay open only moves the hole. This re-litigates the
+deliberate "honest exit 0" reasoning that stood here before: honesty in a field a cron never reads is
+not honesty when the exit code says the opposite, which is D1020's argument verbatim.
+
+The named cost, stated plainly: a contract with a hard constraint on a genuinely unobservable attribute
+now goes red in `converge` exactly as it already does in `audit`. The sanctioned remedy is the
+severity escape D1071 already documents — declare such a control `soft`, which is what an unprovable
+assertion honestly is — not a flag to force the green. The conformance change reflects this: the case
+that pinned "inconclusive banners APPLIED at exit 0" keeps that truth for a SOFT constraint (where an
+inconclusive convergence is acceptable), and a new case pins the HARD version blocking at exit 2 (it
+ran exit 0 before the fix — the proof the gate distinguishes). Decision consulted before landing: a
+skeptical review confirmed the gap is reachable and guarded nowhere on the converge path (not
+pre-apply verify, not the compiler), and a design pass chose relaying audit over a severity check
+converge would maintain itself.
