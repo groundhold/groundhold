@@ -28,7 +28,7 @@ Grab a binary — no toolchain, no clone — from
 then:
 
 ```sh
-gh release download v0.1.7 --repo groundhold/groundhold \
+gh release download v0.1.8 --repo groundhold/groundhold \
   --pattern 'groundhold_linux_amd64' --pattern 'SHA256SUMS'
 sha256sum -c SHA256SUMS --ignore-missing
 chmod +x groundhold_linux_amd64
