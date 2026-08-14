@@ -407,6 +407,78 @@ func TestSplitRDSProviderID(t *testing.T) {
 	}
 }
 
+// rdsFix configures a 409-adopt fixture: an instance that already exists and is ours,
+// with the security controls set however the case needs (D1062).
+type rdsFix struct {
+	encrypted  bool
+	kmsKeyId   string // "" = none (unencrypted or default)
+	keyManager string // AWS | CUSTOMER (for the DescribeKey trace)
+	publicAcc  bool
+	paramGroup bool // attach a TLS parameter group (so observe reads inTransit)
+	tlsForced  bool
+}
+
+func rdsAdoptSrv(f rdsFix) func() *httptest.Server {
+	return func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if tgt := r.Header.Get("X-Amz-Target"); strings.HasSuffix(tgt, "DescribeKey") {
+				km := f.keyManager
+				if km == "" {
+					km = "AWS"
+				}
+				_, _ = w.Write([]byte(`{"KeyMetadata":{"KeyManager":"` + km + `"}}`))
+				return
+			}
+			body := make([]byte, r.ContentLength)
+			r.Body.Read(body)
+			action := ""
+			for _, kv := range strings.Split(string(body), "&") {
+				if strings.HasPrefix(kv, "Action=") {
+					action = strings.TrimPrefix(kv, "Action=")
+				}
+			}
+			switch action {
+			case "CreateDBInstance":
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte("<ErrorResponse><Error><Code>DBInstanceAlreadyExists</Code></Error></ErrorResponse>"))
+			case "DescribeDBInstances":
+				enc, pub := "false", "false"
+				if f.encrypted {
+					enc = "true"
+				}
+				if f.publicAcc {
+					pub = "true"
+				}
+				kms, pg := "", ""
+				if f.kmsKeyId != "" {
+					kms = "<KmsKeyId>" + f.kmsKeyId + "</KmsKeyId>"
+				}
+				if f.paramGroup {
+					pg = `<DBParameterGroups><DBParameterGroup><DBParameterGroupName>tls-grp</DBParameterGroupName></DBParameterGroup></DBParameterGroups>`
+				}
+				_, _ = w.Write([]byte(`<DescribeDBInstancesResponse><DescribeDBInstancesResult><DBInstances><DBInstance>` +
+					`<DBInstanceIdentifier>db-x</DBInstanceIdentifier><DBInstanceStatus>available</DBInstanceStatus>` +
+					`<Engine>postgres</Engine><EngineVersion>16.3</EngineVersion>` +
+					`<StorageEncrypted>` + enc + `</StorageEncrypted><PubliclyAccessible>` + pub + `</PubliclyAccessible>` +
+					kms + `<MultiAZ>false</MultiAZ>` + pg +
+					`<TagList><Tag><Key>groundhold-capability</Key><Value>db</Value></Tag>` +
+					`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag></TagList>` +
+					`</DBInstance></DBInstances></DescribeDBInstancesResult></DescribeDBInstancesResponse>`))
+			case "DescribeDBParameters":
+				val := "0"
+				if f.tlsForced {
+					val = "1"
+				}
+				_, _ = w.Write([]byte(`<DescribeDBParametersResponse><DescribeDBParametersResult><Parameters>` +
+					`<Parameter><ParameterName>rds.force_ssl</ParameterName><ParameterValue>` + val + `</ParameterValue></Parameter>` +
+					`</Parameters></DescribeDBParametersResult></DescribeDBParametersResponse>`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	}
+}
+
 // TestAdoptsExistingRDS enrols rds in the D391 gate. The instance identifier is
 // deterministic and client-assigned, so a second create is answered
 // DBInstanceAlreadyExists — the tags on the standing instance are what license binding
@@ -432,6 +504,36 @@ func TestAdoptsExistingRDS(t *testing.T) {
 			return pr.Create("rds", "db", "prod", rdsAttrs(), rdsImpl(), "db", 1)
 		},
 		AllowedMutations: 1, // the refused CreateDBInstance
+		// D1062: encryption at rest, its customer key and TLS enforcement are immutable
+		// at create; public exposure is a mutable ModifyDBInstance. Each must block an
+		// adopt that lacks it; a more-secure instance still adopts.
+		AdoptControls: rdsAdoptControls,
+		MissingControl: []certifynet.ControlCase{
+			{Path: "encryption.atRest", Server: rdsAdoptSrv(rdsFix{encrypted: false}),
+				WantStatus: "failed", WantMutations: 1},
+			{Path: "encryption.customerManagedKeys", WantStatus: "failed", WantMutations: 1,
+				Server: rdsAdoptSrv(rdsFix{encrypted: true, kmsKeyId: "arn:aws:kms:eu-central-1:000000000000:key/abc", keyManager: "AWS"}),
+				Create: func(pr provider.Provider) provider.CreateResult {
+					a := rdsAttrs()
+					a["encryption.customerManagedKeys"] = true
+					im := rdsImpl()
+					im["kms_key_id"] = "arn:aws:kms:eu-central-1:000000000000:key/abc"
+					return pr.Create("rds", "db", "prod", a, im, "db", 1)
+				}},
+			{Path: "encryption.inTransit", WantStatus: "failed", WantMutations: 1,
+				Server: rdsAdoptSrv(rdsFix{encrypted: true, paramGroup: true, tlsForced: false}),
+				Create: func(pr provider.Provider) provider.CreateResult {
+					a := rdsAttrs()
+					a["encryption.inTransit"] = true
+					im := rdsImpl()
+					im["db_parameter_group"] = "tls-grp"
+					return pr.Create("rds", "db", "prod", a, im, "db", 1)
+				}},
+			{Path: "network.publicExposure", Server: rdsAdoptSrv(rdsFix{encrypted: true, publicAcc: true}),
+				WantStatus: "unknown", WantMutations: 1}, // mutable — converge patches it
+		},
+		MoreSecure: rdsAdoptSrv(rdsFix{encrypted: true, kmsKeyId: "arn:aws:kms:eu-central-1:000000000000:key/abc",
+			keyManager: "CUSTOMER", paramGroup: true, tlsForced: true}),
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }
