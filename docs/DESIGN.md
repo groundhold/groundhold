@@ -34552,3 +34552,36 @@ witness is the D613 shape: "I could not check" is not "I checked". A manifest-le
 partial ledger is now `unverifiable` (which the CLI exits 5 on, and EnforceAnchor fails closed),
 mirroring the D613 zero-event fix. Found by an evidence-integrity adversarial hunt (its one plausible
 lead; the rest of the capsule/sig/anchor/restore surface traced clean).
+
+## D1060 — namespace pod-security posture was measured, but its enforcement is unwitnessed
+The k8s namespace lens read the `pod-security.kubernetes.io/enforce` label and emitted
+`security.podSecurity` as `measured`. But the label is only ENFORCED if the API server runs the
+PodSecurity admission plugin — in-tree and default-on since k8s 1.25, yet an operator can disable it.
+A static label read cannot witness that the plugin is on. This is the exact enforcement-vs-declaration
+split the netpol lens already draws: a NetworkPolicy object is really present (a read) but inert
+unless the CNI honors it, so `ingress.public`/`egress.restricted` are `config-intent` with a CNI
+caveat and a probe path — never `measured`. podSecurity was the inconsistent case: a namespace
+labelled `restricted` on a cluster with PodSecurity admission OFF admits privileged pods, while
+`measured restricted` reads as witnessed reality. The value is now `config-intent` with a caveat
+naming the admission-plugin dependency, mirroring netpol. SCOPE, stated honestly: config-intent is a
+definite value, so a `verify: static` hard constraint still reads it satisfied (the basis now says
+`config-intent`, ending the false claim of a measured enforcement, and the caveat steers a contract
+to `verify: probe`); the FULL witness of enforcement needs a namespace Prober, which does not exist
+yet — the same deferral netpol carries for its CNI probe. This corrects the basis-honesty defect
+(a repeated claim of measurement over an unwitnessed control, the D766 shape), not the absence of a
+prober. Found by a k8s driver-honesty hunt (its finding #2, deferred at D1051, taken up here).
+
+## D1061 — DynamoDB's in-place update reported succeeded on the async accept, not on applied
+`updateDynamoDB` sends UpdateTable (deletion protection) and UpdateContinuousBackups (PITR) and
+returned `succeeded` on the HTTP 200. Both are ASYNCHRONOUS: the 200 only ACCEPTS the change while
+the table sits in UPDATING / PITR in ENABLING. It was the single outlier of the D953 class across
+~46 update methods — every other async managed-resource updater (RDS/Aurora poll to available +
+empty PendingModifiedValues, EKS/GKE/AKS poll their LRO to done) polls to applied, and DynamoDB's own
+create (poll to ACTIVE) and delete (poll to absence, D968) do too; only its update skipped the poll.
+The dangerous direction: enabling deletion protection or PITR — a security/recovery control — reads
+converged while not yet in effect, and if the async modify fails the ledger has already tombstoned it
+as applied. The update now polls to the applied state — table ACTIVE and each changed control at its
+target (DeletionProtectionEnabled == declared; PITR status == declared) — before reporting succeeded,
+timing out to unknown (keep the handle) like the create path. Found by a D953-class sweep of every
+updater (its one finding; the rest poll to applied, apply synchronously, or refuse an unwired
+in-place change — none falsely succeeds).
