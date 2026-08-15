@@ -35643,3 +35643,60 @@ been read with that weight before. Doing it properly means auditing all 47 verbs
 against what each actually consumes, which is exactly the kind of careful sweep that
 should not be started at 03:40 on autopilot. Recorded with the measurement and the
 mechanism so whoever takes it starts from here.
+
+## D1093 — the one script that crosses the boundary is the one nothing runs
+
+RECORDED, NOT BUILT — with the blocker diagnosed, because the obvious workaround does
+not work and someone should not spend an evening rediscovering that.
+
+`scripts/adopt-candidate.sh` is a named exception in the export whitelist. `scripts/`
+is otherwise denied, and this one crosses for a stated reason: the `adopt-candidate`
+SKILL crosses too, and it instructs an agent to run the script, so without it the
+published skill is broken at its central step.
+
+Nothing executes it. `bash -n` checks its syntax and a doc gate checks the skill cites
+it; neither runs a line of it. That is the D1087 shape — a published sequence whose only
+verification is that it parses — on an agent-facing path, which is the audience least
+able to notice that a step did nothing.
+
+**The blocker is not a missing fixture.** `cloudfake` implements no `Discoverer` at
+all, which is why `discover --provider fake` returns zero resources. Nor does a
+hand-written discovery document rescue it: the script goes on to `publish` and
+`adopt`, and adopt READS the resource to confirm the takeover — which the fake cannot
+produce either. So exercising the script needs a provider that both enumerates and
+observes the same resource, and the fake is the only provider a hermetic harness may use.
+
+Two honest routes, both design decisions rather than typing. Teach `cloudfake` to
+enumerate — which means deciding what a fake should claim to have (a fixed inventory? only
+what it created in this run? the second is the more honest and the more useful). Or record
+a real cloud discovery as a verbatim fixture and drive the script against a replay, which
+is the stance D511 took for the k8s schemas after hand-simplified fixtures hid a defect
+the real documents would have caught.
+
+Building a synthetic discovery document whose fidelity nobody established, and then
+gating the script against it, would be the anti-pattern this record has named twice in
+one night: a gate that proves a fiction is worse than no gate, because it reads as
+coverage.
+
+## D1094 — "every refusal carries a machine code" is true where it was checked, and checked nowhere
+
+RECORDED, NOT BUILT. The README's agent-facing section says every refusal carries a
+machine code and a `next` step, "so an agent recovers from a rejection instead of
+guessing". That claim is the reason the error registry has four gated copies (D330) and
+a fifth (D1089) — but the claim ITSELF, that every refusing path emits one, is not gated.
+
+Sampled on two genuine refusals: `verify` and `plan` over a pair violating a hard
+residency constraint both carry `not-executable`. Clean, and two of forty-seven verbs
+is a sample, not a proof.
+
+**Gating it needs a distinction settled first, and that is why this is filed rather than
+attempted.** A REFUSAL is the tool declining a well-formed request — the product's
+central act, exit 2, and what the sentence is about. A usage error is a missing argument
+or an unparseable flag, exit 1, and no machine code is promised for it. A gate that
+drove every verb with no arguments would measure the second and report on the first: it
+would look thorough, produce a number, and say nothing about the claim. That is the
+vacuity shape (D328) wearing diligence.
+
+The distinction is decidable — the exit codes already separate them, and `spec/errors.md`
+assigns codes per remediation — but deciding it is an editorial act on a published
+promise, not something to infer from the code at speed.
