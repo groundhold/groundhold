@@ -35526,3 +35526,41 @@ the selection framing fails with the count (nine of thirty-three) in the message
 Recorded as a clean result with a gate rather than as a fix, because the useful part is
 the shape: a closed set with four guarded copies and a fifth that nobody counted, which
 is the D329/D330 pattern arriving one artefact later.
+
+## D1090 — what a driver author can learn from the published pages, measured
+
+RECORDED, NOT BUILT. This is a measurement and an editorial decision it implies, not a
+fix; the decision is the owner's and the work is documentation, not runtime.
+
+The published drivers page teaches the provider contract and is where a would-be driver
+author starts. Under "Optional capabilities" it presents a table of four:
+`Discoverer`, `Reconciler`, `Prober`, `Preflighter`. The table carries no hedge —
+unlike the errors page, which says "Highlights" and points at the full registry (D1089).
+
+`go/internal/provider` defines SIXTEEN interfaces besides the core `Provider`. And
+`spec/providers/AUTHORING.md` — the authority the same page points to for "writing a
+driver" — names NONE of them.
+
+So the published path teaches four, and the count it does not teach includes ones this
+record shows to be load-bearing. `Claimer` is how adoption stamps ownership.
+`Enumerator` is the discovery-parity surface D557 made mandatory. `CompetingManagers`
+is the check that guards adoption against another reconciler — the one D550 found broken
+for six of the ten mapped k8s services, on a live cluster. An author who does not know
+these exist writes a driver that certifies, ships, and cannot be adopted safely.
+
+**What was verified and what was not.** Verified: the page's four, the package's sixteen,
+AUTHORING naming none, and that `Claimer`, `Enumerator`, `CompetingManagers`,
+`Reconciler` and `Prober` have real implementations in the cloud driver packages, so
+they are driver-facing rather than internal plumbing. NOT verified: that all sixteen are
+driver-facing — a method-name probe for two of them returned zero and the names differ
+from the interface names, so the honest figure is "sixteen defined, at least five
+implemented by drivers", not a precise count of gaps. Publishing the precise number
+would repeat the mistake this entry is about.
+
+**Why it is not gated tonight.** The cheap gate — every interface the page names must
+exist — would pass today and would be checking the weaker property while the real gap
+stands, which is the exact shape D1089 was written to avoid repeating. The useful gate
+needs a deliberate register: which interfaces are documented, which are deliberately not,
+so the omission is visible and can only shrink (the `knownNoAdoptRead` pattern, D700/
+D804). Building that register means deciding what belongs on a summary page versus the
+authoring spec, which is an editorial call and not one to make at 02:00 on autopilot.
