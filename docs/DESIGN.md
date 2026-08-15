@@ -35853,3 +35853,28 @@ incompleteness with the offending call named; a second pins `react.FreshScope` p
 scope from a truncated result — swapping the status back to a hardcoded `complete` fails it (verified with the
 mutant). This is the same lesson as the horizon present-block gate two entries up: a completeness claim, like
 a gate, is only honest if it can say "no", and the dangerous default is the affirmative one.
+
+## D1102 — posture classified a never-observed capability "decayed" (exit 0) with a reason that lies
+The same parallel audit that found D1101 found a false-good in `posture`, the present-tense sibling of
+`horizon`. `classifyPosture` folds each bound capability into a class; for a capability with NO observation
+records at all it set the `decayed` marker and moved on. But `decayed` has a specific meaning — a proof that
+outlived its ttl — and its row says exactly that: "the backing proof outlived its own ttl — we no longer
+know", classed benign (exit 0) because a stale proof is renewed, not a violation (D958). A capability that
+was BOUND but never observed has no proof that aged out; it has no evidence at all. Marking it decayed put
+"we have never had any evidence" into the benign class, over a reason string that is simply false, and — the
+sharpest way to see it — inverted monotonicity: a bound capability with a FRESH but unaudited observation
+falls to capRow's default arm and classes `unknown` (exit 2, "cannot claim ok without a proof"), so the
+capability posture knew LESS about (zero evidence) returned the GREENER result. posture's own `ExitCode`
+docstring calls exit 0 over an unknown estate "the unverifiable-as-success inversion the sibling audit verb
+refuses" — this defeated exactly that, on the unattended cron surface where the exit code is the only alert.
+Reachability is ordinary: a capability just created by `apply`, not yet observed, under a `posture` run
+without a covering hard constraint (audit would otherwise return `unknown` and rank above decayed, D965).
+
+The fix stops conflating the two absences: a zero-record capability is left unmarked, so it falls to the
+`unknown` classification (exit 2) with the honest reason "no audit verdict — cannot claim ok without a
+proof", the same direction audit takes on the same absence. A decayed proof is a proof that EXISTED and
+expired — records present, aged past ttl — which the per-record loop still handles unchanged. A gate test
+seeds a binding with no observation, runs `posture` without a contract, and asserts `unknown`/exit 2;
+restoring the old marker fails it (verified with the mutant). This is the third false-good of the same shape
+in this sweep (horizon's present block, react's complete claim, now posture's decayed claim): every one was
+a tool reporting the good-news reading of a state it could not actually vouch for.
