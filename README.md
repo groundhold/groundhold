@@ -518,6 +518,21 @@ declared structural gap instead of a third mapping.
 the executor speaks provider APIs; `.tf.json` is at most an optional export,
 never on the execution path.
 
+## What would help most
+
+Run it against something real and say what broke.
+
+The honest gap in `docs/MATURITY.md` is not a missing feature — it is that exactly one
+external operator has ever run this on their own estate, on one cloud. Every verdict in
+that document that is not `proven` + `measured` is waiting on somebody else's
+infrastructure, and nothing else moves them: not stars, not agreement, not funding.
+A run that ends in a refusal we did not anticipate is worth more to this project than
+one that works.
+
+Open a [discussion](https://github.com/groundhold/groundhold/discussions) with what you
+pointed it at and what it said. `fake` runs need no account and still find things — the
+last six defects on the front page were found that way.
+
 ## Support
 
 Maintainer-led, best-effort, **no SLA** — except security, where
