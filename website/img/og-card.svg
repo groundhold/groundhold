@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="Groundhold — typed infrastructure contracts: declare what must be true, verify deterministically, execute sealed">
+  <rect width="1200" height="630" fill="#12151c"/>
+  <rect x="60" y="60" width="1080" height="510" rx="12" fill="#1b1f27"/>
+
+  <circle cx="96" cy="100" r="7" fill="#e06c75"/>
+  <circle cx="120" cy="100" r="7" fill="#e5c07b"/>
+  <circle cx="144" cy="100" r="7" fill="#8dc891"/>
+  <text x="172" y="105" fill="#7a8296" font-family="DejaVu Sans Mono,Menlo,Consolas,ui-monospace,monospace" font-size="17">groundhold verify orders.contract.yaml orders.candidate.yaml</text>
+
+  <text x="96" y="196" fill="#e6e9ef" font-family="DejaVu Sans Mono,Menlo,Consolas,ui-monospace,monospace" font-size="62" font-weight="bold">Groundhold</text>
+
+  <text x="96" y="252" fill="#9aa3b5" font-family="DejaVu Sans Mono,Menlo,Consolas,ui-monospace,monospace" font-size="25">Infrastructure contracts an agent can propose</text>
+  <text x="96" y="288" fill="#9aa3b5" font-family="DejaVu Sans Mono,Menlo,Consolas,ui-monospace,monospace" font-size="25">and a deterministic runtime must prove.</text>
+
+  <text x="96" y="376" fill="#8dc891" font-family="DejaVu Sans Mono,Menlo,Consolas,ui-monospace,monospace" font-size="25">✓ c-private   satisfied</text>
+  <text x="540" y="376" fill="#5c6478" font-family="DejaVu Sans Mono,Menlo,Consolas,ui-monospace,monospace" font-size="25">network.publicExposure = false</text>
+
+  <text x="96" y="418" fill="#e5c07b" font-family="DejaVu Sans Mono,Menlo,Consolas,ui-monospace,monospace" font-size="25">? c-rto       unknown</text>
+  <text x="540" y="418" fill="#5c6478" font-family="DejaVu Sans Mono,Menlo,Consolas,ui-monospace,monospace" font-size="25">not provable by reading config</text>
+
+  <text x="96" y="480" fill="#e5c07b" font-family="DejaVu Sans Mono,Menlo,Consolas,ui-monospace,monospace" font-size="29" font-weight="bold">BLOCKED</text>
+  <text x="230" y="480" fill="#7a8296" font-family="DejaVu Sans Mono,Menlo,Consolas,ui-monospace,monospace" font-size="25">— unknown never passes as satisfied</text>
+
+  <text x="96" y="534" fill="#5c6478" font-family="DejaVu Sans Mono,Menlo,Consolas,ui-monospace,monospace" font-size="21">groundhold.github.io/groundhold · experimental v0.x</text>
+</svg>
