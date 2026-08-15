@@ -35907,3 +35907,38 @@ the published site no longer builds from (D1097 was that same mistake in the ass
 Verified with four mutants: strip the sentence from the landing page, strip it from the README,
 paraphrase it on the landing page, declare GA in the README. All four fail; the restored tree
 passes.
+
+## D1104 — the site was indexable by accident, and the front door said only its own name
+Two omissions on the published site, both invisible from inside the build.
+
+There was no `robots.txt`. Crawlers treat its absence as permission, so nothing was
+broken — but the sitemap went unannounced, and more to the point the file sat
+unattended. `robots.txt` is a rare shape: one line, `Disallow: /`, removes the entire
+site from every search engine, and there is no symptom. The pages build, deploy and
+render exactly as before; the only evidence is traffic that never arrives, which
+nobody investigates because nobody knows what it should have been. A file with that
+much reach and that little feedback belongs under a gate before it exists, not after
+someone edits it.
+
+The landing page's `<title>` was `Groundhold`. The theme renders `<page title> - <site
+name>` everywhere except the homepage, where it falls back to the site name alone. So
+every interior page said what it was — "The honesty rules", "Errors and exit codes" —
+and the front door, the page every external link points at, spent the single line a
+search result displays on a word nobody has heard yet.
+
+Both fixed: a permissive `robots.txt` naming the sitemap, and `extra.homepage_title`
+rendered through an `htmltitle` override on the homepage only. The gate checks
+`robots.txt` exists, carries no blanket `Disallow: /`, and names the sitemap URL
+DERIVED from `site_url` — so moving domains breaks it until the file follows. For the
+title it checks three things, the third being the one that matters: the key exists, it
+differs from the site name, and `overrides/main.html` actually READS it. A
+configuration value nothing consumes renders identically to the bug it was meant to
+fix, and would have passed a gate that only looked at the config.
+
+The gate also caps the title at 70 characters, and immediately failed the first title
+written for it (75) — search results truncate around there, so the tail is written for
+nobody. Verified with five mutants: delete the file, disallow everything, point the
+sitemap at the old domain, stop reading the title in the template, set the title to
+the bare site name. All five fail. The rendered output was checked by building the
+site, not by reading the template: the homepage carries the new title, interior pages
+are untouched.
