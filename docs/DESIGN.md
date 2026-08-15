@@ -36171,3 +36171,43 @@ always return 0. The first needed its assertion rewritten before it would die �
 original named `hash`/`verify`, neither of which leaks, so the mutant survived a check
 that looked like it covered exactly this. A gate aimed at the wrong witness is not a
 gate.
+
+## D1110 — deriving the allowed flags from the documentation disabled an undocumented one
+D1109 made the usage block load-bearing in a way it had never been: a flag the parse
+switch accepts but no usage line names is now refused by every verb. One flag was in
+exactly that position, and D1109 turned it off.
+
+`--allow-plaintext-secret` has existed since D364. It silences the plaintext-credential
+warning, on the reasoning that a warning nobody can turn off is one everybody learns to
+ignore — so it is an escape hatch, deliberately provided, and five verbs read it
+(`verify`, `adopt`, `plan`, `preflight`, `apply`). The only place it had ever been
+written down is one sentence in this record. Not the usage block. Not the README. Not a
+spec page.
+
+So D1109 shipped, and every one of those five verbs began refusing it, and nothing
+failed. No test passes it, no example uses it, no CI job exercises it. The same silence
+that let it go undocumented for months is what let it break: an escape hatch nobody
+documents is one nobody exercises, and one nobody exercises can be removed without a
+single red light. It was found by asking the inverse of D1109's question — not "is this
+flag one the verb reads", but "is this flag one the operator could have known about".
+
+The flag is now documented on the five verbs that read it, which both restores it and
+makes it discoverable for the first time. The gate closes the class from the other
+side: every flag the parse switch accepts must appear in the usage block, unless it is
+registered as a private sub-parser flag (D602) — undocumented ON PURPOSE being a
+different thing from undocumented by omission. Together with D1109 the two gates pin
+the switch and the usage block to the same set, so neither can gain a flag without the
+other.
+
+The switch is read from the AST rather than by grep, so a flag inside a comment or a
+string cannot pad the set, and both sides carry vacuity floors: fewer than forty flags
+on either means the walk broke and the gate would pass on anything (D328). A
+behavioural assertion holds the specific case as well — `verify` and `apply` must
+accept this flag — because the general rule would still be satisfied by documenting it
+somewhere it does nothing.
+
+Verified with two mutants: undocument the flag again (the parser-side gate fires), and
+add a new flag to the switch with no usage line (same). The lesson is narrower than
+"document your flags": when a check starts deriving its behaviour from a document, that
+document stops being prose. Everything it fails to say becomes something the tool now
+refuses to do.

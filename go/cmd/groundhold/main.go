@@ -90,12 +90,15 @@ const usage = `groundhold — Go runtime of the Infrastructure Contract spec v0.
 Usage:
   groundhold validate <contract.yaml>
   groundhold verify   <contract.yaml> <candidate.yaml> [--json] [--vocab <dir>]
+                   [--allow-plaintext-secret]
   groundhold plan     <contract.yaml> <candidate.yaml> [--vocab <dir>] [--project <p>]
                    [--ledger <f>] [--bindings <f>] [--observations <f>] --at <ts>
-                   [--deposed]  (compile the pinned deletes for deposed identities)
+                   [--deposed] [--allow-plaintext-secret]
+                   (--deposed compiles the pinned deletes for deposed identities)
   groundhold preflight <contract.yaml> <candidate.yaml> --provider <aws|gcp|azure|k8s>
-                   [--project <p>]  (every capability's missing implementation
-                    operands + unsatisfiable attributes in ONE pass; exit 2 if any)
+                   [--project <p>] [--allow-plaintext-secret]
+                   (every capability's missing implementation operands +
+                    unsatisfiable attributes in ONE pass; exit 2 if any)
   groundhold forecast <plan.yaml> <candidate.yaml> [--ledger <file>]
                    [--heads <f>] [--bindings <f>] [--observations <f>] --at <ts>
   groundhold apply    <contract.yaml> <candidate.yaml> <plan.yaml>
@@ -103,6 +106,7 @@ Usage:
                    [--vocab <dir>] [--require-preflight] [--no-reachability]
                    [--detach] [--fail-key <k>] [--unknown-key <k>]
                    [--retryable-key <k>] [--progress auto|plain|ndjson|none]
+                   [--allow-plaintext-secret]
   groundhold observe  (--ledger <file> | --bindings <file>)
                    [--provider fake|gcp|aws|azure|k8s|cloudflare|hetzner|upstash] --at <ts> [--ttl <s>] [--record]
   groundhold example  <contract|candidate> [<contract.yaml>]
@@ -213,7 +217,7 @@ Usage:
   groundhold adopt    <contract.yaml> <candidate.yaml> --ledger <file>
                    --map <cap=providerId> [--map ...] [--provider fake|gcp|aws|azure|k8s|cloudflare|hetzner|upstash]
                    [--project <p>] [--vocab <dir>] --at <ts>
-                   [--discovery <file>]
+                   [--discovery <file>] [--allow-plaintext-secret]
                    (binds existing resources; mutates the ledger, never
                     the cloud; refuses when reality disagrees)
   groundhold unadopt  <contract.yaml> <capability> --ledger <file> --at <ts>
