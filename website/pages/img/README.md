@@ -13,8 +13,12 @@ that symbol cannot say: held until proven, then released.
 | `logo-mark-plain.svg` | no tile, `currentColor` — inherits the surrounding text colour |
 | `logo-lockup.svg` | mark + wordmark, horizontal |
 | `og-card.svg` | the link preview card |
+| `avatar.svg` | full-bleed square for an org/profile avatar — the mark sits inside a safe area so a circular crop does not clip it |
 
 ## Raster (`raster/`, generated)
+
+`avatar-{512,1024}.png` — what to upload as a GitHub organisation or profile picture
+(GitHub applies its own rounding, so the source is square and full-bleed).
 
 `mark-{16,32,48,64,128,180,192,256,512,1024}.png` — 16/32/48 render from the small
 variant, the rest from the full one. `lockup-1360.png`, `mark-plain-512.png` (RGBA,
