@@ -36,7 +36,7 @@ func TestVerbsRefuseALedgerThatIsNotThere(t *testing.T) {
 		{"attest", []string{"attest", "--ledger", missing, "--at", at}},
 		{"repair", []string{"repair", "--ledger", missing, "--provider", "fake"}},
 		{"anchor", []string{"anchor", "--ledger", missing, "--provider", "fake"}},
-		{"deposed", []string{"deposed", "--ledger", missing, "--at", at}},
+		{"deposed", []string{"deposed", "--ledger", missing}},
 		{"posture", []string{"posture", "--ledger", missing, "--at", at}},
 		{"refresh", []string{"refresh", "--ledger", missing, "--provider", "fake", "--at", at}},
 		{"runs", []string{"runs", "--ledger", missing, "--at", at}},

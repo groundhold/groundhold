@@ -71,7 +71,7 @@ capabilities:
 	})
 	p1 := write("p1.json", planOut)
 	if code := run([]string{"apply", c1, k1, p1, "--ledger", ledgerPath,
-		"--provider", "fake", "--at", "2026-01-01T00:11:00Z", "--yes",
+		"--provider", "fake", "--at", "2026-01-01T00:11:00Z",
 		"--no-reachability"}); code != 0 {
 		t.Fatalf("fixture: apply exited %d", code)
 	}
@@ -109,14 +109,14 @@ capabilities:
 	}
 
 	if code := run([]string{"apply", c2, k2, p2, "--ledger", copyLedger("fresh.jsonl"),
-		"--provider", "fake", "--at", "2026-01-01T01:30:00Z", "--yes",
+		"--provider", "fake", "--at", "2026-01-01T01:30:00Z",
 		"--no-reachability"}); code != 0 {
 		t.Fatalf("the CONTROL failed: applying inside the ttl exited %d. Without it "+
 			"the refusal below proves only that apply refuses everything", code)
 	}
 
 	if code := run([]string{"apply", c2, k2, p2, "--ledger", copyLedger("late.jsonl"),
-		"--provider", "fake", "--at", "2030-01-01T00:00:00Z", "--yes",
+		"--provider", "fake", "--at", "2030-01-01T00:00:00Z",
 		"--no-reachability"}); code == 0 {
 		t.Error("apply executed a change set four years after the observation that " +
 			"justifies it expired — `plan` refuses that world, and apply is the verb " +

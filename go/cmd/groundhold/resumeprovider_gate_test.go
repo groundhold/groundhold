@@ -81,7 +81,7 @@ capabilities:
 		t.Fatalf("fixture: cannot read the plan's actions: %v", err)
 	}
 	if code := run([]string{"apply", contract, candidate, planFile, "--ledger", ledger,
-		"--provider", "fake", "--at", "2026-01-01T00:11:00Z", "--yes",
+		"--provider", "fake", "--at", "2026-01-01T00:11:00Z",
 		"--no-reachability", "--unknown-key", plan.Plan.Actions[0].IdempotencyKey}); code != 4 {
 		t.Fatalf("fixture: apply with an unknown outcome exited %d, want 4", code)
 	}

@@ -178,7 +178,7 @@ func buildHistory(t *testing.T, dir, contract, candidate, ledgerPath, at string)
 		t.Fatal(err)
 	}
 	if rc := run([]string{"apply", contract, candidate, planFile, "--provider", "fake",
-		"--at", at, "--yes", "--ledger", ledgerPath}); rc != 0 {
+		"--at", at, "--ledger", ledgerPath}); rc != 0 {
 		t.Fatalf("fixture: apply exited %d", rc)
 	}
 }

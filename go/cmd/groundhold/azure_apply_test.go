@@ -77,7 +77,7 @@ func TestApplyReachesAzureBranch(t *testing.T) {
 	var code int
 	stderr := captureStderr(t, func() {
 		code = run([]string{"apply", c, cand, planFile, "--provider", "azure",
-			"--at", at, "--yes", "--ledger", filepath.Join(dir, "l")})
+			"--at", at, "--ledger", filepath.Join(dir, "l")})
 	})
 	if strings.Contains(stderr, "unknown provider") {
 		t.Fatalf("apply dropped azure to the inner default (executor not wired):\n%s", stderr)
