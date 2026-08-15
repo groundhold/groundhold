@@ -3132,7 +3132,14 @@ func classifyPosture(led *ledger.Ledger, ledgerPath string, ctx *crawl.Document,
 	for capID := range in.Bindings {
 		recs := led.Observations[capID]
 		if len(recs) == 0 {
-			in.Decayed[capID] = true
+			// A bound capability with NO observation at all is not DECAYED — decayed
+			// means a proof outlived its ttl, and here no proof ever existed. Marking it
+			// decayed put "we have no evidence" into the benign class (exit 0) with a
+			// reason that lies ("the backing proof outlived its own ttl"), and made the
+			// less-known capability GREENER than a bound one with a fresh-but-unaudited
+			// observation (which falls to unknown, exit 2). Leave it unmarked so capRow's
+			// default arm classifies it `unknown` (exit 2, "cannot claim ok without a
+			// proof") — the honest direction audit takes on the same absence (D1102).
 			continue
 		}
 		// D652: the reserved absence marker, judged for freshness the same way the
