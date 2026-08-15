@@ -2,7 +2,7 @@
 
 `conformance/cases/*.yaml` is the source of truth — **the suite defines
 what "correct" means**, and it is run through the implementations' own
-CLIs, not their internals. 555 cases, plus seeded differential fuzzing.
+CLIs, not their internals. 556 cases, plus seeded differential fuzzing.
 
 Of those, **261 run against BOTH implementations** — the Python reference
 and the Go runtime must agree on them exactly. The rest carry `impl: go`

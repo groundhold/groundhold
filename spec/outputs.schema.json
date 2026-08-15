@@ -781,7 +781,7 @@
       }
     },
     "horizonResult": {
-      "description": "`groundhold horizon` (D1099): posture's future tense — WHEN the tool's own verdicts change as the ledger's evidence and leases expire, and what to run before each deadline. Deterministic, read-only: it re-runs `audit`/`status` at the finite breakpoints and diffs, so it cannot disagree with what those verbs will say at T. Without `--within` a pure reporter (exit 0); with `--within` a gate (exit 2, code `horizon-action-required`) when a hard constraint's proof decays or a live run's lease lapses with a receipt unsettled inside the window. Every deadline is CONDITIONAL — `assumes` states on what.",
+      "description": "`groundhold horizon` (D1099): posture's future tense — WHEN the tool's own verdicts change as the ledger's evidence and leases expire, and what to run before each deadline. Deterministic, read-only: it re-runs `audit`/`status` at the finite breakpoints and diffs, so it cannot disagree with what those verbs will say at T. Without `--within` a pure reporter (exit 0); with `--within` a gate (exit 2, code `horizon-action-required`) when a hard constraint's proof decays or a live run's lease lapses with a receipt unsettled inside the window — OR when a hard constraint/run is already blocking at the window's near edge (an `already-blocking` entry, so the gate cannot go green over a block apply already refuses). Every deadline is CONDITIONAL — `assumes` states on what.",
       "type": "object",
       "required": [
         "apiVersion",
@@ -872,8 +872,10 @@
                 "enum": [
                   "constraint-decay",
                   "lease-lapse",
-                  "evidence-arrives"
-                ]
+                  "evidence-arrives",
+                  "already-blocking"
+                ],
+                "description": "constraint-decay/lease-lapse/evidence-arrives are CHANGES within the window; already-blocking is a hard constraint or run ALREADY blocking at `at` (the window's near edge) — it predates the window and carries no freshThrough, but a --within gate counts it so it cannot go green over a block apply already refuses"
               },
               "capability": {
                 "type": "string"

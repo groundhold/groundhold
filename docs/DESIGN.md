@@ -35797,3 +35797,31 @@ projection, and the clear-window-is-not-vacuous D328 guard) and three conformanc
 reports-but-does-not-gate with the code absent; agrees-with-audit-at-the-instant). Read-only, deterministic,
 no network — it lives left of every mutation. The console's four-dimensional forensics view (projecting these
 deadlines onto the estate timeline) is the natural next slice and is deferred, not built here.
+
+## D1100 — horizon's --within gate went green over a constraint already blocking when its window opened
+D1099 shipped `horizon --within` as a cron early-warning gate: exit 2 when a hard constraint's proof decays
+or a lease lapses INSIDE the window. Adversarially re-reading the fresh code — the third time this session a
+hunt found a gap in my own just-landed work — surfaced a false-secure hole from the other direction. horizon
+projects CHANGES, and a constraint whose proof expired BEFORE the evaluation instant has no change to
+project: it was already `unknown` at `atClock`. Measured on one ledger (a proof with ttl 86400, evaluated a
+week later): `audit` exits 2 (`observation-required`, the hard constraint is unverifiable now), and
+`horizon --within 100000` exited 0 with zero transitions. A cron using horizon as its gate would go GREEN
+while `apply`/`converge` refuse right now — the exact "gate that cannot fail" shape the D1069–D1077 sweep
+closed elsewhere, reintroduced by a verb whose whole identity is the future tense.
+
+The window is `[atClock, atClock+within]`, and it INCLUDES its own near edge. "Will the estate be blocked at
+any point in the next hour" is truthfully YES when it is blocked at second zero. The fix keeps transitions
+meaning CHANGES but adds a distinct `already-blocking` kind, stamped at `atClock` (no `freshThrough` — the
+proof did not expire inside the window, it expired before it), for every hard constraint already blocking in
+the baseline audit AND every run already `needs-reconcile`. These count toward `hardBlocking`, so the gate
+exits 2 and `firstHardDeadline` becomes `atClock` — act now, not at some future instant. The reporter (no
+`--within`) reports them without gating, exactly as it does future changes, and the `code` still follows the
+exit. The agreement with `audit` is pinned end to end: at the eval instant horizon shows `already-blocking`
+and `audit` blocks — the same boundary, because the present block is read from the same baseline `audit.Run`
+horizon runs at `atClock`, never re-derived. A unit test and a conformance case pin the gate; the honesty
+scope in the package doc and the `projects` sentence now say the window reports present blocks too.
+
+The lesson is the recurring one: a gate is only a gate if it can be RED. "What would this print if the
+dangerous thing were true" is the question, and for a future-tense gate the dangerous thing includes a
+present already true when the window opens. A projection that only looks forward is blind to the wall it is
+already standing at.
