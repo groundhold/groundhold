@@ -40,6 +40,7 @@ var schemaStructs = map[string]struct{ file, name string }{
 	"anchorDocument":  {"internal/ledger/anchor.go", "Anchor"},
 	"exportRecord":    {"internal/export/export.go", "Record"},
 	"hintsResult":     {"internal/importer/importer.go", "Result"},
+	"horizonResult":   {"internal/horizon/horizon.go", "Document"},
 	"repairDiagnosis": {"internal/ledger/repair.go", "Diagnosis"},
 	"repairResult":    {"internal/ledger/repair.go", "RepairResult"},
 	// converge's result type is unexported; the gate reads source text, so it

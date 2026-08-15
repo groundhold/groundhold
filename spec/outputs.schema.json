@@ -39,7 +39,8 @@
         "run-needs-reconcile",
         "run-done",
         "run-failed",
-        "wait-timeout"
+        "wait-timeout",
+        "horizon-action-required"
       ]
     },
     "explain": {
@@ -776,6 +777,186 @@
               }
             }
           }
+        }
+      }
+    },
+    "horizonResult": {
+      "description": "`groundhold horizon` (D1099): posture's future tense — WHEN the tool's own verdicts change as the ledger's evidence and leases expire, and what to run before each deadline. Deterministic, read-only: it re-runs `audit`/`status` at the finite breakpoints and diffs, so it cannot disagree with what those verbs will say at T. Without `--within` a pure reporter (exit 0); with `--within` a gate (exit 2, code `horizon-action-required`) when a hard constraint's proof decays or a live run's lease lapses with a receipt unsettled inside the window. Every deadline is CONDITIONAL — `assumes` states on what.",
+      "type": "object",
+      "required": [
+        "apiVersion",
+        "kind",
+        "at",
+        "projects",
+        "assumes",
+        "examined",
+        "transitions",
+        "summary",
+        "horizonHash"
+      ],
+      "properties": {
+        "apiVersion": {
+          "const": "horizon/v0.1"
+        },
+        "kind": {
+          "const": "Horizon"
+        },
+        "at": {
+          "type": "string",
+          "description": "the evaluation clock (--at), RFC3339"
+        },
+        "windowSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "present ONLY with --within; the projection's upper bound in seconds from `at`"
+        },
+        "horizon": {
+          "type": "string",
+          "description": "present ONLY with --within; at+windowSeconds as RFC3339 — the far edge examined"
+        },
+        "projects": {
+          "type": "string",
+          "description": "the honesty scope, verbatim: what horizon does and does NOT predict (verdict changes from existing evidence/leases, never new drift or the world itself)"
+        },
+        "assumes": {
+          "type": "string",
+          "description": "the standing precondition every deadline is conditional on — no intervention and no new ledger events before the instant"
+        },
+        "examined": {
+          "type": "object",
+          "description": "D328 non-vacuity: what the projection actually looked at. A clear window that examined nothing is not evidence of calm.",
+          "required": [
+            "constraints",
+            "boundCapabilities",
+            "liveRuns",
+            "contractsGiven"
+          ],
+          "properties": {
+            "constraints": {
+              "type": "integer"
+            },
+            "boundCapabilities": {
+              "type": "integer"
+            },
+            "liveRuns": {
+              "type": "integer"
+            },
+            "contractsGiven": {
+              "type": "boolean"
+            }
+          }
+        },
+        "transitions": {
+          "type": "array",
+          "description": "each projected change in a tool verdict, sorted by instant; from/to are the states across the breakpoint and advice.before is the deadline to act by",
+          "items": {
+            "type": "object",
+            "required": [
+              "at",
+              "kind",
+              "from",
+              "to",
+              "effect",
+              "advice"
+            ],
+            "properties": {
+              "at": {
+                "type": "string",
+                "description": "the instant a re-run of the real verb first differs (RFC3339)"
+              },
+              "freshThrough": {
+                "type": "string",
+                "description": "the last instant the prior verdict still holds — `at` minus one second"
+              },
+              "kind": {
+                "enum": [
+                  "constraint-decay",
+                  "lease-lapse",
+                  "evidence-arrives"
+                ]
+              },
+              "capability": {
+                "type": "string"
+              },
+              "constraint": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "hard",
+                  "soft"
+                ]
+              },
+              "run": {
+                "type": "string"
+              },
+              "from": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              },
+              "effect": {
+                "type": "string",
+                "description": "what the change does to the tool's behaviour, in prose"
+              },
+              "advice": {
+                "type": "object",
+                "required": [
+                  "action",
+                  "before"
+                ],
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "description": "the verb to run before the deadline (e.g. refresh, resume, wait)"
+                  },
+                  "before": {
+                    "type": "string",
+                    "description": "run the action strictly before this instant (RFC3339)"
+                  },
+                  "steps": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "summary": {
+          "type": "object",
+          "required": [
+            "hardBlocking",
+            "advisory"
+          ],
+          "properties": {
+            "hardBlocking": {
+              "type": "integer",
+              "description": "transitions that WILL block execution (hard-constraint decay, or a lease lapse to needs-reconcile). Reported even in reporter mode; only GATES the exit with --within."
+            },
+            "advisory": {
+              "type": "integer"
+            },
+            "firstHardDeadline": {
+              "type": "string",
+              "description": "earliest hardBlocking instant — the deadline to act on first"
+            }
+          }
+        },
+        "code": {
+          "$ref": "#/$defs/code",
+          "description": "`horizon-action-required`, emitted ONLY when the process gates (exit 2). Absent in reporter mode so a code-router never sees a remediation contract the exit code contradicts."
+        },
+        "horizonHash": {
+          "type": "string",
+          "description": "sha256 over the transitions' structural fields (not prose) — a stable projection identity"
         }
       }
     },

@@ -74,6 +74,11 @@ const (
 	// the remediation is "wait and retry the same verb", not "reconcile". A 5xx,
 	// transport error, or live 403 stays reconcile-required (may have landed).
 	ProviderAgainLater Code = "provider-again-later"
+	// D1099: the estate has a projected state-change (a hard constraint's proof
+	// decays, or a live run's lease lapses with a receipt unsettled) INSIDE the
+	// requested --within window. One remediation: run the advised verb before the
+	// stated deadline. A future condition, so exit 2 (not a corruption/refusal class).
+	HorizonActionRequired Code = "horizon-action-required"
 )
 
 type Explanation struct {
@@ -168,6 +173,7 @@ func init() {
 		ApplyFailed:              {4},
 		BindingConflict:          {2},
 		ClockRegress:             {2, 3},
+		HorizonActionRequired:    {2},
 		ConfirmationRequired:     {2},
 		ConsentRequired:          {2},
 		LeaseConflict:            {3},
@@ -247,6 +253,9 @@ var Explain = map[Code]Explanation{
 	ProviderAgainLater: {
 		"The provider throttled the mutation before it could land.",
 		"Wait for the backoff (honor Retry-After when present), then re-run the same verb; no reconcile is needed — the mutation did not execute."},
+	HorizonActionRequired: {
+		"Something the estate depends on decays within your --within window: a hard constraint's proof expires, or a live run's lease lapses with a receipt unsettled.",
+		"Run the advised verb before the stated deadline — each transition names the action (refresh before a proof decays; wait/resume before a lease lapses)."},
 	ConsentRequired: {
 		"The action needs explicit consent that is absent.",
 		"Add the named contract autonomy entry or flag; nothing implicit unlocks it."},

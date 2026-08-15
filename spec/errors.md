@@ -20,6 +20,7 @@ the same next action, they share a code, wherever they were detected.
 | `reconcile-required` | 3/4 | run `resume` (pending receipts block, or an outcome just came back unknown) |
 | `reconcile-pending` | 3 | retry `resume` later — the provider cannot answer yet |
 | `provider-again-later` | 4 | wait for the backoff (honor `Retry-After` when present), then re-run the same verb — the provider throttled the mutation before it landed, so no reconcile is needed (D237). Distinct from `reconcile-required`: a pure rate-limit provably did not execute, whereas a 5xx/transport/live-403 may have landed and needs `resume` first |
+| `horizon-action-required` | 2 | run the advised verb before the stated deadline — `horizon --within` projected a hard constraint's proof decaying (run `refresh`) or a live run's lease lapsing with a receipt unsettled (run `wait`/`resume`) inside the window. A future condition, not a present refusal |
 | `consent-required` | 2 | add the explicit consent (contract autonomy entry or the named flag); nothing implicit unlocks it |
 | `confirmation-required` | 2 | a human must confirm (interactive prompt, MCP token, --yes) |
 | `read-set-mismatch` | 2 | use the exact documents the plan pinned, or re-seal |

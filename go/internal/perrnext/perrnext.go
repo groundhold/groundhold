@@ -223,6 +223,11 @@ var noNext = map[perr.Code]bool{
 	perr.RunDone:           true, // success, nothing to do
 	perr.RunFailed:         true, // inspect the run's own refusal; situational
 	perr.WaitTimeout:       true, // a longer --timeout is the operator's choice; `retry` already echoes the invocation
+	// D1099: horizon's remediation is not a single command — its document already carries
+	// per-transition `advice` (a different verb and deadline for each projected decay or
+	// lapse: refresh, resume, wait). A single `next` would flatten a list of distinct,
+	// differently-timed actions into one, so it is honestly omitted here.
+	perr.HorizonActionRequired: true,
 }
 
 // NextFor returns the advisory next for a refusal, or nil when none is honest.
