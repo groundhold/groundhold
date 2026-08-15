@@ -35825,3 +35825,31 @@ The lesson is the recurring one: a gate is only a gate if it can be RED. "What w
 dangerous thing were true" is the question, and for a future-tense gate the dangerous thing includes a
 present already true when the window opens. A projection that only looks forward is blind to the wall it is
 already standing at.
+
+## D1101 — react stamped every re-listed scope "complete", laundering a truncated listing into a false all-clear
+A parallel read-only audit of the real-time ingress path found a false-secure defect where react's own comment
+claims the opposite. `react` maps one cloud/k8s change event to a (provider, scope) coordinate, re-lists that
+scope read-only, and splices the fresh listing into the last full crawl. It built the fresh scope with a
+hardcoded `Status: "complete"` — there was no code path that could ever mark it incomplete. But a driver's
+`List` can return page one, be told more exists, and NOT follow the continuation: it returns partial results
+with `err == nil` (the truncation is recorded out-of-band, surfaced through the optional
+`provider.ListingCompleteness` capability that aws/azure/gcp/k8s all implement). The polling `crawl` path
+interrogates that capability and marks the scope `incomplete`; react did not, so it stamped a truncated
+listing `complete`. `Splice` REPLACES the base crawl's block for that scope, so the fabricated `complete`
+overwrote a prior honest `incomplete`; posture folds scope status into `shadowLowerBound`, so a `complete`
+scope reports an EXACT shadow count and can exit 0; and react returns `posture.Summary.ExitCode()`. The net:
+react — the unattended stream path where exit 0 means "handled, all clear" — reports success over a namespace
+that was only partially listed, where a shadow resource may sit on the unread page, and it does so by erasing
+the honest incompleteness a prior crawl had recorded. The k8s watch, react's primary real-time source, is
+exactly where a namespace re-list paginates.
+
+The fix refuses to add a THIRD copy of the completeness decision (crawl had one, react would have been the
+second place to get it wrong). `discover.Run` now interrogates `ListingCompleteness` ONCE — the single reset
+site, since `TruncatedListings` resets its record — and carries the verdict on its `Result` (`Incomplete`,
+`IncompleteReason`). The live-crawl fetcher reads that instead of asking again (one fewer copy than before),
+and react's `FreshScope` reads it too: the scope's status is now READ from the re-list, never assumed. A
+unit test drives a truncating discoverer through `discover.Run` and asserts the Result carries the
+incompleteness with the offending call named; a second pins `react.FreshScope` producing an `incomplete`
+scope from a truncated result — swapping the status back to a hardcoded `complete` fails it (verified with the
+mutant). This is the same lesson as the horizon present-block gate two entries up: a completeness claim, like
+a gate, is only honest if it can say "no", and the dangerous default is the affirmative one.

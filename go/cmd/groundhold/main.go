@@ -2038,14 +2038,10 @@ func run(args []string) int {
 		}
 		stamp := time.Now().UTC().Format(time.RFC3339)
 		// D592: the re-listed scope is stamped NOW; every scope the splice carries
-		// over keeps its own listing time, so the document stops re-dating what it
-		// did not read.
-		fresh := crawl.ScopeContext{Scope: ev.Scope, Status: "complete", ListedAt: evalTime, Resources: []crawl.Resource{}}
-		for _, r := range res.Discovery.Resources {
-			fresh.Resources = append(fresh.Resources, crawl.Resource{
-				ProviderID: r.ProviderID, ResourceType: r.ResourceType,
-				Observations: r.Observations, ObservedAt: stamp})
-		}
+		// over keeps its own listing time, so the document stops re-dating what it did
+		// not read. FreshScope READS the re-list's completeness (never assumes complete),
+		// so a truncated listing cannot be laundered into an affirmative complete claim.
+		fresh := react.FreshScope(ev.Scope, evalTime, stamp, res)
 		// splice the fresh scope into the last full crawl (--crawl), if any
 		var base *crawl.Document
 		if contextPath != "" {
@@ -3049,22 +3045,13 @@ func runLiveCrawl(reg *pair.Registry, budgetArg int, at, kubeconfigPath, kubeCon
 		if derr != nil {
 			return crawl.Fetched{Pace: pace.Result{Outcome: pace.ServerError}}
 		}
-		// D803: the sweep succeeded — and the provider may have said there was more.
-		// A driver that can answer is asked; one that cannot is not assumed complete by
-		// this code, it simply says nothing and the scope keeps whatever the sweep said.
+		// D803: the sweep succeeded — and the driver may have said there was more.
+		// discover.Run interrogated the completeness capability once (the single reset
+		// site); this reads its verdict rather than asking again.
 		f := crawl.Fetched{Resources: res.Discovery.Resources, Pace: pace.Result{Outcome: pace.OK}}
-		if lc, ok := prov.(provider.ListingCompleteness); ok {
-			if notes := lc.TruncatedListings(); len(notes) > 0 {
-				calls := make([]string, 0, len(notes))
-				for _, n := range notes {
-					calls = append(calls, n.Call)
-				}
-				sort.Strings(calls)
-				f.Incomplete = true
-				f.Reason = "the scope is incomplete — a listing did not finish (a page went " +
-					"unread, or a discovery sweep failed): " + strings.Join(calls, ", ") +
-					" — the resources found are real, the count is a lower bound (D803/D873)"
-			}
+		if res.Incomplete {
+			f.Incomplete = true
+			f.Reason = res.IncompleteReason
 		}
 		return f
 	}

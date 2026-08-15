@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"groundhold/internal/crawl"
+	"groundhold/internal/discover"
 )
 
 // Event is the mapped coordinate of a change: which provider+scope to re-read.
@@ -95,6 +96,28 @@ func ParseEvent(raw []byte) (Event, error) {
 		return Event{}, fmt.Errorf("%w: watch %s frame", ErrNothingToReactTo, wk.Type)
 	}
 	return Event{}, fmt.Errorf("unrecognised event envelope (expected groundhold/test-event/v0, an AWS EventBridge event, or a Kubernetes watch event)")
+}
+
+// FreshScope builds the re-listed scope's context from a discovery result, stamping
+// each resource at `stamp`. Crucially the scope's completeness is READ from the re-list,
+// never assumed: a driver that truncated its listing (a page went unread) returns partial
+// results with NO error, and a hardcoded "complete" here would launder that into an
+// affirmative complete claim — spliced OVER a prior honest incomplete and letting posture
+// exit 0 over a scope where a shadow may sit on the unread page. react is the unattended
+// stream path where exit 0 reads "all clear"; the count must stay a lower bound (D803/D873).
+func FreshScope(scope, listedAt, stamp string, res *discover.Result) crawl.ScopeContext {
+	sc := crawl.ScopeContext{Scope: scope, Status: "complete", ListedAt: listedAt,
+		Resources: []crawl.Resource{}}
+	if res.Incomplete {
+		sc.Status = "incomplete"
+		sc.Reason = res.IncompleteReason
+	}
+	for _, r := range res.Discovery.Resources {
+		sc.Resources = append(sc.Resources, crawl.Resource{
+			ProviderID: r.ProviderID, ResourceType: r.ResourceType,
+			Observations: r.Observations, ObservedAt: stamp})
+	}
+	return sc
 }
 
 // Splice replaces the (provider, scope) block of base with a freshly re-listed scope

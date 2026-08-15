@@ -9,6 +9,7 @@ package discover
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"groundhold/internal/canonical"
 	"groundhold/internal/provider"
@@ -45,6 +46,13 @@ type Result struct {
 	// enumeration they derive from.
 	DiscoveryHash string   `json:"discoveryHash"`
 	Diagnostics   []string `json:"diagnostics,omitempty"`
+	// Incomplete is true when the driver reported a listing that did not finish —
+	// a page went unread, or a sub-sweep failed — and returned no error (D803/D873).
+	// The resources found are real; the COUNT is a lower bound. Surfaced on the Result
+	// so every caller (crawl's live fetch AND react's targeted re-list) reads ONE
+	// truncation signal instead of each re-deciding completeness for itself.
+	Incomplete       bool   `json:"incomplete,omitempty"`
+	IncompleteReason string `json:"incompleteReason,omitempty"`
 }
 
 // tree renders the document as the raw map the canonical hasher sees —
@@ -129,6 +137,24 @@ func Run(prov provider.Provider, project, region,
 				"attributes": attrs,
 			},
 		})
+	}
+	// The sweep succeeded — and the driver may have said there was more. Ask the optional
+	// completeness capability ONCE, here, so no caller re-decides it: react hardcoded
+	// "complete" and laundered a truncated re-list into an affirmative complete claim
+	// (overwriting a prior honest incomplete and exiting 0), while the crawl path asked.
+	// TruncatedListings RESETS the record, so this must be the single interrogation site.
+	if lc, ok := prov.(provider.ListingCompleteness); ok {
+		if notes := lc.TruncatedListings(); len(notes) > 0 {
+			calls := make([]string, 0, len(notes))
+			for _, n := range notes {
+				calls = append(calls, n.Call)
+			}
+			sort.Strings(calls)
+			res.Incomplete = true
+			res.IncompleteReason = "the scope is incomplete — a listing did not finish (a page went " +
+				"unread, or a discovery sweep failed): " + strings.Join(calls, ", ") +
+				" — the resources found are real, the count is a lower bound (D803/D873)"
+		}
 	}
 	h, err := canonical.HashDiscovery(res.Discovery.tree())
 	if err != nil {
