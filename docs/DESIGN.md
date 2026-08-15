@@ -35564,3 +35564,42 @@ needs a deliberate register: which interfaces are documented, which are delibera
 so the omission is visible and can only shrink (the `knownNoAdoptRead` pattern, D700/
 D804). Building that register means deciding what belongs on a summary page versus the
 authoring spec, which is an editorial call and not one to make at 02:00 on autopilot.
+
+## D1091 — a named vocabulary directory that supplied nothing loaded nothing, quietly
+
+`--vocab <dir>` is how an operator extends the type system with their own capability
+types, and a loaded vocabulary is what makes candidate values kind- and enum-checked AT
+LOAD (D19, fail-fast). `filepath.Glob` reports no error for a path that does not exist,
+and none for a directory holding no vocabularies, so `LoadDir` returned an empty map and
+a nil error for both. The operator named a directory, nothing loaded, and nothing said
+so — every custom attribute silently dropped to free-form, losing the load-time check
+the flag exists to buy.
+
+The machine output stayed honest: the verdict carries `pathInVocabulary: false` and
+`basis: declared`, which is why this is a silence rather than a lie. But a per-verdict
+flag in JSON is not where a reader learns that the directory they named was not there.
+
+**The shipped CI recipe made it likely rather than hypothetical.** It passed
+`--vocab spec/vocab` — a path that exists in THIS repository and not in the user's, so
+anyone copying the recipe into their own repo got the silent no-op by construction. The
+flag is now absent from both recipes, with a comment saying why and when to add it back.
+
+`LoadDir` refuses in both directions: a path that does not exist reports the stat error,
+and an existing directory with no `*.yaml` refuses by naming the asymmetry — a directory
+was NAMED, so it must supply something, and `--no-vocab` is how the empty set is
+requested. That is the paginated-reads rule (D861) at a different boundary: "I found
+nothing" and "there is nothing to find" must not arrive as one value.
+
+Teeth-checked with a mutant that disables the refusal without breaking the build (the
+first attempt removed the block and only broke compilation, which proves nothing about
+the test): both arms fail by name, and a positive control loads a real vocabulary so the
+pair cannot pass against a LoadDir that rejects everything.
+
+**What this deliberately does not change.** A constraint on a path outside every loaded
+vocabulary still reads `satisfied`, comparing the author's declaration with the author's
+declaration. That is D23's decision, not an oversight: rejecting those paths would close
+the door on extension vocabularies before the governance model exists, and the verdict
+carries `pathInVocabulary` precisely so a policy can gate on it. Worth stating because
+the shape is D766's — a constraint resting on a number you wrote yourself — and the
+reason it is tolerated here is a deliberate trade with a machine-readable escape hatch,
+which is different from nobody having noticed.
