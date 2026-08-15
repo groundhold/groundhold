@@ -10935,7 +10935,7 @@ the test that pins it has to be Go-side. That is a limit of the dual suite worth
 papering over — it proves the two implementations agree on documents, not on the values their drivers
 construct.
 ## D377. The gates run on the fleet the organisation already pays for
-_Internal CI infrastructure — this entry describes the private build estate rather than groundhold, and its body is omitted from the public record._
+_Internal to how this project is built and run — the body is omitted from the public record._
 
 ## D378. A refusal that is knowable from the document must be raised before anything is mutated
 A field partner's `converge` ended `DIED` on every run because `capability.ai.inference` on AWS tried to
@@ -11051,19 +11051,19 @@ environment is frozen after the response and a periodic exporter never gets to f
 is ever designed, it should name a destination, not assume a collector.
 
 ## D382. Which pool is alive is a measurement, not a belief
-_Internal CI infrastructure — this entry describes the private build estate rather than groundhold, and its body is omitted from the public record._
+_Internal to how this project is built and run — the body is omitted from the public record._
 
 ## D383. The release path was down and nobody was going to notice
-_Internal CI infrastructure — this entry describes the private build estate rather than groundhold, and its body is omitted from the public record._
+_Internal to how this project is built and run — the body is omitted from the public record._
 
 ## D384. The export guarded file contents and forgot prose
-_Internal CI infrastructure — this entry describes the private build estate rather than groundhold, and its body is omitted from the public record._
+_Internal to how this project is built and run — the body is omitted from the public record._
 
 ## D385. The leak gate was the leak
-_Internal CI infrastructure — this entry describes the private build estate rather than groundhold, and its body is omitted from the public record._
+_Internal to how this project is built and run — the body is omitted from the public record._
 
 ## D386. Darwin runs in the one repository that can run it
-_Internal CI infrastructure — this entry describes the private build estate rather than groundhold, and its body is omitted from the public record._
+_Internal to how this project is built and run — the body is omitted from the public record._
 
 ## D387. A run that changed the world must look at what it changed
 D379 made a part-way apply SAY what it had applied. It did not make converge LOOK. On an apply failure
@@ -35746,3 +35746,10 @@ the first byte-for-byte intact) — there was none before, and it is a real regr
 open back to `O_TRUNC` fails it. This is the "always works, honest" bar applied to a security root — an
 atomic guarantee where a check-then-act stood, closed on the owner's call for highest quality on the parts
 that must never fail.
+
+## D1097 — the link-preview card was published, correct, and unfetchable
+_Internal to how this project is built and run — the body is omitted from the public record._
+
+## D1098 — the record is complete; the projection of it is a choice
+_Internal to how this project is built and run — the body is omitted from the public record._
+
