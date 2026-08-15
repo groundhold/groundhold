@@ -35729,3 +35729,20 @@ the measured off (its own `retention.locked: false`). `retention.minimum` is del
 emitted from soft-delete when present, absent when not — honouring the second half of the S3 rule that
 `retention.minimum` classifies as non-security precisely because a numeric floor has no measured off-value
 to witness.
+
+## D1096 — keygen refused an overwrite with a Stat check, not the kernel's atomic guarantee
+`keygen` mints an ed25519 signing seed — the root of every signature's trust — and it correctly used
+`crypto/rand` (via `ed25519.GenerateKey(nil)`) and wrote the seed at `0600`. Its refusal to overwrite an
+existing key, though, was a `Stat`-then-`WriteFile`: if the path already exists, refuse; otherwise write.
+Between the check and the write is a TOCTOU window. Two concurrent `keygen`s on the same path, or any
+process creating the file in that gap, and the `WriteFile` (which opens `O_CREATE|O_TRUNC`) truncates and
+overwrites — silently replacing a signing identity, which is losing the ability to prove any history it
+signed. The reachability is low (a manual mint verb, an identical path, a race), but the loss is total and
+the correct primitive costs nothing: `O_CREATE|O_WRONLY|O_EXCL` makes "create a NEW file, never overwrite"
+the kernel's atomic guarantee — the open itself fails if the file exists, with no window. The key is
+generated before the open so a refused path leaves nothing written and a failed create leaves no half-file.
+A unit test now pins the crypto-root contract (valid 32-byte seed at 0600; a second mint refuses and leaves
+the first byte-for-byte intact) — there was none before, and it is a real regression fence: swapping the
+open back to `O_TRUNC` fails it. This is the "always works, honest" bar applied to a security root — an
+atomic guarantee where a check-then-act stood, closed on the owner's call for highest quality on the parts
+that must never fail.
