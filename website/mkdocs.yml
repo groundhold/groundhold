@@ -28,4 +28,5 @@ nav:
   - Versioning and licenses: versioning.md
   - 'Field note: when one page is enough': paging.md
   - 'Field note: every check passed, no alarm could reach a human': dead-channel.md
+  - 'Field note: six ways our own documentation lied': unrun.md
 markdown_extensions: [admonition, pymdownx.superfences, tables]
