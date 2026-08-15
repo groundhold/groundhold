@@ -686,6 +686,14 @@
           "items": {
             "type": "string"
           }
+        },
+        "incomplete": {
+          "type": "boolean",
+          "description": "true when the driver reported a listing that did not finish — a page went unread or a sub-sweep failed — and returned no error (D803/D873). The resources found are real; the COUNT is a lower bound. Read by crawl and react so neither re-decides completeness."
+        },
+        "incompleteReason": {
+          "type": "string",
+          "description": "names the truncated call(s), for the human row and the incomplete scope's reason"
         }
       }
     },
