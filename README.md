@@ -118,7 +118,7 @@ in-process provider, so there is nothing to sign up for and nothing to clean up.
 
 ## What a verdict looks like
 
-![groundhold verify — four-valued verdicts, provenance dimmed, execution blocked](website/img/verify-four-valued.svg)
+![groundhold verify — four-valued verdicts, provenance dimmed, execution blocked](website/pages/img/verify-four-valued.svg)
 
 Six things are happening in that one screen, and they are the reasons this
 project exists rather than features bolted onto it.
