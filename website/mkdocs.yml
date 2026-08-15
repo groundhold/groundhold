@@ -7,6 +7,9 @@ site_description: >
 docs_dir: pages
 theme:
   name: material
+  custom_dir: overrides
+  logo: img/logo-mark.svg
+  favicon: img/logo-mark-small.svg
   palette:
     - scheme: default
       toggle: { icon: material/brightness-7, name: dark }

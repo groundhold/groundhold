@@ -4249,18 +4249,33 @@ func runScenario(path string) int {
 // signature it ever made. stdout is the PUBLIC key: the half you hand
 // to verifiers (--trust); the seed never leaves the file.
 func runKeygen(path string) int {
-	if _, err := os.Stat(path); err == nil {
-		fmt.Fprintf(os.Stderr, "keygen error: %s already exists — "+
-			"refusing to overwrite a signing identity\n", path)
-		return 1
-	}
-	pub, priv, err := ed25519.GenerateKey(nil)
+	// Generate BEFORE opening: a path that already holds a key is refused below with
+	// nothing written, and a create that fails leaves no half-file behind.
+	pub, priv, err := ed25519.GenerateKey(nil) // nil rand -> crypto/rand
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "keygen error: %v\n", err)
 		return 1
 	}
-	seedHex := hex.EncodeToString(priv.Seed())
-	if err := os.WriteFile(path, []byte(seedHex+"\n"), 0o600); err != nil {
+	// O_EXCL makes "create a NEW file, never overwrite" the kernel's ATOMIC guarantee,
+	// not a Stat-then-write check with a TOCTOU window a concurrent create could slip a
+	// truncate into. A signing key is the root of every signature's trust — losing one
+	// to a race is losing the ability to prove any history it signed.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			fmt.Fprintf(os.Stderr, "keygen error: %s already exists — "+
+				"refusing to overwrite a signing identity\n", path)
+		} else {
+			fmt.Fprintf(os.Stderr, "keygen error: %v\n", err)
+		}
+		return 1
+	}
+	if _, err := f.WriteString(hex.EncodeToString(priv.Seed()) + "\n"); err != nil {
+		f.Close()
+		fmt.Fprintf(os.Stderr, "keygen error: %v\n", err)
+		return 1
+	}
+	if err := f.Close(); err != nil {
 		fmt.Fprintf(os.Stderr, "keygen error: %v\n", err)
 		return 1
 	}

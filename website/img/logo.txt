@@ -1,0 +1,25 @@
+Groundhold — console marks.
+
+A claim descends and is HELD: the line cradles it rather than merely sitting under it,
+and below that is ground. Held until proven — then, and only then, it moves.
+
+  full                    compact              inline
+
+       │                       │               ┗┛ groundhold
+   ┗━━━━━━━┛               ┗━━━━━┛
+     ━━━━━                    ━
+       ━
+
+  ascii-only, for a terminal that mangles box drawing
+
+       |
+   |_______|
+     =====
+       =
+
+  banner
+
+       │
+   ┗━━━━━━━┛     groundhold
+     ━━━━━       declare what must be true · prove it · then execute
+       ━
