@@ -5,6 +5,11 @@ site_description: >
   and a deterministic runtime should validate, gate, execute and prove
   them.
 docs_dir: pages
+# The landing page's <title>. Material falls back to site_name alone there, which
+# spends the most valuable line in a search result on a word nobody searches for.
+extra:
+  homepage_title: >-
+    Groundhold — verify what is actually true about your cloud
 theme:
   name: material
   custom_dir: overrides

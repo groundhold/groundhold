@@ -26,3 +26,17 @@
   <meta name="twitter:description" content="{{ config.site_description | striptags | trim }}">
   <meta name="twitter:image" content="{{ og_image }}">
 {% endblock %}
+
+{#
+  Every other page renders "<page title> - Groundhold", which says what the page is.
+  The landing page rendered "Groundhold" and nothing else — the one line a search
+  result shows, spent on a name nobody has heard yet. Sub-pages keep the theme's
+  default; only the homepage is replaced.
+#}
+{% block htmltitle %}
+  {% if page and page.is_homepage and config.extra.homepage_title %}
+    <title>{{ config.extra.homepage_title | trim }}</title>
+  {% else %}
+    {{ super() }}
+  {% endif %}
+{% endblock %}
