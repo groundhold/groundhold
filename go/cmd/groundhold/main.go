@@ -810,8 +810,8 @@ func run(args []string) int {
 	// the per-verb question can be answered at all.
 	var seenFlags []string
 	for i := 0; i < len(args); i++ {
-		if !endOfFlags && strings.HasPrefix(args[i], "--") && len(args[i]) > 2 {
-			seenFlags = append(seenFlags, strings.SplitN(args[i], "=", 2)[0])
+		if !endOfFlags && strings.HasPrefix(args[i], "--") && len(args[i]) > 2 { //nolint:gosec // G602: i is bounded by the enclosing for i := 0; i < len(args); i++
+			seenFlags = append(seenFlags, strings.SplitN(args[i], "=", 2)[0]) //nolint:gosec // G602: same bound
 		}
 		// D590: POSIX `--` ends the flags; everything after it is positional. D567
 		// made an unrecognised "-" token an error and refused this one too, which is
