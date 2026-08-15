@@ -52,6 +52,11 @@ func TestAVerbRefusesAFlagThatBelongsToAnotherVerb(t *testing.T) {
 		{"apply", "--provider"}, // same
 		{"react", "--pairings"}, // documented after this check found it undocumented
 		{"forecast", "--heads"},
+		// D1110: the escape hatch D1109 silently disabled. It must stay accepted by
+		// the verbs that read it — nothing else in the tree passes this flag, so
+		// without this assertion breaking it again would go unnoticed a second time.
+		{"verify", "--allow-plaintext-secret"},
+		{"apply", "--allow-plaintext-secret"},
 		// Armed before dispatch, so no verb documents them and every verb must
 		// accept them; this is how a signed ledger is built (D102).
 		{"publish", "--sign-key"},
