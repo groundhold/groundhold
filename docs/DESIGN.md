@@ -36009,3 +36009,46 @@ improvised. That premise was false. `provider.Fake.List` returns one determinist
 resource and has all along. The obstacle was read out of the code rather than measured
 by running it, and it postponed a fix that needed neither decision. Running the thing is
 not a formality when the question is whether the thing runs.
+
+## D1107 — the README promised a `next` on every refusal; no refusal carries one
+Two sentences in the README describe the same mechanism and disagree. The careful one
+says a structured `next` is attached "where an honest invocation-specific step exists"
+and "omitted rather than guessed" where none does. The other, 170 lines later and in
+the section written FOR AGENTS, says every refusal carries a machine code and a `next`
+step.
+
+Measured rather than read: four genuine refusals — `verify` and `plan` on a violating
+pair, `converge` on the same, `audit` with no observations — carry `code` and no `next`
+at all. The unconditional sentence is false, and it is the one an agent is written
+against. The overclaim is now removed; the agent-facing text states what the tool does.
+
+The gate is conditional on the measurement rather than on the wording, which is what
+keeps it honest in both directions. The harness takes a real refusal, asserts exit 2 and
+a machine code — the half that IS unconditionally true — and then, ONLY IF that refusal
+carries no `next`, asserts the README no longer promises one on every refusal. Emit a
+`next` one day and the gate stops demanding the README be silent about it.
+
+Two failures worth recording, because both were mine and both are the shapes this
+project keeps finding in other people's work.
+
+The first draft of the check grepped README.md line by line for a sentence fragment.
+The sentence WRAPS, so no line ever contains it: the check could not fail. It passed
+against a README carrying the exact overclaim it was written to catch — a gate whose
+green means nothing, caught only because the mutant refused to die (D328). The fix folds
+the file to one line before matching.
+
+The second: verifying a mutant, `git checkout -- README.md` silently reverted the
+uncommitted fix, and the following run measured the unfixed file. Backup and restore by
+copy; never restore a file that holds work git has not seen.
+
+Verified with two mutants: restore the overclaim (the README check fires), and make the
+refused example satisfy its contract (the refusal checks fire, proving they rest on a
+real refusal rather than on any exit 2). 56 example checks to 59.
+
+The larger half of this finding is NOT fixed here and is stated so it is not mistaken
+for closed: `--explain` is documented as attaching remediation to JSON refusals, and on
+those same four refusals it changed the output by zero bytes. The enrichment lives in
+one emitter that consults the code registry; `verify`, `plan`, `audit`, `apply` and
+`preflight` marshal their JSON directly and never reach it. A documented flag that
+silently does nothing is worse than an absent one, and routing every refusal through a
+single emitter is a slice of its own.

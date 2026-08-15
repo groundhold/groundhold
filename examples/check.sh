@@ -274,6 +274,35 @@ bound=no
 grep -q "$res" "$ADOPT/ledger.ndjson" 2>/dev/null && bound=yes
 report "adopt-candidate binds the resource in the ledger" yes "$bound"
 
+# The README's agent-facing section makes a promise about refusals. It is the promise
+# an agent is written against, so it is worth measuring rather than believing: take a
+# GENUINE refusal (a well-formed request the tool declines, exit 2) and read what it
+# actually carries.
+REF="$(mktemp -d)"
+trap 'rm -rf "$LEDGER" "$LIFE" "$NEW" "$ADOPT" "$REF"' EXIT
+rc=0
+"$CLI" verify examples/lifecycle/2-refused.contract.yaml \
+               examples/lifecycle/2-refused.candidate.yaml --json > "$REF/refusal.json" 2>/dev/null || rc=$?
+report "a violating pair is refused" 2 "$rc"
+
+has_code=no; grep -q '"code"' "$REF/refusal.json" && has_code=yes
+report "the refusal carries a machine code" yes "$has_code"
+
+# And the half the README used to overpromise. `next` is deliberately OMITTED where no
+# honest invocation-specific step exists, so its absence is not a defect — claiming it
+# unconditionally is. The check is conditional on the measurement: only when a refusal
+# carries no `next` must the README stop promising one on every refusal.
+has_next=no; grep -q '"next"' "$REF/refusal.json" && has_next=yes
+if [ "$has_next" = no ]; then
+  # Prose wraps. A line-oriented grep for a sentence fragment can never match one that
+  # spans two lines, so it would pass over the very claim it exists to catch — the whole
+  # text is folded to one line first.
+  overclaim=no
+  tr '\n' ' ' < README.md | tr -s ' ' \
+    | grep -q 'carries a machine code and a `next` step' && overclaim=yes
+  report "README does not promise a next it never emits" no "$overclaim"
+fi
+
 echo
 if [ "$fail" -gt 0 ]; then
   echo "$pass passed, $fail FAILED — a shipped example does not work"
