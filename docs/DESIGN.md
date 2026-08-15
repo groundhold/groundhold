@@ -35603,3 +35603,43 @@ carries `pathInVocabulary` precisely so a policy can gate on it. Worth stating b
 the shape is D766's — a constraint resting on a number you wrote yourself — and the
 reason it is tolerated here is a deliberate trade with a machine-readable escape hatch,
 which is different from nobody having noticed.
+
+## D1092 — D567 closed "no verb takes this flag"; "THIS verb does not" is open by construction
+
+RECORDED, NOT BUILT. A structural finding with a proposed mechanism, not a fix — the
+fix is a real slice and this is not the hour for it.
+
+D567 is the entry that found flag absorption, and it found it the way these things get
+found: the author ran `posture --ledger <l> --at <ts> --discovery discovery.json`,
+because `--discovery` exists on other verbs and posture's own remediation tells an
+operator to run `discover`. Posture takes no such flag. The run printed `"shadow": 0`
+and a postureHash over a cluster holding 169 unmanaged objects — a confident, hashed
+answer to a question it was never asked. The fix made an unrecognised `-` token an
+operator error instead of a positional.
+
+**"Unrecognised" is global.** The flags are parsed by ONE switch before dispatch, so a
+token is recognised if ANY verb takes it. A flag that belongs to another verb is
+therefore accepted everywhere and consumed nowhere:
+
+    verify <c> <cand> --heads /x     exit 0     (--heads is forecast's; verify ignores it)
+    verify <c> <cand> --ledger /x    exit 0     (verify reads no ledger)
+    plan <c> <cand> --heads /x       exit 0     (only forecast reads heads)
+    hash <doc> --at <ts>             exit 0     (hash has no clock)
+
+Every one of those is the shape of the sentence that opens D567 — "`--discovery`
+exists on other verbs" — and every one still lands. What that entry actually closed is
+the narrower door: a token no verb at all recognises. The wider one was never shut,
+because shutting it needs per-verb knowledge the parser does not have.
+
+**The mechanism is already written down.** The help's usage block lists each verb with
+its own flags, and that block is published and gated. Deriving the per-verb allowed set
+from it makes the refusal a projection of the documentation rather than a second list to
+maintain — the same move as reading the deny list from the export script rather than
+restating it (D580, D1053).
+
+**Why not tonight.** Any half-version breaks real invocations: a flag that is valid for a
+verb but absent from its usage line would start refusing, and the usage block has not
+been read with that weight before. Doing it properly means auditing all 47 verbs' lines
+against what each actually consumes, which is exactly the kind of careful sweep that
+should not be started at 03:40 on autopilot. Recorded with the measurement and the
+mechanism so whoever takes it starts from here.
