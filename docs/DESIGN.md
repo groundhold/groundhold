@@ -36251,3 +36251,40 @@ step out of the published file (the extraction finds nothing and fails rather th
 silently testing an empty script, which is how this check could most easily become
 decorative). The GitLab example carries no equivalent routing block and is not covered
 here; its `survey` gate is a plain exit-2 check.
+
+## D1112 — `plan` kept a promise nothing was holding it to
+`spec/errors.md` states the machine contract for refusals, and one clause of it is
+written for agents: "`plan` on exit 2 additionally prints exactly ONE refusal object
+(`{status, code?, reasons}`) to stdout ... and the success document stays
+self-discriminating via its top-level `plan` key."
+
+Measured across four different roads to exit 2 — a violated hard constraint, a
+converged world, an unproven constraint, and a stale observation — it is true. All four
+print exactly one object; the success document carries `plan`. Nothing anywhere
+asserted it.
+
+That combination is this family's signature, and D1063 already recorded how it ends:
+four of six front-door defects were TRUE when written and were falsified later by a
+routine event somewhere else. Exit 2 is a FAMILY reached from several places in the
+compiler. Any one of them returning before it emits, or emitting twice, leaves an agent
+routing on stdout with nothing to route on — or with a second document it will not
+expect. Neither shows up as a failure anywhere: the exit code is still 2, the stderr
+prose is still there, and a human reading the terminal sees exactly what they saw
+before.
+
+The harness drives all four roads and asserts one object each, then asserts the success
+document is self-discriminating. Getting the fixtures right is the same lesson D1111
+taught: the converged road needs a ledger built on the clock the plan will read, and
+the stale road needs one deliberately built on an older stamp — the same fixture,
+differing only in its clock, producing two different codes.
+
+The vacuity guard NAMES the codes rather than counting them, and that mattered
+immediately: the first version asserted "four roads, four codes" and failed, because a
+violated constraint and an unproven one are both `not-executable` — correct, and
+exactly what a bare count hides. Three codes across four roads is the honest shape, so
+the check states the set. If it ever collapses to one, the check was exercising a single
+path four times while the others rotted.
+
+Two mutants: silence plan's refusal on stdout (nine checks fail, including the code-set
+guard, which is what tells you the silence was total rather than partial), and print the
+refusal twice.

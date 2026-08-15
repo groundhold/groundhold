@@ -407,6 +407,83 @@ else
   report "CI routing re-raises a violated hard constraint" 2 "$rc"
 fi
 
+# spec/errors.md makes a promise an agent is written against: "`plan` on exit 2
+# additionally prints exactly ONE refusal object (`{status, code?, reasons}`) to
+# stdout ... and the success document stays self-discriminating via its top-level
+# `plan` key". It is true. Nothing kept it true — exit 2 is a FAMILY, reached from
+# several places in the compiler, and any one of them returning before it emits leaves
+# an agent routing on stdout with nothing to route on.
+PL="$(mktemp -d)"
+trap 'rm -rf "$LEDGER" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX" "$CI" "$PL"' EXIT
+
+# Count top-level JSON documents on stdout: 0 means the promise is broken by silence,
+# 2+ by chatter, -1 by malformed output.
+count_json() {
+  python3 -c '
+import sys, json
+s = sys.stdin.read().strip()
+if not s:
+    print(0); raise SystemExit
+d = json.JSONDecoder(); i = 0; n = 0
+while i < len(s):
+    while i < len(s) and s[i].isspace(): i += 1
+    if i >= len(s): break
+    try: _, i = d.raw_decode(s, i)
+    except Exception: print(-1); raise SystemExit
+    n += 1
+print(n)'
+}
+plan_code() { python3 -c 'import sys,json; print(json.load(sys.stdin).get("code","-"))' 2>/dev/null || echo "-"; }
+
+# Four genuinely different roads to exit 2. The clock matters: a converged fixture must
+# be built on the stamp the plan will read, or the answer becomes observation-required
+# (which is itself one of the four, built deliberately below).
+PNOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+"$CLI" converge examples/laptop/laptop.contract.yaml examples/laptop/laptop.candidate.yaml \
+  --ledger "$PL/fresh.jsonl" --provider fake --at "$PNOW" --yes >/dev/null 2>&1 || true
+"$CLI" converge examples/laptop/laptop.contract.yaml examples/laptop/laptop.candidate.yaml \
+  --ledger "$PL/stale.jsonl" --provider fake --at "$AT" --yes >/dev/null 2>&1 || true
+
+codes=""
+check_one_object() {  # <label> <outfile> <args...>
+  label="$1"; outf="$2"; shift 2
+  rc=0
+  "$CLI" plan "$@" > "$outf" 2>/dev/null || rc=$?
+  report "plan refuses ($label)" 2 "$rc"
+  report "plan prints exactly one object ($label)" 1 "$(count_json < "$outf")"
+  codes="$codes $(plan_code < "$outf")"
+}
+
+check_one_object "violated"  "$PL/a.json" examples/lifecycle/2-refused.contract.yaml \
+  examples/lifecycle/2-refused.candidate.yaml --at "$PNOW"
+check_one_object "converged" "$PL/b.json" examples/laptop/laptop.contract.yaml \
+  examples/laptop/laptop.candidate.yaml --ledger "$PL/fresh.jsonl" --at "$PNOW"
+check_one_object "unproven"  "$PL/c.json" spec/examples/orders-production.contract.yaml \
+  spec/examples/candidates/gcp-cloudsql.candidate.yaml --vocab spec/vocab --at "$PNOW"
+check_one_object "stale"     "$PL/d.json" examples/laptop/laptop.contract.yaml \
+  examples/laptop/laptop.candidate.yaml --ledger "$PL/stale.jsonl" --at "$PNOW"
+
+# Vacuity: name the codes rather than count them. Four roads produce THREE codes — a
+# violated hard constraint and an unproven one are both `not-executable`, which is
+# correct and is the kind of thing a bare count hides. If this collapses to one code the
+# check tested a single path four times and would keep passing while the others broke;
+# if a code changes, the sentence in spec/errors.md that lists the exit-2 family needs
+# rereading before this line is edited.
+distinct="$(printf '%s\n' $codes | sort -u | tr '\n' ' ' | sed 's/ *$//')"
+report "the refusals span the documented exit-2 family" \
+  "not-executable nothing-to-change observation-required" "$distinct"
+
+# The other half of the same sentence: success is self-discriminating, so a consumer
+# can tell a plan from a refusal without reading the exit code.
+rc=0
+"$CLI" plan examples/lifecycle/1-create.contract.yaml examples/lifecycle/1-create.candidate.yaml \
+  --at "$PNOW" > "$PL/ok.json" 2>/dev/null || rc=$?
+report "plan succeeds on an executable pair" 0 "$rc"
+has_plan=no
+python3 -c 'import sys,json; sys.exit(0 if "plan" in json.load(open(sys.argv[1])) else 1)' \
+  "$PL/ok.json" 2>/dev/null && has_plan=yes
+report "the success document carries a top-level plan key" yes "$has_plan"
+
 echo
 if [ "$fail" -gt 0 ]; then
   echo "$pass passed, $fail FAILED — a shipped example does not work"
