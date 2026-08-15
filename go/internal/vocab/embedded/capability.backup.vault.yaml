@@ -59,10 +59,18 @@ attributes:
 
   retention.lockMode:
     kind: string
-    enum: [governance, compliance]
+    enum: [governance, compliance, none]
     description: >
-      Whether the retention guarantee is admin-changeable (governance) or IMMUTABLE
-      (compliance / WORM).
+      Whether the retention guarantee is admin-changeable (governance), IMMUTABLE
+      (compliance / WORM), or absent entirely (none — no immutability lock; recovery
+      points are deletable subject only to any soft-delete window).
+
+      `none` is a MEASURED off-value, not an absence (the S3 D1041 precedent): a vault
+      with immutability disabled reports `none`, so a candidate that declares
+      `compliance` over an unprotected vault reads VIOLATED, not merely unwitnessed —
+      the same reason S3 emits a measured `retention.locked: false` rather than omitting
+      it. `retention.minimum` (a numeric floor) still follows the other half of that
+      precedent: absent when there is no floor, never fabricated.
 
       D752 corrects this description. It said "governance is REFUSED on GCP, whose
       enforced retention is immutable by construction (compliance-only)", and that is
