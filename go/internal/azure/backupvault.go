@@ -112,6 +112,8 @@ func BuildBackupVault(environment, capability string,
 				p.LockMode, p.LockState = s, "Unlocked"
 			case "compliance":
 				p.LockMode, p.LockState = s, "Locked" // irreversible WORM
+			case "none":
+				p.LockMode, p.LockState = s, "Disabled" // no immutability lock (the measured off-value)
 			default:
 				return BackupVaultPlan{}, fmt.Errorf("retention.lockMode %q is not a recognized value", s)
 			}

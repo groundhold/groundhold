@@ -54,6 +54,16 @@ func TestBuildBackupVaultHonors(t *testing.T) {
 	if p.LockState != "Unlocked" {
 		t.Fatalf("governance must map to Unlocked (Azure honors it), got %q", p.LockState)
 	}
+	// none -> Disabled: the measured off-value builds a vault with no immutability lock.
+	a["retention.lockMode"] = "none"
+	p, err = BuildBackupVault("prod", "archive", a, bvImpl(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.LockState != "Disabled" {
+		t.Fatalf("none must map to Disabled (no immutability lock), got %q", p.LockState)
+	}
+	a["retention.lockMode"] = "compliance" // restore for the CMK cases below
 	// CMK requires the key uri
 	a["encryption.customerManagedKeys"] = true
 	if _, err := BuildBackupVault("prod", "archive", a, bvImpl(), 1); err == nil {
@@ -154,6 +164,33 @@ func TestCreateObserveDeleteBackupVault(t *testing.T) {
 	}
 	if got["retention.lockMode"] != "compliance" || got["retention.minimum"] != "720h" || got["location.region"] != "eastus" {
 		t.Fatalf("observe reverse-map wrong: %+v", got)
+	}
+}
+
+// TestObserveBackupVaultDisabledReportsNone: a vault with immutability Disabled reports
+// retention.lockMode "none" — a MEASURED off-value (S3 D1041), so a `compliance`
+// candidate over an unprotected vault reads VIOLATED, not merely unwitnessed. Before
+// this the Disabled state emitted nothing (a one-state emit, false-secure by omission).
+func TestObserveBackupVaultDisabledReportsNone(t *testing.T) {
+	srv := backupVaultServer(t, "eastus", "Disabled", 30, false,
+		map[string]string{"groundhold-capability": "archive", "groundhold-environment": "prod"})
+	defer srv.Close()
+	d := backupVaultDriver(t, srv)
+	pid := backupVaultProviderID(testSub, "rg1", BackupVaultName("prod", "archive", 1))
+	obs, _, err := d.observeBackupVault("archive", pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]any{}
+	for _, o := range obs {
+		got[o.Path] = o.Value
+	}
+	if got["retention.lockMode"] != "none" {
+		t.Fatalf("a Disabled vault must report retention.lockMode=none (measured off-value), got %+v", got)
+	}
+	// retention.minimum still comes from soft-delete when present — never fabricated when absent.
+	if got["retention.minimum"] != "720h" {
+		t.Fatalf("retention.minimum must reflect soft-delete, got %+v", got)
 	}
 }
 

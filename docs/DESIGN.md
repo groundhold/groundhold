@@ -35700,3 +35700,32 @@ vacuity shape (D328) wearing diligence.
 The distinction is decidable — the exit codes already separate them, and `spec/errors.md`
 assigns codes per remediation — but deciding it is an editorial act on a published
 promise, not something to infer from the code at speed.
+
+## D1095 — a backup vault with immutability disabled emitted no lock mode, so a false WORM claim was only blocked, never violated
+The false-secure-by-one-state-emit sweep (D1069–D1077) left a flagged owner-decision: a few
+retention attributes were emitted only in the feature-on state, with no measured off-value — the
+"Floor/enum presupposes-feature-on" shape. The S3 precedent (D1041) is a two-part rule, and this
+closes it for `capability.backup.vault` without breaking either half. Part one: for the WORM/lock
+attribute, emit a MEASURED off-value, never an absence — S3 reads an absent Object-Lock config as an
+authoritative `retention.locked: false`, because omitting it let a `retention.locked: true` candidate be
+adopted over an unlocked bucket, a permanent false WORM assurance. Part two: for the numeric
+`retention.minimum` (a floor), stay ABSENT when there is no floor — a number has no honest "off" value,
+so it is never fabricated.
+
+`azure.backupvault` broke part one. Its immutability has three states — Locked (compliance/WORM),
+Unlocked (governance, admin-reversible), Disabled (no immutability) — and the reverse map emitted
+`retention.lockMode` only for Locked and Unlocked; Disabled emitted nothing. `retention.lockMode` is a
+floored security path (D1071), so a hard `compliance` constraint over a Disabled vault was BLOCKED (the
+floor refuses to satisfy it from adopt's declared intent) — safe, but weaker than the truth: the vault is
+observably NOT immutable, so the honest verdict is VIOLATED, not merely unwitnessed. The gap was the
+enum: `[governance, compliance]` had no value for "no lock", so the driver had nothing measured to emit.
+
+The enum gains `none` — the measured off-value — and the driver emits it for the Disabled/empty state
+(an unrecognized state stays a diagnostic, never assumed `none`, so an Azure API change cannot
+false-VIOLATE a genuinely locked vault). The builder maps `none` to the Disabled immutability state, so a
+`none` candidate round-trips. GCP is untouched: a Backup-and-DR vault is immutable by construction
+(governance until its effectiveTime, compliance after — there is no Disabled state), and GCS already emits
+the measured off (its own `retention.locked: false`). `retention.minimum` is deliberately left as it is —
+emitted from soft-delete when present, absent when not — honouring the second half of the S3 rule that
+`retention.minimum` classifies as non-security precisely because a numeric floor has no measured off-value
+to witness.

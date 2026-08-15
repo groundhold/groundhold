@@ -108,6 +108,22 @@ func (d *Driver) observeBackupVault(capability, providerID string) ([]provider.O
 		obs = append(obs, provider.Observation{Path: "retention.lockMode", Value: "compliance", Derivation: "measured"})
 	case "Unlocked":
 		obs = append(obs, provider.Observation{Path: "retention.lockMode", Value: "governance", Derivation: "measured"})
+	case "Disabled", "":
+		// No immutability configured: a MEASURED off-value, not an absence (S3 D1041,
+		// which reads an absent lock config as an authoritative `retention.locked:
+		// false`). Omitting it would let a `compliance` candidate be adopted over a vault
+		// with no immutability — a permanent false WORM assurance; `none` makes that read
+		// VIOLATED. retention.minimum stays absent-when-off (the other half of the
+		// precedent) — soft-delete already emitted it above when present.
+		obs = append(obs, provider.Observation{Path: "retention.lockMode", Value: "none", Derivation: "measured"})
+	default:
+		// An immutability state this driver does not recognize (an Azure API change).
+		// Do NOT assume `none` — that could false-VIOLATE a genuinely locked new state,
+		// the wrong direction for a security attribute. Leave lockMode unobserved so a
+		// hard constraint on it blocks at the audit floor rather than misreading.
+		diags = append(diags, fmt.Sprintf("retention.lockMode not observed: unrecognized "+
+			"immutability state %q — not classified rather than assumed unlocked",
+			doc.Props.Security.Immutability.State))
 	}
 	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: doc.Props.Security.Encryption.State == "Enabled", Derivation: "measured"})
 	return obs, diags, nil
