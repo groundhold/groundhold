@@ -1,5 +1,5 @@
 site_name: Groundhold
-site_url: https://groundhold.github.io/groundhold/
+site_url: https://groundhold.dev/
 site_description: >
   AI should not write Terraform. It should emit verifiable contracts —
   and a deterministic runtime should validate, gate, execute and prove
