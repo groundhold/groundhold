@@ -128,6 +128,13 @@ type Options struct {
 	Getter reach.Getter
 	In     io.Reader
 	Out    io.Writer
+	// Enrich attaches the advisory remediation fields to a refusal that already
+	// carries a machine code, exactly as every other verb's refusal gets them
+	// (D1108). converge writes its own JSON from this package, so without a hook
+	// it silently skipped the enrichment the CLI's machine contract promises for
+	// `--explain`. nil means no enrichment, which is only correct for callers with
+	// no code registry — the CLI always sets it.
+	Enrich func(m map[string]any)
 	Run    Runner      // injectable for tests
 	Render render.Mode // presentation (D89/D90); zero value = plain
 	// ConvergeRunID (D229) is the run handle, precomputed by the launcher so
@@ -572,6 +579,17 @@ func (o *Options) finish(r result) int {
 	}
 	if o.JSON {
 		raw, _ := json.MarshalIndent(r, "", "  ")
+		if o.Enrich != nil {
+			var m map[string]any
+			if flat, err := json.Marshal(r); err == nil && json.Unmarshal(flat, &m) == nil {
+				if code, _ := m["code"].(string); code != "" {
+					o.Enrich(m)
+					if out, err := json.MarshalIndent(m, "", "  "); err == nil {
+						raw = out
+					}
+				}
+			}
+		}
 		fmt.Fprintln(o.Out, string(raw))
 		fmt.Fprintf(os.Stderr, "%s\n", o.Render.Paint(color, word))
 	} else {

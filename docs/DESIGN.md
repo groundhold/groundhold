@@ -36052,3 +36052,40 @@ one emitter that consults the code registry; `verify`, `plan`, `audit`, `apply` 
 `preflight` marshal their JSON directly and never reach it. A documented flag that
 silently does nothing is worse than an absent one, and routing every refusal through a
 single emitter is a slice of its own.
+
+## D1108 — `--explain` was documented unconditionally and implemented on one code path
+The CLI's own machine contract, printed in its help, says: route on the exit code and
+the JSON `code` field, and `--explain` attaches remediation to JSON refusals. The second
+half was false for the verbs most likely to refuse.
+
+Measured: `verify`, `plan`, `audit` and `converge` on genuine refusals, with and without
+the flag, compared byte for byte. Identical, all four. Not a missing registry — every one
+of the 34 codes has an explanation, and the codes these refusals carry are among them.
+The enrichment simply lived inside `printResult`, which is one of several ways a verb
+reaches stdout. Those four marshal their own JSON and never called it; `converge` is
+worse still, emitting from its own package where the function is not even in scope.
+
+A flag that silently ignores you is worse than one that does not exist. An absent flag
+fails loudly and the agent adapts. This one accepted the argument, returned the same
+bytes, and reported success — so an agent written to recover from refusals by asking for
+remediation gets nothing and cannot tell the difference between "no remediation exists"
+and "you were ignored".
+
+The fix moves the enrichment off the emitter and onto the refusal: `attachRemediation`
+takes the object, its code, the flag and the site detail, and every refusal path calls
+it. `verify`, `audit` and `preflight` now go through `printResult` (their output was
+already indented, so the shape is unchanged); `plan` keeps its compact single-object
+refusal and calls the helper directly, so the D65 stdout contract is untouched;
+`converge` takes an `Enrich` hook in its options, which keeps the code registry out of
+that package while ending its exemption.
+
+Gated per verb, and behaviourally: for each of the four, run the same refusal with and
+without `--explain` and require the outputs to DIFFER, after asserting the refusal
+carried a code at all — a comparison of two empty results would otherwise pass. Two
+mutants: give `verify` its own marshalling back, and cut `converge`'s hook. Each fails
+exactly one check and no other, which is the evidence that the gate distinguishes the
+paths rather than testing one of them four times. 59 example checks to 63.
+
+This closes the half D1107 left open, and the pair is the same lesson twice: D1107 was a
+sentence promising more than the tool did, D1108 was a flag doing less than its sentence.
+Both were read as true for months because nothing ran them.
