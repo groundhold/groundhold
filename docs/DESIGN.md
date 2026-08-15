@@ -36089,3 +36089,85 @@ paths rather than testing one of them four times. 59 example checks to 63.
 This closes the half D1107 left open, and the pair is the same lesson twice: D1107 was a
 sentence promising more than the tool did, D1108 was a flag doing less than its sentence.
 Both were read as true for months because nothing ran them.
+
+## D1109 — a flag that belongs to another verb was accepted everywhere and read nowhere
+D567 found flag absorption and shut the narrow door: a token no verb at all recognises
+is an operator error rather than a positional. D1092 recorded what that left open, and
+it was open by construction. The flags are parsed by ONE switch before dispatch, so a
+token is "recognised" if ANY verb takes it — which means a flag belonging to a
+different verb was accepted by every verb and consumed by none:
+
+    verify <c> <cand> --heads /x     exit 0     (--heads is forecast's)
+    verify <c> <cand> --ledger /x    exit 0     (verify reads no ledger)
+    plan   <c> <cand> --heads /x     exit 0     (only forecast reads heads)
+    hash   <doc> --at <ts>           exit 0     (hash has no clock)
+
+This is the shape of the run D567 was found by. The author wrote
+`posture --discovery discovery.json` because `--discovery` exists on another verb and
+posture's own remediation tells an operator to run `discover`. Posture takes no such
+flag; it printed `"shadow": 0` and a hashed posture over a cluster holding 169
+unmanaged objects. The operator's actual question went into a variable posture never
+reads, and what came back was a confident, hashed answer to a question nobody asked.
+Silence is the whole danger: an ignored input leaves no trace in the output it changed.
+
+The allowed set is DERIVED from the usage block compiled into this binary, per the
+mechanism D1092 proposed. Adding a flag to a verb therefore means documenting it, in
+the one place readers already look, and the refusal cannot drift from the
+documentation because it IS the documentation. Six flags are global — the vocabulary
+controls, the presentation controls, help, and `--json` — and they are documented as
+global under "Global:" rather than on any one verb's line.
+
+Two deliberate limits. A verb with no usage line of its own gets no per-verb opinion:
+refusing on a verb this parser cannot see would break invocations to prove a point.
+And the parser stops a verb's block at a blank line or a shallower indent — without
+that boundary it runs on into the prose sections and every verb inherits every flag
+mentioned anywhere, which is a check that passes on everything.
+
+D1092 said the risk was breaking real invocations, and that the audit — every verb's
+usage line against what the verb actually consumes — was the work. It was, and the
+enforcement performed it: turned on, the suite named the discrepancies one at a time.
+Six were documentation gaps, every one a flag a verb genuinely reads and its usage line
+never mentioned:
+
+    react      --pairings       the pairing IS the consent (D141) — react reads it
+    pair       --pairings       reads it; documented nowhere
+    connections --pairings      same
+    unpair     --pairings       same
+    plan       --deposed        described in prose under `deposed`, absent from plan's line
+    apply      --retryable-key  two of three injections documented, this one not
+    apply      --progress       operator-visible, undocumented
+
+Four more were the absorption itself, and are now refused: `posture --discovery` (the
+run D567 was found by), `apply --yes` (only `converge` reads it), `deposed --at` (that
+verb has no clock), and the `--heads` cases D1092 listed.
+
+Two classes are global by construction rather than by documentation, and treating them
+per-verb would have broken working invocations. The workspace-context flags — the usage
+block's own words: "just location/identity — safe operator context, set once per
+workspace and omitted per command" — are read from that sentence, not restated. And
+`--sign-key`/`--trust`/`--trust-from` are armed BEFORE dispatch (D102: a bad key
+refuses up front rather than half-signing a session), so no verb takes them; enforcing
+them per-verb refuses `publish --sign-key`, which is how a signed ledger is built.
+
+One case from D1092's list is deliberately still accepted, and the gate asserts it so
+it reads as a decision rather than an oversight: `verify --ledger`. `--ledger` is
+workspace context, and a verb that reads no ledger is not made to answer a different
+question by being told where one lives. That is the line this draws — a flag carrying
+the CONTENT of the question is refused, a flag carrying location or identity is not.
+`--discovery` is content, which is how posture came to report `"shadow": 0` over 169
+unmanaged objects. Tightening location flags to the verbs that read them means
+documenting them per verb first; changing that assertion is how the next author
+announces having done it.
+
+Refusal is exit 1, an operator error — the request was never well formed, which differs
+from the tool declining a well-formed one (D1107). The message names the verb, the
+flag, and which verbs DO take it, because "you meant a different verb" is the likeliest
+truth.
+
+Four mutants: drop the block boundary so every verb inherits every flag named in the
+prose (`certify-capsule` goes from zero flags to twenty-three), make `--at` global,
+break the workspace-context sentence so the global set collapses, and make the check
+always return 0. The first needed its assertion rewritten before it would die — the
+original named `hash`/`verify`, neither of which leaks, so the mutant survived a check
+that looked like it covered exactly this. A gate aimed at the wrong witness is not a
+gate.

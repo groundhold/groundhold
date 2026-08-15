@@ -92,6 +92,7 @@ Usage:
   groundhold verify   <contract.yaml> <candidate.yaml> [--json] [--vocab <dir>]
   groundhold plan     <contract.yaml> <candidate.yaml> [--vocab <dir>] [--project <p>]
                    [--ledger <f>] [--bindings <f>] [--observations <f>] --at <ts>
+                   [--deposed]  (compile the pinned deletes for deposed identities)
   groundhold preflight <contract.yaml> <candidate.yaml> --provider <aws|gcp|azure|k8s>
                    [--project <p>]  (every capability's missing implementation
                     operands + unsatisfiable attributes in ONE pass; exit 2 if any)
@@ -101,6 +102,7 @@ Usage:
                    --ledger <file> [--provider fake|gcp|aws|azure|k8s|cloudflare|hetzner|upstash] --at <ts>
                    [--vocab <dir>] [--require-preflight] [--no-reachability]
                    [--detach] [--fail-key <k>] [--unknown-key <k>]
+                   [--retryable-key <k>] [--progress auto|plain|ndjson|none]
   groundhold observe  (--ledger <file> | --bindings <file>)
                    [--provider fake|gcp|aws|azure|k8s|cloudflare|hetzner|upstash] --at <ts> [--ttl <s>] [--record]
   groundhold example  <contract|candidate> [<contract.yaml>]
@@ -170,11 +172,13 @@ Usage:
                    scaffolding: emits the machine half only, authors no
                    semantics; use "core" for the core group)
   groundhold pair <provider> --cred-ref <kind>:<value> [--scope <s>] [--verify-ref]
+                   [--pairings <f>]
                    (register a credential REFERENCE for the gentle crawler,
                    never a secret; gcp|aws|azure|k8s only, OAuth deferred D141)
-  groundhold connections   (list pairings; references only, never secrets)
+  groundhold connections   [--pairings <f>]
+                   (list pairings; references only, never secrets)
   groundhold version       (which build this is; also --version, -v)
-  groundhold unpair <provider> [--scope <s>]
+  groundhold unpair <provider> [--scope <s>] [--pairings <f>]
   groundhold crawl --provider <p> --at <ts> [--budget <n>] [--out <dir>]
                    [--pairings <f>]
                    (gentle read-only context crawl over the paired providers;
@@ -192,7 +196,7 @@ Usage:
                    --partial restores the sound capabilities and marks the rest
                    unknown+code; --documents re-verifies the backup's contract blobs)
   groundhold react --event <file> --ledger <f> --provider <p> --at <ts>
-                   [--crawl <base.json>]
+                   [--crawl <base.json>] [--pairings <f>]
                    [--contract <f>...] [--out <dir>]  (event-driven ingress:
                    map one cloud change or k8s watch event to a scope, re-list it,
                    splice, reclassify posture — the opt-in real-time path over polling)
@@ -800,7 +804,15 @@ func run(args []string) int {
 	trustFromArg := ""
 	verifyPath := ""
 	endOfFlags := false
+	// D1109: every flag token the operator actually typed, in order, so the verb can
+	// be asked whether it takes them once the verb is known. The parse switch is
+	// GLOBAL — a token is recognised if ANY verb takes it — so this is the only place
+	// the per-verb question can be answered at all.
+	var seenFlags []string
 	for i := 0; i < len(args); i++ {
+		if !endOfFlags && strings.HasPrefix(args[i], "--") && len(args[i]) > 2 {
+			seenFlags = append(seenFlags, strings.SplitN(args[i], "=", 2)[0])
+		}
 		// D590: POSIX `--` ends the flags; everything after it is positional. D567
 		// made an unrecognised "-" token an error and refused this one too, which is
 		// the same failure as --version: a rule that fails closed has to be checked
@@ -1307,6 +1319,9 @@ func run(args []string) int {
 		return 1
 	}
 	cmd := pos[0]
+	if rc := refuseFlagsThisVerbDoesNotTake(cmd, seenFlags); rc != 0 {
+		return rc
+	}
 	// D230: package the operator's own inputs ONCE, so a refusal can offer an
 	// invocation-specific `next`. --at is echoed only when the operator actually
 	// supplied it (never the epoch default), so a command builder that needs a

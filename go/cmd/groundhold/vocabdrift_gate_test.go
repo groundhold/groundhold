@@ -127,14 +127,14 @@ capabilities:
 
 	if code := run([]string{"apply", contract, candidate, planFile, "--vocab", vocabA,
 		"--ledger", ledgerCopy("la.jsonl"), "--provider", "fake",
-		"--at", "2026-01-01T00:11:00Z", "--yes", "--no-reachability"}); code != 0 {
+		"--at", "2026-01-01T00:11:00Z", "--no-reachability"}); code != 0 {
 		t.Fatalf("the CONTROL failed: applying against the vocabulary the plan was "+
 			"compiled with exited %d", code)
 	}
 
 	code := run([]string{"apply", contract, candidate, planFile, "--vocab", vocabB,
 		"--ledger", ledgerCopy("lb.jsonl"), "--provider", "fake",
-		"--at", "2026-01-01T00:11:00Z", "--yes", "--no-reachability"})
+		"--at", "2026-01-01T00:11:00Z", "--no-reachability"})
 	if code == 0 {
 		t.Error("apply executed a sealed plan against a DIFFERENT vocabulary than the " +
 			"one it was compiled against — one line there decides whether a delete is " +
