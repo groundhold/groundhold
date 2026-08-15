@@ -35942,3 +35942,34 @@ sitemap at the old domain, stop reading the title in the template, set the title
 the bare site name. All five fail. The rendered output was checked by building the
 site, not by reading the template: the homepage carries the new title, interior pages
 are untouched.
+
+## D1105 — a page was published because of where its file sat
+Submitting the sitemap to a search console surfaced a URL nobody had ever decided to
+publish: `/img/`, serving the working notes that live beside the brand assets they
+describe. Not linked from anywhere, not in the navigation, listed in the sitemap, and
+served with a 200 to anyone who guessed the path.
+
+mkdocs builds every markdown file under `docs_dir`. That is not a bug in mkdocs — it
+is the obvious behaviour — but it means a file's LOCATION decides whether it is
+published, and a directory layout is not a decision. Nothing in the build says
+otherwise: the deploy is green, the navigation renders exactly as intended, and the
+extra page is simply there. It took an external system enumerating our own sitemap
+back at us to notice.
+
+The content was harmless, which is the least interesting fact about it. What matters
+is that the next file dropped into that directory would have been published on the
+same terms, and the same mechanism applies to any notes anyone leaves beside an asset.
+
+The fix names it: `exclude_docs: img/README.md` — the file stays where it belongs,
+next to what it documents, and is deliberately withheld. The gate then generalises the
+rule rather than the instance: every `*.md` under `docs_dir` must appear in `nav` (it
+is a page) or in `exclude_docs` (it is not). Neither, and the build fails naming the
+file. The nav is read as a TREE, so nesting a page deeper cannot smuggle it past the
+check, and an empty nav fails rather than passing — with an empty nav the gate would
+either call every page an orphan or nothing an orphan, and neither is a check (D328).
+
+Verified with three mutants: drop the exclusion, add a new file to the directory, empty
+the nav. All three fail. Confirmed by building: `/img/index.html` is gone, the sitemap
+carries 15 URLs instead of 16, and the assets themselves — the mark, the card, the
+favicon — are still copied, which was the half worth checking. Withholding the notes
+must not withhold what they describe.

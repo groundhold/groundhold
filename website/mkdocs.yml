@@ -37,4 +37,10 @@ nav:
   - 'Field note: when one page is enough': paging.md
   - 'Field note: every check passed, no alarm could reach a human': dead-channel.md
   - 'Field note: six ways our own documentation lied': unrun.md
+# Markdown under docs_dir is BUILT whether or not anyone navigates to it. These are
+# working notes that live beside the assets they describe; they are not pages, and
+# publishing them was a decision nobody made. Anything here is deliberately withheld —
+# the gate requires every other page to be reachable from nav.
+exclude_docs: |
+  img/README.md
 markdown_extensions: [admonition, pymdownx.superfences, tables]
