@@ -653,6 +653,35 @@ func planRefusalCode(reason string) perr.Code {
 	return ""
 }
 
+// attachRemediation puts the two advisory fields on a refusal object that already
+// carries a machine code.
+//
+// D1108: this used to live inside printResult, which is one of several ways a verb
+// reaches stdout. `verify`, `plan`, `audit` and `preflight` marshal their own JSON and
+// never called it, so `--explain` — documented in the CLI's own machine contract as
+// attaching remediation to JSON refusals — changed their output by zero bytes. A
+// documented flag that silently does nothing is worse than an absent one: the agent
+// told to use it for recovery gets the same bytes back and no signal that the request
+// was ignored. Enrichment belongs to the refusal, not to one emitter's code path.
+//
+// `explain` is prose and NON-CONTRACTUAL (D64: `code` is the contract, prose is never
+// parsed). `next` is advisory and emitted without the flag, because an agent is a
+// first-class consumer — where no honest invocation-specific step exists it is omitted
+// rather than guessed (D1107), which is why callers must not synthesise one.
+func attachRemediation(m map[string]any, code perr.Code, explain bool, detail perrnext.Detail) {
+	if code == "" {
+		return
+	}
+	if explain {
+		if ex, ok := perr.Explain[code]; ok {
+			m["explain"] = ex
+		}
+	}
+	if n := perrnext.NextFor(invocation, code, detail); n != nil {
+		m["next"] = n
+	}
+}
+
 // printResult emits a verb's JSON result; with --explain it attaches
 // the registry's remediation under the NON-CONTRACTUAL explain field
 // (D64: `code` is the contract; prose is never parsed).
@@ -663,19 +692,7 @@ func printResult(v any, explain bool) {
 		if json.Unmarshal(raw, &m) == nil {
 			if code, _ := m["code"].(string); code != "" {
 				bannerState.code = code
-				if explain {
-					if ex, ok := perr.Explain[perr.Code(code)]; ok {
-						m["explain"] = ex
-					}
-				}
-				// D230: an invocation-specific advisory next step, when one is
-				// derivable from the operator's own inputs (always emitted — an
-				// agent is a first-class consumer, no --explain gate). Command
-				// kinds need only the invocation; edit/grant kinds need site
-				// facts and are attached at their refusal sites.
-				if n := perrnext.NextFor(invocation, perr.Code(code), refusalDetail); n != nil {
-					m["next"] = n
-				}
+				attachRemediation(m, perr.Code(code), explain, refusalDetail)
 			}
 			out, _ := json.MarshalIndent(m, "", "  ")
 			fmt.Println(string(out))
@@ -1635,6 +1652,12 @@ func run(args []string) int {
 			FailKey: oneKey(failKeys), UnknownKey: oneKey(unknownKeys),
 			RetryableKey: oneKey(retryableKeys),
 			In:           os.Stdin, Out: os.Stdout,
+			// D1108: converge writes its own JSON, so it takes the same enrichment
+			// every other refusal gets rather than quietly going without.
+			Enrich: func(m map[string]any) {
+				code, _ := m["code"].(string)
+				attachRemediation(m, perr.Code(code), explainFlag, refusalDetail)
+			},
 			Run:           converge.SelfRunner(self),
 			ConvergeRunID: crunID, Env: cenv, Caps: ccaps,
 		})
@@ -2400,12 +2423,7 @@ func run(args []string) int {
 		bannerState.code = report.Code
 		bannerState.rollup = verdictRollup(report)
 		if jsonMode {
-			out, err := json.MarshalIndent(report, "", "  ")
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "report error: %v\n", err)
-				return 1
-			}
-			fmt.Println(string(out))
+			printResult(report, explainFlag)
 		} else {
 			bannerState.done = true
 			exit := 0
@@ -2532,8 +2550,7 @@ func run(args []string) int {
 				bannerState.rollup.Unverifiable = append(bannerState.rollup.Unverifiable, v.Constraint)
 			}
 		}
-		out, _ := json.MarshalIndent(res, "", "  ")
-		fmt.Println(string(out))
+		printResult(res, explainFlag)
 		if res.Violations > 0 {
 			return 2
 		}
@@ -2750,9 +2767,7 @@ func run(args []string) int {
 					detail.RefPointer = re.RefPointer
 					detail.Note = re.Note
 				}
-				if n := perrnext.NextFor(invocation, code, detail); n != nil {
-					refusal["next"] = n
-				}
+				attachRemediation(refusal, code, explainFlag, detail)
 			}
 			raw, _ := json.Marshal(refusal)
 			fmt.Println(string(raw))
@@ -2814,12 +2829,7 @@ func run(args []string) int {
 			return 1
 		}
 		report := apply.Preflight(c, cand, vocabs, prov)
-		out, err := json.MarshalIndent(report, "", "  ")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "preflight error: %v\n", err)
-			return 1
-		}
-		fmt.Println(string(out))
+		printResult(report, explainFlag)
 		if !report.Ready {
 			fmt.Fprintf(os.Stderr,
 				"preflight: %d of %d capabilities cannot be honored yet — "+

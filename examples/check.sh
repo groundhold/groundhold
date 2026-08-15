@@ -303,6 +303,46 @@ if [ "$has_next" = no ]; then
   report "README does not promise a next it never emits" no "$overclaim"
 fi
 
+# `--explain` is documented in the CLI's own machine contract as attaching remediation
+# to JSON refusals. It used to change nothing on four of the verbs most likely to refuse,
+# because each marshalled its own JSON and never reached the emitter that does the
+# attaching. A flag that silently ignores you is worse than one that does not exist, so
+# the promise is measured per verb: same invocation, with and without the flag, and the
+# output must differ.
+EX="$(mktemp -d)"
+trap 'rm -rf "$LEDGER" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX"' EXIT
+explains() {
+  name="$1"; shift
+  "$CLI" "$@" --ledger "$EX/$name-a.jsonl" --json          > "$EX/$name.plain" 2>/dev/null || true
+  "$CLI" "$@" --ledger "$EX/$name-b.jsonl" --json --explain > "$EX/$name.expl"  2>/dev/null || true
+  # The refusal must be real, else this measures nothing.
+  if ! grep -q '"code"' "$EX/$name.plain"; then
+    report "$name refuses with a code (precondition)" yes no
+    return
+  fi
+  if cmp -s "$EX/$name.plain" "$EX/$name.expl"; then
+    report "--explain changes $name's refusal" yes no
+  else
+    report "--explain changes $name's refusal" yes yes
+  fi
+}
+explains verify   verify   examples/lifecycle/2-refused.contract.yaml examples/lifecycle/2-refused.candidate.yaml
+explains audit    audit    examples/lifecycle/1-create.contract.yaml --at "$AT"
+explains converge converge examples/lifecycle/2-refused.contract.yaml examples/lifecycle/2-refused.candidate.yaml --provider fake --at "$AT" --yes
+
+# plan takes no --ledger, so it is measured on its own.
+"$CLI" plan spec/examples/orders-production.contract.yaml \
+       spec/examples/candidates/gcp-cloudsql.candidate.yaml --vocab spec/vocab \
+       --at "$AT" --json > "$EX/plan.plain" 2>/dev/null || true
+"$CLI" plan spec/examples/orders-production.contract.yaml \
+       spec/examples/candidates/gcp-cloudsql.candidate.yaml --vocab spec/vocab \
+       --at "$AT" --json --explain > "$EX/plan.expl" 2>/dev/null || true
+if grep -q '"code"' "$EX/plan.plain" && ! cmp -s "$EX/plan.plain" "$EX/plan.expl"; then
+  report "--explain changes plan's refusal" yes yes
+else
+  report "--explain changes plan's refusal" yes no
+fi
+
 echo
 if [ "$fail" -gt 0 ]; then
   echo "$pass passed, $fail FAILED — a shipped example does not work"
