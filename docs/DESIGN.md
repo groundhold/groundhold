@@ -35878,3 +35878,32 @@ seeds a binding with no observation, runs `posture` without a contract, and asse
 restoring the old marker fails it (verified with the mutant). This is the third false-good of the same shape
 in this sweep (horizon's present block, react's complete claim, now posture's decayed claim): every one was
 a tool reporting the good-news reading of a state it could not actually vouch for.
+
+## D1103 — the landing page never said the project was experimental
+The README leads with a maturity sentence: public, experimental, `v0.x`, an RFC you can run, not
+GA. The site's landing page carried no such sentence anywhere. The claim was not wrong on the
+site — it was absent, and absent precisely where the reader is least equipped to supply it.
+
+The asymmetry is the defect, not the omission. Someone who arrives at the repository is warned
+before the first heading. Someone who arrives at the site — from a link, a newsletter, a search
+result — reads the whole thesis, follows the download line to a binary, and learns the maturity
+only if they happen to click through to a secondary page that mentions it in passing. Two front
+doors, one of them silent about what this is. And the direction of the silence is the dangerous
+one: the reader who is told nothing assumes more finish, never less.
+
+`v0.x` is not a disclaimer to be tucked away. It is the single most decision-relevant fact for
+someone deciding whether to point this at their infrastructure, and it costs one line.
+
+The fix puts the README's sentence verbatim on the landing page, and a gate binds them: the
+landing page must contain the README's `**Status:**` line, character for character. One
+direction only — the README is the source, the site follows — so softening or sharpening the
+claim in one place breaks the build until the other agrees. Two vacuity guards: a README with no
+status line fails rather than passes (a gate that finds nothing must not go green, D328), and a
+status line that stops naming the maturity fails with an instruction to rewrite this gate
+deliberately if the project genuinely reaches GA. The landing page is resolved through the site
+config's `docs_dir`, not assumed, so moving the built tree cannot leave the gate reading a file
+the published site no longer builds from (D1097 was that same mistake in the assets).
+
+Verified with four mutants: strip the sentence from the landing page, strip it from the README,
+paraphrase it on the landing page, declare GA in the README. All four fail; the restored tree
+passes.
