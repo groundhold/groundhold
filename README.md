@@ -311,8 +311,10 @@ capability.database.relational — capability type (11 attributes)
 ```
 
 Error codes answer the same way — `groundhold explain consent-required` returns
-what it means and what to do next. Every refusal carries a machine code and a
-`next` step, so an agent recovers from a rejection instead of guessing.
+what it means and what to do next. Every refusal carries a machine code, which is
+what an agent routes on to recover from a rejection instead of guessing. A
+structured `next` is attached only where an honest invocation-specific step
+exists; where none does, it is omitted rather than guessed.
 
 **Packaged workflows.** [`.claude/skills/`](.claude/skills/) holds the
 agent-side procedures: `draft-contract` (prose → contract), `code-to-contract`
