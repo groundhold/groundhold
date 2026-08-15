@@ -11,10 +11,13 @@
 // of (ledger, clock)), and diffs consecutive evaluations. So horizon can never
 // disagree with what audit/status will actually say at T — because at T it IS them.
 //
-// Honesty scope: it projects when the tool's own VERDICTS change as evidence and
-// leases already in the ledger expire — never new drift, new failures, or the world
-// itself. Every deadline is CONDITIONAL on no intervention; the advised action is the
-// one that falsifies the prediction, which is the product, not a caveat.
+// Honesty scope: it projects what blocks execution across the --within window — the
+// tool's own VERDICTS changing as evidence and leases already in the ledger expire,
+// PLUS anything already blocking at the instant the window opens (a --within gate that
+// counted only future changes would go green over a block apply already refuses) —
+// never new drift, new failures, or the world itself. Every deadline is CONDITIONAL on
+// no intervention; the advised action is the one that falsifies the prediction, which
+// is the product, not a caveat.
 package horizon
 
 import (
@@ -34,7 +37,7 @@ import (
 
 const (
 	apiVersion       = "horizon/v0.1"
-	projectsSentence = "when this tool's own verdicts change as evidence and leases already in the ledger expire — never new drift, new failures, or the state of the world itself"
+	projectsSentence = "what blocks execution across the --within window: this tool's own verdicts changing as ledger evidence and leases expire, plus anything already blocking at the instant the window opens — never new drift, new failures, or the state of the world itself"
 	assumesSentence  = "no intervention and no new ledger events before each projected instant"
 )
 
@@ -177,12 +180,30 @@ func Project(led *ledger.Ledger, evs []runstatus.RunEvent, contracts []*contract
 		return vs, rs, nil
 	}
 
-	// 2. evaluate at [at] + breakpoints, diff consecutive.
-	prevV, prevR, err := snap(atClock)
+	// 2. baseline at atClock, then evaluate each breakpoint and diff consecutive.
+	baseV, baseR, err := snap(atClock)
 	if err != nil {
 		return nil, err
 	}
 	transitions := []Transition{} // never nil — marshals as [], schema wants an array
+
+	// present blocks: a hard constraint ALREADY unknown/violated at atClock, or a run
+	// ALREADY needs-reconcile. No CHANGE projects them — they predate the window — but
+	// the window OPENS on them, so a --within gate that counted only future transitions
+	// would exit 0 while apply/converge refuse RIGHT NOW (a false-secure gate, the
+	// D1069 class). They are stamped at atClock, the head of the timeline, and they gate.
+	for _, k := range sortedStrKeys(baseV) {
+		if v := baseV[k]; v.Severity == "hard" && blockingVerdict(v.Verdict) {
+			transitions = append(transitions, presentConstraintBlock(atClock, v))
+		}
+	}
+	for _, h := range sortedStateKeys(baseR) {
+		if baseR[h] == runstatus.StateNeedsReconcile {
+			transitions = append(transitions, presentLeaseBlock(atClock, h))
+		}
+	}
+
+	prevV, prevR := baseV, baseR
 	for _, T := range bps {
 		curV, curR, err := snap(T)
 		if err != nil {
@@ -216,15 +237,13 @@ func Project(led *ledger.Ledger, evs []runstatus.RunEvent, contracts []*contract
 		return transitions[i].sortKey < transitions[j].sortKey
 	})
 
-	// examined + summary
-	baseV, baseR, _ := snap(atClock)
+	// examined + summary (baseV/baseR are the atClock snapshot captured above)
 	live := 0
 	for _, r := range runstatus.ListRuns(evs, atClock, nil) {
 		if r.Lease.Live {
 			live++
 		}
 	}
-	_ = baseR
 	doc := &Document{
 		APIVersion: apiVersion, Kind: "Horizon", At: ledger.FormatTs(atClock),
 		Projects: projectsSentence, Assumes: assumesSentence,
@@ -331,6 +350,43 @@ func leaseTransition(T int, handle string, prev, cur runstatus.State) (Transitio
 		t.Advice = Advice{Action: "none", Before: t.At}
 	}
 	return t, true
+}
+
+// presentConstraintBlock stamps a hard constraint ALREADY blocking at atClock as an
+// already-blocking entry at the window's start. There is no freshThrough — the proof
+// expired before the window opened — and the deadline is now. Without this, a --within
+// gate would report exit 0 over a constraint apply/converge already refuse (false-secure).
+func presentConstraintBlock(atClock int, v audit.Verdict) Transition {
+	at := ledger.FormatTs(atClock)
+	return Transition{
+		At: at, Kind: "already-blocking",
+		Capability: v.Capability, Constraint: v.Constraint, Path: v.Path,
+		Severity: v.Severity, From: v.Verdict, To: v.Verdict, blocking: true,
+		sortKey: "\x00present-constraint\x00" + v.Capability + "\x00" + v.Constraint,
+		Effect: "audit ALREADY blocks: the proof is " + v.Verdict + " now, so apply and " +
+			"converge refuse until it is renewed — this predates the window, not a future risk",
+		Advice: Advice{Action: "refresh", Before: at, Steps: []string{
+			"groundhold refresh --ledger <l> --provider <p> --at <ts>  (now)",
+			"groundhold audit <contract> --ledger <l> --at <ts>",
+		}},
+	}
+}
+
+// presentLeaseBlock stamps a run ALREADY needs-reconcile at atClock — a lease that
+// lapsed with a receipt unsettled before the window opened, which refuses the next
+// apply now (D935). Symmetric to presentConstraintBlock on the run side.
+func presentLeaseBlock(atClock int, handle string) Transition {
+	at := ledger.FormatTs(atClock)
+	nr := string(runstatus.StateNeedsReconcile)
+	return Transition{
+		At: at, Kind: "already-blocking", Run: handle, From: nr, To: nr, blocking: true,
+		sortKey: "\x00present-lease\x00" + handle,
+		Effect: "this run ALREADY needs reconcile (a lease lapsed with a receipt unsettled) — " +
+			"the next apply against this ledger is refused now until resume concludes it (D935)",
+		Advice: Advice{Action: "resume", Before: at, Steps: []string{
+			"groundhold resume <contract> --ledger <l> --provider <p> --at <ts>  (now)",
+		}},
+	}
 }
 
 func hashTransitions(ts []Transition) string {

@@ -4,7 +4,7 @@
 
 ```sh
 git clone https://github.com/groundhold/groundhold.git && cd groundhold
-make check        # vet + tests + the full conformance suite (555 cases); 261 run through both implementations, the rest Go-only
+make check        # vet + tests + the full conformance suite (556 cases); 261 run through both implementations, the rest Go-only
 cd go && go build -o ../bin/groundhold-go ./cmd/groundhold && cd ..   # the CLI binary
 ```
 

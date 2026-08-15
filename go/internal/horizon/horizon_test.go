@@ -161,3 +161,59 @@ constraints:
 		t.Fatal("a clear window must still assert it EXAMINED a non-empty subject (D328), got 0 constraints")
 	}
 }
+
+// TestHorizonGatesOnAPresentBlock pins the false-secure fix: a hard constraint whose
+// proof EXPIRED before the evaluation instant is already blocking at atClock. horizon's
+// window opens on it, so a --within gate must exit 2 (not go green over a block apply
+// already refuses) with an already-blocking entry stamped at atClock and the deadline now.
+func TestHorizonGatesOnAPresentBlock(t *testing.T) {
+	c := loadContract(t, `
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta: { id: h3, environment: test, version: 1 }
+capabilities:
+  - id: db
+    type: capability.database.relational
+constraints:
+  hard:
+    - id: c-region
+      subject: db
+      path: location.region
+      op: equals
+      value: europe-central2
+      verify: { method: static }
+`)
+	obsStr := "2026-07-15T12:00:00Z"
+	led := ledger.New()
+	seedObs(led, "db", map[string]ledger.ObsRecord{
+		"location.region": {Value: "europe-central2", ObservedAt: obsStr,
+			TTLSeconds: 3600, Derivation: "measured", Source: "provider-api"},
+	})
+	// evaluate a day later: the proof (ttl 3600) expired long ago, so the constraint is
+	// already unknown at atClock — no CHANGE decays it, it predates the window.
+	evalStr := "2026-07-16T12:00:00Z"
+	eval, _ := ledger.ParseTs(evalStr)
+	doc, err := Project(led, nil, []*contract.Contract{c}, nil, eval, 3600, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Transitions) != 1 || doc.Transitions[0].Kind != "already-blocking" {
+		t.Fatalf("want one already-blocking entry, got %+v", doc.Transitions)
+	}
+	if doc.Transitions[0].At != evalStr || doc.Transitions[0].FreshThrough != "" {
+		t.Fatalf("present block must be stamped at atClock with no freshThrough: %+v", doc.Transitions[0])
+	}
+	if doc.Summary.HardBlocking != 1 || doc.Summary.FirstHardDeadline != evalStr {
+		t.Fatalf("present block must gate with deadline now: hardBlocking=%d first=%s",
+			doc.Summary.HardBlocking, doc.Summary.FirstHardDeadline)
+	}
+	if doc.ExitCode() != 2 {
+		t.Fatalf("a --within gate must exit 2 over a present hard block, got %d", doc.ExitCode())
+	}
+	// and the reporter (no window) reports it but does not gate.
+	rep, _ := Project(led, nil, []*contract.Contract{c}, nil, eval, 0, false)
+	if rep.Summary.HardBlocking != 1 || rep.ExitCode() != 0 || rep.Code != "" {
+		t.Fatalf("reporter must report the present block (hardBlocking 1) yet exit 0 with no code: "+
+			"hardBlocking=%d exit=%d code=%q", rep.Summary.HardBlocking, rep.ExitCode(), rep.Code)
+	}
+}

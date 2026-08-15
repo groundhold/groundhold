@@ -164,3 +164,60 @@ cases:
             exit: 2
             status: violations-found
             code: observation-required
+
+  - name: horizon-within-gates-on-a-present-block-not-only-future-changes
+    impl: go
+    description: >
+      A --within gate whose window opens on a constraint that is ALREADY blocking must
+      exit 2, not go green because nothing CHANGES inside the window. The proof (ttl
+      86400) expired a day before this evaluation, so the constraint is unknown at the
+      window's near edge: horizon stamps an already-blocking entry at the eval instant
+      with the deadline now, and audit at the same instant agrees (exit 2). Before the
+      fix horizon reported exit 0 here while apply/converge already refused.
+    onboard:
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: h, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-region
+              subject: db
+              path: location.region
+              op: equals
+              value: europe-central2
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: h
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+              location.region: europe-central2
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T12:00:00Z"
+          provider: fake
+          map: { db: "fake:existing-db" }
+          expect: { exit: 0, status: adopted }
+        - cmd: horizon
+          at: "2026-07-15T12:00:00Z"
+          within: 3600
+          expect:
+            exit: 2
+            code: horizon-action-required
+            hardBlocking: 1
+            transitionKinds: [already-blocking]
+            firstHardDeadline: "2026-07-15T12:00:00Z"
+            examinedNonEmpty: true
+        - cmd: audit
+          at: "2026-07-15T12:00:00Z"
+          expect:
+            exit: 2
+            status: violations-found
+            code: observation-required
