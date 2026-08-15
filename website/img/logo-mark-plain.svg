@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Groundhold mark">
+  <rect x="240" y="92" width="32" height="150" rx="8" fill="currentColor"/>
+  <path d="M92 236 h34 v52 h260 v-52 h34 v76 a12 12 0 0 1 -12 12 H104 a12 12 0 0 1 -12 -12 z" fill="#5aa06d"/>
+  <rect x="172" y="352" width="168" height="28" rx="9" fill="currentColor" opacity="0.55"/>
+  <rect x="214" y="410" width="84" height="24" rx="8" fill="currentColor" opacity="0.35"/>
+</svg>
