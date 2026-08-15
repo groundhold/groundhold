@@ -49,6 +49,7 @@ import (
 	"groundhold/internal/forecast"
 	"groundhold/internal/gcp"
 	"groundhold/internal/hetzner"
+	"groundhold/internal/horizon"
 	"groundhold/internal/importer"
 	"groundhold/internal/k8s"
 	"groundhold/internal/ledger"
@@ -199,6 +200,12 @@ Usage:
                    [--contract <f>...] [--out <dir>]  (proactive classifier:
                    managed-ok/drifted/shadow/decayed/unknown with adopt/converge/
                    observe recipes; exit 2 on shadow or drift; writes nothing)
+  groundhold horizon --ledger <f> --at <ts> [--contract <f>...] [--within <s>]
+                   (posture's future tense: WHEN the tool's own verdicts change as
+                   evidence/leases expire and what to run before each deadline. It
+                   re-runs audit/status at the breakpoints, so it cannot disagree
+                   with them. --within gates a cron on a hard decay/lapse inside the
+                   window (exit 2); without it, a reporter (exit 0); writes nothing)
   groundhold adopt    <contract.yaml> <candidate.yaml> --ledger <file>
                    --map <cap=providerId> [--map ...] [--provider fake|gcp|aws|azure|k8s|cloudflare|hetzner|upstash]
                    [--project <p>] [--vocab <dir>] --at <ts>
@@ -311,9 +318,9 @@ Global: the full attribute vocabulary is compiled into this binary and
         Time-sensitive verbs REQUIRE an explicit --at (RFC3339): a
         safety clock never defaults to a value that makes stale
         observations look fresh (N1). They are: adopt, apply, attest,
-        audit, converge, crawl, discover, forecast, observe, plan,
-        posture, probe, publish, react, refresh, resume, runs, status,
-        unadopt. (wait is exempt: it IS the live clock.)
+        audit, converge, crawl, discover, forecast, horizon, observe,
+        plan, posture, probe, publish, react, refresh, resume, runs,
+        status, unadopt. (wait is exempt: it IS the live clock.)
         Provider verbs (discover/apply/adopt/observe/converge/probe/
         resume/react/refresh/crawl/preflight) REQUIRE an
         explicit --provider (aws|gcp|azure|k8s|cloudflare|hetzner|upstash|fake): the fake driver
@@ -489,6 +496,7 @@ var timeSensitiveVerbs = map[string]bool{
 	"observe": true, "forecast": true, "adopt": true, "unadopt": true,
 	"converge": true, "resume": true, "publish": true,
 	"attest": true, "crawl": true, "refresh": true, "posture": true, "react": true,
+	"horizon": true, // D1099: projects decay/lapse from --at; a defaulted epoch is the N1 lie squared
 	// D229: status judges lease-TTL liveness against the clock — a defaulted
 	// clock is exactly the stale-freshness lie N1 forbids. `wait` is exempt (it
 	// IS the live clock).
@@ -753,6 +761,7 @@ func run(args []string) int {
 	budgetArg := 0
 	crawlOut := ""
 	windowArg := 0
+	withinArg, withinSet := 0, false // horizon's planning window (D1099)
 	contextPath := ""
 	eventPath := ""
 	var contractPaths []string
@@ -1151,6 +1160,21 @@ func run(args []string) int {
 				windowArg = v
 			}
 			i++
+		case "--within":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "--within requires seconds")
+				return 1
+			}
+			if v, ferr := parseIntFlag("--within", args[i+1]); ferr != nil {
+				fmt.Fprintln(os.Stderr, ferr)
+				return 1
+			} else if v < 0 {
+				fmt.Fprintln(os.Stderr, "--within must be a non-negative number of seconds")
+				return 1
+			} else {
+				withinArg, withinSet = v, true
+			}
+			i++
 		case "--crawl":
 			if i+1 >= len(args) {
 				fmt.Fprintln(os.Stderr, "--crawl requires a crawl document file")
@@ -1466,6 +1490,7 @@ func run(args []string) int {
 		cmd != "deposed" && cmd != "repair" && cmd != "anchor" &&
 		cmd != "capsule" && cmd != "snapshot" && cmd != "attest" &&
 		cmd != "connections" && cmd != "crawl" && cmd != "refresh" && cmd != "posture" && cmd != "react" &&
+		cmd != "horizon" && // D1099: ledger-wide projection, contracts via repeatable --contract
 		cmd != "backup" && cmd != "runs" && // D231: runs takes no positional (ledger-wide)
 		cmd != "explain" && // D233: explain --json (no term) dumps the error registry
 		cmd != "apiver" && // D236: apiver takes no positional (registry-wide)
@@ -2126,6 +2151,52 @@ func run(args []string) int {
 	}
 	if cmd == "apiver" {
 		return runAPIVer(liveVersionsPath, jsonMode)
+	}
+	if cmd == "horizon" {
+		// D1099: posture's future tense — project WHEN the tool's own verdicts change
+		// as ledger evidence/leases expire, and what to run before each deadline. Read-only,
+		// pure: re-runs audit@T / status@T at the finite breakpoints and diffs. --within
+		// makes it a cron gate (exit 2 on a hard block inside the window); without it, a
+		// pure reporter (exit 0).
+		if ledgerPath == "" {
+			fmt.Fprintln(os.Stderr, "horizon requires --ledger")
+			return 1
+		}
+		led, lerr := ledger.ReplayExisting(ledgerPath)
+		if lerr != nil {
+			return refuseCorruptLedger(lerr)
+		}
+		evs, eerr := runstatus.ReadEvents(ledgerPath)
+		if eerr != nil {
+			return refuseCorruptLedger(eerr)
+		}
+		vocabs, verr := loadVocabs(vocabDir, noVocab)
+		if verr != nil {
+			fmt.Fprintf(os.Stderr, "vocab error: %v\n", verr)
+			return 1
+		}
+		var contracts []*contract.Contract
+		for _, cp := range contractPaths {
+			c, cerr := contract.LoadContract(cp)
+			if cerr != nil {
+				fmt.Fprintf(os.Stderr, "contract error: %v\n", cerr)
+				return 1
+			}
+			contracts = append(contracts, c)
+		}
+		atClock, aerr := ledger.ParseTs(evalTime)
+		if aerr != nil {
+			fmt.Fprintf(os.Stderr, "horizon needs a parseable --at (RFC3339): %v\n", aerr)
+			return 1
+		}
+		doc, herr := horizon.Project(led, evs, contracts, vocabs, atClock, withinArg, withinSet)
+		if herr != nil {
+			fmt.Fprintf(os.Stderr, "horizon error: %v\n", herr)
+			return 1
+		}
+		out, _ := json.MarshalIndent(doc, "", "  ")
+		fmt.Println(string(out))
+		return doc.ExitCode()
 	}
 	if cmd == "deposed" {
 		if ledgerPath == "" {

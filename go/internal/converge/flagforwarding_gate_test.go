@@ -111,6 +111,7 @@ func TestEveryGlobalFlagIsClassifiedForForwarding(t *testing.T) {
 		"--verify-ref":             "capsule trust reference",
 		"--version":                "answers before any verb",
 		"--window":                 "forecast/report window",
+		"--within":                 "horizon's projection window",
 	}
 
 	root := findRepoRoot(t)

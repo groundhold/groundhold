@@ -38,6 +38,42 @@ func TestTheFreshnessBoundaryIsTheSpecsBoundary(t *testing.T) {
 	}
 }
 
+// ObservationDecayInstant is the boundary ObservationExpired compares against, exposed
+// for horizon (D1099). This pins that the two AGREE by construction: at the returned
+// instant the predicate says fresh, at instant+1 it says expired — so a caller that
+// projects a future decay from the instant cannot drift from the caller that decides
+// freshness with the predicate. That drift, across six copies, was the D666 defect.
+func TestDecayInstantAgreesWithTheExpiryPredicate(t *testing.T) {
+	const obs = "2026-07-01T00:00:10Z"
+	const ttl = 100
+	inst, ok := ObservationDecayInstant(obs, ttl)
+	if !ok {
+		t.Fatal("a positive ttl on a readable time must yield a decay instant")
+	}
+	if ObservationExpired(obs, ttl, inst) {
+		t.Errorf("at the decay instant the observation must still be FRESH — the " +
+			"predicate says expired, so horizon's freshThrough would be a second early")
+	}
+	if !ObservationExpired(obs, ttl, inst+1) {
+		t.Errorf("one second past the decay instant must be EXPIRED — the predicate " +
+			"says fresh, so horizon would project the transition a second late")
+	}
+}
+
+// No ttl, or a clock nobody can read, yields no decay instant — horizon must not
+// invent a deadline from a record freshness itself would refuse to judge (N1).
+func TestDecayInstantHasNoBoundaryWithoutATTLOrAClock(t *testing.T) {
+	if _, ok := ObservationDecayInstant("2026-07-01T00:00:10Z", 0); ok {
+		t.Error("ttl 0 must not yield a decay instant")
+	}
+	if _, ok := ObservationDecayInstant("2026-07-01T00:00:10Z", -5); ok {
+		t.Error("a negative ttl must not yield a decay instant")
+	}
+	if _, ok := ObservationDecayInstant("not-a-time", 100); ok {
+		t.Error("an unreadable observedAt must not yield a decay instant")
+	}
+}
+
 // An unreadable observedAt must be EXPIRED, never fresh: a freshness decision made
 // against a clock nobody could read is the N1 failure this project keeps closing.
 func TestAnUnreadableObservationTimeIsExpired(t *testing.T) {

@@ -35753,3 +35753,47 @@ _Internal to how this project is built and run — the body is omitted from the 
 ## D1098 — the record is complete; the projection of it is a choice
 _Internal to how this project is built and run — the body is omitted from the public record._
 
+## D1099 — horizon: posture's future tense, projected by re-running the real verbs, not by re-deriving their arithmetic
+`posture` answers "what is true NOW". Nothing answered "WHEN does the tool's own answer change, and what
+should I run before it does" — yet every verdict this tool gives has a shelf life: an observation's proof
+expires at `observedAt + ttl`, a live run's lease lapses at `acquired + ttl`. An operator who wants to act
+BEFORE a hard constraint goes `unknown` (which blocks apply/converge, invariant #1) or before a lease lapse
+strands a receipt (`needs-reconcile`, which blocks the next apply, D935/D57) had to compute those instants
+by hand. `groundhold horizon` projects them.
+
+The load-bearing decision is how it computes. It does NOT re-derive the freshness/lease arithmetic — that is
+exactly the D666 sibling-drift trap, where six sites each re-implemented "is this past its boundary" and
+disagreed by a second. Instead horizon collects the FINITE set of breakpoints at which a re-evaluation could
+differ (each observation's `obs+ttl` and `obs+ttl+1`; each live lease's `acq+ttl-1` and `acq+ttl`; clamped
+to the window), and at each breakpoint it RE-RUNS the real verbs — `audit.Run` and `runstatus.ListRuns`,
+both pure functions of `(ledger, clock)` — then diffs consecutive evaluations. So horizon can never disagree
+with what `audit`/`status` will actually say at T, because at T it IS them. The third conformance case pins
+this directly: horizon projects a decay at an instant with `freshThrough` one second earlier, and `audit`
+run at both instants flips there and not a second sooner — the boundary is one computation, not two that
+might drift. Re-running `audit` (which honours `latestSufficient`) rather than re-deriving is also what makes
+horizon match audit's real semantics instead of posture's weakest-link projection, which would over-warn.
+
+Two modes, one exit contract. `--within <seconds>` makes horizon a cron gate: a HARD constraint decaying, or
+a live lease lapsing to `needs-reconcile`, inside the window exits 2 (`horizon-action-required`). Without a
+window it is a pure reporter (exit 0): the summary still names the projected `hardBlocking` count honestly,
+but it does not gate — because "something always decays eventually" makes an unbounded gate vacuous, and a
+gate that examined an empty subject is not evidence of calm (the D328 discipline, carried in `examined`).
+The routing `code` follows the exit, not the raw count: it is emitted ONLY when the process actually gates,
+so a consumer routing on `code` never sees a remediation contract (published as exit 2 in `spec/errors.md`)
+that the exit code contradicts. Advisory-only transitions (a soft constraint, a bare `stalled` lease that
+auto-releases) never gate — the HardOnly discipline extended into the future. Only `needs-reconcile` (a
+lapse with a pending receipt) blocks; a plain lease lapse does not, because it releases rather than blocks.
+
+The honesty framing is structural, not a caveat. The document states what it `projects` (verdict changes
+from evidence and leases ALREADY in the ledger — never new drift, new failures, or the state of the world
+itself) and what it `assumes` (no intervention, no new events before each instant). Every deadline is
+conditional on that assumption, and each transition carries the `advice` — the verb (`refresh`, `resume`,
+`wait`) that FALSIFIES the prediction before its deadline. The advised action is the product, not an
+apology: horizon exists so the operator acts before the tool would have to refuse. `horizonHash` covers the
+transitions' structural fields (not prose) for a stable projection identity.
+
+Scope this slice: constraint-decay and lease-lapse, pinned by two unit tests (the two-transition decay+lapse
+projection, and the clear-window-is-not-vacuous D328 guard) and three conformance cases (gate fires; reporter
+reports-but-does-not-gate with the code absent; agrees-with-audit-at-the-instant). Read-only, deterministic,
+no network — it lives left of every mutation. The console's four-dimensional forensics view (projecting these
+deadlines onto the estate timeline) is the natural next slice and is deferred, not built here.

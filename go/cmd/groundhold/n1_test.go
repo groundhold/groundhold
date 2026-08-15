@@ -30,7 +30,13 @@ func TestTimeSensitiveVerbsMembership(t *testing.T) {
 		//   discover --provider fake --project p1                 -> exit 1
 		//   discover --provider fake --project p1 --at not-a-time -> exit 1
 		"discover",
-		"forecast", "observe", "plan", "posture", "probe", "publish",
+		"forecast",
+		// D1099: `horizon` projects FROM --at forward — every breakpoint and every
+		// re-run of audit/status is relative to it. A defaulted 1970 clock would make
+		// every proof look expired and every lease lapsed, inverting the projection;
+		// it is the N1 lie squared, so horizon refuses a missing --at.
+		"horizon",
+		"observe", "plan", "posture", "probe", "publish",
 		"react", "refresh", "resume", "runs", "status", "unadopt",
 	}
 

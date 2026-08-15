@@ -436,6 +436,25 @@ func ObservationExpired(observedAt string, ttlSeconds, evalClock int) bool {
 	return evalClock-obsClock > ttlSeconds
 }
 
+// ObservationDecayInstant returns the clock at which an observation is LAST still
+// fresh — the boundary ObservationExpired compares against. At the returned instant
+// ObservationExpired is false; at instant+1 it is true. It is exposed so a caller that
+// needs to know WHEN freshness ends (horizon projecting a future decay) reads the
+// boundary from the same place the predicate does, instead of re-deriving obs+ttl and
+// drifting from it (D666 — six copies of that arithmetic is the defect this prevents).
+// ok is false when there is no ttl to decay from (ttlSeconds<=0) or observedAt cannot
+// be read — the same clock a freshness decision must never be made against (N1).
+func ObservationDecayInstant(observedAt string, ttlSeconds int) (instant int, ok bool) {
+	if ttlSeconds <= 0 {
+		return 0, false
+	}
+	obsClock, err := ParseTs(observedAt)
+	if err != nil {
+		return 0, false
+	}
+	return obsClock + ttlSeconds, true
+}
+
 // PendingCount returns the number of unresolved operation receipts on a
 // capability (D29). `unknown` receipts stay pending — they are not
 // terminal until explicitly adopted.

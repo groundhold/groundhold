@@ -1,0 +1,166 @@
+# horizon (D1099): posture's future tense. It projects WHEN this tool's own
+# verdicts change as the ledger's evidence and leases expire, and what to run before
+# each deadline. The load-bearing property is that horizon does NOT re-derive the
+# freshness arithmetic (the D666 sibling-drift trap) — it re-runs `audit`/`status` at
+# the finite breakpoints and diffs, so it can never disagree with what those verbs
+# actually say at T. The third case pins exactly that: horizon projects a decay at an
+# instant, and `audit` run AT that instant flips there and not a second earlier.
+# Go-only (impl: go) — horizon is a Go runtime verb.
+suite: horizon
+cases:
+  - name: horizon-projects-a-hard-constraint-decay-and-gates
+    impl: go
+    description: >
+      A hard constraint proven by an observation with ttl 86400 (location.region)
+      decays to unknown at obs+ttl+1. With --within spanning that instant, horizon
+      is a cron gate: exit 2, one constraint-decay transition, firstHardDeadline at
+      the exact decay instant, code horizon-action-required. The examined block is
+      non-empty (D328) — a gate that looked at nothing is not evidence of calm.
+    onboard:
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: h, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-region
+              subject: db
+              path: location.region
+              op: equals
+              value: europe-central2
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: h
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+              location.region: europe-central2
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T12:00:00Z"
+          provider: fake
+          map: { db: "fake:existing-db" }
+          expect: { exit: 0, status: adopted }
+        - cmd: horizon
+          at: "2026-07-12T12:00:00Z"
+          within: 200000
+          expect:
+            exit: 2
+            code: horizon-action-required
+            hardBlocking: 1
+            transitionKinds: [constraint-decay]
+            firstHardDeadline: "2026-07-13T12:00:01Z"
+            examinedNonEmpty: true
+
+  - name: horizon-without-a-window-reports-but-does-not-gate
+    impl: go
+    description: >
+      Without --within horizon is a pure reporter (exit 0): it still names the
+      projected decay in the summary (hardBlocking 1), but it does NOT gate and it
+      does NOT emit the routing code. A consumer routing on `code` must never see a
+      remediation contract (horizon-action-required = exit 2) the process exit
+      contradicts — so the field is absent whenever the exit is 0.
+    onboard:
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: h, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-region
+              subject: db
+              path: location.region
+              op: equals
+              value: europe-central2
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: h
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+              location.region: europe-central2
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T12:00:00Z"
+          provider: fake
+          map: { db: "fake:existing-db" }
+          expect: { exit: 0, status: adopted }
+        - cmd: horizon
+          at: "2026-07-12T12:00:00Z"
+          expect:
+            exit: 0
+            hardBlocking: 1
+            transitionKinds: [constraint-decay]
+            codeAbsent: true
+            examinedNonEmpty: true
+
+  - name: horizon-agrees-with-audit-at-the-projected-instant
+    impl: go
+    description: >
+      The anti-D666 pin. horizon projects the decay at 2026-07-13T12:00:01Z with
+      freshThrough 2026-07-13T12:00:00Z. Running the REAL verb at both instants must
+      agree exactly: audit AT freshThrough is still clean (exit 0), audit AT the
+      projected instant blocks (exit 2, observation-required). horizon cannot drift
+      from audit because at T it re-runs audit — the boundary is one computation, not
+      two that might disagree by a second.
+    onboard:
+      contract:
+        apiVersion: contract/v0.1
+        kind: InfrastructureContract
+        meta: { id: h, environment: test, version: 1 }
+        capabilities:
+          - id: db
+            type: capability.database.relational
+        constraints:
+          hard:
+            - id: c-region
+              subject: db
+              path: location.region
+              op: equals
+              value: europe-central2
+              verify: { method: static }
+      candidate:
+        apiVersion: candidate/v0.1
+        kind: ImplementationCandidate
+        contract: h
+        capabilities:
+          db:
+            attributes:
+              service.managed: true
+              location.region: europe-central2
+      steps:
+        - cmd: adopt
+          at: "2026-07-12T12:00:00Z"
+          provider: fake
+          map: { db: "fake:existing-db" }
+          expect: { exit: 0, status: adopted }
+        - cmd: horizon
+          at: "2026-07-12T12:00:00Z"
+          within: 200000
+          expect:
+            exit: 2
+            transitionKinds: [constraint-decay]
+            firstHardDeadline: "2026-07-13T12:00:01Z"
+        - cmd: audit
+          at: "2026-07-13T12:00:00Z"
+          expect:
+            exit: 0
+            status: clean
+        - cmd: audit
+          at: "2026-07-13T12:00:01Z"
+          expect:
+            exit: 2
+            status: violations-found
+            code: observation-required

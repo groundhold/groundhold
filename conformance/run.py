@@ -1722,6 +1722,13 @@ def run_onboard_case_cli(case: dict, impl: list[str]) -> list[str]:
                     cmd += ["--format", step["format"]]
                 if "since" in step:
                     cmd += ["--since", str(step["since"])]
+            elif cmd_name == "horizon":
+                cmd = impl_abs + ["horizon", "--ledger", lpath,
+                                  "--vocab", vocab, "--at", step["at"]]
+                if step.get("contract", spec.get("contract")) is not None:
+                    cmd += ["--contract", cpath]
+                if "within" in step:
+                    cmd += ["--within", str(step["within"])]
             else:
                 failures.append(f"{tag}: unknown step cmd")
                 continue
@@ -1768,6 +1775,32 @@ def run_onboard_case_cli(case: dict, impl: list[str]) -> list[str]:
                 if key in expect and res.get(key) != expect[key]:
                     failures.append(f"{tag} {key}: expected {expect[key]!r}, "
                                     f"got {res.get(key)!r}")
+            if cmd_name == "horizon":
+                summ = res.get("summary") or {}
+                if "hardBlocking" in expect and \
+                        summ.get("hardBlocking") != expect["hardBlocking"]:
+                    failures.append(f"{tag} hardBlocking: expected "
+                                    f"{expect['hardBlocking']}, got "
+                                    f"{summ.get('hardBlocking')}")
+                if "firstHardDeadline" in expect and \
+                        summ.get("firstHardDeadline") != expect["firstHardDeadline"]:
+                    failures.append(f"{tag} firstHardDeadline: expected "
+                                    f"{expect['firstHardDeadline']!r}, got "
+                                    f"{summ.get('firstHardDeadline')!r}")
+                if "transitionKinds" in expect:
+                    got = [t.get("kind") for t in res.get("transitions") or []]
+                    if got != expect["transitionKinds"]:
+                        failures.append(f"{tag} transitionKinds: expected "
+                                        f"{expect['transitionKinds']}, got {got}")
+                if expect.get("examinedNonEmpty"):
+                    ex = res.get("examined") or {}
+                    if (ex.get("constraints", 0) + ex.get("boundCapabilities", 0)
+                            + ex.get("liveRuns", 0)) == 0:
+                        failures.append(f"{tag}: examined must be non-empty "
+                                        f"(D328), got {ex!r}")
+                if expect.get("codeAbsent") and res.get("code") is not None:
+                    failures.append(f"{tag}: code must be ABSENT in reporter "
+                                    f"mode, got {res.get('code')!r}")
             if "reasonContains" in expect:
                 pool = list(res.get("reasons") or []) + [
                     v.get("reason", "") for v in res.get("verdicts") or []]
