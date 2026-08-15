@@ -36211,3 +36211,43 @@ add a new flag to the switch with no usage line (same). The lesson is narrower t
 "document your flags": when a check starts deriving its behaviour from a document, that
 document stops being prose. Everything it fails to say becomes something the tool now
 refuses to do.
+
+## D1111 — the CI example is a decision, and nothing had ever made it
+`examples/ci/github-actions.yml` is not documentation about CI; it is a file a reader
+copies into their own repository and then trusts to gate merges. Its centre is not a
+command but a DECISION: `plan` exits 2 for a family of reasons, and the step has to
+route on the `code` field — treat `nothing-to-change` as converged, re-raise everything
+else.
+
+Two entries have already been spent on that block. D659 found it treating the whole
+exit-2 family as one verdict, so a pull request violating a hard residency constraint
+merged green; the same entry found the verify step ending in `| tee`, where a
+pipeline's status is its last command, so the gate could not fail at all. D1091 found
+it naming a `--vocab` path that exists in this repository and not in the reader's.
+Three defects, all in a file that nothing has ever executed. They were found by
+reading, which is why it took three separate occasions and why each one shipped first.
+
+The harness now runs it. The block is EXTRACTED from the published YAML rather than
+copied into the harness — a copy drifts, and then the test pins a snapshot of advice
+nobody follows. Only three paths are substituted, because the reader's repository is
+where the originals live; the grep, the exit codes and the re-raise are the published
+text, executed verbatim.
+
+Both branches are driven on the fake provider: a converged pair, where `plan` exits 2
+with `nothing-to-change` and the step must call that success, and a violating pair,
+where it exits 2 with `not-executable` and the step must re-raise. The second is the
+one that merged a broken pull request.
+
+Setting it up taught the thing the file itself says: the block computes its OWN `--at`,
+because a CI job reads the world at one instant. Building the converged state at the
+harness's fixed 2026-01-01 stamp left the observations stale by the time the block
+asked, and the answer came back `observation-required` rather than `nothing-to-change`
+— not a bug, the safety clock behaving exactly as N1 requires, but a reminder that a
+fixture's clock is part of the fixture.
+
+Two mutants: collapse the routing back to "any exit 2 is converged" (the D659
+regression — the violating pair goes green, and the harness says so), and rename the
+step out of the published file (the extraction finds nothing and fails rather than
+silently testing an empty script, which is how this check could most easily become
+decorative). The GitLab example carries no equivalent routing block and is not covered
+here; its `survey` gate is a plain exit-2 check.

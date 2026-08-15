@@ -343,6 +343,70 @@ else
   report "--explain changes plan's refusal" yes no
 fi
 
+# The published CI workflow (examples/ci/github-actions.yml) is a file a reader COPIES
+# into their own repository. Its centre is not a command but a decision: `plan` exits 2
+# for a family of reasons, and the step must route on the `code` field — treat
+# nothing-to-change as converged, re-raise everything else. Two design entries were
+# spent on that block (a pipeline whose status came from `tee` so the gate could not
+# fail, and an exit-2 family read as a single verdict so a violated hard constraint
+# merged green). Nothing has ever executed it.
+#
+# So execute it. The block is EXTRACTED from the published YAML rather than copied
+# here — a copy would drift, and then this would be testing a snapshot of advice
+# nobody follows. Only the three paths are substituted, because the reader's repository
+# is where the originals live.
+CI="$(mktemp -d)"
+trap 'rm -rf "$LEDGER" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX" "$CI"' EXIT
+
+python3 - "$CI/routing.sh" <<'PYEOF' || true
+import re, sys
+y = open('examples/ci/github-actions.yml', encoding='utf-8').read()
+m = re.search(r'name: forecast the sealed plan \(advisory\).*?run: \|\n(.*?)(?=\n      - |\n\n  [a-z]|\Z)',
+              y, re.S)
+if not m:
+    sys.exit("could not find the routing step in the published workflow")
+body = "\n".join(l[10:] if l.startswith(' ' * 10) else l for l in m.group(1).split("\n"))
+open(sys.argv[1], "w", encoding="utf-8").write(body)
+PYEOF
+
+if [ ! -s "$CI/routing.sh" ]; then
+  report "the published CI workflow still has its exit-2 routing step" yes no
+else
+  report "the published CI workflow still has its exit-2 routing step" yes yes
+
+  # The reader's paths, replaced by ours per invocation. Everything else — the grep,
+  # the exit codes, the re-raise — is the published text.
+  # Absolute paths: the block is executed from a scratch directory, exactly as a
+  # reader's checkout would be a different directory from ours.
+  run_routing() {  # <contract> <candidate> <ledger>
+    cp "$CI/routing.sh" "$CI/r.sh"
+    sed -i "s|contracts/prod.contract.yaml|$PWD/$1|g; s|candidates/prod.candidate.yaml|$PWD/$2|g; \
+            s|state/prod.jsonl|$3|g; s|bin/groundhold-go|$PWD/$CLI|g" "$CI/r.sh"
+    ( cd "$CI" && bash ./r.sh >/dev/null 2>&1 )
+  }
+
+  # A converged pair: plan exits 2 with nothing-to-change, and the step must call that
+  # success. This is the half that must not become a false alarm.
+  # The extracted block computes its own `AT` — that is the point of it, a CI job reads
+  # the world at one instant. So the state it reads must be built on the same clock:
+  # converging at the harness's fixed stamp leaves observations the block then calls
+  # stale, and the answer becomes observation-required rather than nothing-to-change.
+  NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  "$CLI" converge examples/laptop/laptop.contract.yaml examples/laptop/laptop.candidate.yaml \
+    --ledger "$CI/converged.jsonl" --provider fake --at "$NOW" --yes >/dev/null 2>&1 || true
+  rc=0
+  run_routing examples/laptop/laptop.contract.yaml examples/laptop/laptop.candidate.yaml \
+              "$CI/converged.jsonl" || rc=$?
+  report "CI routing calls nothing-to-change converged" 0 "$rc"
+
+  # A violating pair: plan exits 2 with not-executable, and the step must RE-RAISE.
+  # This is the one that merged a broken pull request green.
+  rc=0
+  run_routing examples/lifecycle/2-refused.contract.yaml examples/lifecycle/2-refused.candidate.yaml \
+              "$CI/violating.jsonl" || rc=$?
+  report "CI routing re-raises a violated hard constraint" 2 "$rc"
+fi
+
 echo
 if [ "$fail" -gt 0 ]; then
   echo "$pass passed, $fail FAILED — a shipped example does not work"
