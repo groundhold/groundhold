@@ -5,6 +5,7 @@ package vocab
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 
@@ -31,6 +32,20 @@ func LoadDir(dir string) (map[string]Vocabulary, error) {
 	paths, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
 	if err != nil {
 		return nil, err
+	}
+	// D1091: a caller naming a directory is ASKING for it. `filepath.Glob` reports
+	// no error for a path that does not exist and none for one holding no
+	// vocabularies, so both used to return an empty map and no error — the operator
+	// supplied `--vocab`, nothing loaded, nothing said so, and every custom
+	// attribute silently lost the load-time kind/enum check (D19) it was there to
+	// get. "I found nothing" and "there is nothing to find" arrived as one value.
+	if len(paths) == 0 {
+		if _, statErr := os.Stat(dir); statErr != nil {
+			return nil, fmt.Errorf("vocabulary directory %s: %w", dir, statErr)
+		}
+		return nil, fmt.Errorf(
+			"vocabulary directory %s holds no *.yaml vocabularies — it was named, so "+
+				"it must supply something; use --no-vocab for the empty set", dir)
 	}
 	sort.Strings(paths)
 	out := map[string]Vocabulary{}

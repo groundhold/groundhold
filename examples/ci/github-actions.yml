@@ -12,6 +12,12 @@ jobs:
         with: { go-version: '1.25' }
       - name: build groundhold
         run: cd go && go build -o ../bin/groundhold-go ./cmd/groundhold
+      # D1091: no `--vocab` here. The full vocabulary is compiled into the binary;
+      # the flag only EXTENDS it with your own types, and it used to name
+      # `spec/vocab` — a path that exists in the groundhold repository and not in
+      # yours. A named directory that is not there now REFUSES rather than loading
+      # nothing in silence, so add the flag only when you have your own vocabularies
+      # and the path resolves in this checkout.
       - name: verify the candidate against the contract
         # D659: the report is written FIRST and the exit code is the step's own.
         # This used to end in `| tee verify-report.json`, and a pipeline's status is
@@ -20,7 +26,7 @@ jobs:
         # request violating a hard residency constraint merged green.
         run: |
           bin/groundhold-go verify contracts/prod.contract.yaml \
-            candidates/prod.candidate.yaml --vocab spec/vocab --json \
+            candidates/prod.candidate.yaml --json \
             > verify-report.json
           cat verify-report.json
       - name: forecast the sealed plan (advisory)
@@ -31,7 +37,7 @@ jobs:
           # is reused by forecast so both read the world at one instant.
           AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           bin/groundhold-go plan contracts/prod.contract.yaml \
-            candidates/prod.candidate.yaml --vocab spec/vocab \
+            candidates/prod.candidate.yaml \
             --ledger state/prod.jsonl --at "$AT" > plan.json || {
               code=$?
               # D659: exit 2 is a FAMILY, not a verdict. spec/errors.md gives it to
