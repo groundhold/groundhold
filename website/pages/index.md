@@ -1,5 +1,7 @@
 # What is Groundhold
 
+**Status: public, experimental (`v0.x`) — an RFC you can run, not GA.**
+
 **AI should not write Terraform.** The problem is not Terraform; it is
 that a probabilistic author needs a medium built for verification
 rather than for authoring implementations. An agent should emit
