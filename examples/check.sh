@@ -240,6 +240,40 @@ second="$("$CLI" converge "$NEW/my.contract.yaml" "$NEW/my.candidate.yaml" \
   --ledger "$NEW/try.jsonl" --provider fake --at "$AT" --yes 2>&1 | tail -1 || true)"
 report "newcomer path: second converge is a no-op" CONVERGED "$second"
 
+# The `adopt-candidate` skill crosses to the public tree and tells an agent to run
+# `scripts/adopt-candidate.sh` as its central step. Until now only the script's REFUSAL
+# path was ever executed — the D606 guard, driven with GROUNDHOLD=/bin/false precisely so
+# nothing would run. The path the skill actually publishes, the one that ends in an
+# adopted binding, was never executed by anything.
+ADOPT="$(mktemp -d)"
+trap 'rm -rf "$LEDGER" "$LIFE" "$NEW" "$ADOPT"' EXIT
+"$CLI" discover --provider fake --at "$AT" > "$ADOPT/discovery.json" 2>/dev/null || true
+res="$(grep -oE '"providerId": *"[^"]+"' "$ADOPT/discovery.json" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
+report "discover --provider fake offers a resource to adopt" yes "$([ -n "$res" ] && echo yes || echo no)"
+
+rc=0
+out="$(cd "$ADOPT" && GROUNDHOLD="$OLDPWD/$CLI" bash "$OLDPWD/scripts/adopt-candidate.sh" \
+  --discovery discovery.json --resource "$res" \
+  --contract orders-db --capability orders-primary \
+  --ledger ledger.ndjson --at "$AT" 2>&1)" || rc=$?
+report "adopt-candidate runs the published path" 0 "$rc"
+case "$out" in
+  *"adopted: orders-db/orders-primary -> $res"*)
+    report "adopt-candidate reports the binding it made" yes yes ;;
+  *) report "adopt-candidate reports the binding it made" yes no ;;
+esac
+
+# The generated contract must actually constrain something. An adoption that declares
+# nothing confirms nothing, which is the whole point of the D606 guard — asserted here
+# on the path that succeeds, not only on the one that refuses.
+cons="$(grep -cE '^[[:space:]]*- id:' "$ADOPT/orders-db.contract.yaml" 2>/dev/null || echo 0)"
+report "adopt-candidate generates a constrained contract" yes "$([ "$cons" -ge 1 ] && echo yes || echo no)"
+
+# The binding is the claim: the ledger must name the discovered resource.
+bound=no
+grep -q "$res" "$ADOPT/ledger.ndjson" 2>/dev/null && bound=yes
+report "adopt-candidate binds the resource in the ledger" yes "$bound"
+
 echo
 if [ "$fail" -gt 0 ]; then
   echo "$pass passed, $fail FAILED — a shipped example does not work"

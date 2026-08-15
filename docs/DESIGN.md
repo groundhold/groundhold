@@ -35973,3 +35973,39 @@ the nav. All three fail. Confirmed by building: `/img/index.html` is gone, the s
 carries 15 URLs instead of 16, and the assets themselves — the mark, the card, the
 favicon — are still copied, which was the half worth checking. Withholding the notes
 must not withhold what they describe.
+
+## D1106 — the adopt script's refusal was tested; the path it publishes was not
+`scripts/adopt-candidate.sh` crosses the export boundary as a named exception, for one
+reason: the published `adopt-candidate` skill instructs an agent to run it as the
+central step of taking over existing infrastructure. It is the only shipped script an
+outside agent is told to execute.
+
+It was executed by exactly one test, and that test ran it with `GROUNDHOLD=/bin/false`.
+Deliberately — the D606 guard must refuse BEFORE anything runs, so the binary must not
+be needed to prove it. That test is right and stays. But it means the only line of this
+script anything ever exercised was the one that gives up. Generation, `validate`,
+`publish`, `adopt`, and the binding they exist to produce were checked by `bash -n`,
+which reads syntax and executes nothing, and by a reference check that the skill cites
+the file. Neither is evidence that running it does anything.
+
+The shape is D1087's, on the sharpest possible surface: not a sequence a human might
+skim and adapt, but one an agent is told to run verbatim, against real infrastructure,
+on the path where it takes ownership of resources someone else created.
+
+The examples harness now runs the published path: `discover --provider fake`, then the
+script exactly as the skill invokes it, then four assertions — exit 0, the binding is
+reported, the generated contract carries at least one constraint, and the LEDGER names
+the discovered resource. The last is the one that matters. Three mutants: skip the
+`adopt` call but keep the success message (only the ledger assertion catches it — the
+script prints `adopted:` and has bound nothing, which is the exact false-success this
+whole family is about), exit 0 straight after `publish`, and generate a contract with
+no constraints. All three fail; the harness went 51 checks to 56.
+
+A correction belongs in the record. This was left open on the ground that the fake
+provider implements no `Discoverer`, so `discover --provider fake` returns nothing, and
+that closing it therefore required either teaching the fake to enumerate or replaying a
+recorded cloud sweep — both design decisions, both properly deferred rather than
+improvised. That premise was false. `provider.Fake.List` returns one deterministic
+resource and has all along. The obstacle was read out of the code rather than measured
+by running it, and it postponed a fix that needed neither decision. Running the thing is
+not a formality when the question is whether the thing runs.
