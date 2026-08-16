@@ -37570,3 +37570,37 @@ schema promises and the runtime refuses is an offer nobody can accept.
 A note on the repair rather than the finding: regenerating the file with a JSON writer
 reformatted all of it, 237 lines changed to add 51. Reverted and patched the enum in
 place. A diff nobody can read is a diff nobody reviews, and this file is published.
+
+## D1151 — our own ledgers did not validate against our own schema
+
+The event-type registry is held across all four of its copies, the schema among them,
+and the gate that does it says why: the schema is "the closed enum consumers validate
+ledgers against". One field over, in the same file, the observation SOURCE enum listed
+three values while the runtime writes four — and two of the four are not on the list.
+
+	provider-api        a driver read it from the resource
+	probe               an outcome probe measured it
+	candidate-declared  adopted, and the provider emitted NO value, so it is intent (D555)
+	reachability        the post-apply reach recording
+
+The schema published the first two and `manual`, which nothing here emits. So a ledger
+from `adopt` over an attribute the provider cannot read — the case D555 measured on a
+live cluster — or from any reachability recording, fails the validation we tell people
+to run. Not a stale list of things we have not built yet: a contradiction with what the
+tool writes today, on two documented paths.
+
+Nothing noticed because nothing validates a real ledger against the file. It is compared
+to other registries, and registries agree with registries. This is D1150's shape a second
+time in one night and it is worth naming as its own class: a published artefact checked
+only against other descriptions of the thing, never against the thing.
+
+Which way it hurts: this direction is loud for the consumer and silent for us. Their
+validator rejects a ledger the runtime considers ordinary, and they conclude the ledger
+is corrupt or their tooling is wrong. The audit ladder, meanwhile, ranks both unknown
+sources at the static bar — safe, and by accident rather than by decision.
+
+The gate names the five and holds the schema to them, and holds each emitting site to
+still be emitting. That second half was wrong first: it searched the file for the word,
+and every one of those files says its own source in prose, so a mutant that renamed the
+literal walked through. It matches an ASSIGNMENT now, which is D1142 read one more time
+— a check that accepts the word accepts the paragraph explaining the word.

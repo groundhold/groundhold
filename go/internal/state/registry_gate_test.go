@@ -149,3 +149,91 @@ func dotted(s string) map[string]bool {
 	}
 	return out
 }
+
+// D1151. The neighbouring gate holds the EVENT-TYPE registry across all four copies,
+// including the schema, and that is the shape this one is missing next door: the
+// observation SOURCE enum in `spec/state.schema.json` listed three values while the
+// runtime writes four, two of which it does not list.
+//
+//	provider-api        internal/observe        — a driver read this from the resource
+//	probe               internal/probe          — an outcome probe measured it
+//	candidate-declared  internal/adopt          — adopted, and the provider emitted NO
+//	                                              value for it, so it is intent (D555)
+//	reachability        internal/reach          — the post-apply reach recording
+//
+// The schema listed the first two and `manual`, which nothing here emits. So a ledger
+// produced by `adopt` over an attribute the provider cannot read, or by any reachability
+// recording, does not validate against the file the registry gate above calls "the
+// closed enum consumers validate ledgers against". Nothing noticed because nothing
+// validates a real ledger against it — the schema is compared to other registries and
+// never to output.
+//
+// The set is NAMED. Derived from the emitting sites it would agree with itself whatever
+// they did (D1130), and derived from the schema it would agree with the file this exists
+// to hold.
+func TestObservationSourceEnumCoversWhatTheRuntimeWrites(t *testing.T) {
+	want := []string{"candidate-declared", "manual", "probe", "provider-api", "reachability"}
+
+	got := schemaObservationSources(t)
+	if len(got) == 0 {
+		t.Fatal("no observation-source enum found in spec/state.schema.json — the scan " +
+			"broke and this gate would pass on anything (D328)")
+	}
+	sort.Strings(got)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("the schema publishes sources %v; the runtime writes %v.\nA value the "+
+			"runtime writes and the schema omits makes our own ledger fail the validation "+
+			"we tell consumers to run; a value the schema promises and nothing writes is "+
+			"an offer nobody can take.", got, want)
+	}
+
+	// The emitting sites must stay inside it. Matched as an ASSIGNMENT, not anywhere in
+	// the file: every one of these files says its own source in prose too, and a check
+	// that accepts the word accepts the paragraph explaining the word — which is how
+	// D1142 kept a gate green on a comment denying the very thing it checked. A mutant
+	// that renamed the emitted literal walked straight through the first draft of this.
+	for _, site := range []struct{ file, literal string }{
+		{filepath.Join("..", "observe", "observe.go"), "provider-api"},
+		{filepath.Join("..", "probe", "probe.go"), "probe"},
+		{filepath.Join("..", "reach", "record.go"), "reachability"},
+		{filepath.Join("..", "provider", "provider.go"), "candidate-declared"},
+	} {
+		raw, err := os.ReadFile(site.file)
+		if err != nil {
+			t.Skipf("cannot read %s: %v", site.file, err)
+		}
+		// Either the value is assigned to a source field at the emitting site, or it is
+		// the named constant the emitting site uses. Both are assignments; neither is
+		// prose about one.
+		assigned := regexp.MustCompile(
+			`(?:"source":|Source:|=)\s*"` + regexp.QuoteMeta(site.literal) + `"`)
+		if !assigned.MatchString(string(raw)) {
+			t.Errorf("%s no longer ASSIGNS the source %q — either it moved or the value "+
+				"changed, and the schema still promises it to consumers", site.file, site.literal)
+		}
+	}
+}
+
+// schemaObservationSources reads $defs.observation.properties.source.enum.
+func schemaObservationSources(t *testing.T) []string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "spec", "state.schema.json"))
+	if err != nil {
+		t.Skipf("no state schema in this tree: %v", err)
+	}
+	var doc struct {
+		Defs struct {
+			Observation struct {
+				Properties struct {
+					Source struct {
+						Enum []string `json:"enum"`
+					} `json:"source"`
+				} `json:"properties"`
+			} `json:"observation"`
+		} `json:"$defs"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("state schema does not parse: %v", err)
+	}
+	return doc.Defs.Observation.Properties.Source.Enum
+}
