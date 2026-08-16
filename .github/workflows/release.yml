@@ -338,6 +338,42 @@ jobs:
           format: cyclonedx-json
           output-file: dist/sbom.cdx.json
 
+      # D1138: the scanner names the document's SUBJECT after what it was pointed at —
+      # `{"type":"file","name":"."}`, a directory called dot. A person reading the file
+      # inside a release page knows which release it is; the machines an SBOM exists for
+      # read the file alone, and it did not say. The binaries in it are all version
+      # UNKNOWN, correctly so: the version is injected at link time and Go's build info
+      # does not record it, so the scanner cannot know. We can. Naming the subject is a
+      # fact we hold, not an edit to what the scanner observed — its component findings
+      # are left exactly as reported.
+      #
+      # BEFORE the checksums, which are taken last: a document altered afterwards would
+      # be published with a hash of the version nobody has.
+      - name: Name the release as the SBOM's subject
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          python3 - "${GITHUB_REF_NAME}" <<'PY'
+          import json, sys
+          tag = sys.argv[1]
+          with open("sbom.cdx.json") as f:
+              doc = json.load(f)
+          if not doc.get("components"):
+              raise SystemExit("the SBOM lists no components — refusing to name a "
+                               "release on an empty document, which would read as "
+                               "a release with no dependencies")
+          doc.setdefault("metadata", {})["component"] = {
+              "bom-ref": "groundhold@" + tag,
+              "type": "application",
+              "name": "groundhold",
+              "version": tag,
+          }
+          with open("sbom.cdx.json", "w") as f:
+              json.dump(doc, f, indent=2)
+          print("SBOM subject: groundhold %s over %d components"
+                % (tag, len(doc["components"])))
+          PY
+
       # S3: keyless SLSA build-provenance attestation for every artifact.
       # Attestations require a PUBLIC repo (or a paid plan). At the public flip
       # (2026-08-13) this became authoritative: continue-on-error is now false, so
