@@ -5,7 +5,7 @@ description: Adopt a single discovered cloud resource under a Groundhold contrac
 
 # Adopt a discovered candidate (CLI)
 
-The console (groundhold-console) shows discovered resources as `adopted` or
+The console shows discovered resources as `adopted` or
 `candidate` and hands you a recipe, but it is read-only and runs nothing.
 This skill runs the recipe from the command line. It invents nothing: the
 contract and candidate are built from the discovery's own observations, so
