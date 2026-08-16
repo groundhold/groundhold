@@ -37236,3 +37236,30 @@ gate: a tool added to the server cannot satisfy this by also being added here. T
 name written down is the conditional one, because a set derived from both sides would
 agree with itself whatever either side did — the shape D1130 found in the checksums.
 Three mutants, one per direction plus the vacuity floor.
+
+## D1141 — three platforms whose first build attempt was the release
+
+The release cross-builds four platforms and publishes a binary for each. The README
+names one and tells the reader to swap in any of the other three. CI compiled ONE of
+them.
+
+The step that did it is honest about what it is — a compile, not a test, nothing
+executed — and its stated reason is exactly right: a break caught at merge beats the
+same break caught at the next release. That reason applies word for word to the two
+platforms it left out, and there was never anything behind covering one of the three
+non-host targets rather than all of them. So linux/arm64 and darwin/amd64 were built
+nowhere until somebody pushed a tag, and the first thing to notice a break in either
+would have been a failed release.
+
+Not a silent failure — a release that cannot build fails loudly — but the wrong place
+and the wrong time to find out, and it is thirty seconds of compute to move it.
+
+The set of published platforms now lives in three places: the release's build loop, the
+CI cross-compile, and a gate that names it. The gate NAMES it rather than deriving it
+from either workflow, because a set taken from both sides agrees with itself whatever
+either side does — the shape the checksums had (D1130) and the tool list had (D1140).
+Changing what we ship is now a decision made in three places at once, deliberately: the
+cost of the third is a failing test that tells you the other two disagree.
+
+Run before it was written down, all four from this machine, which is the same reason the
+step exists at all.
