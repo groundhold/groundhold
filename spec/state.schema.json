@@ -125,7 +125,10 @@
         "capability": { "$ref": "#/$defs/identifier" },
         "path": { "type": "string" },
         "value": {},
-        "source": { "enum": ["provider-api", "probe", "manual"] },
+        "source": {
+          "enum": ["candidate-declared", "manual", "probe", "provider-api", "reachability"],
+          "description": "Where the reading came from. D1151: `candidate-declared` is an adopted attribute the provider emitted no value for — recorded as intent, never as measured reality — and `reachability` is the post-apply reach recording. Both are written by the runtime today; this enum listed neither, so a ledger from `adopt` or `reach` did not validate against the file consumers are told to validate against. `manual` is for a hand-written ledger and is emitted by nothing here."
+        },
         "derivation": {
           "enum": ["config-intent", "measured", "platform-invariant"],
           "description": "D44/D759: how this fact was come by. measured = read from THIS resource's live state; config-intent = a value the resource stores but does not itself enforce; platform-invariant = true of every instance of the service by the provider's own guarantee, read from nothing on this resource. A config-derived fact is not a measurement, and neither is a platform guarantee."
