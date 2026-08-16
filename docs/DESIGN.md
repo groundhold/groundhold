@@ -36704,3 +36704,44 @@ interface the page names must exist — would have passed on the day the gap was
 
 Three mutants: define a new interface without registering it, drop a safety interface
 from the register, and reword the page so its table reads complete again.
+
+## D1124 — the tree is dual-licensed and the badge says one thing
+The project is dual-licensed and says so in three prose places: the README, the
+published versioning page, and the open-source plan. Apache 2.0 for `spec/`,
+`conformance/` and `ref/` — the trust interface anyone may implement against — and MPL
+2.0 for `go/`, the runtime, whose file-level copyleft is the reason it was chosen.
+
+Nothing in the TREE carried that split. The root held `LICENSE` (Apache, verbatim) and
+`LICENSE-runtime` (MPL, verbatim), neither stating what it covers, and there are no
+SPDX headers — deliberately deferred, and the deferral is fine. The mapping existed
+only in sentences.
+
+The consequence is measurable rather than argued. GitHub reports the repository as
+**Apache-2.0**, because that is the licence at the root and GitHub reports exactly one.
+Dependency scanners read that API. Someone embedding the runtime on the strength of the
+badge takes MPL-covered code believing it is Apache — and cannot discover the mistake
+from the artefact they consulted, because the artefact is not wrong about itself, only
+about the tree.
+
+This is the family's shape on a surface where being wrong has legal consequences rather
+than operational ones: three documents state the truth, and the one machines read
+states something else.
+
+The MPL text now sits at `go/LICENSE`, beside the code it covers, where a
+directory-walking tool resolves it — the conventional fix, and the one most tooling
+already expects. The export whitelist carries it, so the public tree gets it too.
+
+The badge still says Apache-2.0 and always will, because a single-licence field cannot
+describe a dual-licensed repository. So the versioning page now says that explicitly:
+the badge is a lossy summary, the runtime is MPL, read `go/LICENSE` rather than the
+badge. A lossy summary is only safe when the reader knows it is one — the alternative,
+restructuring the root so GitHub detects nothing, trades a misleading badge for no
+badge and costs discovery.
+
+The gate holds three things: each licence file exists and contains its own licence's
+text (identified by that text, not by filename), the runtime's copy is byte-identical
+to the root one — two copies of a licence that disagree is worse than one, since a
+consumer reads whichever they find first — and the page keeps its badge warning.
+
+Three mutants: delete the runtime's licence, alter its copy so the two disagree, and
+remove the badge warning.
