@@ -45,8 +45,13 @@ func exportedTreeAt(root string) bool {
 func skipIfExported(t *testing.T, wants string) {
 	t.Helper()
 	if isExportedTree(t) {
-		t.Skipf("exported tree (no .git): %s is private to the source repository, so "+
-			"there is nothing here for this gate to check", wants)
+		// D1131: this used to say "(no .git)" — the mechanism D661 REMOVED for being
+		// wrong, named in the message twenty gates print. The publication target is a
+		// clone, so it HAS `.git`, and a reader who checked was told the detection
+		// keyed on something the code two functions above deliberately does not key
+		// on. Name the marker that actually decides it.
+		t.Skipf("exported tree (PUBLIC_EXPORT marker present): %s is private to the "+
+			"source repository, so there is nothing here for this gate to check", wants)
 	}
 }
 

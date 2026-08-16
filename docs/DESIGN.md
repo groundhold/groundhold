@@ -36951,3 +36951,56 @@ Four mutants, one per assertion, because an alternation is only gated when every
 member is. The first draft of the new gate reported on a comment about repository
 permissions instead of the command: `gh release create` appears in both, and a
 substring search finds the wrong one first.
+
+## D1131 — the reason a gate gives for not running
+
+Twenty gates do not run in the published copy, on purpose: they check machinery that
+exists only in the source repository. Each prints one sentence saying so, and that
+sentence gave the cause as the tree having no `.git`.
+
+That is the mechanism D661 REMOVED, and it removed it for exactly this reason: the
+publication target is a clone, so it HAS a `.git`, and detection that reads its
+absence gets the answer backwards. The replacement reads a marker file. The old
+explanation stayed behind in the message, fifteen lines below a comment that says in
+as many words that reading `.git` was the wrong test.
+
+The one moment anybody reads that sentence is the moment it matters most — a gate did
+not run, and the question is whether that was deliberate or whether something quietly
+switched it off. The answer they got named a cause they could disprove in one command.
+
+The message now names the marker, and the gate that keeps it honest DERIVES the marker
+from the predicate rather than repeating it, so the two cannot drift apart a second
+time. It fails in both directions: the message losing the marker, and the predicate
+changing to a different one.
+
+Found by asking a broader question — which gates do not run where, and why. The answer
+was better than expected: privately nothing skips at all, twenty-nine of a hundred and
+fifty-one skip in the published copy, and every one of those but two says plainly which
+private artefact it wanted. That is a real result and worth writing down as one.
+
+The two exceptions are the same defect at different sizes. This entry is the small one.
+The other is below.
+
+## D1132 — a skip that was an accident, and a green that would have been worse
+
+One of those twenty-nine skipped for no stated reason at all: it landed on a "too few
+tags visible" branch meant for shallow clones. The publication checkout IS shallow, so
+it took that branch every time. Nothing was wrong with the branch; what was wrong is
+that the gate's absence looked identical to its success, run after run, and no decision
+had ever been made about whether it belonged there.
+
+The obvious repair is to fetch the tags. Measured first, on the mirror with tags
+visible: the gate PASSES. It passes on the collision D1078 exists to warn about —
+release `v0.1.8` and heading `[v0.1.8]` are different artefacts wearing one string, so
+the coverage it reports is an accident of naming. That green would have been worse than
+the skip, because a skip at least admits to being nothing.
+
+So the skip becomes deliberate and says which artefact it wanted. Underneath, the gate's
+own rationale had gone stale in the same way as the message above: it argued that a tag
+is something a person can download, which D1080 ended when `v*` stopped meaning a build
+in this line. What it actually checks — the development line's historical tags against
+the build headings — is a real property, and now the sentence says that instead of the
+grander one.
+
+Two gates in two trees, and the useful question was not "is this correct" but "where
+does this run, and what does it say when it doesn't".
