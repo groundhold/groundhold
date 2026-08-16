@@ -37208,3 +37208,31 @@ The third property is an ordering one and it is easy to miss: the release notes 
 written into the same directory at publish time. Attest after that and the notes become
 a subject of their own attestation. The subject set is a directory, so what is in it
 depends on when you look, and the gate holds the when.
+
+## D1140 — the tool list an agent is told to believe
+
+`tools/list` is a closed set published to a MACHINE. An agent does not read this
+server's source to find out what it can do; it reads that reply and acts on it.
+
+The set lived in two places in one file — the advertisement built by `toolDefs`, and
+the dispatcher's switch — and one test held one direction of one entry: that the apply
+tool stays out of the list while it is disabled. Nothing held the rest.
+
+Both drifts hurt, differently. A tool in the dispatcher and not the advertisement is
+the quieter one: it works perfectly for anyone who already knows its name and does not
+exist for anyone else, which is the worse property for a machine-facing surface, because
+discovery IS the interface. A tool in the advertisement and not the dispatcher is louder
+and worse — the agent was told it could, tried, and got "unknown tool" back for a thing
+we published.
+
+Asked rather than scraped, which is the D317 discipline: the server was run and made to
+answer `tools/list` in both configurations. Six tools with apply disabled, seven with it
+enabled, and every advertised name dispatches while an invented one is correctly
+refused. The surface was already right. What was missing was anything holding it there,
+and the drift is one line in either direction.
+
+So the expectation is derived from the dispatcher through the AST, not restated in the
+gate: a tool added to the server cannot satisfy this by also being added here. The one
+name written down is the conditional one, because a set derived from both sides would
+agree with itself whatever either side did — the shape D1130 found in the checksums.
+Three mutants, one per direction plus the vacuity floor.
