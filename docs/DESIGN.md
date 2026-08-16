@@ -37505,3 +37505,34 @@ every comparison was empty against empty, and it printed a confident row of "ide
 for nine rules it had not tested. A vacuous probe reads exactly like a clean one. The
 rule that came out of it: a NEGATIVE result needs its own witness before it is believed,
 and the cheapest one is a case that must fail.
+
+## D1149 — naming what is outside a closed set cannot close it
+
+`derivation` is the line between "this was read from the resource" and "the resource
+holds this value and does not itself enforce it". The audit ladder demotes `config-intent`
+and `platform-invariant` to the static bar for exactly that reason, and demotes nothing
+else — so a class outside the set keeps its SOURCE's rank, which for a provider-api read
+is the strong one. An observation wearing an unrecognised label would be trusted as a
+measurement, which is the failure the collector standard says the whole witness-side
+design exists to prevent.
+
+The set lives in four places: an enum in the state schema, the map `Certify` consults,
+the audit ladder's demotion list, and item 3 of the collector checklist. Nothing compared
+any two of them.
+
+The test standing over the map is a good one — it names the three members, three
+near-misses including `platform` against `platform-invariant`, and checks each verdict.
+Its comment says a closed set is closed. It cannot notice an ADDITION, and that is not a
+gap in its care: naming what is outside a set says nothing about what is inside. Measured
+by adding a fourth key: all six named cases stay correct, the three members still accept,
+the three invented ones still reject, and the set has grown by one.
+
+Which direction matters is worth stating. A class REMOVED makes the tool refuse evidence
+it should take — loud, and safe. A class ADDED makes it accept evidence at a bar nobody
+granted, silently. The gate now holds both, but it exists for the second.
+
+So the three are NAMED, and both copies are held to the name — the map and the schema,
+because a hand-written ledger is validated against the schema and the two paths must not
+disagree about what counts. Named rather than derived from either side: a set taken from
+both agrees with itself whatever either does, which is the shape the checksums had
+(D1130) and the platform list had (D1141).
