@@ -134,3 +134,77 @@ func TestTheDriversPageAdmitsItsListIsPartial(t *testing.T) {
 		}
 	}
 }
+
+// D1126. D1123 fixed the drivers page and stopped there. The same claim stood on
+// `extending.md`, which names the core interface and then "optional
+// `Discoverer`/`Reconciler`/`Prober`" — three of sixteen, phrased as a list rather
+// than an example. Fixing one copy of a claim and not looking for the others is the
+// shape this project keeps finding in other people's work; here it was mine, hours old.
+//
+// The two pages want different things and the gate says so. `drivers.md` is a
+// reference: it carries the harm-shaped subset in a table and must admit the subset.
+// `extending.md` is an overview: it should not carry a table at all, only avoid
+// implying the set is three. So this checks the WEAKER property that matches the page's
+// job — the count is named and the register is pointed at — rather than demanding a
+// list the page has no business holding.
+//
+// The core interface is checked exactly, because there a full list IS the page's job
+// and it was correct: seven methods, same names, same order as `provider.Provider`.
+func TestTheExtendingPageDoesNotImplyThreeOptionalInterfaces(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "website", "pages", "extending.md"))
+	if err != nil {
+		t.Skipf("no extending page here: %v", err)
+	}
+	page := string(raw)
+
+	// The core, exactly — names and order, against the interface itself.
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, filepath.Join(root, "go", "internal", "provider", "provider.go"), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var core []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		ts, ok := n.(*ast.TypeSpec)
+		if !ok || ts.Name.Name != "Provider" {
+			return true
+		}
+		it, ok := ts.Type.(*ast.InterfaceType)
+		if !ok {
+			return true
+		}
+		for _, m := range it.Methods.List {
+			for _, nm := range m.Names {
+				core = append(core, nm.Name)
+			}
+		}
+		return false
+	})
+	if len(core) < 5 {
+		t.Fatalf("parsed %d methods from provider.Provider — the AST walk broke", len(core))
+	}
+	want := "`" + strings.Join(core, " · ") + "`"
+	if !strings.Contains(page, want) {
+		t.Errorf("the extending page no longer prints the core interface as %s.\n"+
+			"A driver author reads this list to know what they must implement; a method "+
+			"missing from it is one they will not write.", want)
+	}
+
+	// The optional set: the page must name its SIZE and send the reader to the
+	// register. It must not read as a three-item list, which is what it did.
+	if regexp.MustCompile("optional `Discoverer`/`Reconciler`/`Prober`").MatchString(page) {
+		t.Error("the extending page again names three optional interfaces as if that " +
+			"were the set. There are sixteen, and some are safety rather than " +
+			"convenience — a reader who takes three as complete writes a driver without " +
+			"the guard against adopting another controller's object.")
+	}
+	if !regexp.MustCompile(`(?i)sixteen optional interfaces`).MatchString(page) {
+		t.Error("the extending page no longer names how many optional interfaces there " +
+			"are. The number is what stops a reader treating an example as a list.")
+	}
+	if !strings.Contains(page, "AUTHORING.md") {
+		t.Error("the extending page no longer points at the authoring guide, which is " +
+			"where the full register lives")
+	}
+}

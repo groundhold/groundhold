@@ -35,7 +35,9 @@ is engineering hardened against a real cloud, which is why its certification is
 adversarial and why the field keeps finding driver defects (see `docs/MATURITY.md`).
 A driver adapts the executor's provider interface to one cloud service
 (`Name · Validate · Create · Observe · ClassifyChange · Update · Delete`, plus
-optional `Discoverer`/`Reconciler`/`Prober`). It is a **pure mapping core +
+any of SIXTEEN optional interfaces it opts into by having the method — some of
+which are safety rather than convenience, so the full register with what each
+one prevents lives in the authoring guide, not here). It is a **pure mapping core +
 a thin network shell**: the core is deterministic and golden-tested, the shell
 is `httptest`-covered. Honesty is enforced, not hoped: absent fields emit
 nothing, unknown enums skip with a diagnostic, measurements are never fabricated
