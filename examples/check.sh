@@ -484,6 +484,33 @@ python3 -c 'import sys,json; sys.exit(0 if "plan" in json.load(open(sys.argv[1])
   "$PL/ok.json" 2>/dev/null && has_plan=yes
 report "the success document carries a top-level plan key" yes "$has_plan"
 
+# The other half of the same spec section: the verbs listed as SILENT must print no
+# green word at all. "Success silence beats generic reassurance" — a green word after
+# `observe` or `probe` would claim the world is healthy when the verb only claims a
+# measurement was recorded. Silence is not implemented by the word table; it is each
+# verb declining to banner, which is exactly the kind of per-site decision that drifts.
+SIL="$(mktemp -d)"
+trap 'rm -rf "$LEDGER" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX" "$CI" "$PL" "$SIL"' EXIT
+"$CLI" converge examples/laptop/laptop.contract.yaml examples/laptop/laptop.candidate.yaml \
+  --ledger "$SIL/l.jsonl" --provider fake --at "$AT" --yes >/dev/null 2>&1 || true
+
+silent_verb() {  # <label> <args...>
+  label="$1"; shift
+  banner="$("$@" 2>&1 >/dev/null | grep -oE '\b(PROVEN|CONVERGED|APPLIED|SEALED|OK)\b' | tail -1 || true)"
+  report "$label banners nothing on success" "" "$banner"
+}
+silent_verb validate "$CLI" validate examples/laptop/laptop.contract.yaml
+silent_verb hash     "$CLI" hash examples/laptop/laptop.contract.yaml
+silent_verb explain  "$CLI" explain not-executable
+silent_verb export   "$CLI" export --ledger "$SIL/l.jsonl"
+silent_verb deposed  "$CLI" deposed --ledger "$SIL/l.jsonl"
+
+# And the paired positive, so the check cannot pass by the banners having vanished
+# everywhere: verify still says PROVEN.
+proven="$("$CLI" verify examples/laptop/laptop.contract.yaml examples/laptop/laptop.candidate.yaml \
+  --json 2>&1 >/dev/null | grep -oE '\bPROVEN\b' | tail -1 || true)"
+report "verify still banners PROVEN" PROVEN "$proven"
+
 echo
 if [ "$fail" -gt 0 ]; then
   echo "$pass passed, $fail FAILED — a shipped example does not work"

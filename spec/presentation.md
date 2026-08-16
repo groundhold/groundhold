@@ -76,8 +76,8 @@ or success banners become a second API:
 | `converge` | `CONVERGED` | reconciliation reached its proven fixed point — the check verified it (D136); an inconclusive or unverified check earns `APPLIED`, true and exactly as much as was checked |
 | `apply` | `APPLIED` | the sealed plan's mutations committed |
 | `plan` | `SEALED` | a hash-pinned Sealed Plan exists and is executable |
-| `publish`, `adopt`, `unadopt`, `resume`, `repair`, `anchor` | `OK` | the procedural verb completed; the record says what |
-| `validate`, `hash`, `explain`, `export`, `hints`, `scenario`, `discover`, `forecast`, `deposed`, `observe`, `probe` | — silent | see below |
+| every other verb that banners — `publish`, `adopt`, `unadopt`, `resume`, `repair`, `anchor`, `compose`, `diff`, `runs`, `horizon`, `backup`, `connections`, `example` … | `OK` | the procedural verb completed; the record says what. `OK` is the DEFAULT, not a membership list: a verb earns one of the four words above by being named, and earns silence by not bannering at all (below) — anything else says `OK`. Stated as a default because it IS one in the runtime, and a list that pretended otherwise would be wrong the first time a verb was added. |
+| `validate`, `hash`, `explain`, `export`, `hints`, `scenario`, `discover`, `forecast`, `deposed`, `observe`, `probe`, `survey`, `suggest`, `keygen`, `capsule`, `snapshot`, `attest`, `apiver` | — silent | see below |
 
 Product verbs print NO green banner: their stdout is the deliverable
 and `OK` is noise that reads as part of the product. Two of them are
