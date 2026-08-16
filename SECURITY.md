@@ -82,9 +82,16 @@ overstepping them is not a vulnerability:
 
 ## Scope notes for researchers
 
-- The runtime makes NO network calls except to the cloud provider the
-  operator explicitly configures, and has ZERO telemetry. Any network
-  traffic beyond the configured provider is a vulnerability — report it.
+- ZERO telemetry, and the verification core — verifier, compiler, ledger —
+  makes no network call at all. The runtime as a whole opens exactly three
+  destinations, each one the operator asked for:
+  1. the cloud provider they configured (`--provider`, credentials theirs);
+  2. a URL they passed to `--notify-url`, when a run finishes (D229);
+  3. the resource's own address, during the post-apply reachability probe
+     — skipped LOUDLY under `--no-reachability`, never silently (D537).
+  Traffic to anything else is a vulnerability — report it. The list is
+  exhaustive on purpose: a claim that flags a documented feature as a bug
+  wastes a researcher's time and teaches them to stop reporting.
 - The ledger is append-only with hash chains and fencing tokens;
   anything that lets a writer rewind time, forge a head, bypass a
   lease, resurrect an expired fencing token, or mutate cloud state
