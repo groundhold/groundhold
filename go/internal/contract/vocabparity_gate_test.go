@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -102,9 +103,46 @@ func TestVocabularySetsMatchThePythonReference(t *testing.T) {
 		{"scalar operators", operators, scalarsPy, "OPERATORS"},
 		{"presence operators", presenceOps, scalarsPy, "PRESENCE_OPERATORS"},
 	}
+	// D1150: the SCHEMA is a third copy, and it is the one a stranger validates against.
+	// It carried six capability types while the runtime accepted fifty-seven — the
+	// original vertical slice, frozen, while every type added since went unrecorded. This
+	// gate compared the two implementations to each other and neither to the published
+	// file, so both could agree and still refuse what the schema promised, or promise what
+	// they refuse.
+	schemaEnums := map[string][]string{
+		"capability types": schemaEnumAt(t, root,
+			"properties", "capabilities", "items", "properties", "type"),
+		"verify methods": schemaEnumAt(t, root, "$defs", "verify", "properties", "method"),
+		"provenance statuses": schemaEnumAt(t, root,
+			"properties", "assumptions", "items", "properties", "status"),
+	}
+
 	for _, c := range cases {
 		if len(c.goSet) == 0 {
 			t.Fatalf("%s: the Go set is empty — the gate would be vacuous (D328)", c.label)
+		}
+		if want, ok := schemaEnums[c.label]; ok {
+			if len(want) == 0 {
+				t.Fatalf("%s: no enum found in the contract schema — the scan broke and "+
+					"this comparison would pass on anything (D328)", c.label)
+			}
+			inSchema := map[string]bool{}
+			for _, v := range want {
+				inSchema[v] = true
+			}
+			for k := range c.goSet {
+				if !inSchema[k] {
+					t.Errorf("%s: the runtime accepts %q and spec/contract.schema.json does "+
+						"not — a stranger validating a contract against the published file "+
+						"is refused a document this tool takes", c.label, k)
+				}
+			}
+			for _, k := range want {
+				if !c.goSet[k] {
+					t.Errorf("%s: the schema promises %q and the runtime refuses it — the "+
+						"published file is an offer nobody can accept", c.label, k)
+				}
+			}
 		}
 		pySet := pyStringSet(t, c.pySrc, c.pyKey)
 		for k := range c.goSet {
@@ -120,4 +158,39 @@ func TestVocabularySetsMatchThePythonReference(t *testing.T) {
 			}
 		}
 	}
+}
+
+// schemaEnumAt walks spec/contract.schema.json to the named path and returns its enum.
+// Nothing at runtime loads this file — it is the artefact a third party validates
+// against, which is exactly why its drift is invisible from inside (D1150).
+func schemaEnumAt(t *testing.T, root string, path ...string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(root, "spec", "contract.schema.json"))
+	if err != nil {
+		t.Skipf("no contract schema in this tree: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("contract schema does not parse: %v", err)
+	}
+	var node any = doc
+	for _, step := range path {
+		m, ok := node.(map[string]any)
+		if !ok {
+			return nil
+		}
+		node = m[step]
+	}
+	m, ok := node.(map[string]any)
+	if !ok {
+		return nil
+	}
+	vals, _ := m["enum"].([]any)
+	var out []string
+	for _, v := range vals {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }

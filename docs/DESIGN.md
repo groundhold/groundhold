@@ -37536,3 +37536,37 @@ because a hand-written ledger is validated against the schema and the two paths 
 disagree about what counts. Named rather than derived from either side: a set taken from
 both agrees with itself whatever either does, which is the shape the checksums had
 (D1130) and the platform list had (D1141).
+
+## D1150 — the published schema still described the first vertical slice
+
+`spec/contract.schema.json` carries `$id: groundhold://schemas/contract/v0.1` and is the
+file a stranger validates a contract against. It listed SIX capability types. The runtime
+accepts fifty-seven.
+
+The six are exactly the original vertical slice — relational database, object storage,
+private network, container workload, and the two identity types. Every type added since
+went into the vocabulary, into the runtime's set and into the reference implementation,
+and none went here. Fifty-one of fifty-seven types are refused by the artefact we publish
+as the definition of a valid contract.
+
+Nothing at runtime loads it, which is exactly why the drift was invisible from inside.
+The file is named in comments as the authority for a document's shape — and the comments
+are right about the intent — but no test opened it, so it aged as documentation ages.
+
+The gate standing next to this compared the Go set to the Python reference, in both
+directions, over five closed sets, with a vacuity floor. A good gate. It could not see
+this: two implementations can agree with each other and still both diverge from the
+published file, and here they had.
+
+Checked all seven of the schema's enums against the code rather than assuming one was
+representative: statuses, verify methods, probe kinds, operators, states and objectives
+all match. Exactly one had drifted, and it is the one that grows every time the project
+learns a new capability — which is why it was the one.
+
+The parity gate now holds the schema as a third copy, both directions: a type the runtime
+takes and the schema refuses is a document a stranger cannot validate, and a type the
+schema promises and the runtime refuses is an offer nobody can accept.
+
+A note on the repair rather than the finding: regenerating the file with a JSON writer
+reformatted all of it, 237 lines changed to add 51. Reverted and patched the enum in
+place. A diff nobody can read is a diff nobody reviews, and this file is published.
