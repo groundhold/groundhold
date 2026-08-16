@@ -30,6 +30,21 @@ service. The GCP Cloud SQL driver is the exemplar
 | `Reconciler` | `resume` | strictly read-only conclusion of lost outcomes; not-found ≠ failed for creates |
 | `Prober` | `probe` | outcome measurements; intrusive ones run only under double consent |
 | `Preflighter` | `apply` | read-only IAM permission check before mutating (D75); a refusal is trustworthy, a pass is evidence not proof |
+| `ResourcePreflighter` | `apply` | the same check at RESOURCE scope, where the provider can answer per-object |
+| `CompetingManagers` | `adopt` | names another controller already managing the object. **A driver without it can certify, ship, and be adopted on top of someone else's resource** — found on a live cluster, where six of ten mapped services failed exactly this way (D1090) |
+| `Claimer` | `adopt` | stamps authorship at takeover, so a binding says who owns the resource and since when |
+
+**This table is the harm-shaped subset, not the whole set.** The provider package
+defines SIXTEEN optional interfaces and every one of them is implemented by a shipped
+cloud driver. The four above the line are the ones most drivers want; the three below
+it are here because omitting them is not a missing feature but a hole — a driver that
+skips them passes certification and then does something unsafe quietly. The remaining
+nine are convenience, batching and progress reporting, and they are listed with what
+each protects in [`spec/providers/AUTHORING.md`](https://github.com/groundhold/groundhold/blob/main/spec/providers/AUTHORING.md).
+
+Saying the set is incomplete is the point: this page said "optional capabilities" over
+four entries for months, and an author who read only this page had no way to learn the
+other twelve existed.
 
 ## Writing one
 

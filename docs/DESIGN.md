@@ -36665,3 +36665,42 @@ vacuity guard, since a page telling nobody to run anything would otherwise pass.
 
 The sequence was then walked verbatim under the new name, which is the only thing that
 proves the page and not the gate.
+
+## D1123 — sixteen optional interfaces, four published, and one of the twelve was a guard
+D1090 recorded this and left it: the drivers page lists four interfaces under "Optional
+capabilities" with no hedge, the provider package defines sixteen, and
+`spec/providers/AUTHORING.md` — the document that page sends a driver author to — named
+none. It stayed open because closing it is an editorial decision about what a summary
+page owes a reader, and that is the owner's call, not an autopilot's.
+
+The measurement D1090 could not make is now made. It reported "sixteen defined, at least
+five implemented by drivers", because a probe by interface NAME returned zero for two of
+them. Probing by each interface's first METHOD resolves it: all sixteen are implemented
+by shipped cloud drivers, and the six with a single implementation were each read to
+confirm they are `func (d *Driver) …` in a driver package rather than internal plumbing.
+Sixteen of sixteen, not five.
+
+That number matters because "optional" reads as "nice to have", and for one group it is
+false. `CompetingManagers` is the guard that notices another controller already manages
+an object. A driver without it certifies, ships, and adopts on top of someone else's
+resource — found on a live cluster, where six of ten mapped k8s services failed exactly
+that way. An author who cannot learn the interface exists writes the hole in. The
+document's silence produces the defect.
+
+Decision (owner, 2026-08-16): the page carries the HARM-SHAPED subset and says so; the
+register lives in AUTHORING.md and carries all sixteen, grouped by what skipping each
+costs — a hole, a capability the runtime cannot offer, or comfort. The three safety
+interfaces missing from the page (`CompetingManagers`, `ResourcePreflighter`, `Claimer`)
+are added to it, because omitting one is not a missing feature.
+
+Two gates. The register is pinned to `provider.go` in both directions, read from the
+AST: an interface cannot be defined without being documented, and the document cannot
+name one that no longer exists. And the page must keep admitting its list is partial and
+keep pointing at the register — an incomplete list is only honest while it says so, and
+the failure this entry is about is precisely a subset that stopped reading like one.
+
+This is the gate D1090 asked for and refused to fake. The cheap version — every
+interface the page names must exist — would have passed on the day the gap was widest.
+
+Three mutants: define a new interface without registering it, drop a safety interface
+from the register, and reword the page so its table reads complete again.
