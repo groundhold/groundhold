@@ -57,7 +57,8 @@ against recorded reality. The first run says `APPLIED`, which is true and exactl
 as much as was checked: the convergence check had not yet seen the world.
 
 Everything below is the same loop with your own documents, and then with a real
-cloud.
+cloud. The commands say `./groundhold` throughout — if you built from source
+instead (last section), that is `bin/groundhold-go` and nothing else changes.
 
 ## Your first contract
 
@@ -112,7 +113,7 @@ capabilities:
 ## Verify
 
 ```sh
-bin/groundhold-go verify db.contract.yaml db.candidate.yaml
+./groundhold verify db.contract.yaml db.candidate.yaml
 ```
 
 ```
@@ -165,14 +166,14 @@ capabilities:
 ```
 
 ```sh
-bin/groundhold-go converge \
+./groundhold converge \
   examples/laptop/laptop.contract.yaml examples/laptop/laptop.candidate.yaml \
   --ledger state/prod.jsonl --provider fake --at "$(date -u +%FT%TZ)" --yes
 # ... apply, observe ...
 #   ✓ converged — verified against observed reality
 # CONVERGED
 
-bin/groundhold-go converge \
+./groundhold converge \
   examples/laptop/laptop.contract.yaml examples/laptop/laptop.candidate.yaml \
   --ledger state/prod.jsonl --provider fake --at "$(date -u +%FT%TZ)" --yes
 #   ✓ converged — the world already matches the candidate
@@ -207,7 +208,7 @@ login` alone leaves the driver with nothing to use:
 
 ```sh
 export GROUNDHOLD_GCP_ACCESS_TOKEN="$(gcloud auth print-access-token)"
-bin/groundhold-go converge db.contract.yaml db.candidate.yaml \
+./groundhold converge db.contract.yaml db.candidate.yaml \
   --ledger state/prod.jsonl --provider gcp --project my-project \
   --at "$(date -u +%FT%TZ)"
 ```
@@ -219,10 +220,10 @@ A plan with `dataLoss: certain` refuses under plain `--yes` and demands
 ## Already have infrastructure?
 
 ```sh
-bin/groundhold-go discover --provider gcp --project my-project
-bin/groundhold-go hints terraform.tfstate       # tf/pulumi state -> adoption hints
-bin/groundhold-go adopt ... --map db=project:region:name
-bin/groundhold-go converge ...                  # must report "converged" — the proof
+./groundhold discover --provider gcp --project my-project
+./groundhold hints terraform.tfstate       # tf/pulumi state -> adoption hints
+./groundhold adopt ... --map db=project:region:name
+./groundhold converge ...                  # must report "converged" — the proof
 ```
 
 Adoption refuses when the candidate disagrees with live observation:
@@ -254,7 +255,7 @@ skill persists its evidence table as a commit-pinned survey), CI can
 hold the two sides of the mirror together:
 
 ```sh
-bin/groundhold-go survey db.contract.yaml --survey .groundhold/survey/9f3c1a7.json
+./groundhold survey db.contract.yaml --survey .groundhold/survey/9f3c1a7.json
 ```
 
 Exit `2` with `code: survey-drift` means the code and the contract

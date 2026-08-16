@@ -1,6 +1,7 @@
 package provider_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -52,5 +53,65 @@ func TestQuickstartPinsNoVersionOfItsOwn(t *testing.T) {
 			"prereleases from `latest`, and every release so far is one, so that link " +
 			"404s — verified by fetching it. The README documents this; the quickstart " +
 			"must not undo it.")
+	}
+}
+
+// D1122. Reordering the page so it opens with a download (D1120) left every later
+// section calling `bin/groundhold-go` — the name the BUILD produces, and the build
+// moved to the bottom. A reader following the new opening ran two minutes of working
+// commands and then met one naming a file they never made.
+//
+// Nothing was wrong when either half was written. The opening is correct, the build
+// section is correct, and the sequence between them stopped working the moment the
+// order changed — the shape D1063 is about, this time introduced by my own edit and
+// found by walking the page rather than by any gate.
+//
+// So the rule is the page's own coherence: an invocation must use the name the page
+// told THAT reader to produce. The build section is the one place `bin/groundhold-go`
+// belongs, because producing it is what that section does.
+func TestQuickstartCallsTheBinaryItToldYouToGet(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "website", "pages", "quickstart.md"))
+	if err != nil {
+		t.Skipf("no quickstart here: %v", err)
+	}
+	page := string(raw)
+
+	build := strings.Index(page, "## Build from source")
+	if build < 0 {
+		t.Fatal("the quickstart no longer has a build-from-source section — this gate " +
+			"cannot tell which invocations are allowed to name the built binary")
+	}
+	buildEnd := strings.Index(page[build:], "\n## ")
+	if buildEnd < 0 {
+		buildEnd = len(page) - build
+	}
+
+	// Invocations of the built name anywhere except inside that one section.
+	lines := strings.Split(page, "\n")
+	offset, stale := 0, []string{}
+	for i, line := range lines {
+		start := offset
+		offset += len(line) + 1
+		if !regexp.MustCompile(`^\s*(\./)?bin/groundhold-go\s`).MatchString(line) {
+			continue
+		}
+		if start >= build && start < build+buildEnd {
+			continue // the section that produces it
+		}
+		stale = append(stale, fmt.Sprintf("line %d: %s", i+1, strings.TrimSpace(line)))
+	}
+	if len(stale) > 0 {
+		t.Errorf("these commands name the built binary outside the build section:\n  %s\n\n"+
+			"The page opens by telling a reader to download `./groundhold`. A command "+
+			"naming `bin/groundhold-go` sends them to a file they never produced — the "+
+			"sequence reads fine and does not run.", strings.Join(stale, "\n  "))
+	}
+
+	// Vacuity: if the page stops using the downloaded name entirely, the check above
+	// passes over a page that tells nobody to run anything.
+	if n := len(regexp.MustCompile(`(?m)^\s*\./groundhold\s`).FindAllString(page, -1)); n < 4 {
+		t.Errorf("only %d invocations use the downloaded name — the page was rewritten "+
+			"and this gate would now pass on almost anything", n)
 	}
 }
