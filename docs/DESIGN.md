@@ -36881,3 +36881,33 @@ covered is better than importing a package to look thorough.
 Two mutants: add a required property the output does not carry, and stop the harness
 producing shapes — the second is the vacuity guard, since a check that finds no
 documents to inspect passes silently.
+
+## D1129 — a published pointer to a repository nobody can open
+
+The dashboard service lives in a second repository of ours. The owner moved it to
+its permanent home and decided it stays CLOSED. Neither half of that is visible
+from here, and one published file had an opinion about it anyway: a skill that
+crosses to the mirror named the old repository in passing, as a helpful aside.
+
+The rename did not make that name wrong. It made it DEAD. Before the move the name
+resolved to something a reader could at least find and be refused by; after it,
+the name resolves to nothing at all, and the new name refuses everyone outside.
+Both readings end at a door that does not open, which is worse than saying nothing,
+because the aside reads as an invitation.
+
+This is the same defect the pre-rename token on the deny list already stops, so it
+belongs on the same list rather than in a new mechanism: the boundary refuses both
+the dead name and the current one. The rule the list now enforces is one sentence —
+**the published tree must not point a reader at a repository they cannot reach.**
+
+The deny list is a refusal, not a warning, so the entry you are reading could not
+be written the obvious way: naming the repositories to explain the rule performs
+exactly what the rule forbids, and the export rejected the first draft. That is the
+standard working, not an inconvenience to route around.
+
+Two mutants, one per alternative in the token — the dead name and the current one.
+Proving one does not prove the other; an alternation is a set, and a set is only
+gated when every member is. Three more copies of the same claim lived in files that
+never cross, including two runnable commands that would now fail against a name that
+no longer exists; those were corrected in this slice rather than left to be found by
+whoever ran them.
