@@ -232,8 +232,15 @@ func TestTheReleasePublishesWhatItClaimsToVerify(t *testing.T) {
 			"cannot cover them — the file the rebuild instructions live in is the " +
 			"one nobody can verify")
 	}
-	if !strings.Contains(body, "BUILDINFO.txt sbom.cdx.json > SHA256SUMS") {
-		t.Error("the checksum glob does not name every published artefact")
+	// D1130 removed the hand-written glob that this pinned as a literal string.
+	// What D680 actually cared about — the checksums cover BUILDINFO and the SBOM,
+	// not only the binaries — now holds because the summed set IS the directory,
+	// so what must stay true is that it is still derived from it. The ordering
+	// check above is what makes derivation sufficient rather than merely tidy:
+	// `find` can only see files that already exist when the step runs.
+	if !strings.Contains(body, `sha256sum "${ARTEFACTS[@]}" > SHA256SUMS`) {
+		t.Error("the checksum step no longer sums the set derived from dist/, so it " +
+			"can once again cover less than every published artefact")
 	}
 	if !strings.Contains(body, "Run every runnable artefact") {
 		t.Error("nothing executes the published binaries beyond the one version " +
