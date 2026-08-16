@@ -128,6 +128,56 @@ Every item below is a real finding from the D76 review; get them right up front.
   permission produces a false PASS, the dangerous direction. Make the set
   attribute-aware where an option changes it (public exposure adds IAM perms).
 
+## The optional interfaces, all of them (D1123)
+
+`provider.Provider` is the core every driver implements. Beyond it the package defines
+SIXTEEN optional interfaces, and a driver opts into each by having the method. Every one
+is implemented by at least one shipped cloud driver, so none of this is theoretical.
+
+The published drivers page carries only the harm-shaped subset. This is the whole set,
+grouped by what skipping it costs — because "optional" reads as "nice to have", and for
+the first group that is false.
+
+**Skipping these is a hole, not a missing feature.** A driver without them certifies,
+ships, and then does something unsafe without saying so.
+
+| interface | method | what it prevents |
+|---|---|---|
+| `CompetingManagers` | `CompetingManagers` | adopting an object another controller already manages. Found on a live cluster: six of ten mapped k8s services failed exactly this way |
+| `Preflighter` | `CheckPermissions` | mutating before knowing the identity may. A refusal is trustworthy; a pass is evidence, not proof |
+| `ResourcePreflighter` | `CheckResourcePermissions` | the same at resource scope, where the provider answers per object |
+| `Claimer` | `Claim` | a binding that cannot say who took ownership, or when |
+| `Reconciler` | `Reconcile` | guessing at an outcome the runtime lost. Read-only; not-found ≠ failed for a create |
+
+**These decide what the runtime can OFFER.** Absent, the verb simply cannot do its work
+for your provider — an honest limit rather than a silent one.
+
+| interface | method | what it enables |
+|---|---|---|
+| `Discoverer` | `List` | `discover` — read-only enumeration of resources the runtime did not create |
+| `Prober` | `Probe` | `probe` — outcome measurements; intrusive ones only under double consent |
+| `Enumerator` | `Enumerate` | the scope fan-out a gentle crawl walks (D141) |
+| `OutputProducer` | `OutputsFor` | operands one capability produces for another to consume |
+| `OperandConsumer` | `ConsumedOperands` | declaring which operands an action reads, so the compiler can order them |
+| `OperandDrifter` | `OperandTargets` | noticing when a consumed operand's source moved |
+| `EmissionCertifier` | `EmittedCompanions` | naming resources the provider creates as companions to yours |
+| `EmissionAdopter` | `SetEmissionAdopt` | consent to adopt those companions rather than duplicate them |
+
+**These change how a run behaves, never what it claims.** Omitting one costs comfort,
+not correctness.
+
+| interface | method | what it changes |
+|---|---|---|
+| `ProgressReporter` | `SetProgress` | per-phase progress during a long action |
+| `LROBudgeter` | `LROTimeout` | how long a long-running operation may take before the runtime gives up |
+| `FieldReclaimer` | `SetFieldReclaim` | whether converge may re-take fields another manager owns, under scoped consent (D699) |
+
+A new optional interface belongs in this table in the same commit that defines it. A
+gate holds that: `provider.go` and this file must name the same set, in both directions.
+The gate exists because the drivers page listed four of sixteen for months and nothing
+noticed — a driver author reading only that page could not learn the other twelve were
+there.
+
 ## The OTHER authoring mode: a schema-driven mapping (Kubernetes)
 
 Everything above describes a HAND-WRITTEN driver: a pure core, a network shell, a
