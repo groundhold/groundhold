@@ -31,6 +31,13 @@ Please do not publicly disclose before the coordinated date.
 ## Verifying a release
 
 Release binaries ship with a CycloneDX SBOM, `SHA256SUMS`, and `BUILDINFO.txt`.
+The SBOM's subject names the release. Its components describe the source tree the
+binaries were built from, which is a SUPERSET of what is linked into them — it also
+lists the CI tooling — so a finding against a component there is not by itself a
+finding against the binary. The binaries appear in it without a version: the version
+is injected at link time and Go's build info does not carry it, so the subject is
+the authority on which release the document belongs to.
+
 Before running a downloaded binary, verify the checksums:
 
 ```sh

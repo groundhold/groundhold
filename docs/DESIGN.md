@@ -37144,3 +37144,37 @@ Nothing here was caught by judgement; it was caught because the meter now has to
 before anything is published, and it refused to write the receipt. That is the D1135
 mechanism doing exactly the job it was added for, on its first outing, against its own
 author.
+
+## D1138 — the bill of materials that did not say what it was for
+
+Every release publishes a CycloneDX SBOM and the security page tells the reader it is
+there. Nothing had ever opened one. Fetched from the last release and read: the document
+names its own subject `{"type": "file", "name": "."}` — a directory called dot — and
+every copy of the binary it found carries the version `UNKNOWN`.
+
+The UNKNOWN is the scanner being honest. The version is injected at link time and Go's
+build info does not record it, so the tool cannot know and says so. That is the right
+behaviour and it is left alone; editing a scanner's findings to look tidier would be the
+opposite of what this document is for.
+
+The subject is ours to state and we had not. An SBOM answers two questions — which
+version is this, and what is in it — and read on its own, which is how a machine reads
+it, this one answered only the second. A person who finds the file on a release page
+knows which release it belongs to from the page around it. An inventory that ingests the
+JSON has no page.
+
+Measured before assuming, on the real artefact: 72 components, and the Go dependency the
+binary actually links is present and correct. So the document was not WRONG about
+contents, and this is not a case of a scan that missed something. It was unattributed.
+The other half — that the components describe the source TREE, a superset including CI
+tooling, so a finding there is not by itself a finding against the binary — was true and
+unsaid, and the security page now says it.
+
+The stamp goes in before the checksums are taken, and the gate holds the ORDER rather
+than the presence of the step, because that is where this can go quietly wrong: a
+document altered after it is hashed ships a checksum for a version nobody has, and one
+hashed before it is stamped is published unattributed anyway. Four mutants — the stamp
+losing the tag, the empty-document guard going away, the step disappearing, and the two
+steps swapping. The last one took three attempts to inject, because the block I was
+moving spanned the step I was moving it past; a mutant that reports a pass without
+having applied is the failure mode this project has written down twice already.
