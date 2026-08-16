@@ -36911,3 +36911,43 @@ gated when every member is. Three more copies of the same claim lived in files t
 never cross, including two runnable commands that would now fail against a name that
 no longer exists; those were corrected in this slice rather than left to be found by
 whoever ran them.
+
+## D1130 — the guard that compared a list with itself
+
+The release ships a checksum file and the README calls it coverage: the sums cover
+the binaries, the SBOM and the build info. A step existed to enforce that, with a
+comment saying exactly the right thing — a checksum file that silently omits an
+artefact is worse than none, because it reads as coverage.
+
+The step summed a hand-written list of names, and then asserted that every name on
+that same hand-written list appeared in the file it had just built from it. It
+compared a list with itself. Nothing it could be pointed at would make it fail
+except sha256sum breaking, and the artefact it was supposed to protect against —
+one produced by a step somebody adds later — was invisible to it by construction,
+because such a file is not on the list being checked.
+
+The upload was a SECOND hand-written copy of the same set, in the same file, and
+the two agreeing rested on whoever edited one remembering the other.
+
+The direction is the bad one. An artefact that ships unsummed is not caught by the
+reader either: the verification line we publish is `sha256sum -c SHA256SUMS
+--ignore-missing`, and `--ignore-missing` skips a file it has no entry for and
+prints OK. The reader is told they verified the release. They verified everything
+except the part nobody listed. Silence would have been more honest.
+
+So the checksum file is the manifest it already claimed to be. The summed set comes
+from the directory, and the upload set is read back out of the checksum file — an
+asset cannot ship without a checksum, because the checksum is what names it. Two
+things that were implied are now stated: a set of nothing is refused, and the count
+is compared, since containment holds vacuously over an empty set.
+
+That the checksums are taken LAST stops being tidiness and becomes load-bearing: a
+directory listing can only see files that already exist, so taking them early would
+now quietly narrow coverage rather than obviously omit two known names. The gate
+that pinned the old arrangement pinned the STRING that expressed it rather than the
+property, so improving the mechanism broke it — it now asserts the property.
+
+Four mutants, one per assertion, because an alternation is only gated when every
+member is. The first draft of the new gate reported on a comment about repository
+permissions instead of the command: `gh release create` appears in both, and a
+substring search finds the wrong one first.

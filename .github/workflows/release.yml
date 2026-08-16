@@ -359,17 +359,27 @@ jobs:
         working-directory: dist
         run: |
           set -euo pipefail
-          sha256sum groundhold_* BUILDINFO.txt sbom.cdx.json > SHA256SUMS
+          # D1130: the artefact set is the DIRECTORY, not a list kept in step by
+          # hand. What stood here summed a hand-written glob and then checked that
+          # same hand-written glob against the file it had just produced from it —
+          # a list compared with itself, which cannot fail unless sha256sum
+          # misbehaves. An artefact written by a step added later would ship
+          # unsummed with this step still green.
+          mapfile -t ARTEFACTS < <(find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' | sort)
+          # Vacuity: a checksum file covering nothing passes every check below.
+          [ "${#ARTEFACTS[@]}" -gt 0 ] || {
+            echo "dist/ holds no artefacts — refusing to publish an empty release" >&2
+            exit 1
+          }
+          sha256sum "${ARTEFACTS[@]}" > SHA256SUMS
           cat SHA256SUMS
-          # Every artefact that will be uploaded must be listed. A checksum file
-          # that silently omits one is worse than none: it reads as coverage.
-          for f in groundhold_* BUILDINFO.txt sbom.cdx.json; do
-            grep -q "  $f\$" SHA256SUMS || {
-              echo "$f is not in SHA256SUMS — refusing to publish an artefact " \
-                   "nobody can verify" >&2
-              exit 1
-            }
-          done
+          # A checksum file that silently omits an artefact is worse than none: it
+          # reads as coverage. Coverage now holds by construction, so what is left
+          # to prove is that the construction did not narrow it.
+          [ "$(wc -l < SHA256SUMS)" -eq "${#ARTEFACTS[@]}" ] || {
+            echo "SHA256SUMS covers $(wc -l < SHA256SUMS) of ${#ARTEFACTS[@]} artefacts in dist/" >&2
+            exit 1
+          }
           sha256sum -c SHA256SUMS
 
       - name: Attest build provenance
@@ -440,8 +450,16 @@ jobs:
               printf '**No SLSA build-provenance attestation is available for this release.** GitHub does not produce a retrievable one while this repository is private on a free plan, so the notes do not claim it. The checksums above and the reproducible build are the evidence.\n'
             fi
           } > dist/NOTES.md
+          # D1130: upload exactly what was summed. This list used to be written out
+          # by hand a second time, so "every artefact is verifiable" rested on two
+          # people-maintained lists agreeing, and nothing compared them. Reading it
+          # back from SHA256SUMS makes the checksum file the manifest it already
+          # claimed to be — an asset cannot ship without a checksum, because the
+          # checksum is what names it. NOTES.md is not summed and not uploaded.
+          mapfile -t ASSETS < <(awk '{print "dist/" $2}' dist/SHA256SUMS)
+          [ "${#ASSETS[@]}" -gt 0 ] || { echo "SHA256SUMS named no assets" >&2; exit 1; }
           gh release create "${GITHUB_REF_NAME}" \
             --title "groundhold ${GITHUB_REF_NAME}" \
             --prerelease \
             --notes-file dist/NOTES.md \
-            dist/groundhold_* dist/SHA256SUMS dist/sbom.cdx.json dist/BUILDINFO.txt
+            "${ASSETS[@]}" dist/SHA256SUMS
