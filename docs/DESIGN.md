@@ -37365,3 +37365,41 @@ the tag already refuses. It is a diagnostic refinement, not a second safety net.
 rather than worked around — the input that would tell them apart is an EMPTY tag, which
 cannot occur on a tag push, and inventing a case to kill a mutant that models nothing
 real would make the suite look stronger while testing less.
+
+## D1145 — the supply-chain check nobody had run, and why three mutants would not die
+
+"Actions are pinned to commit SHAs" is a control the threat model names, and it is two
+halves. The project gate holds the SHAPE — every `uses:` pinned, the same action pinned
+identically everywhere, and a version comment on each pin so the other half has something
+to work with (D474, D479). The other half re-resolves each tag against the provider and
+compares it to the pin. Twenty-seven lines with a vacuity floor, an annotated-tag
+indirection and a failure flag, and nothing had ever executed it.
+
+Its own comment records the bug the first draft had: the loop read from a PIPE, so it ran
+in a subshell and the failure flag could not escape — a job reporting success whatever it
+found. Nothing stopped that from returning. Run now, with the provider stubbed, against a
+workspace where the LAST pin is the moved one, which is the case that would notice.
+
+The provider is stubbed deliberately. A test that reached the network would be slow,
+flaky and token-dependent, and the question — does a moved pin fail the job — needs a
+consistent answer, not a real one.
+
+**Found by running it:** the pin list went to a fixed `/tmp` path. This pool is shared and
+self-hosted, and two runs of this workflow at once — a push and a pull request, the
+ordinary case — read and wrote one another's list. Reading the script would not have
+surfaced that; needing a hermetic temp directory to run it did. It is under the runner's
+own temp now, the way the neighbouring `gh` install step already did it.
+
+**And the thing three slices have now shown.** A mutant that removed the "tag no longer
+resolves" branch survived, because an empty resolution then falls through to the
+comparison and fails there anyway. That is the third time today: the sign-off check's
+missing-trailer rule is subsumed by its author-match rule (D1143), the README step's
+empty-result check is subsumed by its comparison against the tag (D1144), and now this.
+
+It is not three bugs. It is one habit, and a good one: these scripts put a SPECIFIC
+diagnostic branch in front of a GENERAL comparison, so the operator is told "the tag is
+gone" rather than "the tag moved to nothing". For every input that can actually occur the
+general branch already refuses, so the specific one cannot be killed by any test — it
+changes the message, not the verdict. Recorded rather than papered over: chasing those
+three would have meant inventing inputs that model nothing, and a suite full of those
+looks stronger while testing less.

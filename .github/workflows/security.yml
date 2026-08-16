@@ -95,11 +95,17 @@ jobs:
           # that reports success no matter what it found, which is the failure mode
           # this whole session keeps finding in other people's gates and which the
           # first draft of this one had.
+          #
+          # D1145: the file is under RUNNER_TEMP, not a fixed /tmp path. This pool is
+          # SHARED and self-hosted, so two runs of this workflow at once — a push and a
+          # pull request, which is the ordinary case — read and wrote one another's
+          # list. Found by running the step rather than by reading it.
+          pins="${RUNNER_TEMP:-/tmp}/pins.txt"
           grep -rhoE "uses:[[:space:]]+[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}[[:space:]]*#[[:space:]]*v[^[:space:]]+" \
             .github/workflows/*.yml \
             | sed -E 's|uses:[[:space:]]+||; s|@| |; s|[[:space:]]*#[[:space:]]*| |' \
-            | sort -u > /tmp/pins.txt
-          n=$(wc -l < /tmp/pins.txt)
+            | sort -u > "$pins"
+          n=$(wc -l < "$pins")
           if [ "$n" -lt 5 ]; then
             echo "only $n pins found — this job would be vacuous" >&2
             exit 1
@@ -118,6 +124,6 @@ jobs:
             else
               echo "ok $repo@$tag"
             fi
-          done < /tmp/pins.txt
+          done < "$pins"
           echo "checked $n pins"
           exit "$fail"
