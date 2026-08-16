@@ -36331,3 +36331,35 @@ with the spec on `plan`, delete a spec row, drop a verb from `silentOnSuccess`, 
 one from the spec's silent list, and delete the silent row entirely. All six fail.
 Behavioural checks in the harness back the static ones, so the maps cannot be correct
 and unconsulted.
+
+## D1114 — the progress enum was "closed twice" and published a third time
+`spec/progress.md` heads its table "Closed action-state enum" and says the enum is
+"closed twice, in code and in the suite". It is closed in a third place — that
+document — and nothing in the tree opened it. No test read `spec/progress.md` at all.
+
+The names were never the interesting part, and they agreed: ten states on both sides.
+What the table also publishes is two RELATIONS, and one of them is a claim about
+liveness. Motion is a pure function of state, and "the only motion states are `running`
+and `provider-wait`". A renderer animates what the runtime calls motion, and a human
+reads animation as *it is working*. Let the motion set grow to include `stalled` or
+`blocked-consent` and a wedged action keeps moving on screen while the document still
+promises it cannot — invisible to every existing test, because nothing compared the two.
+
+Both relations were correct when measured. Terminal is `{done, failed, skipped,
+indeterminate}` on both sides; motion is `{running, provider-wait}` on both. This is the
+D1112 shape again: true, and held by nothing.
+
+The expected table is written IN THE GATE rather than derived from either side. A gate
+that parses the spec and checks what it finds narrows itself when the spec loses a row —
+D1113 proved that by deleting one — and a gate that reads the code and checks the code
+proves nothing. So the ten states and their two attributes are named once, and both the
+runtime and the document are held against that.
+
+One extra assertion earns its place: a state the table does not name must not be motion
+or terminal. The maps are keyed, so an unknown key already answers false — but that is
+an assumption about map semantics standing in for a check, and this makes it a check.
+
+Four mutants, two per side: make `stalled` a motion state (the wedged-looks-alive
+failure, caught by name), make `skipped` non-terminal, delete a row from the published
+table, and flip the published `advancing` column for one state. All four fail, each
+naming which artefact moved.
