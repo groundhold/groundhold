@@ -16,10 +16,27 @@ import (
 // from a RED commit and superseded by v0.1.5.
 //
 // The checkable property is narrow on purpose. "Is the CHANGELOG complete?" is not
-// mechanical — not every decision deserves a line. "Does every RELEASED version
-// appear?" is: a tag is an artefact someone can download, and a downloader reading
-// the CHANGELOG must find it or an explicit statement about it.
+// mechanical — not every decision deserves a line. "Does every version-tagged build
+// appear?" is: the tag is how the entry is found, and a reader holding one must land
+// on it or on an explicit statement about it.
+//
+// D1132 corrects what this used to claim. "A tag is an artefact someone can download"
+// was true when written and D1080 ended it: in THIS repository a `v*` tag is a build
+// marker from the development line, no new one may be minted, and what a person
+// downloads is tagged on the mirror instead. So the subject is the development line's
+// eighteen historical tags against the build headings — which is a real property, and
+// not the one the sentence advertised.
+//
+// It also skips DELIBERATELY in the export now. It always skipped there, by accident:
+// the publication checkout is shallow, no tags come with it, and the run landed on the
+// "too few tags" branch — a skip that reads exactly like a pass. Fetching the tags
+// would be worse than leaving it. Measured on the mirror with tags visible, the gate
+// PASSES, and it passes on the collision D1078 exists to warn about: release `v0.1.8`
+// and heading `[v0.1.8]` are different artefacts under one string, so the coverage it
+// would report is a coincidence of names. A green earned that way is worth less than
+// an honest skip.
 func TestEveryReleaseTagAppearsInTheChangelog(t *testing.T) {
+	skipIfExported(t, "the development line's build tags")
 	root := repoRoot(t)
 
 	out, err := exec.Command("git", "-C", root, "tag", "-l", "v*").Output()
@@ -32,8 +49,15 @@ func TestEveryReleaseTagAppearsInTheChangelog(t *testing.T) {
 			tags = append(tags, v)
 		}
 	}
-	if len(tags) < 3 {
-		t.Skipf("only %d tags visible — a shallow clone cannot check this", len(tags))
+	// D1132: not a Skipf. Its sibling below already refuses here for the D328 reason —
+	// over a repository whose tags failed to list, this check passes while proving
+	// nothing — and the export, the one place tags legitimately do not come along, is
+	// handled above by name. What is left is a shallow clone of the source, which
+	// should say so rather than quietly stand down.
+	if len(tags) <= devLineHighWaterMark {
+		t.Fatalf("only %d v* tags visible, expected more than %d historical ones — a "+
+			"shallow clone or a broken listing, and this gate would pass on anything",
+			len(tags), devLineHighWaterMark)
 	}
 
 	body := mustReadRepo(t, "CHANGELOG.md")
@@ -64,8 +88,8 @@ func TestEveryReleaseTagAppearsInTheChangelog(t *testing.T) {
 	}
 	sort.Strings(missing)
 	if len(missing) > 0 {
-		t.Errorf("released tags absent from CHANGELOG.md and unexplained: %v\n"+
-			"A tag is something a person can download. Either give it a section or say "+
+		t.Errorf("version-tagged builds absent from CHANGELOG.md and unexplained: %v\n"+
+			"The tag is how a reader finds the entry. Either give it a section or say "+
 			"in the document why it has none.", missing)
 	}
 }
