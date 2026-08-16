@@ -37439,3 +37439,35 @@ not a violation.
 
 Found by sweeping for copies after fixing one of them (D1145). One instance is a defect;
 the same shape five more times in the same file is what the sweep is for.
+
+## D1147 — four of seven, and the one a single-element list cannot test
+
+`spec/export.md` publishes a seven-field CloudEvents mapping, and the dashboard ingests
+exactly this stream, so it is a machine-read contract like the output schema was. Nothing
+in the tree reads that document, and the fold's own test held four of the seven.
+
+Measured first, against a real seventeen-event ledger built by running the tool: all
+seven are correct today. This is not a repair. It is three mappings that were right and
+unheld, and one of them could not have been held by the fixture that existed.
+
+That one is the comma. `subject` is the affected capabilities joined by commas, and the
+fixture carried a single capability — a join over a one-element list produces the same
+string under every separator, so the rule was asserted by a case that cannot distinguish
+it from any other rule. The new fixture carries two.
+
+The other two are the ones with the sharper cost. `groundholdindex` is the consumer's
+cursor: wrong by one and a reader resumes in the wrong place or replays what it already
+had. `data` must be the ledger event with nothing summarised away — the document says
+consumers filter and the exporter does not editorialize, which is a promise that what
+reaches a reader is what happened rather than a view of it. A fold that quietly narrowed
+`data` would still validate as CloudEvents, still carry the right id, time and subject,
+and still be wrong in the one way that matters.
+
+The export refused the first fixture, correctly: it verifies the hash chain exactly as
+replay does, and a second event whose `prev` ignored the head the first one moved is a
+spliced tail. Recorded because it is the behaviour working — the fixture was wrong, not
+the gate — and because a synthetic ledger has to respect the chain to be worth testing
+against.
+
+Three mutants, one per newly-held mapping: the separator, the cursor, and a `data` that
+summarises.
