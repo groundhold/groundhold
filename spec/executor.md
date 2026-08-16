@@ -8,10 +8,15 @@ pin; what the scenarios prove is what apply obeys.
 
 1. **Read-set identity**: contract and candidate documents must hash to
    `reads.contractHash` / `reads.candidateHash`.
-2. **Preconditions** (closed registry, D36): `report-executable` is
-   re-verified from the pinned documents; `no-assumed-basis` from the
-   report; anything the executor cannot evaluate REFUSES fail-closed
-   (`within-autonomy` in v0).
+2. **Preconditions** (closed registry, D36) — `report-executable |
+   no-assumed-basis | no-assumed-hard-basis | within-autonomy`, the same
+   registry `spec/sealed-plan.md` publishes. `report-executable` is
+   re-verified from the pinned documents; `no-assumed-basis` and
+   `no-assumed-hard-basis` (D195: a HARD constraint may not seal on an
+   assumed value) from the report; anything the executor cannot evaluate
+   REFUSES fail-closed (`within-autonomy` in v0). A plan carrying a
+   precondition outside the registry is refused for the same reason —
+   the executor never skips what it cannot judge.
 3. **Effect-model limit**: `create`, `update` (D46: update requires a
    binding, every listed change must classify as honorable in place) and
    `delete` (D47: the pinned target identity must match the current
