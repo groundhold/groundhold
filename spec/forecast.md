@@ -41,15 +41,23 @@ no-effect | unknown | unforecastable | stale-plan
 class of effect cannot be predicted by this forecaster — the same
 distinction verdicts make between `unknown` and `unverifiable` (D6).
 
+**Reserved, never yet emitted:** `will-replace`, `will-adopt`,
+`unforecastable`. They are part of the closed set — nothing outside it may
+appear — but no forecaster produces them today, and a reader deciding what
+to route on should know which six are live: `will-create`, `will-update`,
+`will-delete`, `no-effect`, `unknown`, `stale-plan`.
+
 ## Unknown-reason registry (separately versioned)
 
 Emitted today: `missing-observation | stale-observation |
-unsupported-effect-model`, plus `target-identity-mismatch` (carried on
-stale-plan effects). Reserved for future providers/effects (defined,
-never yet emitted): `provider-computed | provider-defaulted |
-write-only | cross-resource-effect | eventual-consistency-window |
-requires-provider-validation`. The effect `unforecastable` is likewise
-reserved in the closed effect set.
+unsupported-effect-model | invalid-observation | missing-binding |
+target-already-matches | deposed-target-validated-at-apply`, plus
+`target-identity-mismatch` (carried on stale-plan effects). Reserved for
+future providers/effects (defined, never yet emitted): `provider-computed |
+provider-defaulted | write-only | cross-resource-effect |
+eventual-consistency-window | requires-provider-validation`. The effects
+`unforecastable`, `will-replace` and `will-adopt` are likewise reserved in
+the closed effect set.
 
 This is "known after apply" made systematic and explained: the forecast
 declares WHY it does not know, and policy can gate on ignorance
