@@ -36545,3 +36545,36 @@ and a heuristic that cannot separate two switches cannot be the basis of a claim
 
 Three mutants: drop a status from the runtime enumeration, unbold one on the page, and
 name `gap` as drift in the published exit contract.
+
+## D1120 — the first instruction was "install a compiler"
+The quickstart opened with `git clone`, `make check` and a build from source. A
+reader who wanted to know what this IS had to install a Go toolchain and sit through
+the full conformance suite before seeing a single verdict. The path that needs
+neither — the whole loop against the built-in `fake` provider — sat at line 83 of 201,
+below the fold, after two contract listings.
+
+That ordering is a claim about who the page is for, and it was aimed at contributors
+while the project needs readers who will RUN it. The page now opens with the shortest
+honest path: take a binary from the releases page, let the binary scaffold both
+documents (`example contract`, `example candidate`), fill the one blank the scaffold
+leaves, and run `converge` twice. No clone, no toolchain, no cloud, no credentials.
+
+The sequence is not a new claim. The harness already walks it — the scaffold leaving
+exactly one documented blank, the first converge applying, the second reporting a
+no-op — so what changed is which reader meets it first. It was also run verbatim as
+written, including the date format, before being published.
+
+Writing a download section introduced a drift risk this project has already paid for
+once. A version number on the quickstart would be a SECOND copy: the release workflow
+refuses a tag the README's download line does not name, and it knows nothing about
+this page, so the day a release is cut the quickstart starts handing out a stale
+binary with every gate green. The page therefore names no version and points at the
+releases listing, which is current by construction. A gate holds it there.
+
+The same gate refuses a `/releases/latest/download` URL, which is the shape someone
+will reach for precisely because it looks version-free. It 404s here: GitHub excludes
+prereleases from `latest` and every release so far is one. The README documents that;
+this is the second place it now cannot be undone. Verified by fetching the URL rather
+than reasoning about it — the 404 is why the section reads the way it does.
+
+Three mutants: pin a version, restore a `latest` URL, and remove the releases link.

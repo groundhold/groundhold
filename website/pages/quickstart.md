@@ -1,19 +1,63 @@
 # Quickstart
 
-## Build
+## Two minutes, no cloud, no clone
+
+The fastest way to see what this is: one binary, two generated documents, one
+command run twice. No cloud account, no credentials, no Go toolchain, nothing
+cloned.
+
+Take the newest asset for your platform from
+[Releases](https://github.com/groundhold/groundhold/releases) — `groundhold_linux_amd64`,
+`groundhold_darwin_arm64` and so on. Every release also carries `SHA256SUMS`:
 
 ```sh
-git clone https://github.com/groundhold/groundhold.git && cd groundhold
-make check        # vet + tests + the full conformance suite (556 cases); 261 run through both implementations, the rest Go-only
-cd go && go build -o ../bin/groundhold-go ./cmd/groundhold && cd ..   # the CLI binary
+sha256sum -c SHA256SUMS --ignore-missing
+chmod +x groundhold_linux_amd64 && mv groundhold_linux_amd64 groundhold
 ```
 
-Requirements: Go ≥ 1.25, Python ≥ 3.12 (reference implementation),
-PyYAML. Nothing else — the runtime is stdlib + yaml only.
+The README's download line pins an exact tag and is checked by the release
+workflow; this page deliberately does not repeat the version, so it cannot go
+stale on its own.
 
-The full attribute vocabulary is compiled into the binary, so it works
-with no external files — `--vocab <dir>` is optional and only EXTENDS
-the built-in set with your own types; `--no-vocab` forces the empty set.
+Now scaffold a contract and a candidate — the binary writes both, and the
+vocabulary is compiled in, so there is nothing else to fetch:
+
+```sh
+./groundhold example contract > my.contract.yaml
+./groundhold example candidate my.contract.yaml > my.candidate.yaml
+```
+
+The candidate comes out with exactly ONE blank: `service`, the provider's own
+name for the thing. Everything the contract pins is already filled, because the
+scaffold answers what the contract asked and leaves only what it cannot know.
+Put anything there — nothing reaches a cloud on the `fake` provider:
+
+```sh
+sed -i 's|service: ""|service: "rds"|' my.candidate.yaml
+```
+
+Then run the whole loop — verify, plan, apply, observe, convergence check —
+twice:
+
+```sh
+AT="$(date -u +%FT%TZ)"
+./groundhold converge my.contract.yaml my.candidate.yaml \
+  --ledger try.jsonl --provider fake --at "$AT" --yes
+# ... APPLIED
+
+./groundhold converge my.contract.yaml my.candidate.yaml \
+  --ledger try.jsonl --provider fake --at "$AT" --yes
+#   the sealed plan carries no actions — the world already matches the candidate
+# CONVERGED
+```
+
+**The second run is the point.** It banners `CONVERGED` because the runtime went
+and looked, not because the first apply returned success — convergence is proven
+against recorded reality. The first run says `APPLIED`, which is true and exactly
+as much as was checked: the convergence check had not yet seen the world.
+
+Everything below is the same loop with your own documents, and then with a real
+cloud.
 
 ## Your first contract
 
@@ -183,6 +227,25 @@ bin/groundhold-go converge ...                  # must report "converged" — th
 
 Adoption refuses when the candidate disagrees with live observation:
 **adoption must not lie**.
+
+## Build from source
+
+You only need this to change groundhold itself, or to run the conformance suite.
+Using it does not require building it.
+
+
+```sh
+git clone https://github.com/groundhold/groundhold.git && cd groundhold
+make check        # vet + tests + the full conformance suite (556 cases); 261 run through both implementations, the rest Go-only
+cd go && go build -o ../bin/groundhold-go ./cmd/groundhold && cd ..   # the CLI binary
+```
+
+Requirements: Go ≥ 1.25, Python ≥ 3.12 (reference implementation),
+PyYAML. Nothing else — the runtime is stdlib + yaml only.
+
+The full attribute vocabulary is compiled into the binary, so it works
+with no external files — `--vocab <dir>` is optional and only EXTENDS
+the built-in set with your own types; `--no-vocab` forces the empty set.
 
 ## Keep the code and the contract agreeing
 
