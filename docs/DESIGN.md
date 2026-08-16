@@ -36813,3 +36813,44 @@ did not compile, because every driver must implement the interface. That is not 
 that failed to fire; it is Go's type system already holding the property from the code
 side, which means the only direction that can drift is the page. The mutant was rerun
 from that side, which is what proves the assertion.
+
+## D1127 — "and to nothing else" was published six times and was not quite true
+Zero telemetry is stated in six places, and the honesty page calls it structural:
+"guaranteed by the absence of any network call in the core rather than by a case".
+The core half is true and was never in doubt — the verifier, compiler and ledger
+contact nothing. The sentence around it was the problem.
+
+`SECURITY.md` told researchers: "any network traffic beyond the configured provider is
+a vulnerability — report it." The honesty page said the runtime "talks to the cloud
+provider you configured and to nothing else." The runtime opens two further
+destinations, both documented features:
+
+    notify   POSTs to the URL the operator passed to --notify-url (D229)
+    reach    GETs the resource's own address after apply, to see if it is public (D537)
+
+Neither is telemetry. The operator asked for both, and nothing reports back to us —
+there is no us to report to. But a researcher who observes either and files, on the
+strength of that sentence, is told it is a feature. What they will not do next is file
+again. The claim failed in the SAFE direction and still cost exactly what such a claim
+is for: a disclosure list is only useful while it is exact in both directions, and one
+that flags documented behaviour spends the reporter's goodwill.
+
+Fixed by precision rather than retraction. The two authoritative statements now name
+all three destinations and say the list is exhaustive on purpose. The overview pages
+keep their shorter phrasing; per D1126, a summary owes the reader a true sentence, not
+the same list as the security note.
+
+The gate names the set of packages that may issue an outbound request — seven drivers
+plus `notify` and `reach` — and holds it BOTH ways. A new caller is either a driver,
+added here deliberately, or traffic nobody agreed to. And a named non-driver that stops
+calling must leave the security note in the same change, because an over-broad
+disclosure is still an inaccurate one.
+
+It tests for a CALL, not an import: `provider/errorclass.go` imports `net/http` for
+`http.Header` and `http.ParseTime` and contacts nothing, so importing the package
+cannot be the signal. Test files are excluded — a harness reaching its own `httptest`
+server is not egress.
+
+Three mutants: add a package that calls out (the strongest — it is the shape of an
+actual telemetry regression), drop a destination from the note, and remove the sentence
+telling researchers what to do about traffic outside the list.

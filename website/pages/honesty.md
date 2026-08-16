@@ -68,9 +68,13 @@ asks the provider what actually happened; an outcome stays *pending*
 until the provider answers. `DIED` is a state, not an apology.
 
 **10. Your data does not leave.**
-Zero telemetry. The runtime talks to the cloud provider you configured
-and to nothing else. The ledger is the observability surface — stream
-it wherever you already look, with `export`.
+Zero telemetry, and no network call at all in the verification core. The
+runtime opens three destinations and you asked for every one: the provider
+you configured, a `--notify-url` you supplied, and the resource's own
+address during the reachability probe (skipped loudly, never silently).
+Nothing reports back to us — there is no us to report to. The ledger is
+the observability surface; stream it wherever you already look, with
+`export`.
 
 **11. Proof travels without asking for trust.**
 An evidence capsule (`groundhold capsule`) carries one capability's
