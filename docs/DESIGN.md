@@ -36363,3 +36363,43 @@ Four mutants, two per side: make `stalled` a motion state (the wedged-looks-aliv
 failure, caught by name), make `skipped` non-terminal, delete a row from the published
 table, and flip the published `advancing` column for one state. All four fail, each
 naming which artefact moved.
+
+## D1115 — two registries in one spec, drifted in opposite directions
+`spec/forecast.md` publishes two closed registries — the effect set ("closed set, D19
+discipline") and the unknown-reason registry — and no test in the tree opened that file.
+Both had drifted, and the two directions are worth stating together because they fail a
+reader differently.
+
+The reason registry names what is "emitted today" and, separately, what is "reserved
+for future providers/effects (defined, never yet emitted)". That split is a claim about
+the runtime, not a list of words. The runtime emitted FOUR reasons the document knew
+nothing about: `invalid-observation`, `missing-binding`, `target-already-matches`,
+`deposed-target-validated-at-apply`. A consumer reading the registry to decide what to
+branch on would meet all four in production, having been told the set was three plus
+one.
+
+The effect set drifted the other way: nine published, six produced. What makes that
+misleading rather than merely incomplete is the care already taken — `unforecastable`
+was explicitly flagged as reserved, so a reader who sees ONE effect marked not-yet-
+emitted reasonably concludes the other eight are live. `will-replace` and `will-adopt`
+are not, and are emitted nowhere in the tree, the conformance suite or the reference
+implementation. Both are now flagged beside `unforecastable`, and the six live effects
+are named so the reader does not have to subtract.
+
+The gate holds both registries in both directions, with the expected sets named in the
+gate rather than derived from either side. The runtime's answers are read from the AST,
+so a word in a comment or an error string cannot pad a set. The sharpest assertion is
+the one that catches the reserved claim breaking: emitting something the document calls
+"never yet emitted" is the document telling a consumer not to expect what they will
+meet.
+
+Two of my own parsing errors are worth recording, because both would have made the gate
+lie in the permissive direction. Matching registry entries by word SHAPE
+(`[a-z]+(-[a-z]+)+`) silently dropped `unknown` and `unforecastable`, which carry no
+hyphen — a pattern tuned to the long names quietly excused the short ones. And reading
+the reason sentence as prose pulled in `stale-plan`, the effect those reasons are
+CARRIED ON, as though it were a reason itself. Both are now read from the published
+separator inside the backticked spans, which is the shape the document actually uses.
+
+Three mutants: emit a reserved effect (fails three ways, including by name), emit an
+undocumented reason, and delete a reason from the spec's emitted list.
