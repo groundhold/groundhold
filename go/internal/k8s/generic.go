@@ -34,6 +34,17 @@ const (
 // conformance case + a DESIGN entry (invariant #5) — never an ad-hoc addition.
 var closedOps = map[string]bool{"copy": true, "const": true, "quantity-int": true, "resolve-ref": true}
 
+// closedOpNames renders the registry for a refusal message, so the message cannot
+// name a set the registry does not have.
+func closedOpNames() string {
+	names := make([]string, 0, len(closedOps))
+	for op := range closedOps {
+		names = append(names, op)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
 type Mapping struct {
 	Mapping    string             `yaml:"mapping"`
 	FieldPath  string             `yaml:"fieldpath"`
@@ -117,7 +128,13 @@ func loadMapping(data []byte) (*Mapping, error) {
 	}
 	for path, a := range m.Attributes {
 		if !closedOps[a.Op] {
-			return nil, fmt.Errorf("attribute %s: op %q is not in the closed set (copy, const, quantity-int, resolve-ref) — a richer op is a spec change, not an ad-hoc addition; conditional semantics belong in a NAMED LENS", path, a.Op)
+			// D1118: the set is RECITED from the registry, never restated. This
+			// message used to carry its own copy of the four names, so adding an op
+			// left the refusal telling the author their op was not in a set that no
+			// longer existed — the third place the same closed set was written down.
+			return nil, fmt.Errorf("attribute %s: op %q is not in the closed set (%s) — "+
+				"a richer op is a spec change, not an ad-hoc addition; conditional "+
+				"semantics belong in a NAMED LENS", path, a.Op, closedOpNames())
 		}
 		if a.Op != "const" && a.Field == "" {
 			return nil, fmt.Errorf("attribute %s: op %s requires a field path", path, a.Op)

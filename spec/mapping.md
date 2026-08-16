@@ -28,10 +28,14 @@ therefore structurally impossible.
 
 ## The closed operator set + named lenses (invariant #4 at the driver layer)
 
-The engine applies a CLOSED operator set. v0.1: `copy` (raw field value), `const`
+The engine applies a CLOSED operator set: `copy` (raw field value), `const`
 (a literal), `quantity-int` (a k8s quantity string → integer; non-integer → a
-diagnostic, never a fabricated number). Growing the set is a spec change with a
-conformance case and a DESIGN entry (invariant #5) — never an ad-hoc addition.
+diagnostic, never a fabricated number), `resolve-ref` (a SECOND read, declared in
+the mapping rather than hidden in Go: a dangling reference yields a diagnostic
+NAMING the missing referent and no value — never a fabricated one, and never
+silence). Growing the set is a spec change with a conformance case and a DESIGN
+entry (invariant #5) — never an ad-hoc addition. The engine recites this set back
+when it refuses an unknown op, and reads it from the same registry it enforces.
 
 Anything conditional — NetworkPolicy's "default-deny only when policyTypes has
 Ingress and the rule list is empty", RBAC's verb-class derivation — is a **named
