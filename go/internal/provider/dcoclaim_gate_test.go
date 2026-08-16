@@ -41,10 +41,11 @@ func TestTheDCOPromiseHasAWorkflowBehindIt(t *testing.T) {
 				"a pull request", need)
 		}
 	}
-	// It must fail the run, not merely print. A check that reports and exits 0 is a
-	// green tick over an unsigned commit.
-	if !strings.Contains(body, "exit 1") {
-		t.Error("dco.yml never exits non-zero — an unsigned commit would pass the check " +
-			"that exists to stop it")
-	}
+	// D1143: what the check DOES is not asserted here any more. It used to require the
+	// string "exit 1" somewhere in the file, which a comment satisfies and which says
+	// nothing about whether an unsigned commit is actually refused. The step's shell is
+	// extracted and run against real commits by
+	// TestTheDCOScriptRefusesWhatItSaysItRefuses; this gate keeps the narrower claim it
+	// can honestly make — that the promise in CONTRIBUTING has a workflow behind it at
+	// all, reading the commits of a pull request.
 }

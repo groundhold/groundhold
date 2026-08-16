@@ -37299,3 +37299,69 @@ entry is the correction, not an edit to it.
 
 Two mutants: the trigger removed, and the trigger removed while the file still says the
 word. The second is the one that matters; it is the case the previous gate passed.
+
+## D1143 — the sign-off check nobody had run
+
+The DCO is the one contributor obligation here that cannot rest on memory: it stands in
+for a CLA, under a never-relicense promise, and CONTRIBUTING tells every contributor a
+pull request without it cannot be merged. What stood over the check was a token search
+— the workflow must contain "Signed-off-by", "rev-list" and "exit 1" somewhere in the
+file. Each of those is satisfiable by a comment, and none of them says the script works.
+
+It has two rules and the second had no test of any kind. The first refuses a commit with
+no trailer. The second refuses a trailer in somebody ELSE's name, which is the whole
+point: the DCO is a statement about who wrote this, not a string that must be present.
+
+Run rather than searched, against commits built for the purpose, the script turns out to
+be correct — all four cases behave. That is the result, and it is worth stating plainly:
+nothing was broken here. What was missing was any way to notice if it broke.
+
+Two things came out of the mutants that would not have come out of reading it.
+
+A mutant that gutted the first rule SURVIVED. The two rules overlap: a commit missing
+its trailer entirely also fails the author match, so the second catches what the first
+was for. That is D1134's equivalent-mutant shape, and the way out is the same — find the
+input that tells them apart. Here it is a sign-off quoted inside a sentence: the first
+rule anchors the trailer to its own line, the second matches a fixed substring anywhere
+in the body. A sign-off mentioned in prose is a mention, not a certification, and until
+that case existed the anchoring was untested and the mutant was unkillable.
+
+The old assertion is gone rather than kept alongside. A token search sitting next to a
+gate that runs the thing is not redundancy, it is a second, weaker answer to the same
+question, and the weaker one is what a future reader would copy.
+
+## D1144 — the meter caught the person who weakened a gate
+
+D1143 replaced a token search over the sign-off workflow with a gate that runs the
+script. The token search had asserted, among other things, that the file contains the
+string `exit 1`. Removing it was right — a comment satisfies that, and it says nothing
+about whether anything is refused — but the mutation catalogue had an entry DECLARING
+that test, and a mutant is a claim about a specific test having teeth.
+
+So the next full run reported a survivor: flip the workflow's `exit 1` to `exit 0` and
+the named gate still passed. The behaviour was covered the whole time, by the new test.
+The catalogue was pointing at the old one. Re-aimed, and the receipt that publishing
+requires was refused until it was — which is the D1135 mechanism working a second time
+against its own author, on the exact failure mode D1143 had just written down.
+
+The rule this leaves is small and worth keeping: weakening or removing an assertion is
+the same event as renaming the test, from the catalogue's point of view. Both leave a
+mutant naming something that no longer holds the property.
+
+**And the step nobody had run.** Every build here is a prerelease, so the README names an
+exact tag rather than pretending a permanent "latest" link works, and the cost is that it
+goes stale the moment the next release succeeds. It did: after one release was cut to
+replace binaries built with a since-patched toolchain, the README still handed a newcomer
+the line for the version that release existed to supersede (D1073). The step added then
+is release-blocking, has a regex, an empty check and a comparison in it, and nothing ever
+executed it. Its own comment explains why a repository gate cannot: only at release time
+is the tag known. That argument is right about which tag, and it is what left the LOGIC
+unexercised — the two are separable, and the script now runs here against four READMEs
+with the tag supplied the way the environment supplies it.
+
+One mutant of that step did not die, and the reason is the one D1143 met hours earlier:
+removing the empty-result check changes nothing, because comparing an empty extraction to
+the tag already refuses. It is a diagnostic refinement, not a second safety net. Recorded
+rather than worked around — the input that would tell them apart is an EMPTY tag, which
+cannot occur on a tag push, and inventing a case to kill a mutant that models nothing
+real would make the suite look stronger while testing less.
