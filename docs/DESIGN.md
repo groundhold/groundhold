@@ -36578,3 +36578,54 @@ this is the second place it now cannot be undone. Verified by fetching the URL r
 than reasoning about it — the 404 is why the section reads the way it does.
 
 Three mutants: pin a version, restore a `latest` URL, and remove the releases link.
+
+## D1121 — every guard pointed at over-claiming, and the code had no imports to cite
+The `code-to-contract` skill turns an application repository into a survey document —
+the evidence a contract is checked against. Its guards are careful and all point the
+same way: "code mentions it is not production requires it"; classify before promoting;
+run a contradiction pass; never emit a capability whose only evidence is an import.
+Every one defends against INVENTING a dependency. The evidence shape they ask for —
+"driver import + the config that wires it + the runtime entrypoint" — assumes an import
+exists to cite.
+
+A real codebase — the first this path has read that we did not write — showed what
+that assumption costs. It reaches several cloud services and declares **no cloud SDK in
+any manifest**: most of its modules list no external dependency at all, and every call
+is an endpoint assembled from strings with request signing written by hand. A survey
+built the way the procedure describes returns EMPTY, and an empty survey reads as a
+clean estate.
+
+The details stay out of this record deliberately. The codebase is a tester's, read with
+their permission to run a survey — which is not permission to publish their
+architecture. What the finding rests on is the SHAPE, and the shape is the whole of it:
+cloud access with no import to cite.
+
+The two failure directions are not symmetric, which is why only one was armoured. An
+invented dependency becomes a constraint somebody argues with. A missed one becomes a
+capability no contract carries and nothing ever verifies — for a system holding keys
+and personal data — and the report looks identical either way. This is D1063's shape on
+the authoring side: looking too little returns the reassuring answer.
+
+The skill now carries a guard pointing the other way, with the concrete shape to search
+for rather than a warning, and it cites this run so the risk is measured rather than
+hypothetical.
+
+**The gate is weak and saying so is part of the fix.** A skill is executed by an agent,
+not by CI, so nothing here proves an agent obeys it — what the gate prevents is the
+guard being deleted or hollowed out, which is the failure that would otherwise happen
+silently, since no test had ever opened that file. The real proof was the field run, and
+there is no substitute for it in this repository.
+
+Three mutants, and the second one earned its place twice. Deleting the guard fails;
+removing the citation fails; hollowing the guard to "look harder" PASSED, because the
+assertion searched the whole document for words that live elsewhere in it. That is the
+fourth wrong-witness failure in this series (D1113, D1116, D1118, now this), and the
+correction is the same every time: scope the assertion to the thing that drifts — here,
+the guard's own paragraph — not to the file that contains it.
+
+One more correction belongs here, because it is the discipline the survey exists to
+enforce. Two environment variables in that codebase differ by a single letter, and I
+read the second as a typo — a read that would always come back empty. Their own
+candidate document sets both, to different resources, deliberately. Caught before it
+reached a report: a false alarm handed to a tester costs more than the finding is
+worth, and the survey's job is to be believed.

@@ -27,7 +27,28 @@ integrations all look like infrastructure dependencies. Guards:
    Dockerfile/CI/deploy manifests vs runtime entrypoints. A dependency
    the code imports but no config wires, or an env var nothing reads,
    is a GAP to ask about — never a contract requirement.
-3. **Never promote non-code factors from inference.** Scale, SLAs
+3. **An empty survey is a finding, not a clean bill.** Every guard above
+   points at over-claiming; this one points the other way, because the
+   failure directions are not symmetric. Inventing a dependency produces
+   a constraint someone argues with; MISSING one produces a capability
+   no contract carries and nothing ever verifies — and the report reads
+   clean either way.
+   Measured on a real codebase (D1121), not hypothesised: a system
+   reaching several cloud services with **zero cloud SDKs in any
+   manifest** — most modules declaring no external dependency at all,
+   every call a string-concatenated endpoint signed by hand. A survey
+   built from manifests and driver imports would have found NOTHING and
+   reported a clean estate for a system that handles keys and personal
+   data.
+   So before concluding a repo has no infrastructure dependencies, look
+   for the shape that has no import: endpoints assembled from strings,
+   request signing, `*_RUNTIME_API` and resource-naming env vars, wire
+   protocol headers. If the finding set comes back empty or nearly so,
+   say that the search was made and what it looked for — an empty
+   survey asserted without that sentence is indistinguishable from one
+   nobody ran.
+
+4. **Never promote non-code factors from inference.** Scale, SLAs
    (rpo/rto), budget, regions/residency, exposure policy, compliance,
    org vendor commitments, team skills: ASK, and record the answers as
    `declared`. If the user cannot answer, the value enters
