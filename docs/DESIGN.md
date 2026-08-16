@@ -36288,3 +36288,46 @@ path four times while the others rotted.
 Two mutants: silence plan's refusal on stdout (nine checks fail, including the code-set
 guard, which is what tells you the silence was total rather than partial), and print the
 refusal twice.
+
+## D1113 — the banner vocabulary was published in one place and enforced in another
+`spec/presentation.md` publishes two closed sets, and says why they are closed: "the
+green vocabulary stays smaller than the failure vocabulary, or success banners become a
+second API". Four words are distinguished — PROVEN, CONVERGED, APPLIED, SEALED — each
+making a specific claim about what was established. A separate row lists the verbs that
+stay silent on success, because "a green word after `probe` or `observe` would claim
+the world is HEALTHY, when the verb only claims the measurement was recorded".
+
+The runtime has both sets too: a switch in `greenWord`, and `silentOnSuccess` consulted
+by the banner emitter. Nothing bound either pair. The published silent list held ELEVEN
+verbs; the runtime held EIGHTEEN. `survey`, `suggest`, `keygen`, `capsule`, `snapshot`,
+`attest` and `apiver` were silent in the tool and absent from the document that says
+which verbs are silent — neither copy wrong on its own, and no agreement between them.
+
+The `OK` row was worse than incomplete, it was the wrong SHAPE. It reads as a
+membership list; `greenWord` returns `OK` as its DEFAULT, so a verb joins that set by
+existing. Every verb ever added has been silently enrolled. The row now says so — `OK`
+is the default, a verb earns one of the four words by being named and earns silence by
+not bannering — because a list that pretended otherwise would be wrong again the first
+time a verb was added.
+
+Two gates, each pinning a set in both directions. The distinguished words are checked
+against the spec table AND the runtime is asked about every verb, including ones the
+table never mentions: a verb that starts claiming PROVEN without being granted it says
+something false in a single word, and that direction cannot be found by reading the
+spec. The silent sets are pinned to each other, the sharper direction being a verb
+LEAVING the runtime set — it starts printing `OK` on success, and for a measuring verb
+that reads as a verdict it never made.
+
+The first version of the distinguished-word gate parsed the spec and checked what it
+found, with a floor of four. Deleting the `plan` row left four verbs, cleared the floor,
+and dropped SEALED from the set the gate knew about — the check narrowed itself to
+match the document it was supposed to be holding. It now NAMES the five grants. That is
+the second time in two days a count-based guard has been weaker than it looked (D1112
+was the first), and the rule earned by both is the same: a guard that counts is a guard
+that can be satisfied by removal.
+
+Six mutants across the two gates: grant a new verb PROVEN, make the runtime disagree
+with the spec on `plan`, delete a spec row, drop a verb from `silentOnSuccess`, drop
+one from the spec's silent list, and delete the silent row entirely. All six fail.
+Behavioural checks in the harness back the static ones, so the maps cannot be correct
+and unconsulted.
