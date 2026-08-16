@@ -36854,3 +36854,30 @@ server is not egress.
 Three mutants: add a package that calls out (the strongest — it is the shape of an
 actual telemetry regression), drop a destination from the note, and remove the sentence
 telling researchers what to do about traffic outside the list.
+
+## D1128 — the output schema is what a machine trusts, and nothing compared it to output
+`spec/outputs.schema.json` is the contract a machine consumer validates against, and
+the versioning page makes it a stability promise: "CLI exit codes and the JSON output
+shapes are stable; outputs may GROW fields (consumers must tolerate unknown fields)".
+Twenty-one shapes, 1271 lines. Nothing in the tree ever compared one of them to what a
+verb actually prints.
+
+Measured before assuming: real output from six verbs — `verify`, `converge`, `audit`,
+`plan` (refusing), `discover`, `publish` — validated against its own `$defs` entry with
+a full JSON Schema validator. Six for six, clean. The schema is accurate. Again the
+D1112 shape: true, and held by nothing.
+
+The gate checks the half that breaks a consumer. A field ARRIVING is explicitly allowed
+— that is the published promise — so a gate forbidding extra properties would
+contradict the sentence it exists to defend. A required field LEAVING is what breaks
+somebody, so that is what it holds: every property the schema marks `required` must be
+present in real output, for every shape the harness can produce.
+
+It uses the standard library only. A full JSON Schema validator is a dependency the
+reference implementation's rule (stdlib + PyYAML) does not permit, and the strong half
+of validation needs no library: read `required`, look for the key. Saying which half is
+covered is better than importing a package to look thorough.
+
+Two mutants: add a required property the output does not carry, and stop the harness
+producing shapes — the second is the vacuity guard, since a check that finds no
+documents to inspect passes silently.

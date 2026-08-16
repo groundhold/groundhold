@@ -576,6 +576,59 @@ corrupt "4 asOf not the tip's time"   "$CAP/asof.json"
 corrupt "5 --trust by a foreign key"  "$CAP/clean.json" --trust 0000000000000000000000000000000000000000000000000000000000000000
 corrupt "6 anchor pinning another head" "$CAP/clean.json" --check "$CAP/badanchor.json"
 
+# spec/outputs.schema.json is the contract a machine consumer validates against, and
+# versioning.md promises the shapes are stable — "outputs may GROW fields (consumers
+# must tolerate unknown fields)". Growing is safe; a required field LEAVING is not, and
+# nothing compared the schema to what the verbs actually print.
+#
+# This checks the half that breaks a consumer: every property the schema marks
+# `required` must be present in real output. It deliberately does NOT check for extra
+# properties — the published promise allows them, and a gate that forbade them would
+# contradict the sentence it exists to defend.
+SCH="$(mktemp -d)"
+trap 'rm -rf "$LEDGER" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX" "$CI" "$PL" "$SIL" "$CAP" "$SCH"' EXIT
+SNOW="$(date -u +%FT%TZ)"
+
+"$CLI" verify examples/laptop/laptop.contract.yaml examples/laptop/laptop.candidate.yaml \
+  --json > "$SCH/verifyReport.json" 2>/dev/null || true
+"$CLI" converge examples/laptop/laptop.contract.yaml examples/laptop/laptop.candidate.yaml \
+  --ledger "$SCH/l.jsonl" --provider fake --at "$SNOW" --yes --json \
+  > "$SCH/convergeResult.json" 2>/dev/null || true
+"$CLI" audit examples/laptop/laptop.contract.yaml --ledger "$SCH/l.jsonl" --at "$SNOW" \
+  --json > "$SCH/auditResult.json" 2>/dev/null || true
+"$CLI" plan examples/lifecycle/2-refused.contract.yaml examples/lifecycle/2-refused.candidate.yaml \
+  --at "$SNOW" --json > "$SCH/planRefusal.json" 2>/dev/null || true
+"$CLI" discover --provider fake --at "$SNOW" > "$SCH/discoverResult.json" 2>/dev/null || true
+"$CLI" publish examples/laptop/laptop.contract.yaml --ledger "$SCH/p.jsonl" --at "$SNOW" \
+  --actor harness > "$SCH/publishResult.json" 2>/dev/null || true
+
+missing="$(python3 - "$SCH" <<'PYEOF' || true
+import json, os, sys
+d = sys.argv[1]
+schema = json.load(open("spec/outputs.schema.json"))["$defs"]
+bad = []
+checked = 0
+for name in sorted(schema):
+    path = os.path.join(d, name + ".json")
+    if not os.path.exists(path):
+        continue                       # only the shapes this harness can produce
+    try:
+        doc = json.load(open(path))
+    except Exception as e:
+        bad.append(f"{name}: output is not JSON ({e})")
+        continue
+    checked += 1
+    for prop in schema[name].get("required", []):
+        if prop not in doc:
+            bad.append(f"{name}: required property {prop!r} absent from real output")
+if checked < 5:
+    bad.append(f"only {checked} shapes were produced — the harness stopped exercising "
+               "the verbs and this check would pass over almost anything")
+print("; ".join(bad))
+PYEOF
+)"
+report "real output carries every required schema property" "" "$missing"
+
 echo
 if [ "$fail" -gt 0 ]; then
   echo "$pass passed, $fail FAILED — a shipped example does not work"
