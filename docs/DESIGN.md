@@ -36439,3 +36439,39 @@ A third attempt did not compile, so the binary under test was the previous one a
 assertion passed — a mutant that never ran, looking exactly like a mutant that could not
 kill. It is only in this entry because I checked the build output; the rule from D1113
 stands and now has a second form: assert the mutant APPLIED, and assert it BUILT.
+
+## D1117 — one closed registry, published twice, and the two copies disagreed
+The executor's precondition registry is published in two specs. `spec/sealed-plan.md`
+lists `report-executable | no-assumed-basis | no-assumed-hard-basis | within-autonomy`;
+`spec/executor.md` calls it a "closed registry, D36" and named three of them, omitting
+`no-assumed-hard-basis`. Neither file was read by any test.
+
+The omission points the opposite way from the usual, and that is what makes it worth an
+entry. `executor.md` also promises that "anything the executor cannot evaluate REFUSES
+fail-closed", so a reader of that page alone concludes a plan carrying
+`no-assumed-hard-basis` would be REFUSED. It is evaluated — it is the D195 gate that
+stops a HARD constraint sealing on a guess, the opt-in a contract enables with
+`autonomy.no_assumed_hard_basis: true`. A reader who believes that gate unreachable has
+a reason not to turn it on. A document can suppress a safety feature simply by not
+mentioning it.
+
+`executor.md` now carries the same four names as its sibling, says they are the same
+registry, and states explicitly that a precondition outside it is refused.
+
+Two gates. The first names the registry and holds all three artefacts against it: both
+documents, and the executor's own switch read from the AST so a name in a comment
+cannot pad the set. It also asserts the asymmetry that matters — `within-autonomy` is
+PUBLISHED but not EVALUATED, because it falls to the fail-closed arm, and a gate that
+required the two sets to be equal would force someone to "fix" that by implementing or
+deleting it.
+
+The second gate is the promise itself: the switch must have a `default` arm and that arm
+must refuse. Without it an unrecognised precondition falls through and is SKIPPED, which
+is precisely the fail-open a closed registry exists to prevent — a gate the operator
+believes is holding, which never ran. That check reads for the arm's absence explicitly
+rather than trusting that a switch has one.
+
+Three mutants, each verified to have applied AND built: stop evaluating
+`no-assumed-hard-basis` (two assertions fire, including the one that catches a
+precondition no document publishes), drop it from `executor.md` again, and gut the
+default arm so it no longer refuses.
