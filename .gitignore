@@ -22,3 +22,8 @@ website/site/
 
 # Go build cache — pre-existing tracked bloat (D627), never publish, never track
 .gocache/
+
+# D1135: the mutation meter's receipt — the commit it last passed at, which
+# sync-public.sh requires before publishing. A local fact about a local run; it
+# means nothing in anyone else's checkout and must never be committed or exported.
+.mutation-pass

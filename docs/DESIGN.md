@@ -37004,3 +37004,143 @@ grander one.
 
 Two gates in two trees, and the useful question was not "is this correct" but "where
 does this run, and what does it say when it doesn't".
+
+## D1133 — the alarm was blind to being blind
+
+The cloud canaries are the only thing that can notice a provider changing its mind:
+the unit, golden and httptest suites pin what we SEND, and a server-side default that
+moves is invisible to all of them. Each canary has a triage step that classifies a red
+run into one of three incident classes and opens an issue.
+
+The condition on that step was `failure() && steps.canary.outcome == 'failure'`.
+
+It never once matched. When a setup step dies — authentication, an input that was never
+supplied — the canary step does not fail, it is SKIPPED, and a skipped step's outcome is
+not `failure`. Every scheduled run for months took that path. Across the three clouds
+the count is 739 runs and no successes at all, over the whole history rather than
+lately; triage never ran, and not one issue was ever opened. The state in which we learn
+nothing was the one state the alarm could not see.
+
+Two conditions on one step, and the wrong one was load-bearing. `failure()` was true
+every time; `outcome == 'failure'` was never true. A reader checking whether red runs
+raise an alarm sees a step that says it does.
+
+The repair is not "also handle skipped" — that is the bug restated one case wider. The
+alarm is written against SUCCESS, the single outcome that needs no alarm, so every
+present and future way of not producing a verdict is covered by construction. A fourth
+class joins the three: the canary did not run. It is deliberately not one of the
+incident classes, because those describe what was measured, and here nothing was —
+drift would be INVISIBLE rather than absent, which is a different sentence and a worse
+one. It opens a single issue and re-uses it, since a blind watchdog repeats on every
+schedule and an alarm that shouts every six hours gets muted.
+
+The gate names the set of clouds rather than globbing for it (a glob that matched
+nothing would satisfy every assertion), and checks two things a step can satisfy
+separately: that triage is REACHED when no verdict was produced, and that once there it
+knows that case from a real failure. Three mutants — the narrow condition returning, the
+never-ran branch going away, and the set of clouds changing under the gate.
+
+What this cost is worth stating plainly: a watchdog that has never woken is not
+coverage, and nothing in the maturity record ever counted it as such. That much was
+already honest. What was not honest was a green-looking alarm attached to it.
+
+## D1134 — six mutants that had stopped touching the code they name
+
+The mutation meter re-injects every bug this project has ever fixed and requires a named
+test to catch each one. It is the instrument that says the suite still has teeth. Run by
+hand — the first time in months, and the reason for that is D1135 — it reported one
+survivor and, quieter, six NO-OPs: substitutions that no longer match anything, so the
+test ran over healthy code and the mutant proved nothing.
+
+The survivor was not a hole. Its mutation narrowed ONE of two rules that decide whether
+a role is privileged, and the second rule, added later for a different reason, subsumes
+the first entirely — measured over 462 permission strings, the mutation changed no
+verdict at all. An equivalent mutant, unkillable, sitting in the catalogue reporting a
+coverage gap that did not exist. Re-aimed at the BEHAVIOUR the test asserts rather than
+at one line implementing it, it is caught. The same trap was waiting in another of the
+six, where a fallback added later meant that disabling the obvious read left the outcome
+unchanged; that one is aimed at the refusal itself.
+
+Of the six drifted anchors, two were mine, from a slice earlier the same day that
+rewrote the code they pointed at. I did not notice, and could not have: the only thing
+that reports it takes half an hour and nothing runs it. The other four had drifted the
+ordinary way — a list grew a fifth entry, a help paragraph re-wrapped, a condition lost
+a clause, an assignment moved to its own line.
+
+Re-aiming one of them needed a real assertion rather than a re-aim: the equivalent of
+"sum only the binaries" is now "filter the directory scan", and the gate accepted any
+scan. It rejects a filtered one now, which is D1136.
+
+The lesson is about the instrument, not the six. Checking that a mutant still LANDS is
+not the same as checking that a test catches it, and it is a hundredth of the cost: the
+whole catalogue's anchors verify in about thirty seconds, against half an hour for the
+teeth. Cheap enough to run on every `make check`, which is the only property that would
+have caught my own drift on the day I caused it. A meter whose anchors are checked
+continuously and whose teeth are checked before publishing is worth more than one whose
+everything is checked never.
+
+## D1135 — the gate that a comment said somebody else had run
+
+The release workflow skips two gates on the mirror, the mutation meter and the
+standalone export gate, because both are private tooling that does not cross the
+boundary. The comment explaining the skip does not merely note it. It asserts: they
+"gate the PRIVATE source before the sync ... so the shipping code has already passed
+them; skipping the redundant re-run here is honest."
+
+Half of that was true. The publication script does run the export gate, so an export
+that cannot stand alone never reaches a branch. Nothing ran the meter. Its one automated
+caller is a job in a workflow that this repository's way of working — branch pushes, no
+pull requests — does not trigger, and which last ran months ago. So the several hundred
+re-injected bugs were guarded on no automated path at all, while a sentence in the
+release workflow said the shipping code had passed them.
+
+A skip justified by a step somebody else performs is worth exactly what that step is
+worth. The repair is not to soften the sentence, which would leave the hole and merely
+stop claiming otherwise; it is to perform it. The meter writes a receipt naming the
+commit it passed at, and the publication script refuses without one that matches what is
+about to be published. A receipt from an earlier commit is refused too, since it says
+nothing about this one, and the receipt is removed at the START of a run so a meter that
+dies part-way cannot leave a green one behind.
+
+The cost is real and lands where it belongs: whoever publishes waits for the meter. That
+is what the sentence was already promising on their behalf.
+
+## D1136 — reading the directory is not enough if the read is filtered
+
+D1130 made the release's checksum coverage hold by construction: the summed set is the
+contents of the build directory rather than a list kept in step by hand. The gate checked
+that the set comes from a directory scan.
+
+A scan with a positive name filter is a hand-written list wearing different syntax, and
+it re-opens the exact hole D680 closed — sum the binaries, leave the build info and the
+software bill of materials out, and the verification line we publish skips both and
+prints OK. The gate now requires the scan to exclude the checksum file and nothing else.
+Found by re-aiming a mutant, which is the argument for keeping mutants aimed.
+
+## D1137 — verifying a mutant against a test it does not name
+
+The six re-aimed mutants of D1134 were each checked by hand before being written down:
+apply the substitution, run the test, confirm it fails. Two of them then survived the
+full run anyway, and both failures were in the checking, not in the mutants.
+
+The first was aimed at a real property and verified against the wrong test. The mutant
+DECLARES which test must catch it; I ran the one I had just written, which does catch it,
+and never noticed the catalogue named a different one. A mutant is a claim about a
+specific test having teeth. Checked against some other test, it is a claim about nothing.
+
+The second was verified through a different execution path than the instrument uses. Run
+directly in a shell, the substitution matched; run the way the meter runs it, it silently
+matched nothing, because a bracket pair in the search pattern is a character class to
+`sed` and had to be escaped. The file changed anyway — the other half of the mutation
+applied — so the meter saw a mutated file, ran the test, and reported the test toothless
+when what was toothless was half a substitution.
+
+Both are the same mistake at different sizes: a check that does not go through the thing
+it is checking. The rule this leaves is narrow and worth keeping — verify a mutant the
+way the meter will, with the test the mutant names, and confirm the file changed in the
+way intended rather than merely changed at all.
+
+Nothing here was caught by judgement; it was caught because the meter now has to pass
+before anything is published, and it refused to write the receipt. That is the D1135
+mechanism doing exactly the job it was added for, on its first outing, against its own
+author.
