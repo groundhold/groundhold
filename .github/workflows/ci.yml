@@ -151,12 +151,23 @@ jobs:
       # observed. It exists because the darwin TEST now runs downstream (see
       # below), and a compile break caught at merge beats the same break caught at
       # the next sync. Cheap, and honest about being the lesser check.
-      - name: darwin/arm64 cross-compiles
+      #
+      # D1141: it covered darwin/arm64 and the release publishes FOUR platforms, so
+      # linux/arm64 and darwin/amd64 were compiled NOWHERE until a tag was pushed. The
+      # reason above applies to them word for word — a compile break caught at merge
+      # beats the same break caught at release — and there was no reason for the step to
+      # cover one of the three non-host targets rather than all of them. The host pair
+      # is already built and TESTED by the step above; these three only compile, which
+      # is all this claims.
+      - name: every published platform cross-compiles
         working-directory: go
-        env:
-          GOOS: darwin
-          GOARCH: arm64
-        run: go build ./... && go vet ./...
+        run: |
+          set -euo pipefail
+          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            GOOS="${t%/*}" GOARCH="${t#*/}" go build ./...
+            GOOS="${t%/*}" GOARCH="${t#*/}" go vet ./...
+            echo "compiles: $t"
+          done
 
   # Portability, darwin/arm64: the release cross-builds it, so something has to
   # actually RUN it. macos-latest (arm64) exercises the exact platform that would
