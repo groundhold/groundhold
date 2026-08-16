@@ -37403,3 +37403,39 @@ general branch already refuses, so the specific one cannot be killed by any test
 changes the message, not the verdict. Recorded rather than papered over: chasing those
 three would have meant inventing inputs that model nothing, and a suite full of those
 looks stronger while testing less.
+
+## D1146 — verified at an address somebody else can rewrite
+
+The release fetches one third-party binary at build time, and the threat model names the
+control: a pinned version AND a SHA-256 check. Both were real. Both were applied at a
+path on a machine this job shares with other repositories, at a name derived from the
+pinned version — so the download, the checksum and the extraction all happened somewhere
+predictable and writable by anyone else on the box.
+
+A checksum answers "are these the bytes I expected". It answers it about a FILE, at an
+address, at a moment. Verify at an address another tenant can rewrite and the answer
+stops covering the bytes that get used: the window between the check and the extraction
+is the whole of the protection. The pin and the hash were not wrong, they were applied
+one step short of the thing they protect.
+
+The step already had the argument in it. Two lines below the download, it explains that
+the binary is installed under the runner's own temp directory rather than anywhere
+global, because the pool is shared. That reasoning was applied to the DESTINATION and
+not to the SOURCE, which is the half that carries the trust.
+
+The same shape sat in the reproducibility check: it rebuilt each binary to a predictable
+temp path and compared hashes with the published artefact. Bytes planted there between
+the build and the comparison make a non-reproducible release compare equal to itself —
+and "you can rebuild bit-identically" is a published sentence on the security page.
+
+Six paths, one rule: a step that does not run on a single-tenant hosted runner writes
+under the runner's own temp. The gate reads `runs-on` and treats every label that is not
+a published hosted one as the fleet, the direction D713 established for exactly this
+file, since the pool's name is not ours to publish.
+
+A comment that MENTIONS a temp path must not trip it — that is D1142 read the other way,
+and the third mutant checks it: prose about a control is not the control, and it is also
+not a violation.
+
+Found by sweeping for copies after fixing one of them (D1145). One instance is a defect;
+the same shape five more times in the same file is what the sweep is for.

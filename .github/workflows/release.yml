@@ -42,16 +42,26 @@ jobs:
           GH_SHA256: "83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8bd60"
         run: |
           set -euo pipefail
+          # D1146: everything here stays under the runner's own temp directory. It used
+          # to land in /tmp at a name derived from the pinned version — so the download,
+          # the checksum and the extraction all happened at a path any other tenant of
+          # this SHARED pool can write. The pin and the SHA-256 are the control, and
+          # verifying a file at an address someone else can rewrite between the check
+          # and the use is the one arrangement that makes both decorative. The step
+          # already reasoned about the shared pool one line further down, for the
+          # install DESTINATION; the source is the half that mattered.
+          work="${RUNNER_TEMP}/ghdl"
+          mkdir -p "$work"
           tgz="gh_${GH_VERSION}_linux_amd64.tar.gz"
-          curl -fsSL -o "/tmp/${tgz}" \
+          curl -fsSL -o "${work}/${tgz}" \
             "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${tgz}"
-          echo "${GH_SHA256}  /tmp/${tgz}" | sha256sum -c -
-          tar -xzf "/tmp/${tgz}" -C /tmp
+          echo "${GH_SHA256}  ${work}/${tgz}" | sha256sum -c -
+          tar -xzf "${work}/${tgz}" -C "$work"
           # Into the runner's own temp dir, not /usr/local/bin: this job must not
           # assume it is root, and must not leave anything behind on a pool it
           # shares with other repositories.
           mkdir -p "${RUNNER_TEMP}/bin"
-          install -m 0755 "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" "${RUNNER_TEMP}/bin/gh"
+          install -m 0755 "${work}/gh_${GH_VERSION}_linux_amd64/bin/gh" "${RUNNER_TEMP}/bin/gh"
           echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
           "${RUNNER_TEMP}/bin/gh" --version
 
@@ -259,9 +269,9 @@ jobs:
             out="groundhold_${VERSION}_${os}_${arch}"
             GOOS="$os" GOARCH="$arch" go build -trimpath -buildvcs=false \
               -ldflags "-s -w -X main.buildVersion=${VERSION}" \
-              -o "/tmp/${out}.rebuild" ./cmd/groundhold
+              -o "${RUNNER_TEMP}/${out}.rebuild" ./cmd/groundhold
             a=$(sha256sum "../dist/${out}" | cut -d' ' -f1)
-            b=$(sha256sum "/tmp/${out}.rebuild" | cut -d' ' -f1)
+            b=$(sha256sum "${RUNNER_TEMP}/${out}.rebuild" | cut -d' ' -f1)
             if [ "$a" != "$b" ]; then
               echo "NOT REPRODUCIBLE: ${out} $a != $b" >&2
               exit 1
