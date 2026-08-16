@@ -74,9 +74,26 @@ func TestReleaseUploadsExactlyWhatItSummed(t *testing.T) {
 
 	// The set being summed must come from the directory. A `find` over dist is what
 	// makes coverage hold by construction rather than by somebody remembering.
-	if !regexp.MustCompile(`mapfile -t ARTEFACTS < <\(find \.`).MatchString(body) {
+	find := regexp.MustCompile(`mapfile -t ARTEFACTS < <\(find [^)]*\)`).FindString(body)
+	if find == "" {
 		t.Error("the artefact set is no longer read from the directory — without that, " +
 			"coverage is a list to be kept in step by hand, which is what D1130 found broken")
+	}
+	// D1136: reading the directory is not enough if the read is filtered. `find` with a
+	// positive `-name` is a hand-written list wearing a different syntax, and it re-opens
+	// the D680 hole exactly: sum the binaries, leave the SBOM and the build info out, and
+	// the reader's `--ignore-missing` prints OK over the two files nobody checksummed.
+	// The set is every file EXCEPT the checksum file itself, and nothing narrower.
+	if find != "" {
+		if !strings.Contains(find, "! -name SHA256SUMS") {
+			t.Errorf("the artefact scan does not exclude the checksum file by name, so it "+
+				"is not 'everything except SHA256SUMS': %s", find)
+		}
+		if regexp.MustCompile(`[^!] -name `).MatchString(find) {
+			t.Errorf("the artefact scan filters by name, so it sums a SUBSET of what ships "+
+				"— the shape D680 found, where two of four asset kinds could not be "+
+				"covered by construction: %s", find)
+		}
 	}
 
 	// Vacuity, the other way round: a checksum file covering nothing satisfies

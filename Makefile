@@ -21,6 +21,14 @@ vet:
 	# `make check` said all gates passed. A gate that can report success without
 	# re-reading its subject is not a gate.
 	cd go && go vet ./... && go test ./... -count=1
+# D1134: the mutants' ANCHORS, not their teeth. Six of them had stopped matching the
+# code they name — two because a slice of mine rewrote it hours earlier — and each
+# scored as a bug re-injected that nobody could catch. The full meter says so, but the
+# full meter takes half an hour and nothing runs it; this pass takes thirty seconds and
+# only asks whether the substitution still lands. Cheap enough to run every time, which
+# is the only property that would have caught the drift on the day it happened.
+	@if [ -x scripts/mutation-gate.sh ]; then ANCHORS_ONLY=1 ./scripts/mutation-gate.sh; \
+	else echo "no mutation meter in this tree (private tooling) — anchors NOT checked"; fi
 
 # export-check: prove the PUBLIC tree is still publishable (D474). The export is the
 # last step of the roadmap and the only one nothing was checking: it broke once (D340 —
