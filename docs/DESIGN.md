@@ -36784,3 +36784,32 @@ Four mutants: add a verb to the binary alone, drop `preflight` from the page, na
 verb that does not exist, and remove the authority sentence. The nineteen additions were
 then run to confirm the verbs exist and behave as described, rather than trusting the
 help text I read them from.
+
+## D1126 — I fixed one copy of the claim and left the other
+D1123 corrected the drivers page — four optional interfaces published where sixteen
+exist — and stopped there. The same claim stood on `extending.md`, in a different
+shape: "plus optional `Discoverer`/`Reconciler`/`Prober`", three named as a list rather
+than offered as examples. A reader of that page takes three as the set, and one of the
+thirteen it omits is the guard against adopting an object another controller manages.
+
+Fixing one copy of a claim without looking for the others is precisely the class this
+project keeps finding elsewhere. Here it was mine, six hours old, and found by walking
+the next page rather than by any gate — the same way D1122 was found.
+
+The two pages want different things, and the gate now says so rather than flattening
+them. `drivers.md` is a REFERENCE: it carries the harm-shaped subset in a table and
+must admit the subset. `extending.md` is an OVERVIEW: it has no business holding a
+sixteen-row table, so what it owes a reader is the SIZE of the set and a pointer to the
+register. Demanding the same artefact from both would make one of them worse.
+
+The core interface is checked exactly — names and order against `provider.Provider` —
+because there a complete list IS the page's job, and it was correct: seven methods,
+right names, right order.
+
+Four mutants and one instructive failure. Restoring the three-name list fails; removing
+the count fails; dropping a core method from the page fails; reordering the core fails.
+The fifth attempt — adding a method to `provider.Provider` to see the page notice —
+did not compile, because every driver must implement the interface. That is not a gate
+that failed to fire; it is Go's type system already holding the property from the code
+side, which means the only direction that can drift is the page. The mutant was rerun
+from that side, which is what proves the assertion.
