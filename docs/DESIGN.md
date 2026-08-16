@@ -36509,3 +36509,39 @@ a fixture written to exercise one promise walks through several.
 Four mutants, each verified applied and built: add an op to the registry without
 touching the spec, remove `resolve-ref` from the spec again, restore a hand-written list
 in the message, and stop refusing unknown ops entirely.
+
+## D1119 — the last unread spec, and an iteration that found nothing
+`spec/survey.md` was the last spec file no test opened. Unlike the four before it,
+nothing in it was wrong.
+
+The status vocabulary matches the runtime, seven names on both sides. The drift
+predicate — `uncovered`, and `orphaned` only under `--complete` — is what the code does
+and what the package's own tests already assert, several ways. The status literals were
+pinned to their two enumerating functions in D1025. Recording that plainly matters as
+much as the finds: "checked and clean" is a result, and a series that only ever reports
+discoveries is selecting what it tells you.
+
+The one binding that was missing is the DOCUMENT to the runtime. Three copies of the
+status vocabulary exist — the page's prose, `CoverageStatuses()`, `OrphanStatuses()` —
+and the existing gate pins the latter two to the literals the fold assigns. Nothing
+compared any of them to the page a reader uses to interpret a report. A status in the
+runtime and not on the page arrives in a report nobody can look up; one on the page and
+not in the runtime promises a distinction never drawn.
+
+A second gate holds the sentence that carries the whole exit contract, and holds it in
+both directions: `uncovered`, `orphaned` and `complete` must appear in it, and `gap`,
+`ignored`, `unwitnessed` and `witnessed-by-type` must NOT. Each of those four is
+documented as information — a question for a human, or evidence that cannot settle
+which capability it witnessed. Moving one into the drift set turns a clean estate red,
+which is the direction a survey gate fails badly in: an operator who gets drift from a
+correct estate stops believing the verb.
+
+Two other candidates were measured and dropped, which is the rest of what this iteration
+did. The provider list recited in a refusal had already been fixed to render from
+`knownProviders` — the D1118 shape, found and closed earlier. And `network.apiExposure`,
+whose `[public, private, mixed]` enum is recited across three drivers, showed no drift
+my probe could stand behind: the extra value it reported came from an adjacent switch,
+and a heuristic that cannot separate two switches cannot be the basis of a claim.
+
+Three mutants: drop a status from the runtime enumeration, unbold one on the page, and
+name `gap` as drift in the published exit contract.
