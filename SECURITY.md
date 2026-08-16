@@ -44,13 +44,18 @@ Before running a downloaded binary, verify the checksums:
 sha256sum -c SHA256SUMS
 ```
 
-Every release carries a keyless SLSA build-provenance attestation, and the release
-notes claim it only after the workflow has confirmed it is retrievable (D354). Verify
-with:
+Every published asset — the binaries, `SHA256SUMS`, the SBOM and `BUILDINFO.txt` —
+carries a keyless SLSA build-provenance attestation, and the release notes claim it
+only after the workflow has run the same command a reader would, on a binary AND on
+`SHA256SUMS` (D354, D1139). Verify with:
 
 ```sh
 gh attestation verify groundhold_<ver>_<os>_<arch> --repo groundhold/groundhold
+gh attestation verify SHA256SUMS --repo groundhold/groundhold
 ```
+
+The second line is the one worth running: it binds the whole checksum list to this
+build, so verifying it and then `sha256sum -c SHA256SUMS` covers every artefact.
 
 **Reproducible builds.** Binaries are built deterministically (`-trimpath`,
 `-buildvcs=false`, `CGO_ENABLED=0`, pinned `-ldflags`), so **within the same

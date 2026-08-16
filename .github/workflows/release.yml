@@ -418,12 +418,26 @@ jobs:
           }
           sha256sum -c SHA256SUMS
 
+      # D1139: this covered the binaries alone, and the README told the reader to run
+      # `gh attestation verify <asset>`. Measured against the last release: the binary
+      # passes, and SHA256SUMS, the SBOM and BUILDINFO all return 404 — three of the four
+      # asset kinds, including the checksum file a careful reader reaches for FIRST.
+      #
+      # Widening it is worth more than narrowing the sentence would be. An attested
+      # SHA256SUMS binds the whole list to this build, so one attestation check plus
+      # `sha256sum -c` covers every artefact; without it the list is the one link in that
+      # chain resting on nothing but the release page.
+      #
+      # `dist/*` rather than a wider hand-written glob: what ships is what is in the
+      # directory (D1130), and a list maintained beside it drifts from it. NOTES.md is
+      # written into dist/ LATER, at publish time, so it is not a subject here — the gate
+      # holds that order.
       - name: Attest build provenance
         id: attest
         continue-on-error: false
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-path: 'dist/groundhold_*'
+          subject-path: 'dist/*'
 
       # D354: the notes must not promise what the platform did not produce.
       # v0.1.4 shipped saying "verify with gh attestation verify"; the command
@@ -442,8 +456,19 @@ jobs:
             echo "::warning::attest step did not succeed — the notes will not claim an attestation"
             exit 0
           fi
-          if gh attestation verify "dist/groundhold_${GITHUB_REF_NAME}_linux_amd64" \
-               --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+          # D1139: a binary AND a non-binary. The subject widened to everything that
+          # ships, and confirming only the artefact kind that already worked would
+          # extend the claim without checking the part that was newly extended — which
+          # is the D354 mistake with one more step of indirection. SHA256SUMS is the
+          # one to name: it is what a reader reaches for first, and it was 404.
+          ok=1
+          for asset in "dist/groundhold_${GITHUB_REF_NAME}_linux_amd64" dist/SHA256SUMS; do
+            gh attestation verify "$asset" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || {
+              echo "::warning::no retrievable attestation for $asset"
+              ok=0
+            }
+          done
+          if [ "$ok" = 1 ]; then
             echo "verified=true" >> "$GITHUB_OUTPUT"
             echo "attestation verified — the notes may claim it"
           else
@@ -481,7 +506,7 @@ jobs:
             printf 'Verify what you downloaded:\n\n```sh\nsha256sum -c SHA256SUMS --ignore-missing\n```\n\n'
             printf 'Builds are reproducible: rebuild from this tag with BUILDINFO.txt and compare against SHA256SUMS. Also: `groundhold version`.\n\n'
             if [ "${PROVENANCE}" = "true" ]; then
-              printf 'Each binary carries a keyless SLSA build-provenance attestation, confirmed retrievable by this workflow — verify with `gh attestation verify <file> --repo %s`.\n' "${GITHUB_REPOSITORY}"
+              printf 'Every published asset — binaries, SHA256SUMS, the SBOM and BUILDINFO.txt — carries a keyless SLSA build-provenance attestation, confirmed retrievable by this workflow for a binary AND for SHA256SUMS. Verify with `gh attestation verify <asset> --repo %s`.\n' "${GITHUB_REPOSITORY}"
             else
               printf '**No SLSA build-provenance attestation is available for this release.** GitHub does not produce a retrievable one while this repository is private on a free plan, so the notes do not claim it. The checksums above and the reproducible build are the evidence.\n'
             fi

@@ -46,8 +46,9 @@ Every release carries `SHA256SUMS`, a CycloneDX SBOM and `BUILDINFO.txt` for a
 reproducible rebuild; the checksums cover all three (D680), and the download above
 fetches the sums file so the verification line has something to read — following
 the old snippet literally left `sha256sum: SHA256SUMS: No such file or directory`. Every
-release also carries a keyless SLSA build-provenance attestation, verifiable with
-`gh attestation verify <asset> --repo groundhold/groundhold` (D354). That command
+published asset — binaries, `SHA256SUMS`, the SBOM and `BUILDINFO.txt` — also carries a
+keyless SLSA build-provenance attestation, verifiable with
+`gh attestation verify <asset> --repo groundhold/groundhold` (D354, D1139). That command
 prints nothing at all when it succeeds and exits 0 — silence is the pass; a
 failure is loud.
 
