@@ -36629,3 +36629,39 @@ read the second as a typo — a read that would always come back empty. Their ow
 candidate document sets both, to different resources, deliberately. Caught before it
 reached a report: a false alarm handed to a tester costs more than the finding is
 worth, and the survey's job is to be believed.
+
+## D1122 — the reorder left every later command naming a file the reader never made
+D1120 moved the quickstart's opening from "clone and build" to "download a binary".
+It did not touch what came after, and everything after called `bin/groundhold-go` —
+the name the BUILD produces, from the section that had just moved to the bottom. Eight
+invocations, including the first step toward a real cloud.
+
+A reader following the new opening ran two minutes of working commands and then met
+one naming a file they never made. Nothing was wrong when either half was written:
+the opening is correct, the build section is correct, and the sequence between them
+stopped working the moment the order changed. That is D1063's shape exactly — a
+routine event elsewhere falsifying a true sentence — except this time the routine
+event was my own edit, made a few hours earlier, in the same file.
+
+It was found by walking the published page, not by a gate. The gate that existed
+checked the download section for a pinned version and a stale `latest` URL; it had no
+opinion about whether the rest of the page could run.
+
+Fixed by renaming every invocation outside the build section, plus one sentence for
+the reader who did build — the two names are the same binary and nothing else changes.
+
+The mechanical fix then made its own boundary error, which is worth recording because
+it is the same class one level down. Splitting the page at "## Build from source" and
+renaming everything above it left the LAST section untouched — it sits after the build
+section but is not about building, and a reader reaches it with a downloaded binary.
+Renaming by position is not renaming by meaning.
+
+The gate now holds the page's coherence rather than one section's contents: an
+invocation must use the name the page told THAT reader to produce, with the build
+section as the single place the built name belongs. Three mutants: reinstate the old
+name in the real-cloud section, rename the build heading so the gate loses its
+reference point, and strip the downloaded name entirely — the last one being the
+vacuity guard, since a page telling nobody to run anything would otherwise pass.
+
+The sequence was then walked verbatim under the new name, which is the only thing that
+proves the page and not the gate.
