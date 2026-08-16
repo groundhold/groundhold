@@ -37471,3 +37471,37 @@ against.
 
 Three mutants, one per newly-held mapping: the separator, the cursor, and a `data` that
 summarises.
+
+## D1148 — five spellings the two implementations agreed on by luck
+
+`spec/canonicalization.md` is the foundation under every hash this project takes: event
+ids, plan identity, the ledger chain. It publishes how the parser reads integers
+(decimal, `0x` hex, `0o` octal, leading-zero octal), floats in exponent form without a
+fraction, and the four spellings of a boolean — and it names its own enforcement:
+conformance cases pin literal hashes, both implementations must agree.
+
+Two of those rules were pinned. `3` against `3.0`, and `0` against `-0.0`. The rest were
+not, and the document says the suite is what holds them.
+
+Measured on both implementations before writing anything: `0x10`/`16`, `0o17`/`15`,
+`017`/`15`, `1e3`/`1000` and `True`/`true` all collapse into one document, one hash,
+identical across Go and the Python reference. Correct, and held by nothing.
+
+What makes that worth a case rather than a note is where the drift would come from. Each
+side reads YAML with a different library. A change to either — a stricter octal, a
+dropped leading-zero form, a boolean spelling narrowed — moves one implementation and not
+the other, silently, in a direction no test looks at. And identity IS the hash: the same
+document would take two different event ids, so a ledger written by one implementation
+would fail verification under the other. Not a wrong answer, a fork.
+
+Pinned as a pair, following the shape already here: one case fixes the literal on the
+plain spelling, its twin carries the exotic one and must produce the same hash. Separate
+documents on purpose — a single document holding both spellings could pin a hash while
+the two quietly parsed to different values, which is the equality this is about.
+
+Getting here cost five bad measurements, and the fourth is the one worth recording. A
+first probe fed bare `a: true` to the hasher, which refuses a document with no kind — so
+every comparison was empty against empty, and it printed a confident row of "identical"
+for nine rules it had not tested. A vacuous probe reads exactly like a clean one. The
+rule that came out of it: a NEGATIVE result needs its own witness before it is believed,
+and the cheapest one is a case that must fail.

@@ -324,3 +324,55 @@ cases:
         body: { confidence: 1e-18 }
     expect:
       error: document
+  - name: radix-and-boolean-spelling-plain-hash-is-pinned
+    description: >
+      D1148. `spec/canonicalization.md` publishes how the parser reads integers
+      (decimal, 0x hex, 0o octal, leading-zero octal), floats in exponent form
+      without a fraction, and the four spellings of a boolean. Identity is the hash
+      of the PARSED model, so all of them must vanish into the same document. Two of
+      those rules were pinned before this — 3 vs 3.0, and 0 vs -0.0 — and the rest
+      were correct in both implementations and held by nothing.
+      This is the plain spelling; the twin below carries the exotic one and MUST
+      produce this hash. A YAML library changing how it reads `0o17` or `True` on
+      ONE side would otherwise split the two implementations silently, and since
+      identity IS the hash, the same document would take two event ids and a ledger
+      written by one could not be verified by the other.
+    document:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: radixspell, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - { id: c-hex,  subject: db, path: replicas.count,  op: gte,    value: 16,   verify: { method: static } }
+          - { id: c-oct,  subject: db, path: scaling.floor,   op: gte,    value: 15,   verify: { method: static } }
+          - { id: c-lead, subject: db, path: scaling.ceiling, op: gte,    value: 15,   verify: { method: static } }
+          - { id: c-exp,  subject: db, path: iops.floor,      op: gte,    value: 1000, verify: { method: static } }
+          - { id: c-bool, subject: db, path: service.managed, op: equals, value: true, verify: { method: static } }
+    expect:
+      hash: sha256:08e8af6ca1121578859daa3123ba84329719fa2ca3125156b0523a38ea3fe6c9
+  - name: radix-and-boolean-spelling-hashes-identically
+    description: >
+      D1148, the twin: 0x10, 0o17, 017, 1e3 and `True` are the same document as
+      16, 15, 15, 1000 and `true`. The hash MUST equal the case above. Written as a
+      separate case rather than as an extra constraint in one document, because the
+      equality is the property — a single document could pin a hash while the two
+      spellings quietly parsed to different values.
+    document:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: radixspell, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - { id: c-hex,  subject: db, path: replicas.count,  op: gte,    value: 0x10, verify: { method: static } }
+          - { id: c-oct,  subject: db, path: scaling.floor,   op: gte,    value: 0o17, verify: { method: static } }
+          - { id: c-lead, subject: db, path: scaling.ceiling, op: gte,    value: 017,  verify: { method: static } }
+          - { id: c-exp,  subject: db, path: iops.floor,      op: gte,    value: 1e3,  verify: { method: static } }
+          - { id: c-bool, subject: db, path: service.managed, op: equals, value: True, verify: { method: static } }
+    expect:
+      hash: sha256:08e8af6ca1121578859daa3123ba84329719fa2ca3125156b0523a38ea3fe6c9
