@@ -36475,3 +36475,37 @@ Three mutants, each verified to have applied AND built: stop evaluating
 `no-assumed-hard-basis` (two assertions fire, including the one that catches a
 precondition no document publishes), drop it from `executor.md` again, and gut the
 default arm so it no longer refuses.
+
+## D1118 — a closed set written down three times, and the copy that grew alone
+`spec/mapping.md` publishes the mapping engine's operator set, calls it CLOSED, and
+attaches a rule: "Growing the set is a spec change with a conformance case and a DESIGN
+entry (invariant #5) — never an ad-hoc addition." No test read that file.
+
+The set was written down three times. The spec listed three ops. `closedOps` held four.
+The refusal message carried its own copy of the four names, in prose. `resolve-ref` — a
+real operator, used by a shipped mapping (`k8s.flux-kustomization`) to resolve a
+sourceRef into the URL that makes the GitOps capability portable — had earned its DESIGN
+entry and never reached the spec. Half the rule was honoured; the published half was
+not, and the published half is the one an author of a new mapping reads.
+
+The third copy is now derived rather than restated: the refusal renders the registry.
+A message that carries its own list eventually tells an author their op is missing from
+a set that no longer exists — a refusal that is both correct and misleading.
+
+Two of my own errors are worth the space, because both are the shapes this series keeps
+teaching.
+
+The first assertion about the refusal message inspected `closedOpNames()` and passed
+while the message itself carried a hand-written list. The helper was correct; the thing
+that drifts is the message. That is the wrong-witness failure from D1113 and D1116 for
+the third time, and the fix is the same one every time: drive the real path. The gate
+now loads a mapping declaring `no-such-op` and reads the error it gets back.
+
+Building that fixture then failed twice on OTHER published promises before it reached
+the one under test — the algebra pin refusing `k8s/v1` by name (D132), then the
+resource scope. Both are gates working exactly as documented, and both are evidence that
+a fixture written to exercise one promise walks through several.
+
+Four mutants, each verified applied and built: add an op to the registry without
+touching the spec, remove `resolve-ref` from the spec again, restore a hand-written list
+in the message, and stop refusing unknown ops entirely.
