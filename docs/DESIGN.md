@@ -37263,3 +37263,39 @@ cost of the third is a failing test that tells you the other two disagree.
 
 Run before it was written down, all four from this machine, which is the same reason the
 step exists at all.
+
+## D1142 — a comment denying the control satisfied the check for it
+
+D626 recorded that a tag would from then on trigger the other four workflows, so their
+tools would see the code being released, and left a gate to hold it. Measured today:
+three of the four carry `on.push.tags`. `ci.yml` does not.
+
+What makes this worth an entry is not the miscount. It is how the gate stayed green.
+
+It searched the whole file for the string `tags:`. `ci.yml` contains that string exactly
+once, in a comment somebody wrote as a CORRECTION: *"NOT on tags, whatever an earlier
+version of this comment claimed — `on:` above has no `tags:` filter, so a release tag
+never reaches this job."* An honest note, written by someone who had noticed the
+absence and wanted the next reader to know. That sentence is what kept the check for the
+thing it denies passing. The gate was green on the evidence of its own refutation.
+
+This project has already written the general form down once — a comment mentioning
+pipefail is not a command that arms it (D662) — and this is the same shape at one
+remove, because here the prose was not merely inert, it was a denial. The fix is the
+same: parse the trigger, do not grep for a word that appears in sentences about the
+trigger.
+
+The set of workflows a tag must reach is NAMED, and `ci.yml` is deliberately not in it.
+The reason is the OTHER half of D626, which held: what a release must not ship over runs
+inside the publishing job — make check, the differential fuzz, the race detector, the
+mutation meter and the export gate are steps there, and only a step in that job can stop
+`gh release create`. The three scanners have no such step, so a tag has to reach them.
+Left honest rather than tidied: `ci.yml`'s docs, tidy and portability jobs genuinely do
+not see a tagged commit. They saw it at merge, because a tag is cut from a commit
+already on main, and that is the whole of the argument for accepting it.
+
+D626's sentence said four. It was three, and it stays in the record as written — this
+entry is the correction, not an edit to it.
+
+Two mutants: the trigger removed, and the trigger removed while the file still says the
+word. The second is the one that matters; it is the case the previous gate passed.

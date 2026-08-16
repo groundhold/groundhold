@@ -1,6 +1,7 @@
 package provider_test
 
 import (
+	"gopkg.in/yaml.v3"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -184,19 +185,52 @@ func TestReleaseComparesTheVersionStampToTheTag(t *testing.T) {
 	}
 }
 
-// A tag must reach the other four workflows too, so their tools see the released code.
-func TestTagTriggersTheOtherWorkflows(t *testing.T) {
+// A tag must reach the SCANNERS, so their tools see the released code.
+//
+// D1142 rewrote this. It used to search the whole file for the string `tags:` and it
+// used to include ci.yml, and both were wrong at once. ci.yml has no tag trigger — a
+// dated correction in that file says so in as many words — and the sentence stating
+// the absence contains the substring, so the comment denying the control was the thing
+// satisfying the check for it. Green, on the evidence of its own refutation.
+//
+// The set is NAMED because it is a decision, not a derivation. ci.yml is deliberately
+// absent: what a release must not ship over runs INSIDE the publishing job — make
+// check, the differential fuzz, the race detector, the mutation meter and the export
+// gate are steps there, and only a step in that job can stop `gh release create`. The
+// three scanners have no such step, so a tag has to reach them. What genuinely does
+// not see a tagged commit is ci.yml's docs, tidy and portability jobs; they saw it at
+// merge, since a tag is cut from a commit already on main.
+func TestTagTriggersTheScanners(t *testing.T) {
 	root := repoRoot(t)
-	for _, wf := range []string{"security.yml", "lint.yml", "codeql.yml", "ci.yml"} {
+	// Parsed, not grepped: the trigger is `on.push.tags`, and any sentence in the file
+	// mentioning tags is prose about the control rather than the control.
+	type on struct {
+		Push struct {
+			Tags []string `yaml:"tags"`
+		} `yaml:"push"`
+	}
+	checked := 0
+	for _, wf := range []string{"security.yml", "lint.yml", "codeql.yml"} {
 		raw, err := os.ReadFile(filepath.Join(root, ".github", "workflows", wf))
 		if err != nil {
 			continue // an exported tree ships a subset
 		}
-		if !strings.Contains(string(raw), "tags:") {
-			t.Errorf("%s never triggers on a tag, so its checks do not see the code "+
-				"being released — the one commit that reaches a user is the one this "+
-				"workflow skips", wf)
+		var doc struct {
+			On on `yaml:"on"`
 		}
+		if err := yaml.Unmarshal(raw, &doc); err != nil {
+			t.Errorf("%s does not parse: %v", wf, err)
+			continue
+		}
+		checked++
+		if len(doc.On.Push.Tags) == 0 {
+			t.Errorf("%s has no `on.push.tags` filter, so a release tag never reaches it "+
+				"and its scanner does not see the code being released — the one commit "+
+				"that gets to a user is the one it skips", wf)
+		}
+	}
+	if checked == 0 {
+		t.Skip("no scanner workflows here: this is the exported tree")
 	}
 }
 
