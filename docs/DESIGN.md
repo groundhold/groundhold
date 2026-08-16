@@ -36745,3 +36745,42 @@ consumer reads whichever they find first — and the page keeps its badge warnin
 
 Three mutants: delete the runtime's licence, alter its copy so the two disagree, and
 remove the badge warning.
+
+## D1125 — the CLI reference listed thirty-three of fifty-two verbs
+The published CLI reference opened with "The verbs, grouped below" and listed
+thirty-three. The binary accepts fifty-two. Nothing on the page said it was a selection,
+and the phrasing invites the opposite reading.
+
+The nineteen missing were not obscure. `preflight` — the read-only pass that names every
+missing operand before anything mutates. `posture` and `horizon` — the proactive
+classifier and its future tense. `backup` and `restore` — disaster recovery. Also
+`refresh`, `react`, `crawl`, `status`, `wait`, `runs`, `snapshot`, `pair`/`unpair`,
+`connections`, `apiver`, `apireq`, `certify-capsule`, `version`. Each was built
+deliberately and has its own entry in this log; the page a reader consults to learn what
+the tool can do said none of them existed.
+
+This is D1123's shape one level up, and the harm is quieter but wider. There, an author
+shipped a driver with a hole. Here, a capability absent from the reference has — for
+that reader — not been built. Someone meets a permission failure mid-apply without
+knowing `preflight` would have named it first, or reaches for a backup during an
+incident and does not learn the verb is there.
+
+`groundhold --help` was complete the whole time, and that is the part worth keeping.
+The authoritative list existed; the derived one drifted from it silently, because
+nothing compared them. The same asymmetry as D1124: the generated artefact was right
+and the hand-written one was not.
+
+All nineteen are now listed in the group each belongs to, described by what the verb is
+FOR rather than by restating its flags — the page's job next to `--help`, which owns the
+flags. The intro says the same thing out loud: this is a derived list and `--help` is
+the authority.
+
+Two gates. The verb sets must match in both directions, parsed from the usage block that
+`--help` prints, so a new verb cannot ship undocumented and the page cannot name one the
+binary would reject. And the intro must keep naming `--help` as the authority, because a
+derived list is safe to read only while it admits what it is.
+
+Four mutants: add a verb to the binary alone, drop `preflight` from the page, name a
+verb that does not exist, and remove the authority sentence. The nineteen additions were
+then run to confirm the verbs exist and behave as described, rather than trusting the
+help text I read them from.
