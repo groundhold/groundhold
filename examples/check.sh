@@ -511,6 +511,71 @@ proven="$("$CLI" verify examples/laptop/laptop.contract.yaml examples/laptop/lap
   --json 2>&1 >/dev/null | grep -oE '\bPROVEN\b' | tail -1 || true)"
 report "verify still banners PROVEN" PROVEN "$proven"
 
+# spec/capsule.md publishes a numbered sequence of six verification checks and one
+# sentence that binds them: "Any refusal is corruption-class evidence: exit 5." A capsule
+# is evidence that TRAVELS — verified with "no ledger, no groundhold deployment, no
+# filesystem trust" — so the receiver has nothing but the exit code to route on. A check
+# that refused with 1 or 2 instead would read as a bad invocation rather than a tampered
+# proof, and a receiver could reasonably retry it.
+CAP="$(mktemp -d)"
+trap 'rm -rf "$LEDGER" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX" "$CI" "$PL" "$SIL" "$CAP"' EXIT
+CNOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+"$CLI" converge examples/laptop/laptop.contract.yaml examples/laptop/laptop.candidate.yaml \
+  --ledger "$CAP/l.jsonl" --provider fake --at "$CNOW" --yes >/dev/null 2>&1 || true
+"$CLI" capsule db --ledger "$CAP/l.jsonl" > "$CAP/clean.json" 2>/dev/null || true
+"$CLI" anchor --ledger "$CAP/l.jsonl" > "$CAP/anchor.json" 2>/dev/null || true
+
+# The positive control comes first: without it every assertion below could be satisfied
+# by a capsule that never verified at all.
+rc=0; "$CLI" capsule --verify "$CAP/clean.json" >/dev/null 2>&1 || rc=$?
+report "a clean capsule verifies" 0 "$rc"
+rc=0; "$CLI" capsule --verify "$CAP/clean.json" --check "$CAP/anchor.json" >/dev/null 2>&1 || rc=$?
+report "a capsule verifies against its own anchor" 0 "$rc"
+
+python3 - "$CAP" <<'PYEOF' || true
+import json, sys, copy
+d = sys.argv[1]
+b = json.load(open(f"{d}/clean.json"))
+def w(n, o): json.dump(o, open(f"{d}/{n}.json", "w"))
+c = copy.deepcopy(b); c["eventHashAlg"] = "sha3-256"; w("alg", c)          # check 1
+c = copy.deepcopy(b); c["events"][3]["event"]["capabilities"] = ["other"]; w("cap", c)  # check 2
+c = copy.deepcopy(b)                                                       # check 3
+ev = c["events"][2]["event"]
+if isinstance(ev.get("prev"), dict) and ev["prev"]:
+    ev["prev"][list(ev["prev"])[0]] = "sha256:" + "0" * 40
+w("link", c)
+c = copy.deepcopy(b); c["head"] = "sha256:" + "1" * 40; w("head", c)       # check 4
+c = copy.deepcopy(b); c["asOf"] = "2020-01-01T00:00:00Z"; w("asof", c)     # check 4, other half
+a = json.load(open(f"{d}/anchor.json"))                                    # check 6
+def bump(o):
+    if isinstance(o, dict):
+        return {k: ("sha256:" + "3" * 40) if k == "db" and isinstance(v, str) else bump(v)
+                for k, v in o.items()}
+    return o
+w("badanchor", bump(copy.deepcopy(a)))
+PYEOF
+
+# Each of the six, by the number the spec gives it. Asserting FIVE, not merely non-zero:
+# the exit code IS the claim.
+corrupt() {  # <label> <file> [extra args...]
+  label="$1"; file="$2"; shift 2
+  rc=0
+  "$CLI" capsule --verify "$file" "$@" >/dev/null 2>&1 || rc=$?
+  report "$label refuses corruption-class (exit 5)" 5 "$rc"
+}
+corrupt "1 unknown hash algebra"      "$CAP/alg.json"
+# NOT labelled "check 2". Editing an event so it stops listing the capability changes
+# its canonical hash, so the recomputed tip stops matching `head` and check 4 fires
+# first — verified by disabling check 2 alone, which changed nothing. That is defence in
+# depth rather than a redundant check, and the honest label is what the input proves: a
+# foreign event does not travel in this capsule.
+corrupt "a foreign event"             "$CAP/cap.json"
+corrupt "3 broken linkage"            "$CAP/link.json"
+corrupt "4 head not the recomputed tip" "$CAP/head.json"
+corrupt "4 asOf not the tip's time"   "$CAP/asof.json"
+corrupt "5 --trust by a foreign key"  "$CAP/clean.json" --trust 0000000000000000000000000000000000000000000000000000000000000000
+corrupt "6 anchor pinning another head" "$CAP/clean.json" --check "$CAP/badanchor.json"
+
 echo
 if [ "$fail" -gt 0 ]; then
   echo "$pass passed, $fail FAILED — a shipped example does not work"

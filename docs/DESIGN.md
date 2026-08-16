@@ -36403,3 +36403,39 @@ separator inside the backticked spans, which is the shape the document actually 
 
 Three mutants: emit a reserved effect (fails three ways, including by name), emit an
 undocumented reason, and delete a reason from the spec's emitted list.
+
+## D1116 — the capsule's six checks, and the exit code that is the whole contract
+`spec/capsule.md` publishes a numbered sequence of six verification checks and one
+sentence that binds them: "Any refusal is corruption-class evidence: exit 5." No test in
+the tree opened that file.
+
+The exit code carries more here than anywhere else in the system. A capsule is evidence
+that TRAVELS — the spec is explicit that verifying one needs "no ledger, no groundhold
+deployment, no filesystem trust" — so the receiver has the exit code and nothing else.
+A check that refused with 1 or 2 instead would read as a bad invocation rather than a
+tampered proof, and a receiver could reasonably retry it, or shrug. Corruption would
+arrive labelled as operator error.
+
+Measured across all six roads: an unknown hash algebra, a foreign event, broken linkage,
+a head that is not the recomputed tip, an `asOf` that is not the tip's time, `--trust`
+by a key that signed nothing, and an anchor pinning another head. All refuse with 5.
+True, and held by nothing — the same shape as D1112 and D1114.
+
+The harness now drives all seven inputs and asserts FIVE, not merely non-zero: the code
+is the claim. Two positive controls come first, because without them every assertion
+below could be satisfied by a capsule that never verified at all.
+
+One check could not be isolated, and the honest thing is to say so rather than let a
+label imply otherwise. Editing an event so it stops listing the capability changes its
+canonical hash, so the recomputed tip stops matching `head` and check 4 fires before
+check 2 can — verified by disabling check 2 alone, which changed nothing at all. That
+is defence in depth, not a redundant check, and the assertion is now labelled with what
+its input proves (a foreign event does not travel) rather than with the check number it
+does not reach.
+
+Mutants: collapse the refusal exit from 5 to 1 (all seven fail, which is the shape of
+the failure that would matter), and disable the linkage check alone (exactly one fails).
+A third attempt did not compile, so the binary under test was the previous one and every
+assertion passed — a mutant that never ran, looking exactly like a mutant that could not
+kill. It is only in this entry because I checked the build output; the rule from D1113
+stands and now has a second form: assert the mutant APPLIED, and assert it BUILT.
