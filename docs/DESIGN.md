@@ -37178,3 +37178,33 @@ losing the tag, the empty-document guard going away, the step disappearing, and 
 steps swapping. The last one took three attempts to inject, because the block I was
 moving spanned the step I was moving it past; a mutant that reports a pass without
 having applied is the failure mode this project has written down twice already.
+
+## D1139 — verify any asset, said the page, and three of four returned 404
+
+The README tells a reader to check a download's provenance with `gh attestation verify
+<asset>`. Any asset. Run against the last release, one asset kind at a time: the binary
+passes; `SHA256SUMS`, the SBOM and `BUILDINFO.txt` each return a 404. The attestation
+subject had always been the binaries alone.
+
+Two repairs were available and they are not equivalent. Narrowing the sentence would
+have made the page true and left the hole. Widening the attestation closes it, and the
+asset it closes it on is the one that matters most: an attested `SHA256SUMS` binds the
+whole list to this build, so a reader who verifies that one file and then runs
+`sha256sum -c` has reached every artefact. Unattested, that list was the single link in
+the chain resting on nothing sturdier than the release page it was downloaded from —
+and it is exactly the file a careful reader reaches for first, which is why the 404
+mattered more than its count of one in four.
+
+The subject is the build DIRECTORY, not a wider hand-written glob. A list of what ships,
+maintained beside the thing that actually ships, is the shape D1130 removed from the
+checksums an hour earlier, and it had already gone wrong here once.
+
+Widening a claim obliges you to check the part you widened. Confirming only the artefact
+kind that already worked would be D354's mistake with one more step of indirection — a
+green tick standing in for evidence — so the confirmation now runs the reader's own
+command on a binary AND on `SHA256SUMS`.
+
+The third property is an ordering one and it is easy to miss: the release notes are
+written into the same directory at publish time. Attest after that and the notes become
+a subject of their own attestation. The subject set is a directory, so what is in it
+depends on when you look, and the gate holds the when.
