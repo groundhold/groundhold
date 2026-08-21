@@ -969,6 +969,18 @@ func TestContractInnerKeysMatchThePublishedShape(t *testing.T) {
 			dig(contract, "properties", "meta"), contractMetaKeys},
 		{"provenanced attribute",
 			dig(candidate, "$defs", "provenanced"), provenancedKeys},
+		// D1170. Eight nesting levels were closed and compared here, and the level
+		// EVERY document has was not among them — the only one a reader meets before
+		// they have written anything. It hid two of exactly the defect this table
+		// exists to catch: the candidate's root published four keys while the loader
+		// accepted five (`meta`, read by nobody — measured, a candidate carrying it
+		// hashed IDENTICALLY to one without), and the contract's root accepted a
+		// `requirements` block the schema has never published and nothing has ever
+		// read at that depth. Both roots were also OPEN, so a contract spelled
+		// `constraint:` — the D673 defect verbatim — validated against the published
+		// document without a word.
+		{"contract root", contract, knownTopLevel["InfrastructureContract"]},
+		{"candidate root", candidate, knownTopLevel["ImplementationCandidate"]},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			keys, closed, escape := published(tc.block)

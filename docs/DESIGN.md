@@ -38482,3 +38482,61 @@ sugar (D1166), assumption (here) — and on the candidate side capability (D1160
 provenanced attribute (D1161). `implementation` stays free-form by D26, guarded by the
 operand check; `outcomes` and `auto_execute` stay open because closing a block nobody
 reads would be theatre.
+
+## D1170 — the level every document has was the one nothing checked
+
+Yesterday's entry closed the last inner block of the contract document and said, in
+the coordination channel, that "the contract document has NO unchecked key level
+left". That was wrong in the way this whole family is about. Eight nesting levels had
+been audited, closed and compared against the published schema; the level a reader
+meets BEFORE they have written anything — the root — was not among them, because the
+sweep had walked inward from a block someone had tripped over and never turned around.
+
+Three things were living up there.
+
+**The candidate's `meta`.** It sat in the allowed top-level set and was read by
+nobody: no field in either loader, absent from `spec/candidate.schema.json`, used by
+none of the twelve shipped candidates, emitted by no skill and by the scaffolder. The
+measurement that settled it is the one this repository trusts — a candidate carrying
+an authorship note and one without produce the IDENTICAL `candidateHash`. It is not
+merely unread; it does not reach the canonical form at all, so to this tool the two
+documents ARE the same document. Someone recording who reviewed a candidate, and why,
+was writing into a block that verifies away.
+
+**The contract's top-level `requirements`.** The same defect, in the same set, one
+line apart. Requirements are a CAPABILITY's short form (D8,
+`capabilities[].requirements`); nothing has ever read one at the root, nothing ships
+one, no prose teaches one. A contract with a root `requirements:` block hashes
+identically to one without — so an author who wrote requirements at the wrong depth
+had them accepted at exit 0, dropped, and then verified against as though they had
+never been stated. That is the D673 shape exactly, and it survived inside the set D673
+built, because D673 was written to catch a MISSPELLING and these two are spelled
+correctly.
+
+**Both published roots were open.** No `additionalProperties`, no `x-` escape. So the
+runtime refused a top-level key it does not read and the published schema did not: a
+contract whose block is spelled `constraint:` — the D673 defect verbatim, the one that
+made a contract requiring encryption PROVE a candidate refusing it — validates against
+`spec/contract.schema.json` without a word. A stranger's toolchain, holding the
+document this project publishes as the definition, would have passed it on.
+
+The fix is one shape in three places: drop both unread keys, close both roots with the
+`x-` escape beside them, and — the part that lasts — add the two roots to
+`TestContractInnerKeysMatchThePublishedShape`, the gate that already held the eight
+inner blocks to "the schema publishes exactly what the loader accepts, closed, with
+the escape". It is a table; the roots were simply not rows in it. They are now, and
+the removal of `meta` was chosen over the alternative of HASHING it deliberately:
+making it part of candidate identity would move the hash that every sealed plan pins,
+which is not something to do while tidying. The escape exists and says by its name
+that the runtime does not read it.
+
+One more repair, in the refusal itself. It told every author that "a misspelling of
+`constraints` proves a candidate that violates them" — true for a contract, and a
+candidate has no constraints block, so its author was sent looking for something they
+do not have. The example is now kind-specific: a misspelled `capabilities` implements
+nothing, and the contract it claims to satisfy is verified against an empty document.
+
+The general lesson is about the sweep, not the keys. An audit that walks inward from
+the defect that started it will cover everything the defect touched and stop exactly
+where the defect stopped — and the level nobody tripped over is not the obscure one,
+it is the one so obvious that the sweep began below it.

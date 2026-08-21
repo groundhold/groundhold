@@ -4,6 +4,11 @@
   "title": "InfrastructureContract v0.1",
   "type": "object",
   "required": ["apiVersion", "kind", "meta", "capabilities"],
+  "$comment": "closed at the root (D1170): the runtime refuses a top-level key it does not read, and until this was written the published schema did not — a `constraint:` (singular) block, the exact defect D673 refused, validated here without a word. `x-` is the escape, on both sides.",
+  "patternProperties": {
+    "^x-": { "$comment": "the escape a document uses for data the runtime deliberately does not read" }
+  },
+  "additionalProperties": false,
   "properties": {
     "apiVersion": { "const": "contract/v0.1" },
     "kind": { "const": "InfrastructureContract" },
