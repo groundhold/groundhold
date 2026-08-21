@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -50,6 +51,18 @@ func TestPlanKeySetsMatchWhatTheCompilerEmits(t *testing.T) {
 		{"witness record", compiler.WitnessRecord{}, planWitnessKeys},
 		{"precondition", compiler.Precondition{}, planPreconditionKeys},
 		{"pinned provider", compiler.Provider{}, planProviderKeys},
+		// D1172: the seven nested lists. They were admitted by NAME and never walked,
+		// so their inner keys were as open as the whole document had been before
+		// D1171 — inside the blocks that carry succession (`replaces`), operand
+		// resolution (`references`), sealed literals (`folds`) and the D249 record
+		// that stands between a held-back capability and being read as converged.
+		{"replaces", compiler.ReplaceInfo{}, planReplacesKeys},
+		{"reference", compiler.OperandRef{}, planReferenceKeys},
+		{"fold", compiler.OperandFold{}, planFoldKeys},
+		{"blocked capability", compiler.BlockedCapability{}, planBlockedKeys},
+		{"unverified capability", compiler.UnverifiedCapability{}, planUnverifiedKeys},
+		{"noop capability", compiler.NoOpCapability{}, planNoOpKeys},
+		{"advisory", compiler.Advisory{}, planAdvisoryKeys},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			emitted := jsonTags(t, tc.typ)
@@ -276,4 +289,111 @@ plan:
 				"cannot tell a typo from a malformed document", bad, err.Error())
 		}
 	}
+}
+
+// TestAMisspelledKeyInsideANestedBlockIsRefused is D1172's enforcement. The gate above
+// proves the sets match what the compiler emits; this proves they are CONSULTED at the
+// levels D1171 admitted by name and never walked.
+//
+// The subject is a REAL shipped fixture rather than a hand-typed document, because the
+// question "does the loader walk this list" is only answerable over a document that
+// actually has one — `conformance/testdata/show-four-ops.plan.json` carries both
+// `replaces` and `references`. A synthetic fixture would let the walk quietly find
+// nothing and this would pass over an empty list (D328).
+func TestAMisspelledKeyInsideANestedBlockIsRefused(t *testing.T) {
+	root := repoRootFromTest(t)
+	raw, err := os.ReadFile(filepath.Join(root, "conformance", "testdata",
+		"show-four-ops.plan.json"))
+	if err != nil {
+		t.Skipf("no four-ops fixture in this tree: %v", err)
+	}
+
+	load := func(t *testing.T, mutate func(map[string]any)) error {
+		t.Helper()
+		var doc map[string]any
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("the fixture does not parse: %v", err)
+		}
+		mutate(doc)
+		out, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(t.TempDir(), "p.json")
+		if err := os.WriteFile(p, out, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, lerr := LoadPlan(p)
+		return lerr
+	}
+
+	// actionsWith finds the first action carrying `key` and hands it to f. It FAILS
+	// when there is none: the fixture is the vacuity floor here, so a fixture that
+	// stopped carrying these blocks must break this test rather than pass it.
+	actionsWith := func(t *testing.T, doc map[string]any, key string, f func(map[string]any)) {
+		t.Helper()
+		body, _ := doc["plan"].(map[string]any)
+		acts, _ := body["actions"].([]any)
+		for _, it := range acts {
+			a, _ := it.(map[string]any)
+			if _, ok := a[key]; ok {
+				f(a)
+				return
+			}
+		}
+		t.Fatalf("no action in the fixture carries %q — this test would be walking an "+
+			"empty list and reporting that as proof (D328)", key)
+	}
+
+	t.Run("the fixture loads untouched", func(t *testing.T) {
+		if err := load(t, func(map[string]any) {}); err != nil {
+			t.Fatalf("the clean fixture does not load, so every refusal below proves "+
+				"nothing: %v", err)
+		}
+	})
+
+	t.Run("replaces", func(t *testing.T) {
+		err := load(t, func(doc map[string]any) {
+			actionsWith(t, doc, "replaces", func(a map[string]any) {
+				rep := a["replaces"].(map[string]any)
+				rep["providerid"] = rep["providerId"]
+				delete(rep, "providerId")
+			})
+		})
+		if err == nil {
+			t.Error("a misspelled `providerId` inside `replaces` was ACCEPTED. apply " +
+				"builds the binding's `lineage.replaces` from that field and nothing " +
+				"else, so the record of what this resource SUCCEEDED is dropped — the " +
+				"question an audit and a capsule are read for.")
+		} else if !strings.Contains(err.Error(), "providerid") {
+			t.Errorf("the refusal does not name the key: %v", err)
+		}
+	})
+
+	t.Run("references", func(t *testing.T) {
+		err := load(t, func(doc map[string]any) {
+			actionsWith(t, doc, "references", func(a map[string]any) {
+				ref := a["references"].([]any)[0].(map[string]any)
+				ref["slott"] = ref["slot"]
+				delete(ref, "slot")
+			})
+		})
+		if err == nil {
+			t.Error("a misspelled `slot` inside `references` was ACCEPTED — a " +
+				"reference resolves an operand from another action's receipt at apply " +
+				"(D226), so this is an operand silently unresolved in the document " +
+				"that gets executed")
+		}
+	})
+
+	t.Run("the x- escape still works inside a nested block", func(t *testing.T) {
+		if err := load(t, func(doc map[string]any) {
+			actionsWith(t, doc, "replaces", func(a map[string]any) {
+				a["replaces"].(map[string]any)["x-note"] = "an author's marker"
+			})
+		}); err != nil {
+			t.Errorf("the hatch was refused inside a nested block: %v — it is the same "+
+				"hatch at every other level of every other document here", err)
+		}
+	})
 }

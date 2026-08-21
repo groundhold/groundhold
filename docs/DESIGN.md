@@ -38641,3 +38641,51 @@ re-aimed at that single site with a test that loads a document using the hatch a
 top level and every known block below it. A second copy of a rule is a second place for
 a gate to point at while the first goes unwatched — which is the same sentence this
 whole family keeps writing, this time about a gate rather than a document.
+
+## D1172 — the nested lists, and paying a debt the previous entry chose to record
+
+D1171 closed nine levels of the sealed plan and ended by naming what it had not done:
+the loader admitted seven nested lists by NAME and never walked them, so inside
+`references`, `folds`, `replaces` and the D249 triple the keys were as open as the whole
+document had been an hour earlier. This pays that.
+
+**The measured harm, and the correction that goes with it.** When the debt was first
+described, `replaces` was called the sharp one because it feeds a safety check — apply
+refuses a replacement create that returns the identity it is replacing. That was wrong,
+and the measurement says so: `replacedIDByCap` (D1056) re-derives the replaced id from
+the paired DELETE's `targetProviderId`, a required field, precisely so the backstop
+never rests on the create's forgeable `replaces` block. A misspelling there does not
+disarm the guard.
+
+What it does disarm is the record. The binding's `lineage.replaces` is built from
+`a["replaces"]["providerId"]` and from nothing else — no fallback on that path — so
+`providerid:` silently drops the answer to *what did this resource succeed*. That is the
+question an audit and a capsule exist to answer, and losing it is an evidence defect
+rather than a safety one. Saying which it is matters more than saying it loudly: an
+overstated harm spends the same credibility as an understated one.
+
+**The sets are derived, again.** Seven more rows in the reflection gate hold
+`planReplacesKeys`, `planReferenceKeys`, `planFoldKeys`, `planBlockedKeys`,
+`planUnverifiedKeys`, `planNoOpKeys` and `planAdvisoryKeys` to `compiler.ReplaceInfo`,
+`OperandRef`, `OperandFold`, `BlockedCapability`, `UnverifiedCapability`,
+`NoOpCapability` and `Advisory`. Fifteen levels of one document now say what the
+compiler emits, and nothing in either loader restates a set by hand.
+
+**The enforcement test uses a REAL fixture.** `conformance/testdata/show-four-ops.plan.json`
+carries both `replaces` and `references`, and the test fails outright if the fixture
+stops carrying them. The question "does the loader walk this list" is only answerable
+over a document that has one; a synthetic fixture would let the walk find nothing and
+report that as proof, which is D328's whole complaint.
+
+**One correction to the prose D1171 wrote.** That entry added a sentence to
+`spec/sealed-plan.md` — "Every key above is the whole set. Both loaders REFUSE a
+mapping carrying anything else." It was true of the levels D1171 closed and over-broad
+for the nested ones, which is a published claim running slightly ahead of the mechanism
+— the exact shape D464–D476 is about, written by the entry that keeps finding it. The
+sentence is now true. The lesson is not to write the weaker sentence next time; it is
+that the same slice which publishes a claim should be the slice that gates it, and when
+it cannot be, the claim waits.
+
+The reference implements none of these blocks semantically — it has no reference
+resolution and no fold — and closes their keys anyway. Key closure needs no semantics,
+so a rule about the shape of a document can be dual even where its meaning is not.

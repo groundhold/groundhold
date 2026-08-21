@@ -84,6 +84,35 @@ var (
 
 	planPreconditionKeys = map[string]bool{"type": true}
 
+	// D1172. The debt D1171 recorded rather than hid: seven nested lists the loader
+	// admitted by NAME and never walked, so their inner keys were as open as the whole
+	// document had been. Measured harm, on `replaces`: apply builds the binding's
+	// `lineage.replaces` from `a["replaces"]["providerId"]` and NOTHING else, so a
+	// misspelling there drops the succession record — the answer to "what did this
+	// resource replace", which is what an audit and a capsule are read for. The D48
+	// safety backstop does NOT fall with it: D1056 re-derives the replaced id from the
+	// paired delete's REQUIRED targetProviderId precisely so it never rests on this
+	// forgeable field. So the damage here is to the evidence, not to the guard — which
+	// is worth saying plainly, because the first framing of this debt overstated it.
+	planReplacesKeys = map[string]bool{
+		"providerId": true, "generation": true, "because": true,
+	}
+	planReferenceKeys = map[string]bool{
+		"slot": true, "producerAction": true, "capability": true,
+		"output": true, "kind": true,
+	}
+	planFoldKeys = map[string]bool{
+		"slot": true, "capability": true, "output": true, "value": true,
+		"observedAt": true, "ttlSeconds": true,
+	}
+	planBlockedKeys    = map[string]bool{"capability": true, "reason": true}
+	planUnverifiedKeys = map[string]bool{"capability": true, "attributes": true}
+	planNoOpKeys       = map[string]bool{"capability": true, "reason": true}
+	planAdvisoryKeys   = map[string]bool{
+		"code": true, "capability": true, "pointer": true,
+		"detail": true, "next": true,
+	}
+
 	// D1171. The shipped example and the published prose both wrote
 	// `provider: { name, project, region }`. The compiler emits name and project;
 	// apply reads name and project; nothing anywhere reads a region here. A reader
@@ -100,6 +129,32 @@ func requireHash(v any, what string) error {
 	s, ok := v.(string)
 	if !ok || !hashRE.MatchString(s) {
 		return fmt.Errorf("%s must be a sha256:<hex> hash", what)
+	}
+	return nil
+}
+
+// checkNestedItems closes ONE list of mappings. The list itself is optional — the
+// compiler emits every one of these with `omitempty` — but a present list must be a
+// list, and an item must be a mapping: a fail-closed loader that shrugged at
+// `replaces: "yes"` would be reading the document less carefully than the shape it
+// then refuses keys against.
+func checkNestedItems(v any, known map[string]bool, where, why string) error {
+	if v == nil {
+		return nil
+	}
+	list, ok := v.([]any)
+	if !ok {
+		return fmt.Errorf("%s must be a list", where)
+	}
+	for i, it := range list {
+		m, ok := it.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s[%d] must be a mapping", where, i)
+		}
+		if err := docio.CheckKnownKeys(m, known,
+			fmt.Sprintf("%s[%d]", where, i), why); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -173,6 +228,24 @@ func LoadPlan(path string) (map[string]any, error) {
 		"a plan is executed, and a block the executor does not read decides nothing "+
 			"while looking like it does"); err != nil {
 		return nil, err
+	}
+	for _, nb := range []struct {
+		key   string
+		known map[string]bool
+		why   string
+	}{
+		{"blocked", planBlockedKeys, "a blocked capability is the record that a " +
+			"compile could NOT reconcile it (D249) — a key nothing reads weakens the " +
+			"one thing standing between this and being read as converged"},
+		{"unverified", planUnverifiedKeys, "same record, same consequence (D249)"},
+		{"noop", planNoOpKeys, "a no-op entry says a capability needed nothing done; " +
+			"a key nothing reads makes that claim less legible, not more"},
+		{"advisories", planAdvisoryKeys, "an advisory is carried so an AGENT reads it " +
+			"(D388); a field nothing reads is an advisory nobody receives"},
+	} {
+		if err := checkNestedItems(p[nb.key], nb.known, "plan."+nb.key, nb.why); err != nil {
+			return nil, err
+		}
 	}
 	if c, _ := p["contract"].(string); c == "" {
 		return nil, fmt.Errorf("plan.contract is required")
@@ -279,6 +352,33 @@ func LoadPlan(path string) (map[string]any, error) {
 			return nil, fmt.Errorf("duplicate action id: %s", aid)
 		}
 		ids[aid] = true
+		if rep, present := a["replaces"]; present {
+			m, ok := rep.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("action %s: replaces must be a mapping", aid)
+			}
+			if err := docio.CheckKnownKeys(m, planReplacesKeys,
+				"action "+aid+": replaces",
+				"apply builds the binding's `lineage.replaces` from `providerId` here "+
+					"and nothing else, so a misspelling drops the record of what this "+
+					"resource SUCCEEDED — the question an audit and a capsule are read "+
+					"for. (The D48 backstop does not fall with it: D1056 re-derives the "+
+					"replaced id from the paired delete's required pin.)"); err != nil {
+				return nil, err
+			}
+		}
+		if err := checkNestedItems(a["references"], planReferenceKeys,
+			"action "+aid+": references",
+			"a reference resolves an operand from another action's receipt at apply "+
+				"(D226); a key nothing reads is an operand silently unresolved"); err != nil {
+			return nil, err
+		}
+		if err := checkNestedItems(a["folds"], planFoldKeys,
+			"action "+aid+": folds",
+			"a fold is a literal SEALED into the decision (D283) — its identity fields "+
+				"are what a reader checks the seal against"); err != nil {
+			return nil, err
+		}
 		if cap, _ := a["capability"].(string); !writes[cap] {
 			return nil, fmt.Errorf("action %s: capability outside plan.writes", aid)
 		}
