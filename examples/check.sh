@@ -729,6 +729,59 @@ PYEOF
 )"
 report "every shipped document validates against its published schema" "" "$missing"
 
+# D1158: and the third published schema, against the artefact it exists for. The ledger
+# the run above produced is validated event by event — the one document type
+# `spec/state.schema.json` describes, which until now it did not describe at all: its
+# root carried no `type`, no `$ref` and no `properties`, so every document was a valid
+# State Model v0, the number 42 included. Nothing caught that because nothing had ever
+# handed it a ledger.
+missing="$(python3 - "$SCH/l.jsonl" <<'PYEOF' || true
+import json, os, sys
+
+sys.path.insert(0, "examples")
+from schemacheck import errors, selftest                # noqa: E402
+
+path = sys.argv[1]
+schema = json.load(open("spec/state.schema.json"))
+defs = schema.get("$defs", {})
+bad = []
+seen = set()
+n = 0
+if not os.path.exists(path):
+    bad.append("the converge above produced no ledger, so the state schema met nothing")
+else:
+    for i, line in enumerate(open(path), 1):
+        line = line.strip()
+        if not line:
+            continue
+        n += 1
+        try:
+            doc = json.loads(line)
+        except Exception as e:
+            bad.append("ledger line %d: not JSON (%s)" % (i, e))
+            continue
+        seen.add((doc.get("event") or {}).get("type"))
+        for p, msg in errors(doc, schema, defs):
+            bad.append("ledger line %d: %s: %s" % (i, p or "(root)", msg))
+# A floor on BOTH counts: a truncated ledger, or one carrying a single kind of event,
+# validates almost nothing while reading exactly like a clean run.
+if n < 8 or len(seen) < 5:
+    bad.append("only %d events of %d distinct types reached the state schema — the run "
+               "stopped producing a real ledger and this check would pass over nothing"
+               % (n, len(seen)))
+# The schema must also REFUSE. It accepted every document ever handed to it until
+# D1158, and a validator that cannot say no is not one.
+for name, doc in (("the number 42", 42), ("a bare object", {}),
+                  ("an export record", {"index": 0, "type": "x", "event": {}})):
+    if not errors(doc, schema, defs):
+        bad.append("the state schema ACCEPTED %s as a valid ledger event — its root "
+                   "constrains nothing again" % name)
+bad += selftest()
+print("; ".join(bad))
+PYEOF
+)"
+report "a real ledger validates against the published state schema" "" "$missing"
+
 echo
 if [ "$fail" -gt 0 ]; then
   echo "$pass passed, $fail FAILED — a shipped example does not work"

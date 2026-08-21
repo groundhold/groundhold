@@ -60,6 +60,7 @@
       ]
     },
     "outputRef": {
+      "$comment": "descriptive-only: the `implementation:` block is free-form by D26, so this shape is PUBLISHED for an author to write against and deliberately not enforced by this schema. Declared, because an unreferenced definition otherwise reads as an oversight — and one of those had silently drifted out of step with the runtime by the time anyone looked (D1158).",
       "description": "Intra-plan output reference (D226/F13): an implementation operand whose value is another same-candidate capability's typed output, wired in the SAME plan. Structured, never string interpolation (invariant #4). `$ref` MUST be the sole key; `capability` is a capID in this candidate; `output` must appear in that capability's driver OutputsFor and match the operand slot's kind (no coercion, invariant #2).",
       "type": "object",
       "required": ["$ref"],

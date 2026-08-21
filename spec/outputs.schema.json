@@ -3,6 +3,7 @@
   "$id": "groundhold/outputs/v0",
   "title": "Groundhold CLI output shapes (D64)",
   "description": "A $def for each verb whose document a consumer parses TODAY; the set is listed under $defs and is NOT yet every verb — `posture`, `parity` and `apiver` publish documents with no def here, and are registered as debt in TestVerbsPublishingWithoutASchemaDef (D845). The `code` field is the machine contract (spec/errors.md); `reasons` and `explain` are prose and MUST NOT be parsed for control flow. Additive-only: consumers must tolerate unknown fields.",
+  "$comment": "catalogue: this file publishes one shape per verb output and a consumer selects the `$defs` entry named for the verb it called, so the ROOT is deliberately unconstrained and the shapes are entry points rather than dead definitions. Declared here rather than assumed, because the same arrangement in a file that is NOT a catalogue means the schema validates nothing at all (D1158).",
   "$defs": {
     "code": {
       "type": "string",

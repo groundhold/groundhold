@@ -178,6 +178,56 @@ for line in selftest():
 		}
 	})
 
+	// D1158: the sentinel case, against the REAL state schema rather than a synthetic
+	// one. `prev` used to demand a `sha256:` hash, which rejects `genesis` — the value
+	// every capability's FIRST event carries, so the published schema refused the
+	// opening event of every ledger ever written. Nothing noticed for as long as the
+	// file existed, because its root constrained nothing and no ledger was ever handed
+	// to it.
+	t.Run("the genesis sentinel is a valid prev", func(t *testing.T) {
+		raw, err := os.ReadFile(filepath.Join(root, "spec", "state.schema.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var st any
+		if err := json.Unmarshal(raw, &st); err != nil {
+			t.Fatalf("the state schema does not parse: %v", err)
+		}
+		event := map[string]any{
+			"apiVersion": "state/v0", "kind": "LedgerEvent",
+			"event": map[string]any{
+				"type": "apply.started", "environment": "test",
+				"capabilities": []any{"db"},
+				"occurredAt":   "2026-01-01T00:00:00Z",
+				"actor":        map[string]any{"id": "r", "type": "runtime"},
+				"prev":         map[string]any{"db": "genesis"},
+				"body":         map[string]any{},
+			},
+		}
+		if out := run(t, event, st); strings.TrimSpace(out) != "" {
+			t.Errorf("the published state schema rejects a capability's FIRST event. "+
+				"`genesis` is the sentinel the chain opens with — every ledger in "+
+				"existence starts this way, so a schema that refuses it refuses all "+
+				"of them:\n%s", out)
+		}
+		// The sibling: a prev that is neither a hash nor the sentinel must still fail,
+		// or the fix widened the field into anything-goes.
+		bad := map[string]any{}
+		for k, v := range event {
+			bad[k] = v
+		}
+		ev := map[string]any{}
+		for k, v := range event["event"].(map[string]any) {
+			ev[k] = v
+		}
+		ev["prev"] = map[string]any{"db": "whatever"}
+		bad["event"] = ev
+		if out := run(t, bad, st); strings.TrimSpace(out) == "" {
+			t.Error("a prev that is neither a hash nor `genesis` was ACCEPTED — the " +
+				"chain's one structural field would then constrain nothing")
+		}
+	})
+
 	// Both directions must use the SAME checker. Two copies would be free to agree with
 	// each other by luck and diverge on the case that matters — the shape half this
 	// record is about.
