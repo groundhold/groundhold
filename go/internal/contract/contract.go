@@ -924,9 +924,41 @@ func checkReferences(doc map[string]any, cids map[string]bool) error {
 // at exit 0 with `validate` reporting OK. The list of keys is one place, so a knob
 // added later is covered without anyone remembering to add a branch (D597's lesson,
 // applied to shape rather than to reference-checking).
+// autonomyListKeys are the consent blocks written as LISTS. Named once so the shape
+// check, the capability check and the key check below all read the same set — three
+// places that disagreed would be three ways to leave a gate unarmed (D597's lesson,
+// which named the same risk for the capability check).
+var autonomyListKeys = []string{"forbidden",
+	"allow_replace_stateful", "allow_intrusive_probes", "allow_protection_lift",
+	"allow_field_reclaim", "allow_emission_adopt"}
+
+// autonomyKeys is the whole block, CLOSED (D1164). D658 shape-gated these sub-blocks
+// after a `forbidden` written as a MAPPING lost `delete_stateful` and "a bound stateful
+// database is then destroyed at exit 0 with `validate` reporting OK". A misspelled KEY
+// does the identical thing and nothing looked: `forbiden:` loads clean, the prohibition
+// list is empty, and the apply-time gate that refuses a stateful delete has nothing to
+// check.
+//
+// D597, two functions down, reasoned about a typo in this very block and stopped at the
+// `allow_*` keys — where the effect is a refusal, which is fail-CLOSED and merely
+// annoying. The key beside them is a prohibition, where the same typo is fail-OPEN.
+var autonomyKeys = func() map[string]bool {
+	m := map[string]bool{"auto_execute": true, "no_assumed_hard_basis": true}
+	for _, k := range autonomyListKeys {
+		m[k] = true
+	}
+	return m
+}()
+
 func checkAutonomyShape(autonomy map[string]any) error {
 	if autonomy == nil {
 		return nil
+	}
+	if err := checkKnownKeys(autonomy, autonomyKeys, "autonomy",
+		"every key here is a consent gate or a prohibition, and one this loader does "+
+			"not read is a gate nobody armed — a misspelled `forbidden` leaves the "+
+			"apply-time refusal with an empty list to check"); err != nil {
+		return err
 	}
 	// The shapes are not uniform, and the shipped spec example is the authority:
 	// `auto_execute` is a MAPPING of thresholds (max_reversibility, max_cost_delta),
@@ -934,9 +966,7 @@ func checkAutonomyShape(autonomy map[string]any) error {
 	// would have refused `spec/examples/orders-production.contract.yaml` — which is
 	// how I learned it, and why the example is a better specification of the block
 	// than my reading of the code that ignores it.
-	for _, key := range []string{"forbidden",
-		"allow_replace_stateful", "allow_intrusive_probes", "allow_protection_lift",
-		"allow_field_reclaim", "allow_emission_adopt"} {
+	for _, key := range autonomyListKeys {
 		if _, err := wantList(autonomy, key, "autonomy."+key); err != nil {
 			return err
 		}
@@ -957,8 +987,14 @@ func checkAutonomyCapabilities(doc map[string]any,
 	// there loaded clean, granted nothing, and would surface as a refusal later,
 	// quite possibly during the incident the probe was meant to measure. A third
 	// list added here is covered without anyone remembering to add a branch.
-	for _, key := range []string{"allow_replace_stateful", "allow_intrusive_probes",
-		"allow_protection_lift", "allow_field_reclaim", "allow_emission_adopt"} {
+	// D1164: the SAME list the shape check reads. This was a second hand-typed copy,
+	// and a mutant on the first one left this one still checking — two lists agreeing
+	// today is not one list, and the reference implementation had drifted to three
+	// keys against the runtime's five for exactly this reason.
+	for _, key := range autonomyListKeys {
+		if key == "forbidden" {
+			continue // its entries are mappings, reference-checked above
+		}
 		allowed, _ := autonomy[key].([]any)
 		for _, it := range allowed {
 			s, _ := it.(string)

@@ -3,6 +3,83 @@
 # MUST produce these verdicts. Semantics live here, not in any codebase.
 
 cases:
+  # D1164. D658 shape-gated the consent blocks after a `forbidden` written as a
+  # MAPPING lost `delete_stateful` — "a bound stateful database is then destroyed at
+  # exit 0 with validate reporting OK". A misspelled KEY does the identical thing and
+  # nothing looked: the prohibition list is empty and the apply-time refusal has
+  # nothing to check.
+  - name: a-misspelled-autonomy-key-is-refused
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: a1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      autonomy:
+        forbiden:
+          - delete_stateful: true
+    expect:
+      error: contract
+      errorContains:
+        - "forbiden"
+        - "a gate nobody armed"
+
+  # The dual half, and it was LIVE: the reference checked three `allow_*` keys against
+  # a hand-typed tuple while the runtime read five, so this document was refused by one
+  # implementation and accepted by the other — the divergence the comment beside that
+  # tuple warns about. Both now derive the list from one place.
+  - name: an-unknown-capability-under-any-consent-list-is-refused
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: a2, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      autonomy:
+        allow_field_reclaim: [ghost-capability]
+    expect:
+      error: contract
+      errorContains:
+        - "allow_field_reclaim"
+
+  - name: every-published-autonomy-key-loads
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: a3, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - { id: c-managed, subject: db, path: service.managed, op: equals, value: true }
+      autonomy:
+        forbidden:
+          - delete_stateful: true
+          - disable: c-managed
+        allow_replace_stateful: [db]
+        allow_intrusive_probes: [db]
+        allow_protection_lift: [db]
+        allow_field_reclaim: [db]
+        allow_emission_adopt: [db]
+        no_assumed_hard_basis: true
+        auto_execute:
+          max_reversibility: R1
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: a3
+      capabilities:
+        db:
+          attributes:
+            service.managed: true
+          provider: fake
+          service: sql
+    expect:
+      executable: true
+
   # D1162. The verify block is guarded against every wrong VALUE — `method` beside
   # `design`/`runtime` is refused, half of the two-bar form is refused, a non-string
   # bar is refused because "a bar the loader cannot read must not fall back to the

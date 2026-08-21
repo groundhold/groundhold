@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -41,13 +42,23 @@ constraints:
   hard:
     - { id: c-managed, subject: db, path: service.managed, op: equals, value: true }
 `
-	// The block exactly as the shipped example writes it — the shape a reader copies.
-	const withOutcomes = base + `outcomes:
+	// Each block exactly as the shipped example writes it — the shape a reader copies.
+	// D1164 added the second: `auto_execute` names a spending and reversibility cap on
+	// what may run automatically, is shape-gated as a mapping, and is read by nothing.
+	// A name that promises a safety limit is the worse of the two to leave unlabelled.
+	blocks := map[string]string{
+		"outcomes": `outcomes:
   - id: o-reachable
     probe: tcp-connect
     target: db
     expect: reachable
-`
+`,
+		"autonomy.auto_execute": `autonomy:
+  auto_execute:
+    max_reversibility: R1
+    max_cost_delta: { amount: 100, currency: EUR }
+`,
+	}
 	const candidate = `apiVersion: candidate/v0.1
 kind: ImplementationCandidate
 contract: reserved-probe
@@ -67,7 +78,6 @@ capabilities:
 		return p
 	}
 	plain := write("plain.contract.yaml", base)
-	withB := write("with.contract.yaml", withOutcomes)
 	cand := write("c.candidate.yaml", candidate)
 
 	run := func(t *testing.T, contract string) map[string]any {
@@ -83,6 +93,20 @@ capabilities:
 		return doc
 	}
 
+	names := make([]string, 0, len(blocks))
+	for n := range blocks {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) { assertOnlyHashMoves(t, run, plain, write, base, blocks[name], name) })
+	}
+}
+
+func assertOnlyHashMoves(t *testing.T, run func(*testing.T, string) map[string]any,
+	plain string, write func(string, string) string, base, block, name string) {
+	t.Helper()
+	withB := write(strings.ReplaceAll(name, ".", "-")+".contract.yaml", base+block)
 	a, b := run(t, plain), run(t, withB)
 
 	// The hash MUST differ: the block is part of the document, and a contract that
@@ -103,11 +127,11 @@ capabilities:
 		x, _ := json.Marshal(a[k])
 		y, _ := json.Marshal(b[k])
 		if string(x) != string(y) {
-			t.Errorf("`outcomes` changed %q:\n  without: %s\n  with:    %s\n"+
+			t.Errorf("%s changed %q:\n  without: %s\n  with:    %s\n"+
 				"The schema publishes this block as reserved in v0. Either it is not "+
 				"reserved any more — take the marker off, and say in the schema what "+
 				"it does — or something started reading a block readers are told is "+
-				"inert.", k, x, y)
+				"inert.", name, k, x, y)
 		}
 	}
 }

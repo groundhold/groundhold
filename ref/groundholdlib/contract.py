@@ -337,6 +337,19 @@ _KNOWN_TOP_LEVEL = {
 # wrong VALUE and was blind to a wrong KEY — `method` defaults to "static", so `vrify:`
 # or `methdo:` turned a constraint that must be proven against the provider into one
 # proven by the candidate's own word, and the plan became executable.
+# D1164: the consent blocks written as LISTS, named ONCE. The capability check below
+# used a hand-typed tuple of THREE while the runtime read five, so a contract naming an
+# unknown capability under `allow_field_reclaim` was refused by one implementation and
+# accepted by the other — the divergence the comment there warns about, live.
+AUTONOMY_LIST_KEYS = ("forbidden", "allow_replace_stateful", "allow_intrusive_probes",
+                      "allow_protection_lift", "allow_field_reclaim",
+                      "allow_emission_adopt")
+
+# The whole block, CLOSED. D658 shape-gated these after a `forbidden` written as a
+# MAPPING lost `delete_stateful` and a bound stateful database was destroyed at exit 0
+# with validate reporting OK. A misspelled KEY does the identical thing.
+AUTONOMY_KEYS = set(AUTONOMY_LIST_KEYS) | {"auto_execute", "no_assumed_hard_basis"}
+
 CONSTRAINT_KEYS = {"id", "subject", "path", "op", "value", "verify"}
 SOFT_CONSTRAINT_KEYS = CONSTRAINT_KEYS | {"objective"}
 BUDGET_CONSTRAINT_KEYS = CONSTRAINT_KEYS | {"severity"}
@@ -535,14 +548,18 @@ def load_contract(path: str) -> Contract:
     # `allow_replace_stateful` alone, so a typo in the other two loaded CLEAN here and
     # REFUSED in the runtime. A document one implementation accepts and the other
     # rejects breaks the dual guarantee as surely as a hash divergence does.
-    for key in ("allow_replace_stateful", "allow_intrusive_probes",
-                "allow_protection_lift"):
+    for key in AUTONOMY_LIST_KEYS:
+        if key == "forbidden":
+            continue  # its entries are mappings, checked above
         for ref in (doc.get("autonomy") or {}).get(key) or []:
             if ref not in caps:
                 raise ContractError(
                     f"autonomy.{key} references unknown capability {ref!r}")
     # D195: a malformed knob must not silently disarm the gate.
     _autonomy = doc.get("autonomy") or {}
+    _check_known_keys(_autonomy, AUTONOMY_KEYS, "autonomy",
+                      "every key here is a consent gate or a prohibition, and one this "
+                      "loader does not read is a gate nobody armed")
     if "no_assumed_hard_basis" in _autonomy \
             and not isinstance(_autonomy["no_assumed_hard_basis"], bool):
         raise ContractError("autonomy.no_assumed_hard_basis must be a boolean")

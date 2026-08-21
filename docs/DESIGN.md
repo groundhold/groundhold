@@ -38258,3 +38258,64 @@ The shape: **"reserved" is a claim about behaviour, so it needs a behavioural ch
 comment saying a block is inert is the same kind of artefact as a comment saying a set is
 closed — true when written, unfalsifiable afterwards, and quietly wrong the first time
 someone makes the block do something useful.
+
+## D1164 — the consent block, where a typo is fail-open
+
+`autonomy` holds the consent gates and the prohibitions. D658 shape-gated its sub-blocks
+after a `forbidden` written as a MAPPING lost `delete_stateful` — the entry's own words:
+"a bound stateful database is then destroyed at exit 0 with `validate` reporting OK". A
+misspelled KEY does the identical thing, and nothing looked. Measured:
+
+    autonomy: { forbidden: [ {delete_stateful: true} ] }   ->  validate exit 0
+    autonomy: { forbiden:  [ {delete_stateful: true} ] }   ->  validate exit 0
+
+The prohibition list is then empty, and the apply-time refusal that would stop the delete
+has nothing to check.
+
+What makes this the sharpest of the family is the comment two functions down. D597 reasoned
+about a typo in this very block and wrote what it costs: "A typo there loaded clean,
+granted nothing, and would surface as a refusal later, quite possibly during the incident
+the probe was meant to measure." That is the `allow_*` case, where a typo grants nothing
+and is fail-CLOSED — annoying, and safe. The key sitting beside them is a prohibition,
+where the same typo removes a protection. The reasoning was done and stopped one key
+short.
+
+Three more things came out of closing it.
+
+**A live dual divergence.** The reference checked THREE `allow_*` lists against a
+hand-typed tuple while the runtime read five, so a contract naming an unknown capability
+under `allow_field_reclaim` was refused by one implementation and accepted by the other.
+The comment beside that tuple warns about exactly this ("a document one implementation
+accepts and the other rejects breaks the dual guarantee as surely as a hash divergence
+does") — D597 had fixed it once, two keys were added later, and the reference did not
+follow. Both now derive from one list, and a dual case pins it.
+
+**`auto_execute` is a second reserved block, and a worse one than D1163's.** It is
+shape-gated as a mapping and read by NOTHING — `max_reversibility` and `max_cost_delta`
+appear nowhere in either implementation. It sits in the flagship example, so a reader
+learns that they can cap the cost of what runs automatically. Nothing caps anything. The
+D1163 gate covers it now rather than a second gate being written: adding the block may
+change the contract's hash and nothing else.
+
+**The schema published nothing about this block at all** — `"autonomy": {"type":
+"object"}` — while the runtime read eight keys. A reader had no way to learn the
+vocabulary except by finding an example.
+
+Two existing mutants broke on the refactor, one per meter run, and both were mine to
+re-aim: D597's and D698's anchors were the hand-typed copies I merged into one list.
+That is the honest cost of consolidating — and the meter reporting NO-OP rather than a
+false SURVIVED is what made it cheap. The second break also proved the refactor had been
+incomplete: the Go side still had TWO lists, so a mutant shortening one left the other
+checking, and the test passed for the wrong reason until the second copy was gone.
+
+Consolidating also cost a third meter run, and the reason is worth keeping. Re-aimed at
+`autonomyListKeys`, D597's mutant SURVIVED: the shared list now appears in three loops,
+`perl` without `/g` replaced the first — the shape check — and the capability check went
+on working. An anchor that was unique before the refactor stopped being unique because of
+it, and the mutant then measured a different loop than its test names. It now carries the
+line that follows it, which only the capability loop has. Merging duplicated code makes
+every anchor pointing at one of the copies ambiguous, and the meter is where that surfaces.
+
+The shape, and it is the fourth phrasing of one idea: **reasoning that stops at the first
+member of a set is a gate over that member.** D597 thought about typos in this block and
+protected the keys whose failure is safe.

@@ -280,6 +280,26 @@ func TestLoadContractDocErrors(t *testing.T) {
 			"apiVersion must be"},
 		{"missing meta id", func(d map[string]any) { d["meta"] = map[string]any{} },
 			"meta.id is required"},
+		// D1164: the consent block. A misspelled key here is not a refusal later — it
+		// is a gate nobody armed, and `forbidden` is the one where that is fail-OPEN.
+		{"a misspelled autonomy key", func(d map[string]any) {
+			d["autonomy"] = map[string]any{
+				"forbiden": []any{map[string]any{"delete_stateful": true}}}
+		}, "a gate nobody armed"},
+		// Every consent list must be reference-checked, from ONE list of keys. The
+		// reference implementation carried a hand-typed tuple of three while the
+		// runtime read five, so this document was refused by one and accepted by the
+		// other — measured, and live until D1164.
+		{"an unknown capability under a later consent list", func(d map[string]any) {
+			d["autonomy"] = map[string]any{"allow_field_reclaim": []any{"ghost"}}
+			// Matched on the phrase only the CAPABILITY check says: drop the key from
+			// the list and it becomes an unknown-KEY refusal, which still contains the
+			// key's name and would satisfy a looser assertion (the same not-unique
+			// marker trap as D1160 and D1162).
+		}, "allow_field_reclaim references unknown capability"},
+		{"an unknown capability under the newest consent list", func(d map[string]any) {
+			d["autonomy"] = map[string]any{"allow_emission_adopt": []any{"ghost"}}
+		}, "allow_emission_adopt references unknown capability"},
 		// D1162: the two that trade evidence for a claim. Both must NAME the key —
 		// a reader who typed `vrify:` and is told only "invalid contract" reads the
 		// block, sees a plausible `verify`, and looks elsewhere.
