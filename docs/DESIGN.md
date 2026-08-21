@@ -37755,3 +37755,65 @@ two conditions apart cannot advise on either, and the published remediation is w
 that expensive.** The registry rule "one code per distinct remediation" is the test to
 apply — not "is the refusal correct" but "does the advice attached to it fit every case
 that reaches it".
+
+## D1155 — the pre-ship gate asked about credentials the driver cannot read
+
+Found while trying to reproduce something I had written down for a reader and got wrong.
+A delivery manifest recorded a self-found defect: "a driver deemed regionless inherits
+the ambient region, performs a real scan and concludes the create did not land instead
+of unknown". Measured, none of that holds. The AWS driver's read paths return a non-nil
+error on every failure and `found=false, nil` only on a real 404, so there is no
+unreadable-becomes-absent path there. The note was wrong, and it has been corrected in
+the channel — an unfounded accusation against your own tool is still a false statement,
+and it teaches a reader to distrust the part that was working.
+
+What DID reproduce is smaller and real, and it is in the gate rather than the driver.
+`scripts/preship.sh` exists for one check — the SigV4-signed request, the only thing in
+the project that sees a signing regression (D604) — and it decided whether that check
+had run by asking:
+
+    [ -z "$AWS_ACCESS_KEY_ID" ] && [ -z "$AWS_PROFILE" ]
+
+`NewDriver` reads `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`
+and never `~/.aws`. The driver's own refusal says so and names the bridge command
+(D730). So `AWS_PROFILE` is not merely weak evidence that the signed check could run —
+it is the arrangement in which it provably cannot. The guard accepted, as proof that a
+capability was exercised, a variable that guarantees it was not.
+
+Today that shows up as noise rather than as a false pass: the smoke test carried the
+same predicate, so with a profile set it went ahead, spent forty-five seconds inside the
+driver's retries, and failed with
+
+    signed DescribeCluster ... must be READABLE (a clean 404) — D269 broke exactly this
+
+which names a signing regression that had not happened, while DISCARDING the error that
+had. The driver had returned the exact diagnosis and the exact fix; the gate threw it
+away and substituted a guess. Naming a cause you did not measure is the thing most of
+this project's refusals exist to avoid, and a gate is not exempt from its own rule.
+
+The trap is what the obvious fix does. Make the test skip when it cannot sign — clearly
+right — and `preship.sh`, still asking its own question, sees `AWS_PROFILE` set, decides
+credentials were present, and prints
+
+    == PRESHIP OK — safe to build + ship (signed AWS check included) ==
+
+over a check that never ran. That is D604 exactly, restored by fixing one half of a
+predicate that lived in two places. Both had to move together.
+
+So: both guards now ask what the driver answers. The refusal names the bridge from the
+profile the operator already holds, because someone with `AWS_PROFILE` set is not short
+of credentials — they are short of three variables, and telling them "no credentials in
+the environment" sends them hunting for a problem they do not have. The test's failure
+carries the driver's error verbatim.
+
+Three cases already stood over the shell guard and all three passed the broken
+predicate, because every one of them set both variables together or neither. The case
+that finds it is `AWS_PROFILE` alone — the ordinary way a person holds AWS credentials.
+The smoke test's guard is now a function so it can be measured at all; as an `if` inside
+a test that skips without credentials, nothing could reach it.
+
+General shape, and a sharper form of a rule this record keeps rediscovering: **a guard
+over whether something RAN must ask the question the code answers, not the one the
+operator would answer.** The two agree until the operator is right about their intent
+and wrong about the mechanism — which is the normal case, since the mechanism is ours
+and the intent is theirs.

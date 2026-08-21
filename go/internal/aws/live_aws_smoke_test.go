@@ -1,6 +1,7 @@
 package aws
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -53,6 +54,75 @@ func TestLiveAWSSmoke(t *testing.T) {
 	// SKIP, which is what it is. Both are what a reader downstream needs to see.
 }
 
+// signedSmokeSkipReason answers ONE question — can this driver make a signed request
+// right now — and returns "" when it can (D1155).
+//
+// It exists as a function rather than an `if` inside the test so it can be measured.
+// The guard it replaces asked whether AWS_ACCESS_KEY_ID *or* AWS_PROFILE was set, and
+// a profile is the one arrangement where the answer is provably NO: NewDriver reads
+// AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN and never ~/.aws, so
+// profiles, MFA and Identity Center are invisible to it. With a profile set the test
+// went ahead and made the request anyway, spent forty-five seconds on the driver's
+// retries, and failed accusing D269 of a signing regression that had not happened.
+//
+// A guard over a capability must ask what the CODE answers, not what the operator
+// meant. And when the answer is no, it names the bridge — the operator holding a
+// profile has the credentials; what they lack is the three variables.
+func signedSmokeSkipReason(key, profile string) string {
+	if key != "" {
+		return ""
+	}
+	if profile != "" {
+		return fmt.Sprintf("AWS_PROFILE=%s is set, but this driver reads credentials "+
+			"ONLY from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN — "+
+			"never ~/.aws. The SIGNED DescribeCluster check cannot run. Bridge the "+
+			"profile you already have: eval \"$(aws configure export-credentials "+
+			"--profile %s --format env)\"", profile, profile)
+	}
+	return "no AWS credentials in the environment — the SIGNED DescribeCluster check " +
+		"cannot run, and no other gate sees a SigV4 regression"
+}
+
+// The four combinations, because the bug lived in the one nobody had written down:
+// every case that existed set both variables together or neither.
+func TestTheSignedSmokeGuardAsksWhatTheDriverAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name, key, profile string
+		wantRun            bool
+		why                string
+	}{
+		{"exported keys", "AKIAEXAMPLE", "", true,
+			"the guard skipped with the exact credentials the driver reads — the " +
+				"signed check would never run anywhere"},
+		{"keys bridged from a profile", "AKIAEXAMPLE", "some-profile", true,
+			"the guard skipped when a profile HAD been bridged, which is what its " +
+				"own remediation tells the operator to do"},
+		{"a profile and nothing else", "", "some-profile", false,
+			"the guard let the signed check proceed on a profile alone. NewDriver " +
+				"cannot read one, so the request provably cannot be signed; running " +
+				"it costs 45s of retries and reports the failure as a SIGNING " +
+				"regression that did not happen"},
+		{"nothing at all", "", "", false,
+			"the guard let the signed check proceed with no credentials at all"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			why := signedSmokeSkipReason(tc.key, tc.profile)
+			if got := why == ""; got != tc.wantRun {
+				t.Fatalf("%s (reason=%q)", tc.why, why)
+			}
+			if tc.wantRun {
+				return
+			}
+			// A refusal that does not say how to proceed sends an operator who is
+			// HOLDING the credentials looking for a credential problem.
+			if tc.profile != "" && !strings.Contains(why, "export-credentials") {
+				t.Errorf("the skip does not name the bridge from the profile the "+
+					"operator already has (D730 makes the driver name it): %q", why)
+			}
+		})
+	}
+}
+
 // TestLiveAWSSignedSmoke is the SigV4 half (D604): a signed pre-read against real AWS.
 // It catches a signing regression and the NotFound->found=false branch D269 turned into
 // "unreadable" — the exact path a create relies on. Nothing else in the project covers
@@ -62,9 +132,9 @@ func TestLiveAWSSignedSmoke(t *testing.T) {
 	if os.Getenv("GROUNDHOLD_LIVE_AWS_SMOKE") == "" {
 		t.Skip("set GROUNDHOLD_LIVE_AWS_SMOKE=1 to run the live AWS smoke")
 	}
-	if os.Getenv("AWS_ACCESS_KEY_ID") == "" && os.Getenv("AWS_PROFILE") == "" {
-		t.Skip("no AWS credentials in the environment — the SIGNED DescribeCluster " +
-			"check cannot run, and no other gate sees a SigV4 regression")
+	if why := signedSmokeSkipReason(os.Getenv("AWS_ACCESS_KEY_ID"),
+		os.Getenv("AWS_PROFILE")); why != "" {
+		t.Skip(why)
 	}
 	region := os.Getenv("AWS_REGION")
 	if region == "" {
@@ -77,8 +147,15 @@ func TestLiveAWSSignedSmoke(t *testing.T) {
 
 	_, found, rerr := d.describeEKSCluster(region, "groundhold-smoke-none")
 	if rerr != nil {
-		t.Fatal("signed DescribeCluster on a nonexistent cluster must be READABLE (a clean 404) — " +
-			"D269 broke exactly this (create DIED because the 404 response was unparseable -> 'unreadable')")
+		// D1155: the error used to be DISCARDED and replaced with the sentence below
+		// alone, so every cause — expired keys, a denied policy, no network, a
+		// throttle — was reported as a signing regression. Naming a cause you did
+		// not measure is the failure this project spends most of its refusals
+		// avoiding, and a gate is not exempt from its own rule.
+		t.Fatalf("signed DescribeCluster on a nonexistent cluster must be READABLE (a "+
+			"clean 404) — D269 broke exactly this (create DIED because the 404 response "+
+			"was unparseable -> 'unreadable').\nregion=%s\nwhat actually came back: %v",
+			region, rerr)
 	}
 	if found {
 		t.Fatal("a nonexistent cluster must be found=false")
