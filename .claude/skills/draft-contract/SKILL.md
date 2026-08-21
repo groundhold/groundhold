@@ -20,8 +20,14 @@ it is the reviewed authority. You may draft it — the human publishes.
    compliance/security/data-loss → hard; preferences/cost objectives →
    soft or budget. When the speaker is vague ("szybka baza"), draft the
    closest measurable constraint and MARK the leap: put it in
-   `assumptions:` with `status: assumed`, a source ("user said 'fast'"),
-   a confidence, and `affects:` pointing at the constraints resting on it.
+   `assumptions:` with a `statement:` saying WHAT is assumed ("the
+   database must serve reads under 50ms"), `status: assumed`, a
+   `source:` saying where that came from ("user said 'fast'"), a
+   confidence, and `affects:` pointing at the constraints resting on it.
+   `statement` and `source` are different fields and both are needed:
+   the schema requires the statement, and a citation with no proposition
+   travels into a verdict's basis as evidence for a claim nobody wrote
+   down (D1157).
 3. **Contradictions and gaps are findings, not fill-ins.** If intent
    conflicts (private + "accessible from the office WiFi") or omits
    something material (no environment, no region), ASK — do not guess

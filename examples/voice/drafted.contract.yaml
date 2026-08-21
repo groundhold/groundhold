@@ -49,6 +49,9 @@ autonomy:
     - delete_stateful: true
 assumptions:
   - id: a-rpo-supersession
+    statement: >
+      The recovery point objective is one minute, not the five minutes
+      stated earlier in the meeting.
     status: assumed
     source: >
       turn 00:06:44 (Marta), SUPERSEDING turn 00:04:31 (Tomek): "five
@@ -58,6 +61,9 @@ assumptions:
     confidence: 0.9
     affects: [c-rpo]
   - id: a-engine-preference
+    statement: >
+      PostgreSQL 16 is an acceptable engine version, expressed as a
+      preference rather than a firm requirement.
     status: assumed
     source: >
       turn 00:03:40 (Tomek): "Sixteen if we can" — a preference, not a

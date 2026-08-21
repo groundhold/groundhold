@@ -313,10 +313,11 @@ func TestLoadContractDocErrors(t *testing.T) {
 		}, "targets retired capability"},
 		{"assumption unknown affects", func(d map[string]any) {
 			d["assumptions"] = []any{map[string]any{"id": "a1", "status": "assumed",
-				"affects": []any{"nope"}}}
+				"statement": "the disk is fast", "affects": []any{"nope"}}}
 		}, "affects unknown constraint"},
 		{"assumption bad status", func(d map[string]any) {
-			d["assumptions"] = []any{map[string]any{"id": "a1", "status": "hunch"}}
+			d["assumptions"] = []any{map[string]any{"id": "a1", "status": "hunch",
+				"statement": "the disk is fast"}}
 		}, "invalid status"},
 		{"autonomy forbidden unknown constraint", func(d map[string]any) {
 			d["autonomy"] = map[string]any{"forbidden": []any{

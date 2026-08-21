@@ -451,6 +451,15 @@ def load_contract(path: str) -> Contract:
         aid = a.get("id")
         if not aid:
             raise ContractError("assumption missing id")
+        # D1157: `statement` is published as required and neither implementation read
+        # it, so a shipped example carried assumptions with a `source` (where it came
+        # from) and nothing saying WHAT was assumed. Blank counts as absent — spaces
+        # satisfy the letter and record nothing.
+        if not str(a.get("statement") or "").strip():
+            raise ContractError(
+                f"assumption {aid}: statement is required — `source` says where the "
+                f"assumption came from, `statement` says what is assumed, and a "
+                f"verdict's basis carries the latter")
         if a.get("status") not in VALID_STATUSES:
             raise ContractError(
                 f"assumption {aid}: invalid status {a.get('status')!r}")

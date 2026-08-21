@@ -721,6 +721,24 @@ func checkReferences(doc map[string]any, cids map[string]bool) error {
 		if aid == "" {
 			return fmt.Errorf("assumption missing id")
 		}
+		// D1157: `statement` is published as required beside `id` and `status`, every
+		// assumption in the repository except one carries it, and the conformance cases
+		// beside this were written as if it were enforced. It was not read at all — so a
+		// shipped example held assumptions with a `source` saying where they came from
+		// and nothing saying WHAT was assumed, and `validate` reported OK on a document
+		// the published schema rejects.
+		//
+		// `source` is provenance; `statement` is the proposition. An assumption without
+		// one travels into a verdict's basis and into a capsule as a citation for a claim
+		// nobody wrote down, which is the opposite of what this block is for. Blank
+		// counts as absent: a document that satisfies the letter by holding spaces
+		// records nothing.
+		stmt, _ := a["statement"].(string)
+		if strings.TrimSpace(stmt) == "" {
+			return fmt.Errorf("assumption %s: statement is required — `source` says "+
+				"where the assumption came from, `statement` says what is assumed, "+
+				"and a verdict's basis carries the latter", aid)
+		}
 		status, _ := a["status"].(string)
 		if !validStatuses[status] {
 			return fmt.Errorf("assumption %s: invalid status %v", aid, a["status"])

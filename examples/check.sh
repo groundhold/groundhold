@@ -649,78 +649,14 @@ if [ -f "$SCH/ahead.jsonl" ]; then
 fi
 
 missing="$(python3 - "$SCH" <<'PYEOF' || true
-import json, os, re, sys
+import json, os, sys
+
+sys.path.insert(0, "examples")
+from schemacheck import errors, selftest          # noqa: E402
 
 d = sys.argv[1]
 root = json.load(open("spec/outputs.schema.json"))
 defs = root["$defs"]
-
-# The keywords this document uses. A validator that silently IGNORED an unknown one
-# would be weaker than the schema it checks and would read as a pass, so anything
-# outside this set is reported rather than skipped.
-KNOWN = {"type", "properties", "required", "items", "enum", "const", "$ref",
-         "additionalProperties", "pattern", "minimum", "description", "$defs",
-         "$schema", "$id", "title"}
-TYPES = {"object": dict, "array": list, "string": str, "boolean": bool,
-         "number": (int, float), "integer": int, "null": type(None)}
-
-
-def errors(doc, schema, path=""):
-    out = []
-    unknown = set(schema) - KNOWN
-    if unknown:
-        out.append((path, "this checker does not implement %s" % sorted(unknown)))
-    if "$ref" in schema:
-        ref = schema["$ref"]
-        if not ref.startswith("#/$defs/"):
-            return out + [(path, "unsupported $ref %s" % ref)]
-        return out + errors(doc, defs[ref[len("#/$defs/"):]], path)
-    if "type" in schema:
-        want = schema["type"]
-        want = want if isinstance(want, list) else [want]
-        ok = False
-        for w in want:
-            t = TYPES.get(w)
-            if t is None:
-                out.append((path, "unknown type %s" % w))
-                ok = True
-                break
-            # bool is a subclass of int in Python; a boolean is not an integer here.
-            if w in ("number", "integer") and isinstance(doc, bool):
-                continue
-            if isinstance(doc, t):
-                ok = True
-        if not ok:
-            return out + [(path, "is %s, schema says %s" % (type(doc).__name__, want))]
-    if "enum" in schema and doc not in schema["enum"]:
-        out.append((path, "%r is not one of %s" % (doc, schema["enum"])))
-    if "const" in schema and doc != schema["const"]:
-        out.append((path, "%r is not the const %r" % (doc, schema["const"])))
-    if "pattern" in schema and isinstance(doc, str) and not re.search(schema["pattern"], doc):
-        out.append((path, "%r does not match %s" % (doc, schema["pattern"])))
-    if "minimum" in schema and isinstance(doc, (int, float)) and not isinstance(doc, bool):
-        if doc < schema["minimum"]:
-            out.append((path, "%s is below the minimum %s" % (doc, schema["minimum"])))
-    if isinstance(doc, dict):
-        for prop in schema.get("required", []):
-            if prop not in doc:
-                out.append((path, "required property %r is absent" % prop))
-        props = schema.get("properties", {})
-        extra = schema.get("additionalProperties")
-        for k, v in doc.items():
-            sub = path + "/" + k if path else k
-            if k in props:
-                out += errors(v, props[k], sub)
-            elif isinstance(extra, dict):
-                # An open map (bindings, heads, outcomes): the VALUES are constrained
-                # even though the keys are not.
-                out += errors(v, extra, sub)
-            # else: growth is allowed, and the promise this gate defends says so.
-    if isinstance(doc, list) and "items" in schema:
-        for i, v in enumerate(doc):
-            out += errors(v, schema["items"], "%s/%d" % (path, i))
-    return out
-
 
 bad = []
 checked = 0
@@ -734,32 +670,64 @@ for name in sorted(defs):
         bad.append("%s: output is not JSON (%s)" % (name, e))
         continue
     checked += 1
-    for p, msg in errors(doc, defs[name]):
+    for p, msg in errors(doc, defs[name], defs):
         bad.append("%s: %s: %s" % (name, p or "(root)", msg))
 
 if checked < 12:
     bad.append("only %d of %d published shapes were produced — the harness stopped "
                "exercising the verbs and this check would pass over almost nothing"
                % (checked, len(defs)))
-
-# The checker's own witness. Everything above is a NEGATIVE result, and a negative
-# result that cannot be distinguished from a broken checker is worth nothing: if
-# `errors` returned [] unconditionally, every line above would still print PASS.
-# So feed it a document that MUST fail and require that it says so.
-probe_schema = {"type": "object", "required": ["a"],
-                "properties": {"a": {"enum": ["x"]}, "n": {"type": "integer"}}}
-for name, doc, why in (
-    ("a value outside its enum", {"a": "not-x"}, "enum"),
-    ("a missing required property", {}, "required"),
-    ("a string where an integer is published", {"a": "x", "n": "7"}, "type"),
-):
-    if not errors(doc, probe_schema):
-        bad.append("the checker itself is broken: it accepted %s, so every PASS it "
-                   "prints is meaningless (%s went unread)" % (name, why))
+bad += selftest()
 print("; ".join(bad))
 PYEOF
 )"
 report "real output validates against the published schema" "" "$missing"
+
+# D1157: the same question on the INPUT side. `spec/contract.schema.json` and
+# `spec/candidate.schema.json` are what a stranger validates a document against before
+# it ever reaches this runtime, and nothing had run a real one through either. One
+# shipped example failed: the voice track's drafted contract held two assumptions with a
+# `source` citing where they came from and no `statement` of what was assumed — which
+# the schema publishes as required, which every other assumption in the tree carries,
+# and which neither implementation read. `validate` called that document OK.
+#
+# Discovery is the same `find` the checks above use, so a document that ships is a
+# document that is checked; a hand-typed list is how D692 missed the first contract.
+mapfile -t SCHEMA_DOCS < <(find examples spec/examples \
+  \( -name '*.contract.yaml' -o -name '*.candidate.yaml' \) | sort)
+missing="$(python3 - "${SCHEMA_DOCS[@]}" <<'PYEOF' || true
+import json, re, sys, yaml
+
+# The SAME checker as the output block above — one copy in examples/schemacheck.py,
+# imported by both. Two copies would be free to agree with each other by luck and
+# diverge on the case that matters, which is the shape half this record is about.
+sys.path.insert(0, "examples")
+from schemacheck import errors, selftest              # noqa: E402
+
+schemas = {"contract": json.load(open("spec/contract.schema.json")),
+           "candidate": json.load(open("spec/candidate.schema.json"))}
+bad = []
+counts = {"contract": 0, "candidate": 0}
+for path in sys.argv[1:]:
+    kind = "contract" if path.endswith(".contract.yaml") else "candidate"
+    try:
+        doc = yaml.safe_load(open(path))
+    except Exception as e:
+        bad.append("%s: does not parse as YAML (%s)" % (path, e))
+        continue
+    counts[kind] += 1
+    schema = schemas[kind]
+    for p, msg in errors(doc, schema, schema.get("$defs", {})):
+        bad.append("%s: %s: %s" % (path, p or "(root)", msg))
+bad += selftest()
+for kind, n in sorted(counts.items()):
+    if n < 4:
+        bad.append("only %d %s documents were found — the discovery broke and this "
+                   "check would pass over almost nothing" % (n, kind))
+print("; ".join(bad))
+PYEOF
+)"
+report "every shipped document validates against its published schema" "" "$missing"
 
 echo
 if [ "$fail" -gt 0 ]; then
