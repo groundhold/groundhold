@@ -356,6 +356,12 @@ AUTONOMY_KEYS = set(AUTONOMY_LIST_KEYS) | {"auto_execute", "no_assumed_hard_basi
 # satisfied as sugar, with no typo involved.
 REQUIREMENT_KEYS = {"op", "value"}
 
+# The record an assumption IS. NOT reserved like `outcomes`/`auto_execute` — it does what
+# its name promises (it is written down, hashed, and `affects` is reference-checked); it
+# just does not change a verdict. Closed because a misspelled `confidance` drops the
+# number from the record, and a reader cannot tell that from "nobody stated one".
+ASSUMPTION_KEYS = {"id", "statement", "status", "source", "confidence", "affects"}
+
 CONSTRAINT_KEYS = {"id", "subject", "path", "op", "value", "verify"}
 SOFT_CONSTRAINT_KEYS = CONSTRAINT_KEYS | {"objective"}
 BUDGET_CONSTRAINT_KEYS = CONSTRAINT_KEYS | {"severity"}
@@ -525,6 +531,10 @@ def load_contract(path: str) -> Contract:
         aid = a.get("id")
         if not aid:
             raise ContractError("assumption missing id")
+        _check_known_keys(a, ASSUMPTION_KEYS, f"assumption {aid}",
+                          "an assumption is a RECORD, and a key this loader does not "
+                          "read is a part of it that will not be there when someone "
+                          "reads it back")
         # D1157: `statement` is published as required and neither implementation read
         # it, so a shipped example carried assumptions with a `source` (where it came
         # from) and nothing saying WHAT was assumed. Blank counts as absent — spaces

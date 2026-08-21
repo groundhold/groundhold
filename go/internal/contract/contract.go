@@ -88,6 +88,21 @@ var contractCapabilityKeys = map[string]bool{
 // bar and reads nothing else, so any other key here is a stated intent nothing acts on.
 var requirementKeys = map[string]bool{"op": true, "value": true}
 
+// assumptionKeys is the record an assumption IS. Unlike `outcomes` and
+// `auto_execute` this block is not reserved — it does exactly what its name promises,
+// which is to be written down: it travels in the contract's hash, into an audit and
+// into a capsule, and `affects` is reference-checked so it cannot name a constraint
+// that is not there. What it does NOT do is change a verdict; measured, adding the
+// block moves the hash and nothing else, and the summary's verdictsOnAssumedValues
+// comes from the CANDIDATE's provenance, not from here.
+//
+// So the stake is smaller than the blocks around it and it is still worth closing: a
+// misspelled `confidance` drops the number from the record, and a reader of that audit
+// cannot tell "nobody stated a confidence" from "someone misspelled it".
+var assumptionKeys = map[string]bool{
+	"id": true, "statement": true, "status": true,
+	"source": true, "confidence": true, "affects": true}
+
 var contractMetaKeys = map[string]bool{
 	"id": true, "environment": true, "version": true, "owner": true}
 
@@ -882,6 +897,11 @@ func checkReferences(doc map[string]any, cids map[string]bool) error {
 		aid, _ := a["id"].(string)
 		if aid == "" {
 			return fmt.Errorf("assumption missing id")
+		}
+		if err := checkKnownKeys(a, assumptionKeys, "assumption "+aid,
+			"an assumption is a RECORD, and a key this loader does not read is a "+
+				"part of it that will not be there when someone reads it back"); err != nil {
+			return err
 		}
 		// D1157: `statement` is published as required beside `id` and `status`, every
 		// assumption in the repository except one carries it, and the conformance cases
