@@ -38104,3 +38104,47 @@ The shape, which is not the same as "a closed set needs a gate": **a guard learn
 level it was written at.** The operand check knows about operands, so it looks inside the
 operand block — and a mistake one level out is invisible to it precisely because it is
 looking so carefully somewhere else.
+
+## D1161 — the same guard, at the three levels it had never been given
+
+D1160 closed the candidate's capability block and ended with the observation that a guard
+learns the level it was written at. Asked of the neighbouring levels, the answer was that
+three more were open — and the helper that closes them has taken an arbitrary key set as
+an argument since D673. Nothing needed inventing; it needed calling.
+
+    contract, top level          closed since D673
+    contract, a capability       open
+    contract, meta               open
+    candidate, capability        closed by D1160
+    candidate, provenanced attr  open
+
+Each was measured, not assumed: a stray key at every open level passed `validate` at exit
+0 and was read by nothing.
+
+The contract cases are the worse two. D673's own account is a misspelled `constraint:`
+(singular) making a contract that requires encryption PROVE a candidate that refuses it,
+at exit 0, hashing identically to a contract with no constraints at all. One indentation
+in, a stray key in a capability is the same thing with a smaller blast radius and the same
+shape: a contract is where a REQUIREMENT is declared, so a key nothing reads is a
+requirement that never existed, while the tool says OK. The provenanced case is smaller
+still and the most quietly corrosive — `confidance` for `confidence` dropped the number
+and the document passed, so an assumption's stated strength vanished on its way into the
+verdicts it was supposed to qualify.
+
+Three closed sets, both implementations, the published schemas closed to match, and one
+reconciliation gate deriving the expected keys FROM the schema for all three. The `x-`
+escape travels with the rule: a hatch this project has advertised since D673 that worked
+only at the top level would be a hatch that surprises, so it is honoured at every level
+the guard now covers — and it has its own mutant, because an escape nobody tests is an
+escape that stops working the day someone tightens the loop around it.
+
+One mutant PER LEVEL, deliberately. The first run proved why: with the guard extracted
+into one helper and called three times, killing it at one site left the other two
+untested, and all three enforcement mutants survived together because the package's tests
+covered none of them — the conformance cases did, and those the meter cannot name. A
+single guard serving several call sites is measured once and believed three times.
+
+The shape to carry: **a helper that takes the level as an argument is not the same as a
+guard that runs at every level.** D673 wrote the general form and used it once; the
+generality sat there, correct and unapplied, for as long as it took someone to write a
+key one line too far in.

@@ -23,6 +23,22 @@ import (
 // Reconciled against `spec/candidate.schema.json` by
 // TestCandidateCapabilityKeysMatchThePublishedShape — the published document and the
 // loader must accept the same four, or a document valid for one is dropped by the other.
+// D1161: the levels INSIDE a contract, closed for the same reason the top level is.
+// Reconciled against `spec/contract.schema.json` by
+// TestContractInnerKeysMatchThePublishedShape — the published document and the loader
+// must accept the same keys.
+var contractCapabilityKeys = map[string]bool{
+	"id": true, "type": true, "requirements": true, "state": true}
+
+var contractMetaKeys = map[string]bool{
+	"id": true, "environment": true, "version": true, "owner": true}
+
+// provenancedKeys is the attribute block a candidate writes when it carries explicit
+// provenance (D5). A typo here — `confidance` — dropped the confidence and the
+// document passed at exit 0, so an assumption's strength vanished silently.
+var provenancedKeys = map[string]bool{
+	"status": true, "value": true, "source": true, "confidence": true}
+
 var candidateCapabilityKeys = map[string]bool{
 	"attributes": true, "implementation": true, "provider": true, "service": true}
 
@@ -302,6 +318,37 @@ var knownTopLevel = map[string]map[string]bool{
 	},
 }
 
+// checkKnownKeys is the D673 rule with the LEVEL as an argument (D1161).
+//
+// It has taken the whole document since D673 and nothing else, so the two levels
+// INSIDE a contract stayed open: a stray key in a capability or in `meta` was read
+// by nothing and the document still validated. That is the same silent-non-gating
+// the top-level check exists to stop, and it is worse here — a contract is where a
+// REQUIREMENT is declared, so a key nobody reads is a requirement that never
+// existed while the tool says OK.
+//
+// `where` names the level in the refusal, because "unknown key(s) owner" is a
+// different problem to solve depending on whether it sat in `meta` or a capability.
+func checkKnownKeys(doc map[string]any, known map[string]bool, where, why string) error {
+	if known == nil {
+		return nil
+	}
+	unknown := make([]string, 0, 2)
+	for k := range doc {
+		if known[k] || strings.HasPrefix(k, "x-") {
+			continue
+		}
+		unknown = append(unknown, k)
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	return fmt.Errorf("%s declares unknown key(s) %s — %s. Rename it, or prefix it "+
+		"with `x-` if it is deliberately not runtime data",
+		where, strings.Join(unknown, ", "), why)
+}
+
 func checkTopLevelKeys(doc map[string]any, kind string) error {
 	known := knownTopLevel[kind]
 	if known == nil {
@@ -336,6 +383,10 @@ func LoadContractDoc(doc map[string]any) (*Contract, error) {
 		return nil, err
 	}
 	meta, _ := doc["meta"].(map[string]any)
+	if err := checkKnownKeys(meta, contractMetaKeys, "meta",
+		"a field this loader does not read carries no meaning into the document"); err != nil {
+		return nil, err
+	}
 	id, iderr := wantString(meta, "id", "meta.id")
 	if iderr != nil {
 		return nil, iderr
@@ -354,6 +405,11 @@ func LoadContractDoc(doc map[string]any) (*Contract, error) {
 	var unknownTypes []string
 	for _, it := range capList {
 		cap, _ := it.(map[string]any)
+		if err := checkKnownKeys(cap, contractCapabilityKeys, "a capability",
+			"a contract is where a REQUIREMENT is declared, so a key nothing reads "+
+				"is a requirement that never existed"); err != nil {
+			return nil, err
+		}
 		cid, cerr := wantString(cap, "id", "capability id")
 		if cerr != nil {
 			return nil, cerr
@@ -1016,6 +1072,11 @@ func vocabCheck(cand *Candidate, c *Contract,
 func provenanced(v any) (Provenanced, error) {
 	if m, ok := v.(map[string]any); ok {
 		if st, has := m["status"]; has {
+			if err := checkKnownKeys(m, provenancedKeys, "a provenanced attribute",
+				"the provenance this loader does not read is dropped, and the "+
+					"attribute keeps only what was spelled correctly"); err != nil {
+				return Provenanced{}, err
+			}
 			status, _ := st.(string)
 			if !validStatuses[status] {
 				return Provenanced{}, fmt.Errorf("invalid provenance status: %v", st)

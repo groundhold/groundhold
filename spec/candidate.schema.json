@@ -81,6 +81,9 @@
     },
     "provenanced": {
       "type": "object",
+      "$comment": "closed (D1161): a typo here — `confidance` — dropped the confidence and the document passed at exit 0, so an assumption's strength vanished silently.",
+      "patternProperties": { "^x-": {} },
+      "additionalProperties": false,
       "required": ["status"],
       "properties": {
         "value": { "$ref": "#/$defs/scalar" },

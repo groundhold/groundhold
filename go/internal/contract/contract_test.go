@@ -268,6 +268,26 @@ func TestLoadContractDocErrors(t *testing.T) {
 			"apiVersion must be"},
 		{"missing meta id", func(d map[string]any) { d["meta"] = map[string]any{} },
 			"meta.id is required"},
+		// D1161: the levels INSIDE the document. The top level has been closed since
+		// D673; these three were not, so a stray key was read by nothing while the
+		// contract validated. One case PER LEVEL on purpose — one guard serving three
+		// call sites passes easily on two of them.
+		{"a stray key in meta", func(d map[string]any) {
+			m, _ := d["meta"].(map[string]any)
+			m["ownr"] = "someone"
+		}, "ownr"},
+		{"a stray key in a capability", func(d map[string]any) {
+			caps, _ := d["capabilities"].([]any)
+			c, _ := caps[0].(map[string]any)
+			c["retention"] = "30d"
+		}, "a requirement that never existed"},
+		// The escape the top level has advertised since D673 must work here too, or a
+		// document using the published hatch is refused one indentation further in.
+		{"an x- key in a capability is NOT an error", func(d map[string]any) {
+			caps, _ := d["capabilities"].([]any)
+			c, _ := caps[0].(map[string]any)
+			c["x-notes"] = "deliberately not runtime data"
+		}, ""},
 		{"capability missing id", func(d map[string]any) {
 			d["capabilities"] = []any{map[string]any{"type": "capability.database.relational"}}
 		}, "capability missing id"},
@@ -337,6 +357,15 @@ func TestLoadContractDocErrors(t *testing.T) {
 			doc := baseContract()
 			c.mutate(doc)
 			_, err := LoadContractDoc(doc)
+			// D1161: an empty errSub means the mutation must be ACCEPTED. The `x-`
+			// escape has been published since D673 and the guard now runs at four
+			// levels; a hatch that works only at the top is a hatch that surprises.
+			if c.errSub == "" {
+				if err != nil {
+					t.Fatalf("want no error, got %v", err)
+				}
+				return
+			}
 			if err == nil {
 				t.Fatalf("expected error containing %q, got nil", c.errSub)
 			}
@@ -591,6 +620,14 @@ func TestLoadCandidateErrors(t *testing.T) {
 		// exit 0 and the resource kept the default the author thought they changed.
 		// The refusal must NAME the key and say where an operand belongs, or the
 		// reader is told only that something is wrong.
+		// D1161, one indentation further in than the case below: a typo in a
+		// provenance block dropped the confidence and the document passed at exit 0,
+		// so an assumption's strength vanished with nothing said.
+		{"a typo in a provenance block",
+			"kind: ImplementationCandidate\napiVersion: candidate/v0.1\ncontract: x\n" +
+				"capabilities:\n  db:\n    attributes:\n      service.managed:\n" +
+				"        status: declared\n        value: true\n        confidance: 0.9\n",
+			"confidance"},
 		{"a key above the operands",
 			"kind: ImplementationCandidate\napiVersion: candidate/v0.1\ncontract: x\n" +
 				"capabilities:\n  db:\n    attributes:\n      service.managed: true\n" +
@@ -777,5 +814,97 @@ func TestCandidateCapabilityKeysMatchThePublishedShape(t *testing.T) {
 			"`implementation` is the free-form half (D26); this level is structure, " +
 			"and a schema that accepts any key here publishes a promise the loader " +
 			"does not keep")
+	}
+}
+
+// D1161. Three more levels closed, and the same reconciliation D1160 built for the
+// candidate's capability block: what the loader accepts must be what the published
+// document says, or a contract valid for a consumer is refused here — or worse, one this
+// loader accepts is dropped by a consumer that validates.
+//
+// Derived from the schema, never restated: a hand-typed copy in a test is one more place
+// to drift, which is the defect this whole family is about.
+func TestContractInnerKeysMatchThePublishedShape(t *testing.T) {
+	root := vocabParityRoot(t)
+	read := func(name string) map[string]any {
+		raw, err := os.ReadFile(filepath.Join(root, "spec", name))
+		if err != nil {
+			t.Skipf("no %s in this tree: %v", name, err)
+		}
+		var d map[string]any
+		if err := json.Unmarshal(raw, &d); err != nil {
+			t.Fatalf("%s does not parse: %v", name, err)
+		}
+		return d
+	}
+	dig := func(m map[string]any, path ...string) map[string]any {
+		for _, p := range path {
+			next, _ := m[p].(map[string]any)
+			if next == nil {
+				t.Fatalf("the published shape has no %q — the scan lost its subject "+
+					"and this gate would pass over anything (D328)", p)
+			}
+			m = next
+		}
+		return m
+	}
+	published := func(block map[string]any) ([]string, bool, bool) {
+		props, _ := block["properties"].(map[string]any)
+		out := make([]string, 0, len(props))
+		for k := range props {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		closed, _ := block["additionalProperties"].(bool)
+		_, escape := block["patternProperties"]
+		return out, block["additionalProperties"] != nil && !closed, escape
+	}
+	accepted := func(m map[string]bool) []string {
+		out := make([]string, 0, len(m))
+		for k := range m {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		return out
+	}
+
+	contract := read("contract.schema.json")
+	candidate := read("candidate.schema.json")
+	for _, tc := range []struct {
+		name  string
+		block map[string]any
+		set   map[string]bool
+	}{
+		{"contract capability",
+			dig(contract, "properties", "capabilities", "items"), contractCapabilityKeys},
+		{"contract meta",
+			dig(contract, "properties", "meta"), contractMetaKeys},
+		{"provenanced attribute",
+			dig(candidate, "$defs", "provenanced"), provenancedKeys},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			keys, closed, escape := published(tc.block)
+			if len(keys) == 0 {
+				t.Fatal("the schema publishes no keys for this block (D328)")
+			}
+			if got := accepted(tc.set); strings.Join(got, ",") != strings.Join(keys, ",") {
+				t.Errorf("the schema publishes %v; this loader accepts %v.\nA document "+
+					"valid against the published shape must load, and one this loader "+
+					"accepts must validate.", keys, got)
+			}
+			if !closed {
+				t.Error("the block does not set `additionalProperties: false`. Published " +
+					"with growth allowed, a stray key validates cleanly for a consumer " +
+					"while the runtime refuses it — the same disagreement from the " +
+					"other side")
+			}
+			// The loader honours `x-` at every level it guards; a schema that closed the
+			// block without the escape would reject documents the runtime accepts.
+			if !escape {
+				t.Error("the block is closed but publishes no `x-` escape, which the " +
+					"loader honours — the two disagree about a document that uses the " +
+					"hatch this project has advertised since D673")
+			}
+		})
 	}
 }

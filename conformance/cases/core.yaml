@@ -3,6 +3,87 @@
 # MUST produce these verdicts. Semantics live here, not in any codebase.
 
 cases:
+  # D1161. The top level of a contract has been closed since D673 — a misspelled
+  # `constraint:` made a contract requiring encryption PROVE a candidate that
+  # refuses it, at exit 0. The two levels INSIDE it stayed open, so the same
+  # silent-non-gating lived on one indentation further in. It is worse here: a
+  # contract is where a REQUIREMENT is declared, so a key nothing reads is a
+  # requirement that never existed while the tool reports OK.
+  - name: contract-capability-key-outside-the-published-four-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: k1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+          retention: 30d
+    expect:
+      error: contract
+      errorContains:
+        - "a requirement that never existed"
+
+  - name: contract-meta-key-outside-the-published-four-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: k2, environment: test, version: 1, ownr: someone }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+    expect:
+      error: contract
+
+  # One indentation further again: a typo in a provenance block dropped the
+  # confidence and the document passed, so an assumption's strength vanished.
+  - name: provenanced-attribute-key-typo-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: k3, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: k3
+      capabilities:
+        db:
+          attributes:
+            service.managed:
+              status: declared
+              value: true
+              confidance: 0.9
+    expect:
+      error: candidate
+
+  # The sibling every closed set needs: the published keys must still load, at
+  # each of the three levels, or the guard refuses documents it should accept.
+  - name: the-published-inner-keys-all-load
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: k4, environment: test, version: 1, owner: someone }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+          state: active
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: k4
+      capabilities:
+        db:
+          attributes:
+            service.managed:
+              status: declared
+              value: true
+              source: "the runbook"
+              confidence: 0.9
+    expect:
+      executable: true
+
   - name: probe-gated-hard-constraint-blocks-execution
     description: >
       A hard constraint with verify.method=probe cannot be satisfied from the
