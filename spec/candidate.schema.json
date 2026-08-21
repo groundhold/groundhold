@@ -13,7 +13,9 @@
       "type": "object",
       "propertyNames": { "$ref": "#/$defs/identifier" },
       "additionalProperties": {
-        "type": "object",
+        "$comment": "closed: the four keys below are the whole shape of a capability block. `implementation` is the free-form half (D26) and an operand no driver reads is refused there; a key at THIS level is structure, and one the loader does not read is a stated intent nothing acts on. Written one floor too high, an operand used to seal a plan at exit 0 while the resource kept its default (D1160).",
+          "additionalProperties": false,
+          "type": "object",
         "properties": {
           "provider": { "type": "string" },
           "service": { "type": "string" },

@@ -23,6 +23,98 @@ cases:
     expect:
       error: candidate
 
+  - name: capability-body-id-is-refused-by-its-own-name
+    description: >
+      D677 refuses `id:` in a capability body because the identity is the
+      key it is written under, and a second one OVERWROTE it in the
+      canonical model — two candidates implementing different
+      capabilities hashed identically, one verifying PROVEN and the
+      other BLOCKED.
+      D1160 then closed the whole block, which refuses `id` as well, for
+      a weaker reason: "not one of the four keys". That made the older,
+      sharper check unmeasurable — its mutant survived, because the
+      general guard caught the bug the specific one was there to catch.
+      So what is pinned here is the REASON, not the refusal: the
+      specific check earns its place by naming the hazard, and a test
+      that accepts either message would let it rot.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e15d, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: e15d
+      capabilities:
+        db:
+          id: db
+          attributes:
+            service.managed: true
+    expect:
+      error: candidate
+      errorContains:
+        - "identity is the key it is written under"
+
+  - name: capability-block-key-outside-the-published-four-is-load-error
+    description: >
+      D1160, reported from the field. The `implementation:` block is
+      free-form (D26) and a key no driver reads is refused there
+      (unknown-operand). The block ABOVE it is not free-form — it takes
+      exactly `attributes`, `implementation`, `provider`, `service` — and
+      nothing checked it, so an operand written one level too high was
+      collected and dropped. `plan` sealed at exit 0 with no warning, and
+      the resource ran on the default the author believed they had
+      changed. Same silent-ignore defect the operand guard exists to
+      prevent, one level up.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e15b, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: e15b
+      capabilities:
+        db:
+          attributes:
+            service.managed: true
+          memory_mb: 512
+    expect:
+      error: candidate
+
+  - name: the-published-four-capability-keys-all-load
+    description: >
+      The sibling. A closed set enforced from the wrong side refuses
+      documents it should accept, so each of the four keys the schema
+      publishes must load together.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e15c, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: e15c
+      capabilities:
+        db:
+          attributes:
+            service.managed: true
+          provider: fake
+          service: sql
+          implementation:
+            anything: goes-here
+    expect:
+      executable: true
+
   - name: candidate-without-contract-is-load-error
     description: >
       D17 + D19: a candidate names the contract it implements; omitting the

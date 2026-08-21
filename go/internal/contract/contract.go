@@ -17,6 +17,15 @@ import (
 	"groundhold/internal/vocab"
 )
 
+// candidateCapabilityKeys is the capability block's shape, and it is CLOSED (D1160).
+// `implementation` is the free-form half (D26); this level is structure, and a key
+// here that the loader does not read is a stated intent nothing will act on.
+// Reconciled against `spec/candidate.schema.json` by
+// TestCandidateCapabilityKeysMatchThePublishedShape — the published document and the
+// loader must accept the same four, or a document valid for one is dropped by the other.
+var candidateCapabilityKeys = map[string]bool{
+	"attributes": true, "implementation": true, "provider": true, "service": true}
+
 var validStatuses = map[string]bool{
 	"declared": true, "inferred": true, "assumed": true, "unknown": true}
 var presenceOps = map[string]bool{"exists": true, "absent": true}
@@ -894,11 +903,31 @@ func LoadCandidate(path string, c *Contract,
 				"capability's identity is the key it is written under, and a second "+
 				"one can only disagree with it", capID)
 		}
+		// D1160: the same rule as the `id:` refusal above, applied to the whole
+		// block instead of one key. It was stated there — a declared field the
+		// loader does not read is the D673 shape — and enforced for `id` alone,
+		// so every OTHER stray key was collected into `extra` and dropped.
+		//
+		// Reported from the field: an operand written one level too high. The
+		// `implementation:` block is free-form (D26) and a key no driver reads is
+		// refused there (unknown-operand); the block ABOVE it takes exactly four
+		// keys and nothing checked them. `plan` sealed at exit 0 with no warning
+		// and the resource kept running on the default the author believed they
+		// had changed — the silent-ignore defect the operand guard exists to
+		// prevent, one floor up, where no guard was looking.
 		extra := map[string]any{}
 		for k, v := range body {
-			if k != "attributes" {
-				extra[k] = v
+			if k == "attributes" {
+				continue
 			}
+			if !candidateCapabilityKeys[k] {
+				return nil, fmt.Errorf("capabilities.%s carries %q, which is not one "+
+					"of the four keys a capability block takes (attributes, "+
+					"implementation, provider, service). If it is a driver operand, "+
+					"it belongs under `implementation:` — written here it is read by "+
+					"nothing and silently dropped", capID, k)
+			}
+			extra[k] = v
 		}
 		if len(extra) > 0 {
 			extras[capID] = extra

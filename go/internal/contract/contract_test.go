@@ -1,8 +1,10 @@
 package contract
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -584,6 +586,21 @@ func TestLoadCandidateErrors(t *testing.T) {
 			"kind: ImplementationCandidate\napiVersion: candidate/v0.1\ncontract: x\n" +
 				"capabilities:\n  db:\n    attributes:\n      e:\n        status: hunch\n        value: 1\n",
 			"invalid provenance status"},
+		// D1160, from the field: an operand written one level too high. The block
+		// takes four keys; a fifth was collected and dropped, so `plan` sealed at
+		// exit 0 and the resource kept the default the author thought they changed.
+		// The refusal must NAME the key and say where an operand belongs, or the
+		// reader is told only that something is wrong.
+		{"a key above the operands",
+			"kind: ImplementationCandidate\napiVersion: candidate/v0.1\ncontract: x\n" +
+				"capabilities:\n  db:\n    attributes:\n      service.managed: true\n" +
+				"    memory_mb: 512\n",
+			"memory_mb"},
+		{"the refusal points at the free-form block",
+			"kind: ImplementationCandidate\napiVersion: candidate/v0.1\ncontract: x\n" +
+				"capabilities:\n  db:\n    attributes:\n      service.managed: true\n" +
+				"    role_arn: arn:aws:iam::1:role/r\n",
+			"belongs under `implementation:`"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -697,5 +714,68 @@ func TestVerifyTwoBarFormRefusals(t *testing.T) {
 	}
 	if c.Constraints[0].VerifyMethod != "static" || c.Constraints[0].RuntimeMethod != "provider-api" {
 		t.Fatalf("bars did not survive: %+v", c.Constraints[0])
+	}
+}
+
+// D1160. The capability block's four keys live in three places — this loader, the
+// reference implementation, and `spec/candidate.schema.json`, which is what a stranger
+// validates a document against before the runtime ever sees it. A key one accepts and
+// another drops is a document that loads here and is rejected there, or worse: read by
+// nobody and silently discarded, which is the defect this set was closed to stop.
+//
+// Derived from the schema rather than restated: a hand-typed copy in a test is a fourth
+// place to drift.
+func TestCandidateCapabilityKeysMatchThePublishedShape(t *testing.T) {
+	root := vocabParityRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "spec", "candidate.schema.json"))
+	if err != nil {
+		t.Skipf("no candidate schema in this tree: %v", err)
+	}
+	var doc struct {
+		Properties struct {
+			Capabilities struct {
+				AdditionalProperties struct {
+					AdditionalProperties *bool          `json:"additionalProperties"`
+					Properties           map[string]any `json:"properties"`
+				} `json:"additionalProperties"`
+			} `json:"capabilities"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("candidate schema does not parse: %v", err)
+	}
+	block := doc.Properties.Capabilities.AdditionalProperties
+
+	published := make([]string, 0, len(block.Properties))
+	for k := range block.Properties {
+		published = append(published, k)
+	}
+	sort.Strings(published)
+	if len(published) == 0 {
+		t.Fatal("the schema publishes no capability-block keys — the scan lost its " +
+			"subject and this gate would pass over anything (D328)")
+	}
+
+	accepted := make([]string, 0, len(candidateCapabilityKeys))
+	for k := range candidateCapabilityKeys {
+		accepted = append(accepted, k)
+	}
+	sort.Strings(accepted)
+
+	if strings.Join(published, ",") != strings.Join(accepted, ",") {
+		t.Errorf("the schema publishes %v; this loader accepts %v.\nA document valid "+
+			"against the published shape must load, and one this loader accepts must "+
+			"validate — otherwise the two disagree about what a candidate IS.",
+			published, accepted)
+	}
+
+	// The schema must also CLOSE the block. Published with growth allowed, a stray key
+	// validates cleanly for a consumer while the runtime refuses it — the same
+	// disagreement from the other side.
+	if block.AdditionalProperties == nil || *block.AdditionalProperties {
+		t.Error("the capability block does not set `additionalProperties: false`. " +
+			"`implementation` is the free-form half (D26); this level is structure, " +
+			"and a schema that accepts any key here publishes a promise the loader " +
+			"does not keep")
 	}
 }
