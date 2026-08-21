@@ -38001,3 +38001,51 @@ about the word, and the fix is always to match what only the real thing can say.
 The shape: **a schema is a gate, and a gate nobody runs anything through is a document.**
 Every other closed set in this repository has a peer to disagree with; a published schema
 has only the runtime, and the runtime does not read it.
+
+## D1159 — the ledger's other closed set was enforced nowhere
+
+The event type registry has been fail-closed since D19 and reconciled across four
+artefacts since D338, because drift there makes a ledger written by one implementation
+unreadable to the other. `source` — the field that says how a value was LEARNED — is the
+same kind of set in the same document, and it had none of that.
+
+It is not bookkeeping, because the compiler BRANCHES on it. An observation sourced
+`candidate-declared` is adopt-recorded intent (F-LC3), so its path is carried as
+`unverifiable`: never drift, never a staleness freeze. A source the build does not
+recognize misses that branch, and the value is then compared as measured reality. "This
+cannot be verified" becomes "verified by the candidate's own word" — the false-secure
+direction, reached by a typo.
+
+Four copies said three different things. The runtime's five values lived as string
+literals across twenty-nine emission sites, collected nowhere, so there was nothing to
+compare anything against. `spec/state.schema.json` published five — D1151 had corrected
+that enum a few slices earlier, inside a definition nothing referenced (D1158), so the
+correction changed no behaviour anywhere. `spec/state-model.md` published THREE:
+`provider-api | probe | manual`. D1151 fixed the machine-readable copy and left the prose
+registry two lines away untouched, which is the honest measure of what a registry without
+a gate is worth. The reference implementation had no set at all.
+
+So: a named set in both implementations, refused on the WRITE path where every other
+alphabet of the ledger is refused, and a four-artefact gate that mirrors D338's.
+
+The refusal shares D1154's error type rather than raising its own. An unknown source is
+the same condition as an unknown event type — a value this build does not know, in an
+additive-only registry — so a build meeting a NEWER source reports a version gap and
+leaves the file alone, instead of calling an intact ledger corrupt. That fix was three
+hours old when this needed it.
+
+Enforcing it found the sixth value: `collector`, used by the collector package's own
+capsule fixtures and by no production path anywhere. It is not in the schema, not in the
+prose, and not in `spec/collector.md`, which is precise about the three DERIVATIONS a
+collector may claim and silent about source. The fixtures now carry a real source. **What
+source a third-party collector must declare is a genuine spec gap this exposed and does
+not answer** — a collector reads reality with its own credentials, which is not the same
+evidence as an in-tree driver's read, and the answer belongs to whoever owns that
+boundary. Flagged rather than decided.
+
+Two costs of my own. A fixture pinning observation RECENCY carried no source at all and
+began failing — the same shape as D1157's: a fixture for one property that is invalid in
+another way does not test what its name says, so it now carries one. And the gate's first
+draft read the prose registry by filtering words, which duly extracted `set` out of
+"(closed set, fail-closed)"; it now stops at the parenthetical, because prose about a
+registry is not a member of it.

@@ -252,7 +252,8 @@ kind: Observation
 capability: orders-db
 path: network.publicExposure
 value: false
-source: provider-api        # provider-api | probe | manual
+source: provider-api        # provider-api | probe | reachability | manual |
+                            #   candidate-declared  (closed set, fail-closed)
 derivation: measured        # config-intent | measured | platform-invariant (D44/D759)
                             # quality, mirroring candidate provenance (D5)
 observedAt: "2026-07-11T09:00:00Z"

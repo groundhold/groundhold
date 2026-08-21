@@ -32,7 +32,7 @@ func capsuleWith(t *testing.T, obs map[string]any) *ledger.Capsule {
 
 func measured() map[string]any {
 	return map[string]any{"path": "encryption.atRest", "value": true,
-		"observedAt": "2026-07-15T08:06:00Z", "derivation": "measured", "source": "collector"}
+		"observedAt": "2026-07-15T08:06:00Z", "derivation": "measured", "source": "provider-api"}
 }
 
 // TestCertifyCleanCapsule: a well-formed collector capsule certifies.

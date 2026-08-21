@@ -54,10 +54,40 @@ var ActorTypes = map[string]bool{"human": true, "agent": true, "runtime": true}
 // The prose is unchanged on purpose: the string is what every existing caller and test
 // already reads. What is new is that the condition can now be TOLD APART, which is the
 // whole fix — a caller that cannot distinguish two conditions cannot advise on either.
-type UnknownTypeError struct{ Type string }
+type UnknownTypeError struct {
+	// What names the closed set, so one error type serves every registry the
+	// ledger is fail-closed on and replay needs only one branch to route them all
+	// (D1159). The message keeps the exact wording each set already published.
+	What string // "event type" | "observation source"
+	Type string
+}
 
 func (e *UnknownTypeError) Error() string {
-	return fmt.Sprintf("unknown event type: %q", e.Type)
+	what := e.What
+	if what == "" {
+		what = "event type"
+	}
+	return fmt.Sprintf("unknown %s: %q", what, e.Type)
+}
+
+// ObservationSources is the closed set of ways a value can have been LEARNED
+// (D1159). It is published in `spec/state.schema.json` and it was, until now,
+// enforced nowhere: the five values lived as string literals across twenty-nine
+// emission sites with nothing to compare them against — which is exactly how the
+// published enum came to be missing two of them (D1151).
+//
+// It is not decoration. The compiler BRANCHES on this field: an observation whose
+// source is `candidate-declared` is adopt-recorded intent, so the path is carried
+// as unverifiable — never drift, never a staleness freeze. A source this build does
+// not recognize misses that branch and the value is then compared as measured
+// reality, which turns "this cannot be verified" into "verified by the candidate's
+// own word". That is the false-secure direction, reached by a typo.
+var ObservationSources = map[string]bool{
+	"provider-api":       true, // read from the provider's own API
+	"probe":              true, // measured by an outcome probe (D59)
+	"reachability":       true, // measured at the public edge
+	"manual":             true, // supplied by a human, provenance carried
+	"candidate-declared": true, // adopt recorded the candidate's intent (F-LC3)
 }
 
 func LoadEvent(path string) (map[string]any, error) {
@@ -134,6 +164,27 @@ func ValidateEvent(docAny any) (map[string]any, error) {
 	if sv, has := doc["sig"]; has && sv != nil {
 		if err := validateSig(sv); err != nil {
 			return nil, err
+		}
+	}
+	// D1159: the OTHER closed set this document carries. The event type has been
+	// fail-closed here since D19; `source` — which the compiler branches on to tell
+	// intent from measurement — was checked nowhere, so a typo silently promoted an
+	// adopt-recorded intent into evidence. Refused on the write path, where every
+	// other alphabet of the ledger is refused, and with the same error type so a
+	// build meeting a NEWER source reports a version gap rather than corruption
+	// (D1154).
+	if etype == "observation.recorded" {
+		body, _ := ev["body"].(map[string]any)
+		obs, _ := body["observations"].([]any)
+		for _, o := range obs {
+			om, _ := o.(map[string]any)
+			if om == nil {
+				continue
+			}
+			src, _ := om["source"].(string)
+			if !ObservationSources[src] {
+				return nil, &UnknownTypeError{What: "observation source", Type: src}
+			}
 		}
 	}
 	return doc, nil
