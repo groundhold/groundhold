@@ -38319,3 +38319,133 @@ every anchor pointing at one of the copies ambiguous, and the meter is where tha
 The shape, and it is the fourth phrasing of one idea: **reasoning that stops at the first
 member of a set is a gate over that member.** D597 thought about typos in this block and
 protected the keys whose failure is safe.
+
+## D1165 — aws/lambda memory_size operand: memory is the CPU allocation, so a resource that creates green ran at 7% of a core
+The field's fifth report of one family — a capability creates a resource, but a property that decides whether
+it WORKS stays outside the contract, so converge is green and recreation differs from production. Here the
+property is `MemorySize`, and on Lambda memory is not footprint: it is the CPU allocation (a full vCore at
+~1769 MB), so a function left at AWS's 128 MB default gets ~7% of a core. The reporter measured a PDF
+extraction at 213 ms on a full core and >20 s (budget-killed, >94x) at 128 MB — three cells of a legal
+register went unread for a week, and the symptom was not an error but a rising number in a coverage report,
+which is silence. `implementation.memory_size` refused as unknown-operand and there was no capability
+attribute either, so the value could only be set by a manual `update-function-configuration` that does not
+survive recreation and that nobody but its author knows about.
+
+The fix is an operand, not a vocabulary attribute. The reporter argued memory is semantic (it decides
+executability) and preferred an attribute — a fair argument — but an attribute is a cross-cloud type-system
+commitment (GCP Cloud Functions / Azure Functions memory), and the operand solves the measured problem now
+without it: `implementation.memory_size` is sealed into the plan, applied on create AND re-pushed on
+UpdateFunctionConfiguration, observed back from GetFunctionConfiguration, and classified mutable — so it
+survives recreation AND corrects drift, which is the family's actual complaint. It is validated to AWS's
+128..10240 MB range in preflight (a value AWS would reject refuses before the apply, never clamped), and its
+OperandTargets entry is DECLARED-ONLY (the D774/D1001 rule: an adopted function whose contract is silent must
+not drift toward the 128 MB default). A cross-cloud `compute.memory` attribute is deferred, not rejected —
+noted for the vocabulary-governance decision, not made unilaterally on the driver's schedule.
+
+Same delivery notes the reporter's own sub-finding as already closed: a key placed a level ABOVE
+`implementation` (a sibling of provider/service) used to pass plan silently with zero actions, which reads
+exactly like the silent-drop this project refuses — D1160 closed it (the candidate capability block is a
+closed four-key set; a stray key now refuses, naming that it belongs under `implementation:`). The remaining
+three of the family (reserved_concurrency, s3 CORS, sns subscriptions) are the next slices.
+## D1166 — the short form dropped the bar, and no typo was needed
+
+D1162 closed the constraint object and its `verify` block against a misspelled key.
+`constraints.hard`, `constraints.soft` and `budget` all route through one parser, so all
+three were covered. There is a FOURTH producer of hard constraints, and it was not:
+`capabilities[].requirements`, D8's short form.
+
+The desugaring builds the constraint like this:
+
+    "path": rpath, "op": op, "value": sp["value"],
+    "verify": map[string]any{"method": "static"},
+
+The bar is hardcoded and the rest of the requirement is not read. So a bar written in a
+requirement was dropped — and unlike D1162 this needs no misspelling at all. The same
+residency rule, both spellings, measured:
+
+    constraints.hard: {path: location.region, verify: {method: provider-api}}
+        -> executable=false, unknown, "requires provider-api verification"
+    requirements: {location.region: {verify: {method: provider-api}}}
+        -> executable=TRUE, satisfied, "declared eu-central-1"
+
+Both implementations do it identically, so there was no dual divergence to find — only a
+shared silent drop, which is why the conformance suite never noticed.
+
+**Refused rather than honoured**, and that is the part worth arguing. Teaching the short
+form to carry a bar would make it a second spelling of a full constraint — exactly what
+the verify block itself refuses ("one bar or two, never both spellings of the same
+thing"). Widening the contract language is not something to do in passing while fixing a
+silent drop, and the narrow fix is honest immediately: what used to vanish is now a
+refusal that names where the bar goes. If the sugar should one day carry a bar, that is a
+decision with a D-number of its own.
+
+The refusal says three things, because "unknown key" would leave an author who wrote
+something reasonable with nowhere to go: that this form is STATIC-bar sugar, that a bar
+written here is dropped, and that the requirement belongs under `constraints.hard` with
+its `verify:`. There is a mutant on that last clause.
+
+The schema published `op` and `value` for a requirement and said nothing about the static
+bar, so nothing a reader could consult would have told them. It now says it and closes
+the block.
+
+The shape: **a fix scoped to "the parser" misses the sugar that feeds it.** D1162 covered
+every path that CALLS `newConstraint` with author-written keys except the one that
+synthesises them — and a synthesiser reading two fields out of four is a silent drop by
+construction, with no bad input required.
+
+## D1167 — aws/lambda reserved_concurrency operand: an in-memory rate limiter's ceiling multiplied by every replica
+The field's fourth report of the "content/policy outside the contract" family, and the sibling of D1165.
+An in-process rate limiter holds its budget PER INSTANCE, so its limits multiply by the number of concurrent
+Lambda instances: the reporter measured "5 requests/minute" become 65 across 13 containers. A per-function
+concurrency ceiling is the cheap bound on that multiplier and on cost blast radius, and there was no way to
+declare it — `implementation.reserved_concurrency` refused as unknown-operand, so the ceiling could only be
+set by a manual `put-function-concurrency` that does not survive recreation.
+
+Unlike memory (D1165), reserved concurrency is NOT part of CreateFunction: it rides a SEPARATE
+PutFunctionConcurrency call and is read from its OWN endpoint (GetFunctionConcurrency, not
+GetFunctionConfiguration). So the wiring follows the Function-URL / invoke-grant secondary-call pattern:
+`ensureLambdaConcurrency` is called after the function is Active on create AND on update, reads the live
+reservation first (so a value already at the ceiling issues no call), and PUTs only the difference; observe
+reads the reservation from its endpoint and emits the operand only when one is set; classify routes a change
+to that in-place patch, never a replacement. It is DECLARED-ONLY (the D774 rule): an adopted function's live
+reservation is left untouched when the contract is silent, and the operand distinguishes a declared 0
+(throttle to zero — a real, valid reservation) from absent (unreserved, drawing on the account pool). A
+negative value refuses in preflight; the ceiling (the account's unreserved pool) is account STATE, not a
+static range, so it is left for AWS to reject against the live account rather than guessed here. The
+permission is asked for precisely — `lambda:PutFunctionConcurrency` only when the operand is declared (the
+invokers rule), `lambda:GetFunctionConcurrency` registered as the read behind observe. Two remain in the
+family: s3 CORS and sns subscriptions.
+
+## D1168 — s3 CORS enters the contract as the origin-set EFFECT, after a consult killed the bool that would have lied
+The last of the field's "content/policy outside the contract" family. A bucket a browser uploads to needs a
+CORS rule; created through the tool it converges green and the upload fails silently, and the manual
+`put-bucket-cors` does not survive recreation. The reporter asked for the boundary DECISION, and named the
+right shape: "an attribute describing the EFFECT (whether a rule allows given origins), not the raw document,
+because we guard the effect in the gate." The decision: CORS belongs in-contract.
+
+The first design — a bool `network.corsEnabled` — was put through a consult (owner-directed for a
+type-system change) and REJECTED, correctly, as an instance of the very defect this project exists to prevent.
+A bool converges green while the live rule allows the WRONG origin, in the one domain where a wrong origin
+fails silently (a blocked XHR, no server error); it only ever detects TOTAL absence though `GetBucketCors`
+returns the whole ruleset; it inverts the CMK analogy (there the bool carries the guarantee and the operand
+only names the key — here the bool carries nothing and the operand carries everything); and a bucket-scoped
+bool hard-codes an assumption Azure breaks (its CORS is storage-account-scoped, not per-container).
+
+The shipped design is the value-level attribute the consult converged on: **`cors.allowedOrigins`
+(`kind: list`)** — the union of `AllowedOrigin` across the bucket's CORS rules, sorted-unique. Its own
+namespace `cors.` (facility.property, like `versioning.`; not `network.`, which here means transport
+reachability). Observe measures the union from `GetBucketCors`; `NoSuchCORSConfiguration` is a MEASURED empty
+set, never unknown — so the blind bucket reads `[]` and `cors.allowedOrigins equals ["https://app.example.com"]`
+blocks it (converge red until the rule lands), and a drift to `"*"` or an extra origin is caught too, with
+NO verifier change (the existing `equals`/`subset-of` operators do it). The rule document — origin-by-method
+pairing, headers, max-age — is the `implementation.cors` operand; a **projection-consistency gate on the
+build** requires the operand's origin-union to equal the attribute, so the write-only operand cannot smuggle
+an effect the attribute does not assert (the forged-plan-field lesson). Whether a specific METHOD is allowed
+is an OUTCOME a probe proves (a preflight OPTIONS), not a flat attribute that would claim more than it
+enforces (the D323/D325 class). `equals []` is DeleteBucketCors; UNDECLARED is hands-off — a brownfield
+bucket's CORS is not stomped (delete-ownership). The vocab's own "deliberately absent — CORS configuration
+shape" note is revised in the same slice: the shape stays noise, the effect enters. Two owner-flagged
+follow-ups (not this slice): a "no wildcard" recommended rule would need a `not-contains` operator, and
+Azure's account-level CORS scope needs a honored-with-caveat decision at parity. The consult was the whole
+value here — it turned a design that would have shipped the tool's cardinal failure mode into one that
+catches it.

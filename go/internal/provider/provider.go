@@ -1214,6 +1214,7 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			_, retentionMax := attrs["retention.maximum"]
 			cmek, _ := attrs["encryption.customerManagedKeys"].(bool)
 			replication, _ := attrs["replication.enabled"].(bool)
+			_, corsDeclared := attrs["cors.allowedOrigins"]
 			_, retentionMin := attrs["retention.minimum"]
 			retentionLocked, _ := attrs["retention.locked"].(bool)
 			switch operation {
@@ -1242,6 +1243,11 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 					// DeleteBucketReplication — there is no s3:DeleteReplicationConfiguration.
 					p = append(p, "s3:PutReplicationConfiguration")
 				}
+				if corsDeclared {
+					// one action authorises BOTH PutBucketCors and DeleteBucketCors, like
+					// replication — asked for only when cors.allowedOrigins is declared.
+					p = append(p, "s3:PutBucketCORS")
+				}
 				return sortedDedup(p)
 			case "update":
 				// DeleteBucketPolicy is the PRIVATE transition: updateS3 PUTs the public
@@ -1252,7 +1258,8 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 				return sortedDedup([]string{"s3:GetBucketTagging",
 					"s3:PutBucketVersioning", "s3:PutBucketPublicAccessBlock",
 					"s3:PutBucketPolicy", "s3:DeleteBucketPolicy", "s3:PutLifecycleConfiguration",
-					"s3:PutEncryptionConfiguration", "s3:PutReplicationConfiguration"})
+					"s3:PutEncryptionConfiguration", "s3:PutReplicationConfiguration",
+					"s3:PutBucketCORS"})
 			case "delete":
 				// GetBucketObjectLockConfiguration is the pre-delete guard
 				// (refuseIfObjectLockCompliance): a bucket in COMPLIANCE mode must not be
@@ -1426,6 +1433,13 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 				if _, hasInvokers := attrs["impl:invokers"]; hasInvokers {
 					p = append(p, "lambda:AddPermission", "lambda:GetPolicy")
 				}
+				// the reserved-concurrency ceiling is a SECONDARY PutFunctionConcurrency
+				// call, made only when the operand is declared — so the permission is
+				// asked for only then (the invokers rule: precise, operand-gated, not a
+				// blanket superset that would burden every simple function).
+				if _, hasConc := attrs["impl:reserved_concurrency"]; hasConc {
+					p = append(p, "lambda:PutFunctionConcurrency")
+				}
 				return sortedDedup(p)
 			case "update":
 				// updateLambda patches the configuration, then the CODE, then moves the
@@ -1441,7 +1455,8 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 				return sortedDedup([]string{"lambda:GetFunction",
 					"lambda:UpdateFunctionConfiguration", "lambda:UpdateFunctionCode",
 					"lambda:CreateFunctionUrlConfig", "lambda:AddPermission",
-					"lambda:DeleteFunctionUrlConfig", "lambda:RemovePermission"})
+					"lambda:DeleteFunctionUrlConfig", "lambda:RemovePermission",
+					"lambda:PutFunctionConcurrency"})
 			case "delete":
 				return sortedDedup([]string{"lambda:DeleteFunction", "lambda:GetFunction"})
 			}

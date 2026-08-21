@@ -83,6 +83,11 @@ var verifyKeys = map[string]bool{
 var contractCapabilityKeys = map[string]bool{
 	"id": true, "type": true, "requirements": true, "state": true}
 
+// requirementKeys is D8's short form, and it is exactly what the published schema
+// publishes for it: `op` and `value`. The sugar builds a hard constraint with a STATIC
+// bar and reads nothing else, so any other key here is a stated intent nothing acts on.
+var requirementKeys = map[string]bool{"op": true, "value": true}
+
 var contractMetaKeys = map[string]bool{
 	"id": true, "environment": true, "version": true, "owner": true}
 
@@ -657,6 +662,25 @@ func collectConstraints(doc map[string]any, caps map[string]map[string]any,
 		sort.Strings(rpaths)
 		for _, rpath := range rpaths {
 			sp, _ := reqs[rpath].(map[string]any)
+			// D1166: this sugar hardcodes `verify: {method: static}` below and reads
+			// nothing else out of `sp`. So a requirement written with a verification
+			// bar had it SILENTLY DROPPED — measured, the same residency requirement
+			// is `unknown` and blocking as a constraint and `satisfied` and executable
+			// as sugar, with no typo involved at all.
+			//
+			// Refused rather than honoured, deliberately. `requirements` is D8's short
+			// form for the simple case; teaching it a bar would make it a second
+			// spelling of a full constraint, which is what the verify block itself
+			// refuses ("one bar or two, never both spellings of the same thing").
+			// Widening the language is not a thing to do while fixing a silent drop.
+			if err := checkKnownKeys(sp, requirementKeys,
+				"capabilities."+capID+".requirements."+rpath,
+				"this short form is STATIC-bar sugar (D8) and reads only `op` and "+
+					"`value` — a verification bar written here is dropped, so put "+
+					"the requirement under `constraints.hard` with its `verify:` "+
+					"instead"); err != nil {
+				return nil, err
+			}
 			op, _ := sp["op"].(string)
 			if op == "" {
 				op = "equals"

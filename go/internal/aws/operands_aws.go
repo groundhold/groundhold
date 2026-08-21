@@ -56,7 +56,7 @@ var awsConsumedOperands = map[string][]string{
 	"iam":                    {"assume_role_policy", "roleName", "trust_service"}, // D740
 	"kinesis":                {"kms_key_id"},
 	"kms":                    {},
-	"lambda":                 {"architectures", "environment", "image_uri", "invokers", "role_arn", "security_groups", "subnets", "url_auth"},
+	"lambda":                 {"architectures", "environment", "image_uri", "invokers", "memory_size", "reserved_concurrency", "role_arn", "security_groups", "subnets", "url_auth"},
 	"loadbalancer":           {"certificateArn", "healthCheckPath", "port", "region", "securityGroups", "subnets", "targetPort", "vpcId"},
 	"msk":                    {"kms_key_id", "security_group_ids", "subnet_ids"},
 	"opensearch":             {"engine_version", "instance_count", "kms_key_id", "security_group_ids", "subnet_ids"},
@@ -67,7 +67,7 @@ var awsConsumedOperands = map[string][]string{
 	"route53":                {"vpc_id", "vpc_region"},
 	"route53health":          {"port"},
 	"route53record":          {"record_name", "zone_id"},
-	"s3":                     {"kms_key_id", "replication_destination_bucket_arn", "replication_role_arn"},
+	"s3":                     {"cors", "kms_key_id", "replication_destination_bucket_arn", "replication_role_arn"},
 	"secretsmanager":         {"kms_key_id"},
 	"ses-inbound":            {"recipientDomain", "ruleName", "ruleSetName", "s3BucketName", "s3ObjectKeyPrefix", "snsTopicArn"},
 	"ses-sending":            {"bounceTopicArn", "configurationSetName", "domain"},

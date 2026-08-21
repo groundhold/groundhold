@@ -182,6 +182,30 @@ attributes:
     evidence: projection      # D311: a forecast, never resource state
     verification: static against a pricing catalog; billing after deploy
 
+  cors.allowedOrigins:
+    kind: list
+    evidence: resource
+    description: >
+      The SET of browser origins that have a cross-origin rule on this bucket — the UNION of
+      AllowedOrigins across all CORS rules (`"*"` recorded literally), sorted-unique like every
+      list here. This is the EFFECT (who may call from a browser), NOT the rule document: the
+      origin-by-method pairing and the header/max-age detail live in `implementation.cors`,
+      which the verify projection gate requires to agree with this set. An empty list is a
+      MEASURED absence (GetBucketCors returned no configuration), never unknown — so a bucket a
+      browser upload needs, but which has no rule, reads as `[]`, and a hard
+      `cors.allowedOrigins equals ["https://app.example.com"]` blocks it: converge stays red
+      until the rule lands, and a rule drifted to `"*"` or an extra origin is caught too,
+      with no verifier change. Undeclared means the surface is UNMANAGED (no rule written,
+      none removed — a brownfield bucket's CORS is not stomped). Whether a specific METHOD is
+      actually allowed is an OUTCOME a probe proves (a preflight OPTIONS), not this attribute —
+      a flat origin set cannot express origin-by-method without claiming more than it enforces.
+    mappings:
+      aws.s3: union of CORSConfiguration CORSRule[].AllowedOrigins (PutBucketCors / GetBucketCors)
+      gcp.gcs: union of cors[].origin
+      azure.blob: CORS is set at the STORAGE ACCOUNT level, not the container — honored with that caveat
+
 # Deliberately absent in v0.1 (implementation noise):
-# bucket names, storage-class tiers, lifecycle rule syntax, CORS
-# configuration shape, signed-URL mechanics.
+# bucket names, storage-class tiers, lifecycle rule syntax, signed-URL
+# mechanics. The CORS rule DOCUMENT — the origin-by-method pairing, headers,
+# max-age — is `implementation.cors`, not a capability path; its EFFECT, which
+# origins may call cross-origin, IS a capability (cors.allowedOrigins above).

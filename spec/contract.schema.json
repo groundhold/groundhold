@@ -98,8 +98,11 @@
           },
           "requirements": {
             "type": "object",
+            "$comment": "D8's short form for a hard constraint, and it is STATIC-bar sugar: the loader builds the constraint with `verify: {method: static}` and reads nothing else here. A `verify:` written in a requirement used to be dropped in silence, so the same residency rule blocked as a constraint and passed as sugar (D1166). Closed, so writing one is a refusal that names where the bar belongs.",
             "additionalProperties": {
               "type": "object",
+              "patternProperties": { "^x-": {} },
+              "additionalProperties": false,
               "required": ["op", "value"],
               "properties": {
                 "op": { "$ref": "#/$defs/operator" },

@@ -117,6 +117,10 @@ func lambdaExposureServer(t *testing.T, authType string, anonGrant bool) *httpte
 			pol := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*",` +
 				`"Action":"lambda:InvokeFunctionUrl"}]}`
 			_ = json.NewEncoder(w).Encode(map[string]any{"Policy": pol})
+		case "/2019-09-30/functions/" + fn + "/concurrency":
+			// GetFunctionConcurrency: no reservation set (observe reads this on its own
+			// endpoint now); an empty body means the function draws from the account pool.
+			_ = json.NewEncoder(w).Encode(map[string]any{})
 		case "/2015-03-31/functions/" + fn:
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"Configuration": map[string]any{

@@ -3,6 +3,57 @@
 # MUST produce these verdicts. Semantics live here, not in any codebase.
 
 cases:
+  # D1166. `requirements` is D8's short form for a hard constraint, and the loader
+  # builds that constraint with `verify: {method: static}` HARDCODED, reading nothing
+  # else. So a bar written in a requirement was dropped in silence — no typo needed:
+  # the same residency rule is `unknown` and blocking as a constraint, and `satisfied`
+  # and executable as sugar. Refused rather than honoured: teaching the short form a
+  # bar would make it a second spelling of a full constraint, which the verify block
+  # itself refuses ("one bar or two, never both spellings of the same thing").
+  - name: a-verification-bar-in-the-requirements-sugar-is-refused
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: r1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+          requirements:
+            location.region:
+              op: equals
+              value: eu-central-1
+              verify: { method: provider-api }
+    expect:
+      error: contract
+      errorContains:
+        - "STATIC-bar sugar"
+        - "constraints.hard"
+
+  - name: the-requirements-short-form-still-loads
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: r2, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+          requirements:
+            service.managed:
+              op: equals
+              value: true
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: r2
+      capabilities:
+        db:
+          attributes:
+            service.managed: true
+          provider: fake
+          service: sql
+    expect:
+      executable: true
+
   # D1164. D658 shape-gated the consent blocks after a `forbidden` written as a
   # MAPPING lost `delete_stateful` — "a bound stateful database is then destroyed at
   # exit 0 with validate reporting OK". A misspelled KEY does the identical thing and
