@@ -38211,3 +38211,50 @@ The shape, sharpened from D1160: **a guard that checks values learns nothing abo
 keys.** Care spent on what a field may CONTAIN is not care spent on whether the field is
 the one the reader meant to write, and the more carefully a block is validated the more
 convincing its silence is when the validation never ran.
+
+## D1163 — a published block that nothing reads, in the example people learn from
+
+While establishing whether `outcomes` could be closed like the levels around it (D1162),
+the answer turned out to be that there is nothing to close: the block is read by nobody.
+
+    spec/contract.schema.json   publishes it: `id` + `probe`, both required
+    both loaders               parse it and shape-gate it (a mis-shaped block is an error)
+    canonicalization           folds it into the contract's hash
+    every verb                 ignores it
+
+`probe` derives what to measure from the ledger's BINDINGS and reads the contract only
+for the intrusive-probe consent (D59) — the outcome block was never part of that design.
+So writing `outcomes:` changes the document's hash and nothing else.
+
+That would be a small thing if it lived only in the schema. It appears in
+`spec/examples/orders-production.contract.yaml` — the flagship example — with ten keys,
+eight of which the schema does not publish and none of which anything reads. A reader
+learning the language from that file writes a block that does nothing, and is told
+nothing.
+
+The block stays. It records what that contract intends to prove, which is worth keeping,
+and deleting an author's stated intent is a larger edit than the honesty problem needs.
+What changes is that the schema and the example both SAY it is reserved in v0.
+
+The gate is the part worth reading. This repository already had a "reserved in v0" marker
+— `signature` in the state schema — and nothing checked it, which is precisely the shape
+five slices today were about. So the marker here is behavioural: **adding the block may
+change the contract's hash and nothing else.** Implement `outcomes` and that gate fails
+until the marker comes off, so the schema cannot go on telling a reader "reserved" after
+it stopped being true.
+
+The first draft of the gate searched the source for readers of the field, and flagged
+`apply.go` and `converge.go` — which carry an unrelated `Outcomes` (per-action results).
+A name two concepts share cannot answer "is this block read", and narrowing the regex
+until it agreed with what I already believed would have been a gate written to pass. The
+behavioural form needs no name at all.
+
+The marker on `signature` was left alone rather than extended to match. This gate covers
+contract-level blocks, and marking a second field with a sentence this gate cannot hold
+would add exactly the unbacked promise the slice exists to remove — one marker with a
+mechanism is worth more than two with one between them.
+
+The shape: **"reserved" is a claim about behaviour, so it needs a behavioural check.** A
+comment saying a block is inert is the same kind of artefact as a comment saying a set is
+closed — true when written, unfalsifiable afterwards, and quietly wrong the first time
+someone makes the block do something useful.

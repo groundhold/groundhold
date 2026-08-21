@@ -88,6 +88,12 @@ autonomy:
     - disable: c-encrypted
     - delete_stateful: true
 
+# RESERVED IN v0 (D1163): nothing reads this block. It is parsed, shape-gated and
+# folded into the contract's hash, and no verb behaves differently because it is here —
+# `probe` derives what to measure from the ledger's bindings and reads the contract only
+# for the intrusive-probe consent (D59). It is kept because it records what this contract
+# INTENDS to prove; it is labelled because a reader copying it is entitled to know it
+# does nothing yet.
 outcomes:
   - id: o-connect
     probe: tcp-connect
