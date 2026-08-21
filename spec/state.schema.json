@@ -2,7 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "groundhold://schemas/state/v0",
   "title": "State Model v0",
-  "description": "Ledger events, bindings, observations, operation receipts (spec/state-model.md, D27-D33, D35). The ledger is the only write path; bindings and lease status are projections of it.",
+  "description": "A ledger event (spec/state-model.md, D27-D33, D35). The ledger is the only write path; bindings, observations and receipts are the BODIES events carry, and lease status is a projection of them. D1158: this file used to describe those four things and constrain none of them — the root carried no `type`, no `$ref` and no `properties`, so every document was a valid State Model v0, including the number 42. A schema that accepts anything is not fail-closed; it is decorative.",
+  "$ref": "#/$defs/ledgerEvent",
   "$defs": {
     "identifier": {
       "type": "string",
@@ -56,14 +57,66 @@
             "body": { "type": "object" },
             "prev": {
               "type": "object",
-              "additionalProperties": { "$ref": "#/$defs/hash" }
+              "description": "capability -> the head this event extends. `genesis` is the sentinel for a capability's FIRST event, so the values are a hash or that word — D1158: the schema demanded a hash here, which rejects the opening event of every ledger ever written. Nothing noticed, because nothing validated a ledger against this file.",
+              "additionalProperties": {
+                "anyOf": [
+                  { "$ref": "#/$defs/hash" },
+                  { "const": "genesis" }
+                ]
+              }
             },
             "fencingToken": { "type": "integer", "minimum": 1 },
             "idempotencyKey": { "type": "string" },
             "signature": { "type": "object", "description": "reserved in v0" }
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "description": "D1158: `binding`, `observation` and `operationReceipt` were published here and referenced NOWHERE — `body` was `{\"type\": \"object\"}`, so the shapes this file exists to describe were the one part of it nothing could check. One of the three had silently drifted out of step with the runtime by the time anyone looked. A body is the payload of a KNOWN event type, so it is constrained per type; every other type keeps an open body, which is honest rather than convenient — those shapes are not published here and pretending otherwise would be the same defect pointing the other way.",
+          "if": {
+            "required": ["event"],
+            "properties": { "event": { "required": ["type"], "properties": { "type": { "const": "binding.updated" } } } }
+          },
+          "then": {
+            "properties": { "event": { "properties": { "body": { "$ref": "#/$defs/binding" } } } }
+          }
+        },
+        {
+          "if": {
+            "required": ["event"],
+            "properties": { "event": { "required": ["type"], "properties": { "type": { "const": "operation.receipt" } } } }
+          },
+          "then": {
+            "properties": { "event": { "properties": { "body": { "$ref": "#/$defs/operationReceipt" } } } }
+          }
+        },
+        {
+          "if": {
+            "required": ["event"],
+            "properties": { "event": { "required": ["type"], "properties": { "type": { "const": "observation.recorded" } } } }
+          },
+          "then": {
+            "properties": {
+              "event": {
+                "properties": {
+                  "body": {
+                    "type": "object",
+                    "required": ["observations"],
+                    "properties": {
+                      "observations": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "$ref": "#/$defs/observation" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "binding": {
       "type": "object",
@@ -139,11 +192,17 @@
     },
     "operationReceipt": {
       "type": "object",
-      "required": ["kind", "operationId", "capability", "target", "startedAt", "status"],
+      "description": "D1158: this described a receipt the runtime has never written. It required `kind`, `capability` and `startedAt` — measured across twenty receipts from real runs, none of the three appears in any of them, and `startedAt`/`lastSeenAt` appear nowhere in the source either. It also named none of the five fields every receipt DOES carry. Nothing noticed for as long as this definition existed, because nothing referenced it: a body was `{\"type\": \"object\"}` and the root constrained nothing at all. Required is now what is measured to be always present; the rest are described, not demanded. The capability the receipt belongs to is `event.capabilities`, and the time it was written is `event.occurredAt` — neither needs restating in the body.",
+      "required": ["operationId", "target", "status"],
       "properties": {
         "kind": { "const": "OperationReceipt" },
         "operationId": { "type": "string" },
         "idempotencyKey": { "type": "string" },
+        "applyRunId": { "type": "string" },
+        "generation": { "type": "integer" },
+        "operation": { "type": "string" },
+        "providerOperation": { "type": "string" },
+        "outputs": { "type": "object" },
         "capability": { "$ref": "#/$defs/identifier" },
         "target": { "type": "string" },
         "startedAt": { "$ref": "#/$defs/timestamp" },

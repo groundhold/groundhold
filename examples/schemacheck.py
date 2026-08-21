@@ -19,7 +19,7 @@ import re
 KNOWN = {"type", "properties", "required", "items", "enum", "const", "$ref",
          "additionalProperties", "pattern", "minimum", "maximum", "maxLength",
          "minItems", "propertyNames", "description", "$defs", "$schema", "$id",
-         "title", "anyOf"}
+         "title", "$comment", "anyOf", "allOf", "if", "then", "else"}
 
 TYPES = {"object": dict, "array": list, "string": str, "boolean": bool,
          "number": (int, float), "integer": int, "null": type(None)}
@@ -37,6 +37,16 @@ def errors(doc, schema, defs, path=""):
         if not ref.startswith("#/$defs/"):
             return out + [(path, "unsupported $ref %s" % ref)]
         return out + errors(doc, defs[ref[len("#/$defs/"):]], defs, path)
+
+    # allOf / if-then: how the state schema says "a body's shape depends on the
+    # event TYPE". Without them a checker either refuses the file outright or —
+    # far worse — passes over the one rule that constrains the payload.
+    for sub in schema.get("allOf", []):
+        out += errors(doc, sub, defs, path)
+    if "if" in schema:
+        branch = "then" if not errors(doc, schema["if"], defs, path) else "else"
+        if branch in schema:
+            out += errors(doc, schema[branch], defs, path)
 
     # anyOf: the document must satisfy at least one branch. Reporting every
     # branch's complaint would bury the real one, so a failure says only that

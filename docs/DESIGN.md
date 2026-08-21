@@ -37941,3 +37941,63 @@ because the tree held uncommitted work. And two existing fixtures began failing 
 new refusal before reaching the condition they name; they now carry a statement, which
 makes them sharper rather than weaker — a fixture for "invalid status" that is ALSO
 invalid some other way does not test what its name says.
+
+## D1158 — a published schema that accepted everything, including the number 42
+
+Ask of a published SCHEMA the question this record asks of every gate — what would it
+print if it were switched off — and one of the four answered: exactly what it prints now.
+
+`spec/state.schema.json` carried no `type`, no `$ref` and no `properties` at its root.
+Only metadata. So every document was a valid State Model v0: a ledger event, a bare
+object, a string, `null`, the number 42. Four of its definitions — `ledgerEvent`,
+`binding`, `observation`, `operationReceipt` — were referenced by nothing, which made the
+shapes the file exists to describe the one part of it nobody could check. `event.body`
+was `{"type": "object"}`. And `spec/state-model.md` says of this file: "it is fail-closed
+on every side".
+
+I had already reported a clean result against it. Earlier the same day I validated a real
+converge ledger — seventeen events, ten distinct types — and wrote down "zero
+violations". That measurement was EMPTY, not clean: nothing was checked, because nothing
+could be. An empty probe reads exactly like a passing one, which is the failure this
+record keeps naming and which I performed here in my own favour.
+
+Two things had drifted in that shelter, and they are why this is a gate rather than a
+one-line fix.
+
+**`prev` demanded a hash.** `{"$ref": "#/$defs/hash"}`, pattern `^sha256:[0-9a-f]{64}$` —
+but a capability's FIRST event carries the sentinel `genesis`, which is how the chain
+opens. The published schema therefore rejected the opening event of every ledger ever
+written. It is now a hash or that word, and both directions are pinned: the sentinel
+validates, and a `prev` that is neither still fails.
+
+**`operationReceipt` described a receipt nobody has written.** It required `kind`,
+`capability` and `startedAt`; measured across twenty receipts from real runs, none of the
+three appears in any of them, and `startedAt`/`lastSeenAt` appear nowhere in the source
+either. It named none of the five fields every receipt DOES carry. Required is now what
+is measured to be always present — the capability a receipt belongs to is
+`event.capabilities` and the time it was written is `event.occurredAt`, neither of which
+needs restating in the body.
+
+The root now points at `ledgerEvent`, and the three body definitions are reached
+per event type through `if`/`then`, so a body is validated as the shape its type declares
+while every other type keeps an open body — which is honest rather than convenient, since
+those shapes are not published here. The effect is not theoretical: an observation whose
+`source` falls outside its enum is now refused, and that enum is the one D1151 spent a
+slice correcting inside a definition nothing could reach.
+
+The escapes are deliberate and both are DECLARED in the schema rather than in the gate.
+`outputs.schema.json` genuinely is a catalogue — a consumer picks the `$defs` entry named
+for the verb it called — so its open root is correct, and it now says so in a root
+`$comment`. `candidate.schema.json`'s `outputRef` documents a shape the schema
+deliberately does not enforce, because `implementation:` is free-form by D26, and it says
+that too. An exception a gate carries is an exception nobody reviews.
+
+Mutating the new gate caught the same mistake for the third time in one day: the check
+accepted any `$comment` CONTAINING the word "catalogue", and the comment's own explanation
+uses that word in a later sentence, so renaming the marker left the gate passing. It now
+requires the declaration as a PREFIX. A check that accepts a word accepts a paragraph
+about the word, and the fix is always to match what only the real thing can say.
+
+The shape: **a schema is a gate, and a gate nobody runs anything through is a document.**
+Every other closed set in this repository has a peer to disagree with; a published schema
+has only the runtime, and the runtime does not read it.
