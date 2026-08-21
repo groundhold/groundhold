@@ -97,6 +97,20 @@ func Run(bindings map[string]string, prov provider.Provider, at string,
 			res.Partial = true
 			res.Unreadable = append(res.Unreadable, Unreadable{Capability: cap, Reason: err.Error()})
 			res.Diagnostics = append(res.Diagnostics, cap+": unreadable: "+err.Error())
+			// D1152: the failure goes into the LEDGER, not only into this result. It
+			// used to live on stdout alone, so the next `plan` saw an observation
+			// ageing out and could not see that the last READ had failed — and said
+			// "observation is stale — re-observe first", which is true, useless, and
+			// loops forever when the read cannot succeed. Recording it is the move D59
+			// made for probe.failed: a failed measurement is knowledge, and it is never
+			// an observation. It records NOTHING about the resource's state — absence
+			// of evidence stays the signal (D242).
+			if record {
+				if rerr := recordFailure(led, ledgerPath, cap, at,
+					prov.Name(), bindings[cap], err.Error()); rerr != nil {
+					return nil, rerr
+				}
+			}
 			continue
 		}
 		for _, d := range diags {
@@ -117,8 +131,18 @@ func Run(bindings map[string]string, prov provider.Provider, at string,
 		// failed or invalid outputs read is a DIAGNOSTIC, never a fabricated
 		// value: without the record, a fold refuses observation-required —
 		// absence of evidence stays the signal (D242).
-		docs = append(docs, outputDocs(prov, services[cap], cap,
-			bindings[cap], at, ttlOverride, res)...)
+		outDocs, outFail := outputDocs(prov, services[cap], cap,
+			bindings[cap], at, ttlOverride, res)
+		docs = append(docs, outDocs...)
+		if outFail != "" && record {
+			// D1153: durable, like the primary-read failure — the producer's own
+			// state was read fine, so this records the OUTPUTS failure and nothing
+			// else. The observation.recorded below still carries what WAS read.
+			if rerr := recordFailure(led, ledgerPath, cap, at,
+				prov.Name(), bindings[cap], outFail); rerr != nil {
+				return nil, rerr
+			}
+		}
 		sort.Slice(docs, func(i, j int) bool { return docs[i].Path < docs[j].Path })
 		res.Observations = append(res.Observations, docs...)
 
@@ -171,29 +195,63 @@ func recordEvent(led *ledger.Ledger, path, cap, at, providerName,
 		}, 0)
 }
 
+// recordFailure appends the D1152 event: this bound capability could not be read
+// this run, and why. It carries no observations by construction — the whole point
+// is that nothing about the resource's state was learned. `plan` reads it to tell
+// a stale reading apart from a failing one, so its refusal can name the cause
+// instead of prescribing a re-observe that cannot work.
+func recordFailure(led *ledger.Ledger, path, cap, at, providerName,
+	providerID, reason string) error {
+	clock, err := ledger.ParseTs(at)
+	if err != nil {
+		return err
+	}
+	w := &ledger.Writer{Path: path, Led: led, Env: led.Environments[cap],
+		Clock: clock, Actor: "groundhold-observe"}
+	return w.Append("observation.failed", []string{cap},
+		map[string]any{
+			"provider":    map[string]any{"name": providerName},
+			"resource":    map[string]any{"providerId": providerID},
+			"reason":      reason,
+			"attemptedAt": at,
+		}, 0)
+}
+
 // outputDocs re-reads a bound resource's DECLARED typed outputs (D283) and
 // shapes them as observations under "outputs.<name>". Only declared names,
 // each kind-checked — a missing or wrong-kinded declared output drops the
 // WHOLE set with a diagnostic (a partial output set could fold one operand
 // and starve its sibling mid-plan; all-or-nothing keeps the refusal at plan
 // time, observation-required, where it is cheap).
+// D1153: returns the failure reason alongside the docs. A failed outputs read is a
+// failed READ — the caller records it exactly like a failed primary read (D1152), so
+// a `$ref` to this producer can be refused by NAME instead of by symptom.
 func outputDocs(prov provider.Provider, service, cap, providerID, at string,
-	ttlOverride int, res *Result) []Doc {
+	ttlOverride int, res *Result) ([]Doc, string) {
 	op, isProducer := prov.(provider.OutputProducer)
 	rd, isReader := prov.(provider.OutputReader)
 	if !isProducer || !isReader {
-		return nil
+		return nil, ""
 	}
 	specs := op.OutputsFor(service)
 	if len(specs) == 0 {
-		return nil
+		return nil, ""
 	}
 	raw, err := rd.ReadOutputs(service, providerID)
 	if err != nil {
+		// D1153: this is a READ that failed, and it was neither marked Partial nor
+		// recorded — so the run looked complete, the ledger kept no outputs for the
+		// producer, and a `$ref` to it refused with "no outputs.<name> observation —
+		// re-observe first". Re-observing fails the same way: the same loop D1152
+		// closed for the primary read, one field over. Reported from the field as
+		// "$ref works as a literal and refuses as a reference".
+		res.Partial = true
+		res.Unreadable = append(res.Unreadable,
+			Unreadable{Capability: cap, Reason: "outputs: " + err.Error()})
 		res.Diagnostics = append(res.Diagnostics,
 			cap+": outputs unreadable (references to this producer will refuse "+
 				"observation-required): "+err.Error())
-		return nil
+		return nil, "outputs: " + err.Error()
 	}
 	docs := make([]Doc, 0, len(specs))
 	// D774, from the field: one unreadable output discarded EVERY readable one. The
@@ -228,5 +286,5 @@ func outputDocs(prov provider.Provider, service, cap, providerID, at string,
 			ObservedAt: at, TTLSeconds: ttlFor("outputs."+s.Name, ttlOverride),
 		})
 	}
-	return docs
+	return docs, ""
 }

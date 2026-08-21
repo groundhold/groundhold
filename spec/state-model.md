@@ -50,6 +50,7 @@ probe.failed          binding.updated       lease.acquired
 lease.renewed         lease.released        lease.broken
 operation.receipt     ownership.claimed     converge.started
 converge.phase.entered  converge.finished   converge.failed
+observation.failed
 ```
 
 `ownership.claimed` (D140) stamps a takeover's authorship; the four `converge.*`
@@ -138,7 +139,7 @@ Two head streams per capability:
   `contract.published`, `candidate.verified`, `plan.sealed`,
   `binding.updated`, `apply.*`. *Knowledge* events
   (`observation.recorded`, `violation.detected`, `violation.resolved`,
-  `probe.failed`, `operation.receipt`)
+  `probe.failed`, `observation.failed`, `operation.receipt`)
   and *coordination* events (`lease.*`) are audit-chained but
   decision-head-neutral (D41): learning something about the world, or
   lease churn, must not invalidate anyone's sealed plan.

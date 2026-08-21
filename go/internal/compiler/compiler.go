@@ -367,6 +367,11 @@ type Inputs struct {
 	// cannot help — isolate as unverifiable, never freeze the compile). A ledger
 	// projection (ObservedCapabilities); empty when observe never ran.
 	Observed map[string]bool
+	// ReadFailures: capability -> what the last FAILED read said (D1152).
+	// Consulted only when a reading is already stale, to tell "this aged out"
+	// from "the refresh is failing" — the second makes "re-observe first" a
+	// loop, and the operator cannot see why from the ledger alone.
+	ReadFailures map[string]ledger.ReadFailure
 }
 
 // Compile refuses non-executable reports — a sealed plan without a passing
@@ -634,7 +639,7 @@ func Compile(c *contract.Contract, cand *contract.Candidate,
 		// a read ERROR never reaches here — it stays observe's returned error, so
 		// the binding blocks re-observe-first (unknown), never a spurious recreate.
 		if rec, ok := in.Observations[capID][provider.ResourceAbsentPath]; ok {
-			if serr := stalenessRefusal(capID, provider.ResourceAbsentPath, rec, in.EvalClock); serr != nil {
+			if serr := stalenessRefusal(capID, provider.ResourceAbsentPath, rec, in.EvalClock, in.ReadFailures[capID]); serr != nil {
 				return nil, serr
 			}
 			if gone, _ := rec.Value.(bool); gone {
@@ -1076,13 +1081,24 @@ func isProjectionAttr(voc vocab.Vocabulary, path string) bool {
 // the operand-drift step (F-LC3) so both judge evidence identically: an unset
 // eval clock (N1), a stale reading, or a future-dated one all refuse rather
 // than seal against knowledge that did not exist at the evaluated instant.
-func stalenessRefusal(capID, path string, rec ledger.ObsRecord, evalClock int) error {
+func stalenessRefusal(capID, path string, rec ledger.ObsRecord, evalClock int,
+	fail ledger.ReadFailure) error {
 	obsClock, perr := ledger.ParseTs(rec.ObservedAt)
 	if evalClock <= 0 {
 		return fmt.Errorf(
 			"%s.%s: evaluation clock unset — cannot judge staleness (N1)", capID, path)
 	}
 	if perr != nil || evalClock-obsClock > rec.TTLSeconds {
+		// D1152: when the last read FAILED, "re-observe first" is advice that
+		// cannot work — re-observing is exactly what just failed, and the operator
+		// loops. Name the cause instead. The reason is the driver's own sentence,
+		// not a rewording, so a credentials problem reads as one.
+		if fail.Reason != "" {
+			return fmt.Errorf(
+				"%s.%s: observation is stale AND the last read failed at %s: %s — "+
+					"re-observing cannot refresh it until that read succeeds",
+				capID, path, fail.AttemptedAt, fail.Reason)
+		}
 		return fmt.Errorf(
 			"%s.%s: observation is stale — re-observe first", capID, path)
 	}
@@ -1183,7 +1199,7 @@ func classifyBound(cand *contract.Candidate, capID, prov, svc string,
 			unverifiable = append(unverifiable, path)
 			continue
 		}
-		if serr := stalenessRefusal(capID, path, rec, in.EvalClock); serr != nil {
+		if serr := stalenessRefusal(capID, path, rec, in.EvalClock, in.ReadFailures[capID]); serr != nil {
 			// stale/future/unset-clock is re-observe-fixable, so it stays an
 			// ObservationRequired GLOBAL refusal (converge auto-observes) — never
 			// isolated. N1/D188 fail-closed defense-in-depth lives in the helper.
@@ -1277,7 +1293,7 @@ func classifyBound(cand *contract.Candidate, capID, prov, svc string,
 				unverifiable = append(unverifiable, tgt.Path)
 				continue
 			}
-			if serr := stalenessRefusal(capID, tgt.Path, rec, in.EvalClock); serr != nil {
+			if serr := stalenessRefusal(capID, tgt.Path, rec, in.EvalClock, in.ReadFailures[capID]); serr != nil {
 				return nil, nil, "", nil, serr
 			}
 			// operands are opaque canonical strings (not typed scalars), compared by

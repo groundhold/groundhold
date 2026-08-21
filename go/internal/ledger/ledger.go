@@ -38,6 +38,7 @@ var NonMutatingTypes = map[string]bool{
 	"violation.detected":   true, // knowledge derived from observations
 	"violation.resolved":   true, // knowledge derived from observations
 	"probe.failed":         true, // knowledge that measurement failed (never an observation, D59)
+	"observation.failed":   true, // knowledge that a READ failed (D1152); never an observation
 	"lease.acquired":       true, // coordination; has its own arm in the append switch
 	"lease.renewed":        true, // coordination
 	"lease.released":       true, // coordination
@@ -156,6 +157,16 @@ type Ledger struct {
 	// must not freeze the latter. Lazily created; canonEmpty nils an empty one so
 	// snapshot+tail folds match a full fold (D137).
 	observed map[string]bool
+	// readFailures: capability -> the most recent observation.failed for it
+	// (D1152). Deliberately NOT part of the canonical snapshot: it is a
+	// DIAGNOSTIC, and putting it there would change every pinned snapshot
+	// hash for a field no decision rests on. The cost is stated rather than
+	// hidden — after a compaction the failures older than the snapshot are
+	// no longer folded, so the refusal falls back to the freshness-only
+	// wording. That degrades to LESS information, never to wrong
+	// information, and the failure that matters is the most recent one,
+	// which lives in the tail.
+	readFailures map[string]ReadFailure
 	// Lenient tolerates occurredAt regressions in EXISTING history
 	// (replay); appends with Lenient false reject them (D56)
 	Lenient     bool
@@ -331,6 +342,26 @@ func (l *Ledger) ClaimedCapabilities() map[string]bool {
 	out := map[string]bool{}
 	for cap := range l.claimed {
 		out[cap] = true
+	}
+	return out
+}
+
+// ReadFailure is what the last failed READ of a capability said, and when it was
+// attempted. It is knowledge that measurement failed — never an observation, and
+// never a value (D59, D242).
+type ReadFailure struct {
+	Reason      string
+	AttemptedAt string
+}
+
+// ReadFailures projects capability -> the most recent observation.failed. The
+// compiler reads it to tell a reading that merely AGED from one whose refresh is
+// failing: "re-observe first" is sound advice for the first and a loop for the
+// second, and only the ledger knows which one this is.
+func (l *Ledger) ReadFailures() map[string]ReadFailure {
+	out := map[string]ReadFailure{}
+	for cap, f := range l.readFailures {
+		out[cap] = f
 	}
 	return out
 }
@@ -584,6 +615,18 @@ func (l *Ledger) Append(doc map[string]any,
 				l.observed = map[string]bool{}
 			}
 			l.observed[c] = true
+		}
+		if etype == "observation.failed" {
+			// LAST one wins: a later successful observe does NOT clear it, because
+			// the compiler only consults this when a reading is already stale, and
+			// a fresh reading never reaches that branch.
+			body, _ := ev["body"].(map[string]any)
+			reason, _ := body["reason"].(string)
+			at, _ := body["attemptedAt"].(string)
+			if l.readFailures == nil {
+				l.readFailures = map[string]ReadFailure{}
+			}
+			l.readFailures[c] = ReadFailure{Reason: reason, AttemptedAt: at}
 		}
 		if etype == "ownership.claimed" {
 			if l.claimed == nil {

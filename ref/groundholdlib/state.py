@@ -16,7 +16,7 @@ EVENT_TYPES = {
     "contract.published", "candidate.verified", "plan.sealed",
     "apply.started", "apply.finished", "apply.failed",
     "observation.recorded", "violation.detected", "violation.resolved",
-    "probe.failed",
+    "probe.failed", "observation.failed",
     "binding.updated",
     "lease.acquired", "lease.renewed", "lease.released", "lease.broken",
     "operation.receipt",

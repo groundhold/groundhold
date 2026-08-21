@@ -44,7 +44,7 @@
                        "lease.acquired", "lease.renewed", "lease.released", "lease.broken",
                        "operation.receipt", "ownership.claimed",
                        "converge.started", "converge.phase.entered",
-                       "converge.finished", "converge.failed"]
+                       "converge.finished", "converge.failed", "observation.failed"]
             },
             "environment": { "type": "string" },
             "capabilities": {
