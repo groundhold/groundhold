@@ -581,10 +581,18 @@ corrupt "6 anchor pinning another head" "$CAP/clean.json" --check "$CAP/badancho
 # must tolerate unknown fields)". Growing is safe; a required field LEAVING is not, and
 # nothing compared the schema to what the verbs actually print.
 #
-# This checks the half that breaks a consumer: every property the schema marks
-# `required` must be present in real output. It deliberately does NOT check for extra
-# properties — the published promise allows them, and a gate that forbade them would
-# contradict the sentence it exists to defend.
+# D1156: this used to check ONE thing — that every property the schema marks `required`
+# was present. Types, enums, `const`, `$ref` and open-map values went unread, and five
+# of the twenty-one published shapes were the only ones a real output ever reached. So a
+# verb could emit a status outside its own published enum and this printed PASS. It did:
+# `repair` gained a `version-ahead` status and finding-kind in D1154, both outside the
+# enums here, and a consumer validating against the schema would have rejected output
+# the runtime was right to produce.
+#
+# Extra properties are still NOT flagged — the promise above allows growth, and the
+# schema declares `additionalProperties: false` nowhere, so the two agree. Where
+# `additionalProperties` IS a schema (the open maps: bindings, heads, outcomes) its
+# values are now validated, which is the same rule read properly rather than skipped.
 SCH="$(mktemp -d)"
 trap 'rm -rf "$LEDGER" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX" "$CI" "$PL" "$SIL" "$CAP" "$SCH"' EXIT
 SNOW="$(date -u +%FT%TZ)"
@@ -601,33 +609,157 @@ SNOW="$(date -u +%FT%TZ)"
 "$CLI" discover --provider fake --at "$SNOW" > "$SCH/discoverResult.json" 2>/dev/null || true
 "$CLI" publish examples/laptop/laptop.contract.yaml --ledger "$SCH/p.jsonl" --at "$SNOW" \
   --actor harness > "$SCH/publishResult.json" 2>/dev/null || true
+# D1156: eleven more shapes, because a schema entry no real output ever reaches is a
+# description of the runtime rather than a check on it.
+"$CLI" observe examples/laptop/laptop.contract.yaml --ledger "$SCH/l.jsonl" \
+  --provider fake --at "$SNOW" --json > "$SCH/observeResult.json" 2>/dev/null || true
+"$CLI" probe examples/laptop/laptop.contract.yaml --ledger "$SCH/l.jsonl" \
+  --provider fake --at "$SNOW" --json > "$SCH/probeResult.json" 2>/dev/null || true
+"$CLI" horizon --ledger "$SCH/l.jsonl" --at "$SNOW" \
+  --contract examples/laptop/laptop.contract.yaml --within 86400 --json \
+  > "$SCH/horizonResult.json" 2>/dev/null || true
+"$CLI" deposed --ledger "$SCH/l.jsonl" --json > "$SCH/deposedResult.json" 2>/dev/null || true
+"$CLI" explain not-executable --json > "$SCH/explain.json" 2>/dev/null || true
+"$CLI" anchor --ledger "$SCH/l.jsonl" > "$SCH/anchorDocument.json" 2>/dev/null || true
+"$CLI" anchor --ledger "$SCH/l.jsonl" --check "$SCH/anchorDocument.json" \
+  > "$SCH/anchorCheck.json" 2>/dev/null || true
+"$CLI" export --ledger "$SCH/l.jsonl" 2>/dev/null | head -1 > "$SCH/exportRecord.json" || true
+# repair's two shapes need a ledger it refuses. An event type from a future build is the
+# one that exercises the version-ahead branch D1154 added — the branch whose statuses
+# were outside this schema until D1156.
+python3 - "$SCH" <<'MKEOF' 2>/dev/null || true
+import json, sys, hashlib, os
+d = sys.argv[1]
+src = os.path.join(d, "l.jsonl")
+if os.path.exists(src):
+    lines = [l for l in open(src).read().split("\n") if l.strip()]
+    if lines:
+        doc = json.loads(lines[0])
+        doc["event"]["type"] = "observation.telepathic"
+        doc["type"] = "observation.telepathic"
+        open(os.path.join(d, "ahead.jsonl"), "w").write(json.dumps(doc) + "\n")
+MKEOF
+if [ -f "$SCH/ahead.jsonl" ]; then
+  "$CLI" repair --ledger "$SCH/ahead.jsonl" > "$SCH/repairDiagnosis.json" 2>/dev/null || true
+  fp="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("fingerprint",""))' "$SCH/repairDiagnosis.json" 2>/dev/null || true)"
+  if [ -n "$fp" ]; then
+    "$CLI" repair --ledger "$SCH/ahead.jsonl" --quarantine --fingerprint "$fp" \
+      > "$SCH/repairResult.json" 2>/dev/null || true
+  fi
+fi
 
 missing="$(python3 - "$SCH" <<'PYEOF' || true
-import json, os, sys
+import json, os, re, sys
+
 d = sys.argv[1]
-schema = json.load(open("spec/outputs.schema.json"))["$defs"]
+root = json.load(open("spec/outputs.schema.json"))
+defs = root["$defs"]
+
+# The keywords this document uses. A validator that silently IGNORED an unknown one
+# would be weaker than the schema it checks and would read as a pass, so anything
+# outside this set is reported rather than skipped.
+KNOWN = {"type", "properties", "required", "items", "enum", "const", "$ref",
+         "additionalProperties", "pattern", "minimum", "description", "$defs",
+         "$schema", "$id", "title"}
+TYPES = {"object": dict, "array": list, "string": str, "boolean": bool,
+         "number": (int, float), "integer": int, "null": type(None)}
+
+
+def errors(doc, schema, path=""):
+    out = []
+    unknown = set(schema) - KNOWN
+    if unknown:
+        out.append((path, "this checker does not implement %s" % sorted(unknown)))
+    if "$ref" in schema:
+        ref = schema["$ref"]
+        if not ref.startswith("#/$defs/"):
+            return out + [(path, "unsupported $ref %s" % ref)]
+        return out + errors(doc, defs[ref[len("#/$defs/"):]], path)
+    if "type" in schema:
+        want = schema["type"]
+        want = want if isinstance(want, list) else [want]
+        ok = False
+        for w in want:
+            t = TYPES.get(w)
+            if t is None:
+                out.append((path, "unknown type %s" % w))
+                ok = True
+                break
+            # bool is a subclass of int in Python; a boolean is not an integer here.
+            if w in ("number", "integer") and isinstance(doc, bool):
+                continue
+            if isinstance(doc, t):
+                ok = True
+        if not ok:
+            return out + [(path, "is %s, schema says %s" % (type(doc).__name__, want))]
+    if "enum" in schema and doc not in schema["enum"]:
+        out.append((path, "%r is not one of %s" % (doc, schema["enum"])))
+    if "const" in schema and doc != schema["const"]:
+        out.append((path, "%r is not the const %r" % (doc, schema["const"])))
+    if "pattern" in schema and isinstance(doc, str) and not re.search(schema["pattern"], doc):
+        out.append((path, "%r does not match %s" % (doc, schema["pattern"])))
+    if "minimum" in schema and isinstance(doc, (int, float)) and not isinstance(doc, bool):
+        if doc < schema["minimum"]:
+            out.append((path, "%s is below the minimum %s" % (doc, schema["minimum"])))
+    if isinstance(doc, dict):
+        for prop in schema.get("required", []):
+            if prop not in doc:
+                out.append((path, "required property %r is absent" % prop))
+        props = schema.get("properties", {})
+        extra = schema.get("additionalProperties")
+        for k, v in doc.items():
+            sub = path + "/" + k if path else k
+            if k in props:
+                out += errors(v, props[k], sub)
+            elif isinstance(extra, dict):
+                # An open map (bindings, heads, outcomes): the VALUES are constrained
+                # even though the keys are not.
+                out += errors(v, extra, sub)
+            # else: growth is allowed, and the promise this gate defends says so.
+    if isinstance(doc, list) and "items" in schema:
+        for i, v in enumerate(doc):
+            out += errors(v, schema["items"], "%s/%d" % (path, i))
+    return out
+
+
 bad = []
 checked = 0
-for name in sorted(schema):
+for name in sorted(defs):
     path = os.path.join(d, name + ".json")
-    if not os.path.exists(path):
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
         continue                       # only the shapes this harness can produce
     try:
         doc = json.load(open(path))
     except Exception as e:
-        bad.append(f"{name}: output is not JSON ({e})")
+        bad.append("%s: output is not JSON (%s)" % (name, e))
         continue
     checked += 1
-    for prop in schema[name].get("required", []):
-        if prop not in doc:
-            bad.append(f"{name}: required property {prop!r} absent from real output")
-if checked < 5:
-    bad.append(f"only {checked} shapes were produced — the harness stopped exercising "
-               "the verbs and this check would pass over almost anything")
+    for p, msg in errors(doc, defs[name]):
+        bad.append("%s: %s: %s" % (name, p or "(root)", msg))
+
+if checked < 12:
+    bad.append("only %d of %d published shapes were produced — the harness stopped "
+               "exercising the verbs and this check would pass over almost nothing"
+               % (checked, len(defs)))
+
+# The checker's own witness. Everything above is a NEGATIVE result, and a negative
+# result that cannot be distinguished from a broken checker is worth nothing: if
+# `errors` returned [] unconditionally, every line above would still print PASS.
+# So feed it a document that MUST fail and require that it says so.
+probe_schema = {"type": "object", "required": ["a"],
+                "properties": {"a": {"enum": ["x"]}, "n": {"type": "integer"}}}
+for name, doc, why in (
+    ("a value outside its enum", {"a": "not-x"}, "enum"),
+    ("a missing required property", {}, "required"),
+    ("a string where an integer is published", {"a": "x", "n": "7"}, "type"),
+):
+    if not errors(doc, probe_schema):
+        bad.append("the checker itself is broken: it accepted %s, so every PASS it "
+                   "prints is meaningless (%s went unread)" % (name, why))
 print("; ".join(bad))
 PYEOF
 )"
-report "real output carries every required schema property" "" "$missing"
+report "real output validates against the published schema" "" "$missing"
 
 echo
 if [ "$fail" -gt 0 ]; then

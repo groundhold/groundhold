@@ -37817,3 +37817,65 @@ over whether something RAN must ask the question the code answers, not the one t
 operator would answer.** The two agree until the operator is right about their intent
 and wrong about the mechanism — which is the normal case, since the mechanism is ours
 and the intent is theirs.
+
+## D1156 — the published output schema was never run against real output
+
+D1151 found the runtime writing observation sources the published schema did not list,
+and the lesson written down then was to ask whether anyone had ever pushed a REAL
+artefact through a published schema. Doing that, five days later, found the answer was
+almost nobody — and the first thing it caught was mine.
+
+`spec/outputs.schema.json` is what a machine consumer validates against. One check
+compared it to reality, in the example harness, and it asked a single question: is every
+property marked `required` PRESENT in the output. Types, enums, `const`, `$ref` and
+open-map values went unread. Of the twenty-one published shapes, five were ever produced
+by the harness at all; the other sixteen existed only as description.
+
+D1154 — merged public that morning — gave `repair` a `version-ahead` status and a
+`version-ahead` finding-kind. Both are outside the enums published for them:
+
+    status:            "version-ahead"   published: healthy | corrupt
+    findings[].kind:   "version-ahead"   published: torn-final-line | unparseable-line |
+                                                    missing-prev | chain-broken |
+                                                    rule-rejected | bad-timestamp
+
+So the runtime printed output the published contract rejects. The same change added
+`ledger-version-ahead` to the error-code enum without trouble, because THAT set has a
+gate over it (D330) and the gate made me. Two enums a step away had none, and drifted in
+the same commit — the clearest demonstration yet that a closed set is held by its gate,
+not by its author's care.
+
+The fix is not the two enum entries. It is that the harness now VALIDATES rather than
+spot-checks, and reaches sixteen shapes instead of five. The validator covers the ten
+keywords this document uses and reports anything outside that set as its own failure —
+a validator that silently ignored an unknown keyword would be weaker than the schema it
+checks, and would read as a pass. Extra properties stay unflagged: `versioning.md`
+promises outputs may grow fields, the schema declares `additionalProperties: false`
+nowhere, and the two agree. Where `additionalProperties` IS a schema (the open maps —
+bindings, heads, outcomes) its values are now checked, which is that keyword read
+properly rather than skipped.
+
+No new dependency: the check is stdlib Python, and its trustworthiness was established
+by differential comparison against a real JSON Schema library on sixteen real documents,
+agreeing on all sixteen including both violations. That comparison is the evidence; my
+confidence in the validator is not.
+
+Every result this check prints is a NEGATIVE one, so it carries its own witness: three
+documents that MUST fail — a value outside an enum, a departed required property, a
+string where an integer is published — and if the validator accepts any of them it
+reports itself as broken. Without that, replacing `errors` with `return []` would leave
+the harness printing PASS forever.
+
+Two things worth keeping from building it. The gate over the validator had to RUN it
+(D1143/D1144/D1145 again) — extracted from the harness and executed against documents
+built in the test, because a check whose logic nothing executes is a comment. And
+mutating that gate before committing caught an assertion of my own that matched the
+substring `required property`, which the validator's own self-witness message also
+contains: the assertion passed while the detection was gone. A check that accepts a WORD
+accepts a paragraph about the word, so it now matches what only real detection can say —
+the property named.
+
+The shape, for the next time: **the artefact a stranger validates against is the one
+nobody in the repository ever runs anything through.** Every other copy of a closed set
+has a peer to disagree with; the published schema has only the runtime, and the runtime
+does not read it.
