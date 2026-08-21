@@ -253,6 +253,9 @@ def _constraint(raw: dict, severity: str, idx: int) -> Constraint:
             raise ContractError(
                 f"{cid}: {expected.kind} value is not orderable")
     vb = raw.get("verify") or {}
+    _check_known_keys(vb, VERIFY_KEYS, f"{cid}: verify",
+                      "a bar this loader cannot find is a bar nobody set, and the "
+                      "default is the weakest evidence there is")
     verify = vb.get("method", "static")
     runtime = verify
     # D728: the two-bar form. `verify` compares the contract with the CANDIDATE, before
@@ -330,6 +333,15 @@ _KNOWN_TOP_LEVEL = {
 # `_check_top_level_keys` has taken the whole document since D673 and nothing else, so a
 # stray key in a capability, in `meta` or in a provenanced attribute was read by nothing
 # while the document still validated.
+# D1162: the constraint object and its verify block. `verify` is guarded against every
+# wrong VALUE and was blind to a wrong KEY — `method` defaults to "static", so `vrify:`
+# or `methdo:` turned a constraint that must be proven against the provider into one
+# proven by the candidate's own word, and the plan became executable.
+CONSTRAINT_KEYS = {"id", "subject", "path", "op", "value", "verify"}
+SOFT_CONSTRAINT_KEYS = CONSTRAINT_KEYS | {"objective"}
+BUDGET_CONSTRAINT_KEYS = CONSTRAINT_KEYS | {"severity"}
+VERIFY_KEYS = {"method", "design", "runtime"}
+
 CONTRACT_CAPABILITY_KEYS = {"id", "type", "requirements", "state"}
 CONTRACT_META_KEYS = {"id", "environment", "version", "owner"}
 PROVENANCED_KEYS = {"status", "value", "source", "confidence"}
@@ -446,11 +458,16 @@ def load_contract(path: str) -> Contract:
 
     constraints: list[Constraint] = []
     cblock = doc.get("constraints") or {}
+    why = ("a key this loader does not read cannot change what the constraint "
+           "demands, and `verify` misspelled leaves the bar at its weakest default")
     for i, raw in enumerate(cblock.get("hard") or []):
+        _check_known_keys(raw, CONSTRAINT_KEYS, "hard constraint", why)
         constraints.append(_constraint(raw, "hard", i))
     for i, raw in enumerate(cblock.get("soft") or []):
+        _check_known_keys(raw, SOFT_CONSTRAINT_KEYS, "soft constraint", why)
         constraints.append(_constraint(raw, "soft", i))
     for i, raw in enumerate(doc.get("budget") or []):
+        _check_known_keys(raw, BUDGET_CONSTRAINT_KEYS, "a budget constraint", why)
         raw.setdefault("severity", "hard")
         constraints.append(_constraint(raw, raw["severity"], i))
 
