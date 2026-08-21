@@ -91,6 +91,47 @@ func TestPreshipRefusesToPassWithoutTheSignedCheck(t *testing.T) {
 			t.Errorf("the clean verdict did not print:\n%s", out)
 		}
 	})
+
+	// D1155. The case that was missing, and the only one where the guard's question
+	// differs from the driver's. A profile is the ORDINARY way to hold AWS
+	// credentials and the one thing this driver cannot read: it takes
+	// AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN and never
+	// ~/.aws. So `AWS_PROFILE` set with no key is not "credentials present" — it is
+	// the case where the signed request provably did not happen.
+	//
+	// The three cases above all pass with the old predicate, which is why it
+	// survived: they only ever set both variables together or neither.
+	t.Run("a profile is not a credential this driver can use", func(t *testing.T) {
+		out, code := run([]string{"AWS_PROFILE=some-profile"})
+		if code == 0 {
+			t.Errorf("the guard passed on AWS_PROFILE alone (exit %d). The driver "+
+				"cannot sign with a profile, so the SIGNED check did not run — and "+
+				"this script exists to refuse exactly that (D604). A gate that "+
+				"reads the operator's INTENT instead of what happened is not a "+
+				"gate.\n%s", code, out)
+		}
+		if strings.Contains(out, "PRESHIP OK") || strings.Contains(out, "safe to build + ship") {
+			t.Errorf("the clean verdict printed over a signed check that could not "+
+				"have run:\n%s", out)
+		}
+		// A refusal that does not say how to fix it sends the operator looking for a
+		// credential problem they do not have — they are holding the credentials.
+		if !strings.Contains(out, "export-credentials") {
+			t.Errorf("the refusal does not name the bridge from the profile the "+
+				"operator already has, which the driver's own refusal does name "+
+				"(D730):\n%s", out)
+		}
+	})
+
+	// The sibling: bridging the profile must actually satisfy the guard, or the
+	// advice above is a dead end.
+	t.Run("a bridged profile is a credential", func(t *testing.T) {
+		out, code := run([]string{"AWS_PROFILE=some-profile", "AWS_ACCESS_KEY_ID=AKIAEXAMPLE"})
+		if code != 0 {
+			t.Errorf("exit %d with a profile AND exported keys — the guard must "+
+				"accept what its own remediation produces:\n%s", code, out)
+		}
+	})
 }
 
 // D663. Two gates that could not fail by being EMPTY.
