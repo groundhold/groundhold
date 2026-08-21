@@ -17,6 +17,7 @@ import (
 
 	"groundhold/internal/ledger"
 	"groundhold/internal/perr"
+	"groundhold/internal/state"
 )
 
 // RunEvent is one ledger event, flattened to what run-status needs.
@@ -179,6 +180,17 @@ func parseRunEvent(line string, n int) (RunEvent, error) {
 	if doc.Event.Type == "" {
 		return RunEvent{}, fmt.Errorf("ledger line %d: event.type is missing — "+
 			"this line is not a ledger event", n)
+	}
+	// D1154. D611 made these three verbs refuse a ledger that does not replay, on
+	// the rule that a file which is not a ledger is not a run that failed. A type
+	// this build does not know is the same argument one step on: the derivation
+	// reads run lifecycle out of event TYPES, so an unrecognized one is skipped —
+	// and the answer that comes back is "0 runs" at exit 0, indistinguishable from
+	// a quiet estate. If a newer build added a run-lifecycle type, that silence is
+	// false in the direction that gets a second writer started against a live run.
+	if !state.EventTypes[doc.Event.Type] {
+		return RunEvent{}, fmt.Errorf("ledger line %d: %w", n,
+			&state.UnknownTypeError{Type: doc.Event.Type})
 	}
 	clk, terr := ledger.ParseTs(doc.Event.OccurredAt)
 	if terr != nil {

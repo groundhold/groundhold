@@ -37687,3 +37687,71 @@ could not be resolved. Measured across both paths, every refusal already names t
 consumer first. That is either a difference in what we are running or in what we are
 reading, and it is a question back to them rather than a change made blind. The candidate
 that produced it would settle it in one line.
+
+## D1154 — an event type from a newer build was reported as a corrupt ledger
+
+Found while verifying a claim I had already written down for a reader, rather than in
+the code: a delivery note said that after adding an append-only event type, an older
+binary "refuses on the unknown type". Run instead of assumed, it turned out to be both
+wrong and worse. The older build's `export` passed the file through faithfully, and its
+`converge` exited 5 — whose banner is the single word `CORRUPTED`.
+
+Nothing about the file was damaged. The event-type registry is additive-only (D35), so
+a type this build does not know is the signature of a NEWER build, and the hash chain
+verified end to end. But `state.ValidateEvent` returned that condition as an ordinary
+error, `ReplayFile` wrapped it as one, and all eleven call sites answered any replay
+error with `return 5`. One condition — "these bytes do not fold here" — was carrying two
+meanings that call for opposite actions.
+
+The cost is not the refusal. Refusing is right: an event we cannot interpret must not be
+skipped past, because a projection that silently omits it is a projection that is wrong.
+The cost is the WORD. `ledger-corrupted`'s published remediation is `repair --quarantine`,
+and `repair` was the worst-behaved of the three paths — it diagnosed the file as corrupt
+AND would cut it at the offending line on a matching fingerprint, discarding exactly the
+history a newer build can still read. The ledger is the one artefact here that nothing
+else can reconstruct, so advice followed in good faith destroys evidence. That is the
+D716 test: a person acting on what the tool said ends up worse off than if it had said
+nothing.
+
+Three copies of the same blindness, and the third is the reminder that a fix at one
+reader is not a fix:
+
+- **the folding path.** `state.UnknownTypeError` is now a distinct type, `ReplayFile`
+  returns `ledger.VersionAheadError`, and the shared `refuseCorruptLedger` helper (D617,
+  which already separated "wrong path" from "damaged history") separates this too. The
+  nine verbs that still refused inline now route through it, which is where they belonged.
+- **`repair`.** The finding is `version-ahead` with the opposite remediation, the
+  diagnosis carries `ledger-version-ahead`, and `Quarantine` refuses the cut even on a
+  matching fingerprint. A confirmed fingerprint is consent to remove corruption; there is
+  none here, so there is nothing it consents to.
+- **`runs`/`status`/`wait`.** These derive run state through a reader that does not fold
+  (D229), and it checked only that `event.type` was non-empty. An unrecognized type was
+  skipped, and the answer was `0 runs` at exit 0 — indistinguishable from a quiet estate.
+  If a later build adds a run-lifecycle type, that silence is false in the direction that
+  gets a second writer started against a live run. D611 made these verbs refuse a ledger
+  that does not replay on the rule that a file which is not a ledger is not a run that
+  failed; this is that rule one step on.
+
+Two things the refusal now says that it could not before. It names the type, so a reader
+can tell a version gap from damage. And where the verb FOLDED the ledger it answers the
+question the reader is really asking — is my file broken — by sweeping the remaining
+lines for chain integrity, projection-free, and reporting the verdict. That sweep is not
+decoration: it decides the outcome. The two conditions are independent and a file can
+have both, and `spec/presentation.md` ranks corruption above every other banner because
+under-reporting damage is the dangerous direction. So a file that is ahead AND broken
+exits 5 with the version note carried inside it, and only an intact chain gets exit 2.
+
+The verbs that do not fold say less, deliberately: they name the type, disclaim any
+judgement about integrity, and point at `repair`, which now answers it correctly. A
+reader told "nothing is wrong with the file" by a path that never checked would be given
+the same kind of false confidence in the other direction.
+
+`ledger-version-ahead` is a new code rather than a reuse, by this registry's own rule:
+one code per DISTINCT remediation, and this one's remediation is the exact opposite of
+`ledger-corrupted`'s — leave the file alone and run a newer build.
+
+The general shape, and it is the one worth carrying forward: **a refusal that cannot tell
+two conditions apart cannot advise on either, and the published remediation is what makes
+that expensive.** The registry rule "one code per distinct remediation" is the test to
+apply — not "is the refusal correct" but "does the advice attached to it fit every case
+that reaches it".

@@ -27,6 +27,7 @@
         "unsupported-operation",
         "apply-failed",
         "ledger-corrupted",
+        "ledger-version-ahead",
         "survey-drift",
         "provider-again-later",
         "mapping-schema-drift",

@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"groundhold/internal/perr"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"syscall"
 
 	"groundhold/internal/canonical"
+	"groundhold/internal/state"
 )
 
 type Finding struct {
@@ -57,6 +59,18 @@ type Diagnosis struct {
 const quarantineRemediation = "quarantine the file (repair --quarantine " +
 	"--fingerprint <fp>), then re-observe reality: resources recorded " +
 	"after the cut may exist — discover/observe/adopt them"
+
+// upgradeRemediation is the DELIBERATE opposite of quarantining (D1154). An event
+// type this build does not know is the signature of a NEWER build, not of damage,
+// and `repair` is the worst place for that confusion: its whole job is to cut a file
+// down to its clean prefix. Told "corrupt", an operator running the older binary
+// would quarantine a file whose chain verifies — and the cut discards every event
+// after the first unreadable one, which is exactly the history that build cannot
+// read and a newer one can.
+const upgradeRemediation = "do NOT quarantine: run a newer groundhold against this " +
+	"ledger, or upgrade this one. The event-type registry is additive-only, so a " +
+	"type this build does not know was written by a later build; cutting the file " +
+	"at this line would discard history that is intact"
 
 // Diagnose folds the file TOLERANTLY: it verifies the chain and the
 // rules line by line, records every deviation as a finding instead of
@@ -195,10 +209,15 @@ func Diagnose(path string) (*Diagnosis, error) {
 		}
 		res, err := led.Append(doc, nil)
 		if err != nil {
+			kind, remedy := "unparseable-line", quarantineRemediation
+			var unknown *state.UnknownTypeError
+			if errors.As(err, &unknown) {
+				kind, remedy = "version-ahead", upgradeRemediation
+			}
 			d.Findings = append(d.Findings, Finding{Line: n,
-				Kind:        "unparseable-line",
+				Kind:        kind,
 				Detail:      err.Error(),
-				Remediation: quarantineRemediation})
+				Remediation: remedy})
 			clean = markCut(d, n, clean)
 			// the event cannot be folded or hashed — advance nothing;
 			// later chain findings may cascade, which is honest
@@ -241,11 +260,32 @@ func Diagnose(path string) (*Diagnosis, error) {
 	if len(d.Findings) == 0 {
 		d.Status = "healthy"
 		d.ValidPrefixLines = len(lines)
+	} else if onlyVersionAhead(d.Findings) {
+		// D1154: nothing here is damage. Saying "corrupt" would be false, and it
+		// is the false direction that costs something: the published remediation
+		// for ledger-corrupted is this very verb's --quarantine.
+		d.Status = "version-ahead"
+		d.Code = string(perr.LedgerVersionAhead)
 	} else {
 		d.Status = "corrupt"
 		d.Code = string(perr.LedgerCorrupted)
 	}
 	return d, nil
+}
+
+// onlyVersionAhead reports whether EVERY finding is "this build cannot read that
+// type" — the one diagnosis that is not damage (D1154).
+//
+// Every, not any: the conditions are independent and a file can have both, and a
+// single real corruption finding must keep the whole diagnosis in the corrupt
+// channel. Under-reporting damage is the direction that loses history.
+func onlyVersionAhead(fs []Finding) bool {
+	for _, f := range fs {
+		if f.Kind != "version-ahead" {
+			return false
+		}
+	}
+	return len(fs) > 0
 }
 
 // markCut freezes the valid prefix at the line BEFORE the first
@@ -319,6 +359,19 @@ func Quarantine(path, fp string) (*RepairResult, *Diagnosis, error) {
 		return &RepairResult{Status: "healthy", KeptLines: d.TailLines,
 			Findings: d.Findings,
 			Reasons:  []string{"nothing to repair"}}, d, nil
+	}
+	// D1154: refuse the cut, even with a matching fingerprint. Everything else
+	// this function cuts is damage; a version-ahead file is intact history this
+	// build cannot READ, and the cut would delete it — irreversibly, since the
+	// ledger is the one artefact nothing else can reconstruct. A confirmed
+	// fingerprint is consent to remove corruption, and there is none here.
+	if onlyVersionAhead(d.Findings) {
+		return &RepairResult{Status: "refused",
+			Code: string(perr.LedgerVersionAhead), Findings: d.Findings,
+			Reasons: []string{"this ledger is not damaged: it holds an event " +
+				"type this build does not know, and its hash chain is intact " +
+				"up to that line. Cutting here would discard history a newer " +
+				"build can read. Run the newer build, or upgrade this one"}}, d, nil
 	}
 	if fp != d.Fingerprint {
 		return &RepairResult{Status: "refused",

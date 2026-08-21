@@ -192,25 +192,32 @@ var nextBuilders = map[perr.Code]func(Invocation, Detail) (*Next, bool){
 // code in perr.Explain (the completeness test enforces this): a new code cannot
 // land without a decision here.
 var noNext = map[perr.Code]bool{
-	perr.StructuralError:       true, // fix the document by hand; no single command
-	perr.NotExecutable:         true, // fix the candidate/contract; situational
-	perr.NothingToChange:       true, // success, nothing to do
-	perr.ReconcilePending:      true, // retry resume LATER — no better command now
-	perr.ProviderAgainLater:    true, // D237: wait for the backoff, then re-run the SAME verb — no better command now
-	perr.ConfirmationRequired:  true, // a human must confirm interactively
-	perr.ReadSetMismatch:       true, // pinned-doc paths are unknown to the runtime
-	perr.StaleDecision:         true, // re-observe/re-plan; situational
-	perr.LeaseConflict:         true, // wait or break deliberately — the break hint could be destructive
-	perr.ClockRegress:          true, // fix the writer clock; environmental
-	perr.BindingConflict:       true, // unadopt/retire first; situational
-	perr.AdoptionMismatch:      true, // fix candidate OR resource; a human judges which
-	perr.ProviderRefused:       true, // change the implementation block; situational
-	perr.SurveyDrift:           true, // reconcile contract vs survey; a human decides
-	perr.ReferenceUnresolved:   true, // apply-time; inspect the producer receipt, then resume (situational)
-	perr.MappingSchemaDrift:    true, // re-author the mapping; situational
-	perr.UnsupportedOperation:  true, // out of scope
-	perr.ApplyFailed:           true, // inspect receipts, re-plan; situational
-	perr.LedgerCorrupted:       true, // repair flow; any command may deepen damage
+	perr.StructuralError:      true, // fix the document by hand; no single command
+	perr.NotExecutable:        true, // fix the candidate/contract; situational
+	perr.NothingToChange:      true, // success, nothing to do
+	perr.ReconcilePending:     true, // retry resume LATER — no better command now
+	perr.ProviderAgainLater:   true, // D237: wait for the backoff, then re-run the SAME verb — no better command now
+	perr.ConfirmationRequired: true, // a human must confirm interactively
+	perr.ReadSetMismatch:      true, // pinned-doc paths are unknown to the runtime
+	perr.StaleDecision:        true, // re-observe/re-plan; situational
+	perr.LeaseConflict:        true, // wait or break deliberately — the break hint could be destructive
+	perr.ClockRegress:         true, // fix the writer clock; environmental
+	perr.BindingConflict:      true, // unadopt/retire first; situational
+	perr.AdoptionMismatch:     true, // fix candidate OR resource; a human judges which
+	perr.ProviderRefused:      true, // change the implementation block; situational
+	perr.SurveyDrift:          true, // reconcile contract vs survey; a human decides
+	perr.ReferenceUnresolved:  true, // apply-time; inspect the producer receipt, then resume (situational)
+	perr.MappingSchemaDrift:   true, // re-author the mapping; situational
+	perr.UnsupportedOperation: true, // out of scope
+	perr.ApplyFailed:          true, // inspect receipts, re-plan; situational
+	perr.LedgerCorrupted:      true, // repair flow; any command may deepen damage
+	// D1154: the remediation is to run a DIFFERENT BUILD, which is not a command
+	// this runtime can offer — it is the one thing a next-step suggestion cannot
+	// hand over. And it must not fall back to a groundhold command: every verb this
+	// build has will refuse the same file for the same reason, and the two that
+	// would happily act on it (`repair --quarantine`) destroy the history that is
+	// intact. Silence is the honest answer here.
+	perr.LedgerVersionAhead:    true,
 	perr.PreflightInconclusive: true, // fix the check environment; situational
 	// D330: the background-run family. `resume` is the right remediation for two
 	// of these, but it takes the CONTRACT and the run verbs (`wait`, `runs`) never
