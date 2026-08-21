@@ -351,3 +351,55 @@ func TestCompileEmitsNoAssumedHardBasisWhenArmed(t *testing.T) {
 			doc.Plan.Preconditions)
 	}
 }
+
+// D1152. "observation is stale — re-observe first" is sound advice when a reading
+// merely aged out, and a LOOP when the refresh itself is failing: re-observing is
+// exactly what just failed. Only the ledger knows which one this is, and until D1152
+// it did not — the failure was printed and dropped.
+//
+// The refusal now names the driver's own reason when the last read failed. Verbatim,
+// not reworded: a reader has to be able to tell "no credentials in the environment"
+// from "denied by policy", and a house sentence flattens both.
+func TestAStaleReadingNamesTheFailedReadInsteadOfPrescribingAReObserve(t *testing.T) {
+	const reason = "GetRole: no answer — AWS_PROFILE is set, but this driver reads " +
+		"credentials ONLY from AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY"
+	stale := ledger.ObsRecord{
+		Value: "true", ObservedAt: "2026-01-01T00:00:00Z", TTLSeconds: 60,
+	}
+	evalClock, err := ledger.ParseTs("2026-01-02T00:00:00Z") // a day later: stale
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Control: an ordinary stale reading keeps the advice that works.
+	aged := stalenessRefusal("db", "encryption.atRest", stale, evalClock,
+		ledger.ReadFailure{})
+	if aged == nil {
+		t.Fatal("a stale reading must still refuse — this gate is about the WORDING, " +
+			"not about relaxing the freshness rule")
+	}
+	if !strings.Contains(aged.Error(), "re-observe first") {
+		t.Errorf("a reading that merely aged out must still say what fixes it, got: %v", aged)
+	}
+
+	// The case from the field: the refresh is failing, so re-observing cannot help.
+	failing := stalenessRefusal("db", "encryption.atRest", stale, evalClock,
+		ledger.ReadFailure{Reason: reason, AttemptedAt: "2026-01-02T00:00:00Z"})
+	if failing == nil {
+		t.Fatal("a stale reading must refuse whether or not the read failed")
+	}
+	msg := failing.Error()
+	if !strings.Contains(msg, reason) {
+		t.Errorf("the refusal does not carry the driver's own reason.\ngot:  %s\nwant: it to "+
+			"contain %q\nWithout it the operator re-runs observe, which fails the same "+
+			"way, and the two verbs each look correct in isolation.", msg, reason)
+	}
+	if strings.Contains(msg, "re-observe first") {
+		t.Errorf("the refusal still prescribes a re-observe while knowing the read is "+
+			"failing — that is the loop this exists to break.\ngot: %s", msg)
+	}
+	if !strings.Contains(msg, "2026-01-02T00:00:00Z") {
+		t.Errorf("the refusal does not say WHEN the read failed, so a failure from this "+
+			"run reads the same as one from last week.\ngot: %s", msg)
+	}
+}

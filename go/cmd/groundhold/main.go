@@ -2725,6 +2725,7 @@ func run(args []string) int {
 			in.Adopted = led.AdoptedCapabilities()
 			in.Claimed = led.ClaimedCapabilities()
 			in.Observed = led.ObservedCapabilities()
+			in.ReadFailures = led.ReadFailures() // D1152
 		}
 		if bindingsPath != "" {
 			if in.Bindings, err = loadStringMap(bindingsPath, "bindings"); err != nil {

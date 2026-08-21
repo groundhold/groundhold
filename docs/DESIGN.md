@@ -37604,3 +37604,86 @@ still be emitting. That second half was wrong first: it searched the file for th
 and every one of those files says its own source in prose, so a mutant that renamed the
 literal walked through. It matches an ASSIGNMENT now, which is D1142 read one more time
 — a check that accepts the word accepts the paragraph explaining the word.
+
+## D1152 — advice that could not work, because the failure was never written down
+
+Reported from the field. A deployment runbook starts with `export AWS_PROFILE=…`, which
+is how everyone drives the AWS CLI and is not how these drivers read credentials. So
+`observe` could read nothing, exited 0, and `plan` refused with
+
+	observation is stale — re-observe first
+
+Re-observing failed the same way, silently, and the loop ran as long as the operator had
+patience. Each verb looked correct on its own: observe reported partiality honestly on
+stdout, and plan reported a stale reading honestly from the ledger.
+
+The defect is between them. A failed read was printed and DROPPED — `observe` recorded
+nothing for the capability, deliberately, because a failed read must never become a
+fabricated value (D242). What it also never became was a FACT. The ledger therefore
+remembered only that the last good reading was getting older, so the best sentence plan
+could form was about age. The advice was sound for the case it could see and useless for
+the case that was happening, and nothing in the system could tell them apart.
+
+The move is one this record already made once, for probes: a failed measurement is
+knowledge, and it is never an observation (D59). `observation.failed` joins the closed
+event set beside `probe.failed`, carrying the driver's own sentence and the time of the
+attempt, and carrying NOTHING about the resource's state. The refusal then names the
+cause instead of prescribing a re-observe it can see will fail.
+
+The reason is recorded VERBATIM. A house sentence would flatten "no credentials in the
+environment" and "denied by policy" into one, and those want opposite actions.
+
+**Two things the reporter asked for and are not being done, with the reason.** They asked
+that `observe` refuse to record on a partial read, and that it exit non-zero. Both would
+break a property they praised in another report the same week: a failed read is evidence
+about ONE capability, and the other nineteen still reconcile (D242, D621). `converge` runs
+`observe` as a child and refuses on a non-zero exit, so one unreadable capability would
+stop a run that has nothing wrong with it. What they wanted from those asks — not looping
+blind — is what the durable record delivers, without buying it at that price.
+
+**One cost, stated rather than hidden.** The projection is not part of the canonical
+snapshot. Putting it there would change every pinned snapshot hash for a field no
+decision rests on. After a compaction, failures older than the snapshot stop being folded
+and the refusal falls back to the freshness-only wording — less information, never wrong
+information, and the failure that matters is the most recent one, which is in the tail.
+
+## D1153 — the read failure that did not even mark the run partial
+
+Reported from the field: the same candidate SEALS with a literal ARN and REFUSES through
+a `$ref` to the same value, and it bites hardest on resources that have stood a while.
+
+The general claim in the report — that a `$ref` to a no-op producer is never resolved —
+does not reproduce. Built and measured: a bound producer, converged twice so it is a
+no-op, a new consumer referencing its output. The plan SEALS and the reference resolves.
+Both resolution paths, create (`wireReferences`) and update (`foldDriftRefs`), read a
+bound producer's recorded outputs, and both refuse explicitly rather than dropping a
+reference silently.
+
+What DOES reproduce is one field over, and it explains the same symptom. When the
+producer's OUTPUTS read fails, `observe` appended a diagnostic, recorded nothing, and —
+unlike a failed primary read — did not mark the run partial. So the verb reported success,
+the ledger kept no `outputs.<name>` for the producer, and every reference to it refused
+with "no outputs.X observation — re-observe first". Re-observing fails the same way. That
+is the loop D1152 closed for the primary read, in the one place the same treatment had
+not been applied.
+
+Their observation that stable resources suffer most is exactly right, and it is the
+mechanism rather than a coincidence: a producer created in the SAME plan takes its
+outputs from the create result, so only a bound one depends on the read that was failing
+in silence. The longer infrastructure stands, the more references rest on it.
+
+So the failure is now Partial, Unreadable, and durable, with the reason prefixed
+`outputs:` — a reader must be able to tell "I could not read this resource" from "I could
+not read what it publishes", because they are different repairs.
+
+Changing `outputDocs` to return the reason broke a mutant that targeted it — the
+substitution stopped compiling, so it scored NO-BUILD and the test's teeth went
+unmeasured while the meter still refused the receipt. Changing a function's SIGNATURE is
+the same event as renaming its test or weakening its assertion: the catalogue points at a
+shape that no longer exists. Re-aimed in the same slice.
+
+Their FIRST ask was the message: a refusal should name the capability whose reference
+could not be resolved. Measured across both paths, every refusal already names the
+consumer first. That is either a difference in what we are running or in what we are
+reading, and it is a question back to them rather than a change made blind. The candidate
+that produced it would settle it in one line.

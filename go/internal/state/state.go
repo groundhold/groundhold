@@ -19,8 +19,15 @@ var EventTypes = map[string]bool{
 	"apply.started": true, "apply.finished": true, "apply.failed": true,
 	"observation.recorded": true, "violation.detected": true,
 	"violation.resolved": true, "binding.updated": true,
-	"probe.failed":   true,
-	"lease.acquired": true, "lease.renewed": true, "lease.released": true,
+	"probe.failed": true,
+	// D1152: a bound capability the provider could not be READ at all. Symmetric
+	// with probe.failed and for the same reason (D59): a failed measurement is
+	// knowledge, and it is never an observation. Without it the failure lived on
+	// stdout only, so `plan` could see an ageing observation and not that the
+	// last read had failed — and told the operator to re-observe, which was the
+	// one thing that could not help.
+	"observation.failed": true,
+	"lease.acquired":     true, "lease.renewed": true, "lease.released": true,
 	"lease.broken": true, "operation.receipt": true,
 	"ownership.claimed": true, // D140: takeover authorship stamp
 	// D229: converge lifecycle markers — run-scoped, lease-free, neither
