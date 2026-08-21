@@ -133,7 +133,25 @@
         }
       }
     },
-    "autonomy": { "type": "object" },
+    "autonomy": {
+      "type": "object",
+      "$comment": "the consent block. It published NOTHING about its shape while the runtime read eight keys, so a reader had no way to learn the vocabulary except from an example — and a misspelling silently disarmed a gate (D1164). Closed, with the `x-` escape the rest of the document carries.",
+      "patternProperties": { "^x-": {} },
+      "additionalProperties": false,
+      "properties": {
+        "forbidden": { "type": "array", "items": { "type": "object" } },
+        "allow_replace_stateful": { "type": "array", "items": { "$ref": "#/$defs/identifier" } },
+        "allow_intrusive_probes": { "type": "array", "items": { "$ref": "#/$defs/identifier" } },
+        "allow_protection_lift": { "type": "array", "items": { "$ref": "#/$defs/identifier" } },
+        "allow_field_reclaim": { "type": "array", "items": { "$ref": "#/$defs/identifier" } },
+        "allow_emission_adopt": { "type": "array", "items": { "$ref": "#/$defs/identifier" } },
+        "no_assumed_hard_basis": { "type": "boolean" },
+        "auto_execute": {
+          "$comment": "reserved in v0 (D1164): shape-gated as a mapping and read by NOTHING. `max_reversibility` and `max_cost_delta` appear nowhere in either implementation, so a contract capping what may execute automatically caps nothing. It is in the flagship example, which is why it is labelled rather than left to be discovered. Held by TestAReservedBlockChangesNothingButTheHash.",
+          "type": "object"
+        }
+      }
+    },
     "outcomes": {
       "$comment": "reserved in v0 (D1163): NOTHING in the runtime reads this block. It is parsed, shape-gated and folded into the contract's hash, and no verb changes behaviour because of it — `probe` derives what to measure from the ledger's bindings and reads the contract only for the intrusive-probe consent (D59). Declared here rather than left to be inferred, because it appears in a shipped example and a reader who writes it is entitled to know it does nothing yet. Held by TestAReservedBlockChangesNothingButTheHash: adding the block may change the contract's hash and nothing else, so implementing it fails that gate until this marker comes off.",
       "type": "array",
