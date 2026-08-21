@@ -9,6 +9,8 @@
     "kind": { "const": "InfrastructureContract" },
     "meta": {
       "type": "object",
+      "patternProperties": { "^x-": {} },
+      "additionalProperties": false,
       "required": ["id"],
       "properties": {
         "id": { "$ref": "#/$defs/identifier" },
@@ -22,6 +24,9 @@
       "minItems": 1,
       "items": {
         "type": "object",
+        "$comment": "closed (D1161): a contract is where a REQUIREMENT is declared, so a key nothing reads is a requirement that never existed while the document validates. `x-` is the escape the top level has published since D673 and it travels with the rule.",
+        "patternProperties": { "^x-": {} },
+        "additionalProperties": false,
         "required": ["id", "type"],
         "properties": {
           "id": { "$ref": "#/$defs/identifier" },

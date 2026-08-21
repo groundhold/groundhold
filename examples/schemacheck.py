@@ -18,7 +18,7 @@ import re
 
 KNOWN = {"type", "properties", "required", "items", "enum", "const", "$ref",
          "additionalProperties", "pattern", "minimum", "maximum", "maxLength",
-         "minItems", "propertyNames", "description", "$defs", "$schema", "$id",
+         "minItems", "propertyNames", "patternProperties", "description", "$defs", "$schema", "$id",
          "title", "$comment", "anyOf", "allOf", "if", "then", "else"}
 
 TYPES = {"object": dict, "array": list, "string": str, "boolean": bool,
@@ -108,14 +108,25 @@ def errors(doc, schema, defs, path=""):
                 out.append((path, "required property %r is absent" % prop))
         props = schema.get("properties", {})
         extra = schema.get("additionalProperties")
+        # patternProperties is how a closed object still admits a family of keys —
+        # here the `x-` escape the document schemas publish for "deliberately not
+        # runtime data". Unread, a closed block would reject every document that
+        # uses the escape it advertises.
+        patterns = schema.get("patternProperties", {})
         for k, v in doc.items():
             sub = path + "/" + k if path else k
             if k in props:
                 out += errors(v, props[k], defs, sub)
+                continue
+            hit = next((ps for pat, ps in patterns.items() if re.search(pat, k)), None)
+            if hit is not None:
+                out += errors(v, hit, defs, sub)
             elif isinstance(extra, dict):
                 # An open map (bindings, heads, outcomes, requirements): the keys
                 # are free, the VALUES are constrained.
                 out += errors(v, extra, defs, sub)
+            elif extra is False:
+                out.append((sub, "is not a key this block admits"))
             # else: growth is allowed. `versioning.md` promises outputs may grow
             # fields and no published schema closes an object, so the two agree.
     if isinstance(doc, list) and "items" in schema:

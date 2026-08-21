@@ -184,6 +184,9 @@ class Candidate:
 
 def _provenanced(v: Any) -> Provenanced:
     if isinstance(v, dict) and "status" in v:
+        _check_known_keys(v, PROVENANCED_KEYS, "a provenanced attribute",
+                          "the provenance this loader does not read is dropped, and "
+                          "the attribute keeps only what was spelled correctly")
         status = v["status"]
         if status not in VALID_STATUSES:
             raise ContractError(f"invalid provenance status: {status}")
@@ -323,6 +326,24 @@ _KNOWN_TOP_LEVEL = {
 }
 
 
+# D1161: the levels INSIDE a contract, closed for the same reason the top level is.
+# `_check_top_level_keys` has taken the whole document since D673 and nothing else, so a
+# stray key in a capability, in `meta` or in a provenanced attribute was read by nothing
+# while the document still validated.
+CONTRACT_CAPABILITY_KEYS = {"id", "type", "requirements", "state"}
+CONTRACT_META_KEYS = {"id", "environment", "version", "owner"}
+PROVENANCED_KEYS = {"status", "value", "source", "confidence"}
+
+
+def _check_known_keys(doc: dict, known: set, where: str, why: str) -> None:
+    unknown = sorted(k for k in doc
+                     if k not in known and not str(k).startswith("x-"))
+    if unknown:
+        raise ContractError(
+            f"{where} declares unknown key(s) {', '.join(unknown)} — {why}. "
+            "Rename it, or prefix it with `x-` if it is deliberately not runtime data")
+
+
 def _check_top_level_keys(doc: dict, kind: str) -> None:
     known = _KNOWN_TOP_LEVEL.get(kind)
     if known is None:
@@ -382,6 +403,9 @@ def load_contract(path: str) -> Contract:
         raise ContractError("apiVersion must be contract/v0.1")
     _check_top_level_keys(doc, "InfrastructureContract")
     meta = doc.get("meta") or {}
+    _check_known_keys(meta, CONTRACT_META_KEYS, "meta",
+                      "a field this loader does not read carries no meaning into "
+                      "the document")
     if not meta.get("id"):
         raise ContractError("meta.id is required")
 
@@ -389,6 +413,9 @@ def load_contract(path: str) -> Contract:
     retired: set[str] = set()
     unknown_types: list[str] = []
     for cap in doc.get("capabilities") or []:
+        _check_known_keys(cap, CONTRACT_CAPABILITY_KEYS, "a capability",
+                          "a contract is where a REQUIREMENT is declared, so a key "
+                          "nothing reads is a requirement that never existed")
         if not cap.get("id"):
             raise ContractError("capability missing id")
         if not _id_clean(cap["id"]):
