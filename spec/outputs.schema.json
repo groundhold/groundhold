@@ -1030,7 +1030,8 @@
         "status": {
           "enum": [
             "healthy",
-            "corrupt"
+            "corrupt",
+            "version-ahead"
           ]
         },
         "totalEvents": {
@@ -1076,7 +1077,8 @@
                   "missing-prev",
                   "chain-broken",
                   "rule-rejected",
-                  "bad-timestamp"
+                  "bad-timestamp",
+                  "version-ahead"
                 ]
               },
               "capability": {
