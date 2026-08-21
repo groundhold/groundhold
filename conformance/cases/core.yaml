@@ -3,6 +3,90 @@
 # MUST produce these verdicts. Semantics live here, not in any codebase.
 
 cases:
+  # D1162. The verify block is guarded against every wrong VALUE — `method` beside
+  # `design`/`runtime` is refused, half of the two-bar form is refused, a non-string
+  # bar is refused because "a bar the loader cannot read must not fall back to the
+  # weakest evidence there is". A wrong KEY walked past all three and landed in
+  # exactly that weakest evidence: `method` initialises to `static`.
+  #
+  # Measured before the fix, on a residency constraint:
+  #   verify: {method: provider-api}  -> executable=false, unknown
+  #   vrify:  {method: provider-api}  -> executable=TRUE,  SATISFIED, "declared ..."
+  #
+  # One character turned a constraint that must be proven against the provider into
+  # one proven by reading the candidate's own claim, and the plan became executable.
+  - name: a-misspelled-verify-block-is-refused-not-downgraded
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: v1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-region
+            subject: db
+            path: location.region
+            op: equals
+            value: eu-central-1
+            vrify: { method: provider-api }
+    expect:
+      error: contract
+      errorContains:
+        - "vrify"
+        - "weakest default"
+
+  - name: a-misspelled-verify-method-is-refused-not-downgraded
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: v2, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-region
+            subject: db
+            path: location.region
+            op: equals
+            value: eu-central-1
+            verify: { methdo: provider-api }
+    expect:
+      error: contract
+      errorContains:
+        - "methdo"
+
+  # The sibling that keeps the guard from being a wall: both published spellings of a
+  # bar must still load, including the two-bar form the schema had never published.
+  - name: both-published-verify-forms-load
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: v3, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - { id: c-one, subject: db, path: service.managed, op: equals, value: true, verify: { method: static } }
+        soft:
+          - { id: c-two, subject: db, path: location.region, op: equals, value: eu-central-1, verify: { design: static, runtime: provider-api } }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: v3
+      capabilities:
+        db:
+          attributes:
+            service.managed: true
+            location.region: eu-central-1
+          provider: fake
+          service: sql
+    expect:
+      executable: true
+
   # D1161. The top level of a contract has been closed since D673 — a misspelled
   # `constraint:` made a contract requiring encryption PROVE a candidate that
   # refuses it, at exit 0. The two levels INSIDE it stayed open, so the same

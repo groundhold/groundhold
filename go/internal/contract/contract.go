@@ -27,6 +27,59 @@ import (
 // Reconciled against `spec/contract.schema.json` by
 // TestContractInnerKeysMatchThePublishedShape — the published document and the loader
 // must accept the same keys.
+// D1162: the constraint object and its verify block, closed for a sharper reason than
+// the levels around them. `verify` is guarded meticulously against every wrong VALUE —
+// `method` beside `design`/`runtime` is refused, half of the two-bar form is refused,
+// a non-string bar is refused with "a bar the loader cannot read must not fall back to
+// the weakest evidence there is". A wrong KEY walked past all three and landed in
+// exactly that weakest evidence: `method` initialises to "static", so `vrify:` or
+// `methdo:` silently turned a constraint the contract says must be proven against the
+// provider into one proven by reading the candidate's own claim.
+//
+// Measured on a residency constraint:
+//
+//	verify: {method: provider-api}  -> executable=false, unknown, "requires provider-api"
+//	vrify:  {method: provider-api}  -> executable=TRUE,  SATISFIED, "declared eu-central-1"
+//
+// `budget` entries share $defs/constraint, so this covers them too. `objective` is
+// soft-only in the schema but the loader parses both severities in one pass, so it is
+// accepted here and its placement stays the schema's business.
+var constraintKeys = map[string]bool{
+	"id": true, "subject": true, "path": true, "op": true, "value": true,
+	"verify": true}
+
+// The two context-only keys. Checked where the CONTEXT is known rather than as one
+// permissive union: `newConstraint` takes an already-resolved severity, so it cannot
+// tell a budget entry from a hard constraint, and a union set would let `objective`
+// sit unread on a hard constraint — the same silent-drop one key over.
+var softConstraintKeys = withKey(constraintKeys, "objective")
+var budgetConstraintKeys = withKey(constraintKeys, "severity")
+
+// constraintKeysFor picks the set by CONTEXT. A function rather than a local variable
+// so the choice is one expression a mutant can replace without leaving an unused
+// binding behind — the meter reports that as NO-BUILD, which measures nothing (D799).
+func constraintKeysFor(severity string) map[string]bool {
+	if severity == "soft" {
+		return softConstraintKeys
+	}
+	return constraintKeys
+}
+
+func withKey(base map[string]bool, extra string) map[string]bool {
+	out := make(map[string]bool, len(base)+1)
+	for k := range base {
+		out[k] = true
+	}
+	out[extra] = true
+	return out
+}
+
+// verifyKeys is the two published spellings of a bar: one (`method`) or two
+// (`design` + `runtime`, D728). The loader already refuses mixing them and refuses
+// half of the pair; what it did not refuse was a third spelling nobody reads.
+var verifyKeys = map[string]bool{
+	"method": true, "design": true, "runtime": true}
+
 var contractCapabilityKeys = map[string]bool{
 	"id": true, "type": true, "requirements": true, "state": true}
 
@@ -549,6 +602,12 @@ func collectConstraints(doc map[string]any, caps map[string]map[string]any,
 			if !ok {
 				return nil, fmt.Errorf("%s constraint #%d is not a mapping", sev, i)
 			}
+			if err := checkKnownKeys(raw, constraintKeysFor(sev), sev+" constraint",
+				"a key this loader does not read cannot change what the constraint "+
+					"demands, and `verify` misspelled leaves the bar at its weakest "+
+					"default"); err != nil {
+				return nil, err
+			}
 			c, err := newConstraint(raw, sev)
 			if err != nil {
 				return nil, err
@@ -571,6 +630,11 @@ func collectConstraints(doc map[string]any, caps map[string]map[string]any,
 		}
 		if _, has := raw["severity"]; !has {
 			sev = "hard"
+		}
+		if err := checkKnownKeys(raw, budgetConstraintKeys, "a budget constraint",
+			"a key this loader does not read cannot change what the constraint "+
+				"demands"); err != nil {
+			return nil, err
 		}
 		c, err := newConstraint(raw, sev)
 		if err != nil {
@@ -668,6 +732,15 @@ func newConstraint(raw map[string]any, severity string) (Constraint, error) {
 		if !ok {
 			return Constraint{}, fmt.Errorf(
 				"%s: verify must be a mapping, got %T", id, vraw)
+		}
+		// D1162: the three refusals below guard every wrong VALUE in this block and
+		// none of them sees a wrong KEY. `method` initialises to "static", so a
+		// misspelling lands in exactly the weakest evidence the third refusal warns
+		// about — silently, and the plan becomes executable.
+		if err := checkKnownKeys(vb, verifyKeys, id+": verify",
+			"a bar this loader cannot find is a bar nobody set, and the default is "+
+				"the weakest evidence there is"); err != nil {
+			return Constraint{}, err
 		}
 		if mraw, has := vb["method"]; has {
 			// An explicit `method: null` is a written key, not an absent one: the

@@ -257,6 +257,18 @@ func baseContract() map[string]any {
 	}
 }
 
+// hardConstraint builds one hard constraint on a real vocabulary path, with `extra`
+// merged in — so a case says only what it is ABOUT and the rest of the document stays
+// valid. A fixture that is invalid in a second way does not test what its name says.
+func hardConstraint(extra map[string]any) map[string]any {
+	c := map[string]any{"id": "c-region", "subject": "db",
+		"path": "location.region", "op": "equals", "value": "eu-central-1"}
+	for k, v := range extra {
+		c[k] = v
+	}
+	return map[string]any{"hard": []any{c}}
+}
+
 func TestLoadContractDocErrors(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -268,6 +280,26 @@ func TestLoadContractDocErrors(t *testing.T) {
 			"apiVersion must be"},
 		{"missing meta id", func(d map[string]any) { d["meta"] = map[string]any{} },
 			"meta.id is required"},
+		// D1162: the two that trade evidence for a claim. Both must NAME the key —
+		// a reader who typed `vrify:` and is told only "invalid contract" reads the
+		// block, sees a plausible `verify`, and looks elsewhere.
+		{"a misspelled verify block", func(d map[string]any) {
+			d["constraints"] = hardConstraint(map[string]any{
+				"vrify": map[string]any{"method": "provider-api"}})
+		}, "vrify"},
+		{"a misspelled method inside verify", func(d map[string]any) {
+			d["constraints"] = hardConstraint(map[string]any{
+				"verify": map[string]any{"methdo": "provider-api"}})
+		}, "methdo"},
+		// The refusal must say what is at stake, or it reads as pedantry about a typo
+		// rather than as a bar quietly dropping to the weakest evidence there is.
+		// Matched on a phrase only THIS refusal uses: "weakest evidence there is" also
+		// appears in D627's message two screens up, so a mutant on one left the other
+		// satisfying the assertion — the same not-unique-marker trap as D1160's.
+		{"the verify refusal says what it costs", func(d map[string]any) {
+			d["constraints"] = hardConstraint(map[string]any{
+				"verify": map[string]any{"methdo": "provider-api"}})
+		}, "a bar nobody set"},
 		// D1161: the levels INSIDE the document. The top level has been closed since
 		// D673; these three were not, so a stray key was read by nothing while the
 		// contract validated. One case PER LEVEL on purpose — one guard serving three
@@ -877,6 +909,14 @@ func TestContractInnerKeysMatchThePublishedShape(t *testing.T) {
 	}{
 		{"contract capability",
 			dig(contract, "properties", "capabilities", "items"), contractCapabilityKeys},
+		// D1162. The verify block is the sharpest of these: it published ONE spelling
+		// of a bar while the loader has read two since D728, so a contract using the
+		// two-bar form was valid for the runtime and invalid against this document.
+		{"verify", dig(contract, "$defs", "verify"), verifyKeys},
+		{"constraint", dig(contract, "$defs", "constraint"), constraintKeys},
+		{"soft constraint", dig(contract, "$defs", "softConstraint"), softConstraintKeys},
+		{"budget constraint",
+			dig(contract, "$defs", "budgetConstraint"), budgetConstraintKeys},
 		{"contract meta",
 			dig(contract, "properties", "meta"), contractMetaKeys},
 		{"provenanced attribute",

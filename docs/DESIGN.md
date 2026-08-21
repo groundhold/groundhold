@@ -38148,3 +38148,66 @@ The shape to carry: **a helper that takes the level as an argument is not the sa
 guard that runs at every level.** D673 wrote the general form and used it once; the
 generality sat there, correct and unapplied, for as long as it took someone to write a
 key one line too far in.
+
+## D1162 — the block guarded against every wrong value, and blind to a wrong key
+
+Third instance in a day of the shape D1160 named, and the first with a security cost.
+
+`verify` decides what evidence a constraint demands, and the loader treats it with care.
+It refuses `method` written beside `design`/`runtime` ("one bar or two, never both
+spellings of the same thing"). It refuses half of the two-bar form ("half of it would
+leave the other bar to a default nobody wrote"). It refuses a bar that is not a string,
+with the reason spelled out: "a bar the loader cannot read must not fall back to the
+weakest evidence there is".
+
+Three refusals, all about the VALUE. None of them looks at the KEY. And `method`
+initialises to `"static"` — so a misspelling walks past all three and lands in exactly
+the weakest evidence the third one warns about. Measured on a residency constraint:
+
+    verify: {method: provider-api}   ->  executable=false, unknown,
+                                         "requires provider-api verification"
+    vrify:  {method: provider-api}   ->  executable=TRUE,  SATISFIED,
+                                         "location.region equals eu-central-1: declared"
+    verify: {methdo: provider-api}   ->  the same
+
+One character turns a constraint the contract says must be proven against the provider
+into one proven by reading the candidate's own claim, and the plan becomes executable.
+That is the D1003/D1040/D1071 false-secure family, reached by a typo rather than by a
+missing check — and the scaffolder emits `verify:` in every contract it writes, so the
+spelling is copied by hand or by an agent, which is the authoring path this project is
+built around.
+
+Closing it surfaced two drifts in the other direction, both of the D1157 shape:
+`$defs/verify` published `method` alone while the loader has read `design`+`runtime`
+since D728, so a contract using the two-bar form was valid for the runtime and invalid
+against the published document; and `budget` pointed at `$defs/constraint`, which never
+published the `severity` the loader reads from a budget entry. Budget now has its own
+definition rather than a `severity` key added to `constraint` — otherwise a HARD
+constraint could carry a severity the runtime ignores, which is the same silent drop one
+key over.
+
+The key sets are per-context, not one permissive union. `newConstraint` receives an
+already-resolved severity and cannot tell a budget entry from a hard constraint, so the
+check runs at the CALL SITES where the context is known. A union would have accepted
+`objective` on a hard constraint and `severity` on a soft one, unread — buying tidiness
+with exactly the defect being fixed.
+
+The mutation run caught the same not-unique-marker trap for the second time today. The
+case pinning that the refusal says what it COSTS matched "weakest evidence there is",
+which appears THREE times in this file — D627's message says it too, so a mutant on one
+occurrence left another satisfying the assertion. It now matches "a bar nobody set",
+which only this refusal says.
+
+The meter refused the first attempt, with NO-BUILD rather than SURVIVED: the mutant
+passed `nil` where a local `allowed` variable had just been assigned, leaving it unused,
+so the tree did not compile and the named test never ran. Verifying it by hand had shown
+"killed", because a hand-rolled check reads any non-zero `go test` as a failing test and
+cannot tell a compile error from a caught bug — which is the whole reason the meter
+distinguishes them (D799). The set is now chosen by a FUNCTION rather than a local, so
+the choice is one expression a mutant can replace and still compile. A mutant that cannot
+build measures nothing, and it is the tooling's job to say so out loud.
+
+The shape, sharpened from D1160: **a guard that checks values learns nothing about
+keys.** Care spent on what a field may CONTAIN is not care spent on whether the field is
+the one the reader meant to write, and the more carefully a block is validated the more
+convincing its silence is when the validation never ran.

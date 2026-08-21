@@ -117,7 +117,7 @@
         "soft": { "type": "array", "items": { "$ref": "#/$defs/softConstraint" } }
       }
     },
-    "budget": { "type": "array", "items": { "$ref": "#/$defs/constraint" } },
+    "budget": { "type": "array", "items": { "$ref": "#/$defs/budgetConstraint" } },
     "assumptions": {
       "type": "array",
       "items": {
@@ -158,12 +158,19 @@
     },
     "verify": {
       "type": "object",
+      "$comment": "closed (D1162), and it publishes BOTH spellings of a bar. It listed only `method` while the loader has read `design`+`runtime` since D728, so a contract using the two-bar form was valid for the runtime and invalid against this document. Closed because the block is guarded against every wrong VALUE and was blind to a wrong KEY: `method` defaults to `static`, so `vrify:` or `methdo:` silently traded provider evidence for the candidate's own word.",
+      "patternProperties": { "^x-": {} },
+      "additionalProperties": false,
       "properties": {
-        "method": { "enum": ["static", "provider-api", "probe"] }
+        "method": { "enum": ["static", "provider-api", "probe"] },
+        "design": { "enum": ["static", "provider-api", "probe"] },
+        "runtime": { "enum": ["static", "provider-api", "probe"] }
       }
     },
     "constraint": {
       "type": "object",
+      "patternProperties": { "^x-": {} },
+      "additionalProperties": false,
       "required": ["id", "subject", "path", "op"],
       "properties": {
         "id": { "$ref": "#/$defs/identifier" },
@@ -174,8 +181,26 @@
         "verify": { "$ref": "#/$defs/verify" }
       }
     },
+    "budgetConstraint": {
+      "type": "object",
+      "$comment": "a constraint that carries its own severity — the loader reads `severity` from a budget entry and defaults it to `hard`, and this file used to point budget at $defs/constraint, which never published the field (D1162). Its own definition rather than a key added to `constraint`, so a HARD constraint cannot carry a severity the runtime would ignore.",
+      "patternProperties": { "^x-": {} },
+      "additionalProperties": false,
+      "required": ["id", "subject", "path", "op"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "subject": { "$ref": "#/$defs/identifier" },
+        "path": { "type": "string" },
+        "op": { "$ref": "#/$defs/operator" },
+        "value": {},
+        "severity": { "enum": ["hard", "soft"] },
+        "verify": { "$ref": "#/$defs/verify" }
+      }
+    },
     "softConstraint": {
       "type": "object",
+      "patternProperties": { "^x-": {} },
+      "additionalProperties": false,
       "required": ["id", "subject"],
       "properties": {
         "id": { "$ref": "#/$defs/identifier" },
