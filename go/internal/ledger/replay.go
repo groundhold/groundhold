@@ -12,6 +12,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"groundhold/internal/canonical"
+	"groundhold/internal/state"
 )
 
 func ParseTs(s string) (int, error) {
@@ -143,7 +146,8 @@ func ReplayFile(path string) (*Ledger, error) {
 	if led.BaseEvents > 0 && trustFrom != "" && led.verifiedFrom == trustFrom {
 		trust.SeedBoundaryHonored()
 	}
-	for i, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	for i, line := range lines {
 		if line == "" {
 			continue
 		}
@@ -183,6 +187,17 @@ func ReplayFile(path string) (*Ledger, error) {
 		}
 		res, err := led.Append(doc, nil)
 		if err != nil {
+			// D1154: a type this build does not know is almost certainly a
+			// type a NEWER build wrote — the registry is additive-only. Fold
+			// no further (an event we cannot interpret must not be skipped
+			// past: silently omitting it would move every projection that
+			// depends on it), but do not call the file corrupt either.
+			// Sweep the rest for chain integrity so the refusal can say
+			// which of the two conditions actually holds.
+			var unknown *state.UnknownTypeError
+			if errors.As(err, &unknown) {
+				return nil, newVersionAhead(lines, i, doc, led.Heads, unknown.Type)
+			}
 			return nil, fmt.Errorf("ledger line %d: %v", i+1, err)
 		}
 		if res.Status != "ok" {
@@ -207,9 +222,125 @@ func ReplayFile(path string) (*Ledger, error) {
 	return led, nil
 }
 
+// VersionAheadError says the ledger carries an event type this build does not
+// know — additive-only registry, so: written by a newer build (D1154).
+//
+// It exists to keep that condition out of the corruption channel. Replay used to
+// return it as an ordinary error, all eleven call sites answered any replay error
+// with exit 5, and exit 5's banner is CORRUPTED. A tester who upgraded, wrote one
+// event of a new type and then went back to the previous binary was told their
+// ledger was corrupt. It was not: the chain verified end to end. The danger is not
+// the refusal — refusing is correct — it is the WORD, because the honest response to
+// "your ledger is corrupted" is to restore it from a backup or delete it, and the
+// ledger is the one file here whose loss cannot be recovered from anywhere else.
+//
+// ChainIntact is why the sweep below exists. "Refuse and say which build wrote it"
+// would already beat CORRUPTED, but it still leaves the reader wondering whether the
+// file is also damaged — and a reader who wonders that reaches for the backup. So the
+// question is answered rather than left open, and answered honestly in both
+// directions: the two conditions are independent and a file can have both.
+type VersionAheadError struct {
+	Line        int    // 1-based line carrying the unreadable event
+	Type        string // the event type this build does not know
+	Lines       int    // total non-empty lines in the file
+	ChainIntact bool   // did the hash chain verify over ALL of them
+	ChainErr    error  // when it did not: where it broke
+}
+
+func (e *VersionAheadError) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "ledger line %d: event type %q is not known to this build — "+
+		"the event-type registry is additive-only, so this ledger was almost "+
+		"certainly written by a NEWER groundhold than the one you are running",
+		e.Line, e.Type)
+	if e.ChainIntact {
+		ev := "events"
+		if e.Lines == 1 {
+			ev = "event"
+		}
+		fmt.Fprintf(&b, ".\nThe ledger is NOT damaged: the hash chain verifies over "+
+			"all %d %s. Do not repair, quarantine or restore it — there is "+
+			"nothing wrong with the file. Run the newer build against it, or "+
+			"upgrade this one", e.Lines, ev)
+	} else {
+		fmt.Fprintf(&b, ".\nThe hash chain ALSO does not verify (%v), so upgrading "+
+			"alone will not be enough — treat that separately", e.ChainErr)
+	}
+	return b.String()
+}
+
+// newVersionAhead builds the refusal, sweeping the REST of the file for chain
+// integrity (projection-free: this answers "is the file damaged", nothing else).
+//
+// It starts from the offending line, whose own prev was already verified against
+// the heads passed in, so that event's hash advances the sweep exactly as a fold
+// would have. A line that cannot be hashed or parsed at all counts as a broken
+// chain — an unanswerable question is not a clean bill of health.
+func newVersionAhead(lines []string, idx int, doc map[string]any,
+	heads map[string]string, etype string) *VersionAheadError {
+
+	e := &VersionAheadError{Line: idx + 1, Type: etype, ChainIntact: true}
+	local := make(map[string]string, len(heads))
+	for k, v := range heads {
+		local[k] = v
+	}
+	advance := func(d map[string]any) error {
+		h, err := canonical.HashEvent(d)
+		if err != nil {
+			return err
+		}
+		ev, _ := d["event"].(map[string]any)
+		capsAny, _ := ev["capabilities"].([]any)
+		for _, ca := range capsAny {
+			if c, _ := ca.(string); c != "" {
+				local[c] = h
+			}
+		}
+		return nil
+	}
+	for i := idx; i < len(lines); i++ {
+		if lines[i] == "" {
+			continue
+		}
+		e.Lines++
+		d := doc
+		if i != idx {
+			d = map[string]any{}
+			if err := json.Unmarshal([]byte(lines[i]), &d); err != nil {
+				e.ChainIntact, e.ChainErr = false, fmt.Errorf("ledger line %d: %v", i+1, err)
+				return e
+			}
+			normalize(d)
+			ev, _ := d["event"].(map[string]any)
+			if err := verifyPrevHeads(local, ev, i+1); err != nil {
+				e.ChainIntact, e.ChainErr = false, err
+				return e
+			}
+		}
+		if err := advance(d); err != nil {
+			e.ChainIntact, e.ChainErr = false, fmt.Errorf("ledger line %d: %v", i+1, err)
+			return e
+		}
+	}
+	for i := 0; i < idx; i++ { // the lines already folded, whose chain replay verified
+		if lines[i] != "" {
+			e.Lines++
+		}
+	}
+	return e
+}
+
 // verifyPrev checks that an event's prev map pins the current head of
 // each capability it lists (C2). Genesis is the empty-head sentinel.
 func verifyPrev(led *Ledger, ev map[string]any, line int) error {
+	return verifyPrevHeads(led.Heads, ev, line)
+}
+
+// verifyPrevHeads is the chain check itself, over a bare head map so the
+// integrity sweep (D1154) can run it without a folded Ledger. One
+// implementation, two callers: a second copy would be free to agree with
+// this one by luck and diverge on the case that matters.
+func verifyPrevHeads(heads map[string]string, ev map[string]any, line int) error {
 	prev, ok := ev["prev"].(map[string]any)
 	if !ok {
 		return fmt.Errorf(
@@ -219,7 +350,7 @@ func verifyPrev(led *Ledger, ev map[string]any, line int) error {
 	capsAny, _ := ev["capabilities"].([]any)
 	for _, ca := range capsAny {
 		c, _ := ca.(string)
-		want := led.Heads[c]
+		want := heads[c]
 		if want == "" {
 			want = "genesis"
 		}

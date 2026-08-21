@@ -2101,8 +2101,7 @@ func run(args []string) int {
 		}
 		led, lerr := ledger.ReplayFile(ledgerPath)
 		if lerr != nil {
-			fmt.Fprintf(os.Stderr, "ledger error: %v\n", lerr)
-			return 5
+			return refuseCorruptLedger(lerr)
 		}
 		doc, cerr := classifyPosture(led, ledgerPath, spliced, contractPaths, evalTime)
 		if cerr != nil {
@@ -2463,8 +2462,7 @@ func run(args []string) int {
 		}
 		led, err := ledger.ReplayFile(ledgerPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "ledger error: %v\n", err)
-			return 5
+			return refuseCorruptLedger(err)
 		}
 		var prov provider.Provider
 		if providerName == "gcp" {
@@ -2507,8 +2505,7 @@ func run(args []string) int {
 		}
 		led, err := ledger.ReplayFile(ledgerPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "ledger error: %v\n", err)
-			return 5
+			return refuseCorruptLedger(err)
 		}
 		var prov provider.Provider
 		if providerName == "gcp" {
@@ -2548,8 +2545,7 @@ func run(args []string) int {
 		}
 		led, err := ledger.ReplayFile(ledgerPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "ledger error: %v\n", err)
-			return 5
+			return refuseCorruptLedger(err)
 		}
 		res, err := audit.Run(c, led, ledgerPath, evalTime, record, vocabs)
 		if err != nil {
@@ -2607,8 +2603,7 @@ func run(args []string) int {
 		}
 		led, err := ledger.ReplayFile(ledgerPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "ledger error: %v\n", err)
-			return 5
+			return refuseCorruptLedger(err)
 		}
 		discoveryHash := ""
 		if discoveryPath != "" {
@@ -2672,8 +2667,7 @@ func run(args []string) int {
 		}
 		led, err := ledger.ReplayFile(ledgerPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "ledger error: %v\n", err)
-			return 5
+			return refuseCorruptLedger(err)
 		}
 		res, code := adopt.Unadopt(pos[2], led, ledgerPath,
 			c.Environment, evalTime)
@@ -2711,8 +2705,7 @@ func run(args []string) int {
 		if ledgerPath != "" {
 			led, err := ledger.ReplayFile(ledgerPath)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "ledger error: %v\n", err)
-				return 5
+				return refuseCorruptLedger(err)
 			}
 			in.Heads = led.DecisionHeads
 			in.Bindings = led.BoundProviderIDs()
@@ -3620,8 +3613,7 @@ func runForecast(planPath, candPath, headsPath, ledgerPath,
 	if ledgerPath != "" {
 		led, err := ledger.ReplayFile(ledgerPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "ledger error: %v\n", err)
-			return 5
+			return refuseCorruptLedger(err)
 		}
 		heads = led.DecisionHeads // D41: plans pin decision heads
 		bindings = led.BoundProviderIDs()
@@ -3671,8 +3663,7 @@ func runObserve(ledgerPath, bindingsPath, providerName, at string,
 	case ledgerPath != "":
 		l, err := ledger.ReplayFile(ledgerPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "ledger error: %v\n", err)
-			return 5
+			return refuseCorruptLedger(err)
 		}
 		led = l
 		bindings = led.BoundProviderIDs()
@@ -3762,6 +3753,14 @@ func runRepair(ledgerPath string, quarantine bool, fp string,
 		printResult(d, explain)
 		if d.Status == "healthy" {
 			return 0
+		}
+		// D1154: the diagnosis already decided which condition this is; the exit
+		// must not re-decide it. A version-ahead file exits on its own code, so
+		// the banner is REFUSED rather than CORRUPTED and a caller routing on 5
+		// is not told to quarantine an undamaged ledger by the one verb that can.
+		if d.Code == string(perr.LedgerVersionAhead) {
+			bannerState.code = d.Code
+			return perr.ExitFor(perr.LedgerVersionAhead)
 		}
 		return 5
 	}
@@ -4061,6 +4060,43 @@ func refuseCorruptLedger(err error) int {
 	if errors.Is(err, ledger.ErrNoLedger) {
 		fmt.Fprintf(os.Stderr, "ledger error: %v\n", err)
 		return 1
+	}
+	// D1154, the same argument one condition further: "these bytes do not replay"
+	// and "these bytes are DAMAGED" are also different operator problems, and this
+	// path used to answer both with exit 5 — whose banner is the single word
+	// CORRUPTED. An event type from a NEWER build replays nowhere here, so a reader
+	// who upgraded, wrote one such event and stepped back to the previous binary was
+	// told their ledger was corrupt while its hash chain verified end to end. The
+	// published remediation for 5 is `repair` — diagnose and quarantine — so the
+	// advice, followed, destroys the one file no other artefact can reconstruct.
+	// The remediation here is the opposite: leave the file alone and run a newer build.
+	//
+	// Only when the chain VERIFIES, though. The two conditions are independent and a
+	// file can have both, and `spec/presentation.md` ranks corruption above every
+	// other banner for a reason: under-reporting damage is the dangerous direction.
+	// A reader told "upgrade and re-run" about a file that is ALSO tampered would do
+	// exactly that and never look at the chain. So the sweep's answer decides which
+	// condition is reported, and the version note rides along inside it.
+	var ahead *ledger.VersionAheadError
+	if errors.As(err, &ahead) && ahead.ChainIntact {
+		bannerState.code = string(perr.LedgerVersionAhead)
+		fmt.Fprintf(os.Stderr, "ledger refused: %v\n", err)
+		return perr.ExitFor(perr.LedgerVersionAhead)
+	}
+	// The reporting verbs (D611) reach the same condition through a reader that
+	// derives run state without folding the chain, so it can say WHICH type it
+	// does not know but nothing about integrity — and must not imply otherwise.
+	// `repair` answers that question and now answers it correctly, so it is what
+	// the advice names.
+	var unknown *state.UnknownTypeError
+	if errors.As(err, &unknown) {
+		bannerState.code = string(perr.LedgerVersionAhead)
+		fmt.Fprintf(os.Stderr, "ledger refused: %v — the event-type registry is "+
+			"additive-only, so this ledger was written by a NEWER groundhold than "+
+			"the one you are running. Run the newer build, or upgrade this one. "+
+			"This path does not verify the hash chain, so it makes no claim either "+
+			"way about damage: `groundhold repair --ledger <file>` reports that.\n", err)
+		return perr.ExitFor(perr.LedgerVersionAhead)
 	}
 	bannerState.code = string(perr.LedgerCorrupted)
 	fmt.Fprintf(os.Stderr, "ledger error: %v\n", err)

@@ -41,6 +41,13 @@ const (
 	UnsupportedOperation Code = "unsupported-operation"
 	ApplyFailed          Code = "apply-failed"
 	LedgerCorrupted      Code = "ledger-corrupted"
+	// D1154: the ledger holds an event type this build does not know. The
+	// registry rule here is "one code per DISTINCT REMEDIATION", and this one's
+	// remediation is the OPPOSITE of ledger-corrupted's: run a newer build and
+	// leave the file alone, rather than diagnose and quarantine it. Sharing a
+	// code (and with it exit 5, whose banner is CORRUPTED) told a reader their
+	// intact ledger was damaged — advice that, followed, destroys evidence.
+	LedgerVersionAhead Code = "ledger-version-ahead"
 	// D75: permission preflight. Two distinct remediations — grant the
 	// missing permissions vs. make the check itself runnable — so two codes.
 	ProviderPermissionDenied Code = "provider-permission-denied"
@@ -178,6 +185,7 @@ func init() {
 		ConsentRequired:          {2},
 		LeaseConflict:            {3},
 		LedgerCorrupted:          {5},
+		LedgerVersionAhead:       {2},
 		MappingSchemaDrift:       {2},
 		NotExecutable:            {2},
 		NothingToChange:          {2},
@@ -320,6 +328,13 @@ var Explain = map[Code]Explanation{
 	ApplyFailed: {
 		"A provider operation failed terminally mid-flight.",
 		"Inspect the reason and receipts; re-plan."},
+	LedgerVersionAhead: {
+		"The ledger holds an event type this build does not know — the event-type " +
+			"registry is additive-only, so a newer groundhold wrote it.",
+		"Run the newer build against this ledger, or upgrade this one. Do NOT " +
+			"repair, quarantine or restore the file on account of this refusal: " +
+			"the refusal says the events cannot be INTERPRETED here, and it " +
+			"reports separately whether the hash chain verifies."},
 	LedgerCorrupted: {
 		"The ledger file is corrupted.",
 		"Run `groundhold repair --ledger <file>` — diagnose, then quarantine on " +

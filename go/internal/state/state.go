@@ -40,6 +40,26 @@ var EventTypes = map[string]bool{
 
 var ActorTypes = map[string]bool{"human": true, "agent": true, "runtime": true}
 
+// UnknownTypeError is refused-because-unrecognized, kept DISTINCT from every other
+// validation failure in this file (D1154).
+//
+// The event-type registry is additive-only, so "a type this build does not know" has
+// exactly one likely cause: the file was written by a NEWER build. That is not the
+// same condition as a malformed document, and — the reason this type exists — it is
+// not the same condition as a DAMAGED one. Replay used to return it as a bare error
+// alongside broken-chain and unparseable-line, every caller mapped the lot to exit 5,
+// and the banner for exit 5 is CORRUPTED. So a reader who added an event type and went
+// back to the previous binary was told their intact ledger was corrupt.
+//
+// The prose is unchanged on purpose: the string is what every existing caller and test
+// already reads. What is new is that the condition can now be TOLD APART, which is the
+// whole fix — a caller that cannot distinguish two conditions cannot advise on either.
+type UnknownTypeError struct{ Type string }
+
+func (e *UnknownTypeError) Error() string {
+	return fmt.Sprintf("unknown event type: %q", e.Type)
+}
+
 func LoadEvent(path string) (map[string]any, error) {
 	raw, err := docio.ReadDoc(path)
 	if err != nil {
@@ -69,7 +89,7 @@ func ValidateEvent(docAny any) (map[string]any, error) {
 	}
 	etype, _ := ev["type"].(string)
 	if !EventTypes[etype] {
-		return nil, fmt.Errorf("unknown event type: %q", etype)
+		return nil, &UnknownTypeError{Type: etype}
 	}
 	caps, ok := ev["capabilities"].([]any)
 	if !ok || len(caps) == 0 {
