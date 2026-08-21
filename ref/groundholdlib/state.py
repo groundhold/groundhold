@@ -12,6 +12,19 @@ from .yamlcompat import safe_load as _core12_load
 
 from .contract import ContractError, read_document
 
+# D1159: the OTHER closed set a ledger event carries. Published in
+# `spec/state.schema.json`, branched on by the compiler (an observation
+# sourced `candidate-declared` is adopt-recorded INTENT, carried as
+# unverifiable rather than compared as measured reality) — and enforced
+# nowhere until now, so a typo promoted intent into evidence.
+OBSERVATION_SOURCES = {
+    "provider-api",        # read from the provider's own API
+    "probe",               # measured by an outcome probe (D59)
+    "reachability",        # measured at the public edge
+    "manual",              # supplied by a human, provenance carried
+    "candidate-declared",  # adopt recorded the candidate's intent (F-LC3)
+}
+
 EVENT_TYPES = {
     "contract.published", "candidate.verified", "plan.sealed",
     "apply.started", "apply.finished", "apply.failed",
@@ -68,6 +81,15 @@ def validate_event(doc: Any) -> dict[str, Any]:
     sig = doc.get("sig")
     if sig is not None:
         _validate_sig(sig)
+    if etype == "observation.recorded":
+        body = ev.get("body")
+        obs = body.get("observations") if isinstance(body, dict) else None
+        for o in obs or []:
+            if not isinstance(o, dict):
+                continue
+            src = o.get("source")
+            if src not in OBSERVATION_SOURCES:
+                raise ContractError(f"unknown observation source: {src!r}")
     return doc
 
 

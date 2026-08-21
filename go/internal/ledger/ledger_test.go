@@ -96,7 +96,7 @@ func TestObservationRecencyIsNumeric(t *testing.T) {
 		return map[string]any{"observations": []any{map[string]any{
 			"kind": "Observation", "capability": "db",
 			"path": "service.managed", "value": value,
-			"derivation": "measured", "observedAt": at,
+			"source": "provider-api", "derivation": "measured", "observedAt": at,
 			"ttlSeconds": 900}}}
 	}
 	// 13:00Z first, then an OLDER instant written as +02:00 (=12:00Z)
