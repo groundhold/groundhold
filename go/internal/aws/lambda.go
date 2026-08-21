@@ -23,6 +23,12 @@ import (
 // lambdaMaxTimeoutSec is AWS Lambda's hard per-invocation ceiling: 15 minutes.
 const lambdaMaxTimeoutSec = 900
 
+// AWS Lambda's MemorySize range, in MB (1 MB steps). Memory is the CPU allocation.
+const (
+	lambdaMinMemoryMB = 128
+	lambdaMaxMemoryMB = 10240
+)
+
 // wantsFunctionURL answers whether this plan calls for a Function URL to exist.
 // Anonymous exposure needs one; so does the edge pattern, whose URL is reachable
 // only by a SigV4-signed caller and is therefore NOT public exposure (D749).
@@ -36,6 +42,23 @@ type LambdaPlan struct {
 	RoleArn    string
 	TimeoutSec int
 	Public     bool
+
+	// MemorySize is the function's memory in MB — and on Lambda memory IS the CPU
+	// allocation (a full vCore at ~1769 MB), so it decides whether a job runs at all,
+	// not just its footprint. An operand, not a vocab attribute: it maps directly to
+	// MemorySize on Create/UpdateFunctionConfiguration. MemorySizeSet distinguishes an
+	// absent operand (AWS's 128 MB default) from an explicit 128 — an adopted function
+	// whose contract is silent must not drift, the D774/D1001 declared-only rule.
+	MemorySize    int
+	MemorySizeSet bool
+
+	// ReservedConcurrency caps how many instances of this function run at once —
+	// a ceiling on the in-memory-rate-limiter multiplier and on cost blast radius.
+	// It is NOT part of CreateFunction: it rides a SEPARATE PutFunctionConcurrency
+	// call (like the Function URL and invoke grants). ReservedConcurrencySet is the
+	// declared-only guard, so an adopted function's live reservation is left alone.
+	ReservedConcurrency    int
+	ReservedConcurrencySet bool
 
 	// URLAuth REFINES how a public exposure is realised (D26 operand): it is the
 	// Function URL AuthType, "none" (anonymous, AuthType=NONE + a principal:*
@@ -200,6 +223,37 @@ func BuildLambda(account, environment, capability string,
 			return LambdaPlan{}, err
 		}
 		p.Architecture, p.ArchitectureSet = arch, true
+	}
+
+	// ---- memory_size operand: memory in MB, which on Lambda IS the CPU share ----
+	// AWS accepts 128..10240 in 1 MB steps; refuse out of range in preflight rather
+	// than let AWS reject it mid-apply (or worse, silently clamp).
+	if mem, set, err := implIntOperand(impl, "memory_size", "implementation"); err != nil {
+		return LambdaPlan{}, err
+	} else if set {
+		if mem < lambdaMinMemoryMB || mem > lambdaMaxMemoryMB {
+			return LambdaPlan{}, fmt.Errorf(
+				"implementation.memory_size %d is outside AWS Lambda's range %d..%d MB — "+
+					"refusing rather than letting the apply fail (memory on Lambda is the CPU "+
+					"allocation: a full vCore at ~1769 MB, so this decides whether the job runs)",
+				mem, lambdaMinMemoryMB, lambdaMaxMemoryMB)
+		}
+		p.MemorySize, p.MemorySizeSet = mem, true
+	}
+
+	// ---- reserved_concurrency operand: the per-function concurrency ceiling ----
+	// AWS's floor is 0 (throttle to nothing); the ceiling is the account's unreserved
+	// pool, which is account STATE, not a static range — so preflight refuses only a
+	// negative value and lets AWS reject an over-allocation against the live account.
+	if rc, set, err := implIntOperand(impl, "reserved_concurrency", "implementation"); err != nil {
+		return LambdaPlan{}, err
+	} else if set {
+		if rc < 0 {
+			return LambdaPlan{}, fmt.Errorf(
+				"implementation.reserved_concurrency %d is negative — the minimum is 0 "+
+					"(which throttles the function to zero); refusing rather than letting the apply fail", rc)
+		}
+		p.ReservedConcurrency, p.ReservedConcurrencySet = rc, true
 	}
 
 	// ---- invokers operand (D852): who may invoke, and on whose behalf ----
@@ -370,6 +424,9 @@ func (p LambdaPlan) createBody(capability, environment string) map[string]any {
 	if p.TimeoutSec > 0 {
 		body["Timeout"] = p.TimeoutSec
 	}
+	if p.MemorySizeSet {
+		body["MemorySize"] = p.MemorySize
+	}
 	if vc := p.vpcConfig(); vc != nil {
 		body["VpcConfig"] = vc
 	}
@@ -458,6 +515,9 @@ func (p LambdaPlan) updateConfigBody() map[string]any {
 	body := map[string]any{"Role": p.RoleArn}
 	if p.TimeoutSec > 0 {
 		body["Timeout"] = p.TimeoutSec
+	}
+	if p.MemorySizeSet {
+		body["MemorySize"] = p.MemorySize
 	}
 	// VpcConfig is sent unconditionally so DETACHING from a VPC (empty lists)
 	// is expressible — an omitted VpcConfig would leave a stale attachment.

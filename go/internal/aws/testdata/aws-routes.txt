@@ -267,6 +267,9 @@ lambda	GET	/2015-03-31/functions/apifn/policy
 lambda	GET	/2015-03-31/functions/fn/policy
 lambda	GET	/2015-03-31/functions/sessions-prod-zbngzchg
 lambda	GET	/2015-03-31/functions/web-prod-xxx
+lambda	GET	/2019-09-30/functions/api-abcdefgh/concurrency
+lambda	GET	/2019-09-30/functions/api-prod-mjipeplg/concurrency
+lambda	GET	/2019-09-30/functions/apifn/concurrency
 lambda	GET	/2021-10-31/functions/api-abcdefgh/url
 lambda	GET	/2021-10-31/functions/api-prod-mjipeplg/url
 lambda	GET	/2021-10-31/functions/apifn/url
@@ -278,6 +281,7 @@ lambda	POST	/2015-03-31/functions/pv-api-prod-1a2b3c4d/policy
 lambda	POST	/2015-03-31/functions/web-prod-xxx/policy
 lambda	POST	/2021-10-31/functions/api-prod-mjipeplg/url
 lambda	PUT	/2015-03-31/functions/web-prod-xxx/configuration
+lambda	PUT	/2017-10-31/functions/apifn/concurrency
 logs	POST	/?Op=AssociateKmsKey
 logs	POST	/?Op=CreateLogGroup
 logs	POST	/?Op=DeleteLogGroup
@@ -347,6 +351,7 @@ s3	DELETE	/pv-assets-abcd1234/
 s3	DELETE	/pv-assets-abcd1234/?policy
 s3	GET	/
 s3	GET	/far-bucket/?location
+s3	GET	/here-bucket/?cors
 s3	GET	/here-bucket/?encryption
 s3	GET	/here-bucket/?lifecycle
 s3	GET	/here-bucket/?location
@@ -354,6 +359,7 @@ s3	GET	/here-bucket/?object-lock
 s3	GET	/here-bucket/?policyStatus
 s3	GET	/here-bucket/?replication
 s3	GET	/here-bucket/?versioning
+s3	GET	/pv-assets-abcd1234/?cors
 s3	GET	/pv-assets-abcd1234/?encryption
 s3	GET	/pv-assets-abcd1234/?lifecycle
 s3	GET	/pv-assets-abcd1234/?object-lock
@@ -362,6 +368,7 @@ s3	GET	/pv-assets-abcd1234/?publicAccessBlock
 s3	GET	/pv-assets-abcd1234/?replication
 s3	GET	/pv-assets-abcd1234/?tagging
 s3	GET	/pv-assets-abcd1234/?versioning
+s3	GET	/pv-assets-prod-2777ed3c/?cors
 s3	GET	/pv-assets-prod-2777ed3c/?encryption
 s3	GET	/pv-assets-prod-2777ed3c/?lifecycle
 s3	GET	/pv-assets-prod-2777ed3c/?object-lock
@@ -370,6 +377,7 @@ s3	GET	/pv-assets-prod-2777ed3c/?publicAccessBlock
 s3	GET	/pv-assets-prod-2777ed3c/?replication
 s3	GET	/pv-assets-prod-2777ed3c/?tagging
 s3	GET	/pv-assets-prod-2777ed3c/?versioning
+s3	GET	/pv-media/?cors
 s3	GET	/pv-media/?encryption
 s3	GET	/pv-media/?lifecycle
 s3	GET	/pv-media/?object-lock
@@ -377,6 +385,7 @@ s3	GET	/pv-media/?policyStatus
 s3	GET	/pv-media/?replication
 s3	GET	/pv-media/?versioning
 s3	GET	/pv-replica-eu-abcd1234/?location
+s3	GET	/pv-vault-abcd1234/?cors
 s3	GET	/pv-vault-abcd1234/?encryption
 s3	GET	/pv-vault-abcd1234/?lifecycle
 s3	GET	/pv-vault-abcd1234/?object-lock
@@ -393,6 +402,7 @@ s3	PUT	/pv-assets-abcd1234/?publicAccessBlock
 s3	PUT	/pv-assets-abcd1234/?tagging
 s3	PUT	/pv-assets-abcd1234/?versioning
 s3	PUT	/pv-assets-prod-2777ed3c/
+s3	PUT	/pv-assets-prod-2777ed3c/?cors
 s3	PUT	/pv-assets-prod-2777ed3c/?policy
 s3	PUT	/pv-assets-prod-2777ed3c/?publicAccessBlock
 s3	PUT	/pv-assets-prod-2777ed3c/?replication

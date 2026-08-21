@@ -24,6 +24,10 @@ func (f *lambdaOperandFake) handler() http.HandlerFunc {
 		switch {
 		case r.Method == "GET" && strings.HasSuffix(p, "/url"):
 			w.WriteHeader(http.StatusNotFound)
+		case r.Method == "GET" && strings.HasSuffix(p, "/concurrency"):
+			// GetFunctionConcurrency: a reservation of 50 (its own endpoint). Matched
+			// before the general /functions/ case, which /concurrency also contains.
+			_, _ = w.Write([]byte(`{"ReservedConcurrentExecutions":50}`))
 		case r.Method == "GET" && strings.Contains(p, "/functions/"):
 			switch f.getState {
 			case "gone":
@@ -33,7 +37,7 @@ func (f *lambdaOperandFake) handler() http.HandlerFunc {
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = w.Write([]byte(`{"message":"boom"}`))
 			default:
-				_, _ = w.Write([]byte(`{"Configuration":{"State":"Active","Timeout":300,` +
+				_, _ = w.Write([]byte(`{"Configuration":{"State":"Active","Timeout":300,"MemorySize":1024,` +
 					`"VpcConfig":{"SubnetIds":["subnet-b","subnet-a"],"SecurityGroupIds":["sg-1"]},` +
 					`"Environment":{"Variables":{"FOO":"bar","DB":"host"}}},` +
 					`"Code":{"ImageUri":"img:sha1"},` +

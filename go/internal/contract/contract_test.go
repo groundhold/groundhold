@@ -280,6 +280,22 @@ func TestLoadContractDocErrors(t *testing.T) {
 			"apiVersion must be"},
 		{"missing meta id", func(d map[string]any) { d["meta"] = map[string]any{} },
 			"meta.id is required"},
+		// D1166: a bar written in the short form was DROPPED, no typo needed. The
+		// refusal must name where the bar belongs, or an author who wrote something
+		// reasonable is told only that it is wrong.
+		{"a verification bar in the requirements sugar", func(d map[string]any) {
+			caps, _ := d["capabilities"].([]any)
+			c, _ := caps[0].(map[string]any)
+			c["requirements"] = map[string]any{"location.region": map[string]any{
+				"op": "equals", "value": "eu-central-1",
+				"verify": map[string]any{"method": "provider-api"}}}
+		}, "constraints.hard"},
+		{"the short form itself still loads", func(d map[string]any) {
+			caps, _ := d["capabilities"].([]any)
+			c, _ := caps[0].(map[string]any)
+			c["requirements"] = map[string]any{"service.managed": map[string]any{
+				"op": "equals", "value": true}}
+		}, ""},
 		// D1164: the consent block. A misspelled key here is not a refusal later — it
 		// is a gate nobody armed, and `forbidden` is the one where that is fail-OPEN.
 		{"a misspelled autonomy key", func(d map[string]any) {
@@ -937,6 +953,10 @@ func TestContractInnerKeysMatchThePublishedShape(t *testing.T) {
 		{"soft constraint", dig(contract, "$defs", "softConstraint"), softConstraintKeys},
 		{"budget constraint",
 			dig(contract, "$defs", "budgetConstraint"), budgetConstraintKeys},
+		// D1166: the short form. Published `op`+`value`; the loader hardcodes a static
+		// bar and reads nothing else, so anything more written here is dropped.
+		{"requirement", dig(contract, "properties", "capabilities", "items",
+			"properties", "requirements", "additionalProperties"), requirementKeys},
 		{"contract meta",
 			dig(contract, "properties", "meta"), contractMetaKeys},
 		{"provenanced attribute",

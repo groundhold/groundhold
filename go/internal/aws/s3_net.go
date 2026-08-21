@@ -14,6 +14,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	"groundhold/internal/provider"
@@ -209,6 +210,15 @@ func (d *Driver) createS3(account, environment, capability string,
 	// ---- default SSE-KMS encryption (customerManagedKeys, optional) ----
 	if plan.Encryption != nil {
 		if r := d.s3Step(plan.Region, bucket, *plan.Encryption, pid, "encryption"); r != nil {
+			return *r
+		}
+	}
+	if plan.Cors != nil {
+		if plan.Cors.Method == "DELETE" {
+			if r := d.s3DeleteCorsStep(plan.Region, bucket, pid); r != nil {
+				return *r
+			}
+		} else if r := d.s3Step(plan.Region, bucket, *plan.Cors, pid, "cors"); r != nil {
 			return *r
 		}
 	}
@@ -585,6 +595,40 @@ func (d *Driver) observeS3(capability, providerID string) ([]provider.Observatio
 	} else {
 		diags = append(diags, "replication.enabled not observed: "+s3ReadWhy("GetBucketReplication", st, body, err))
 	}
+	// cors.allowedOrigins: the UNION of AllowedOrigin across CORS rules, sorted-unique
+	// (the same effect the projection gate compares the declared attribute against).
+	// NoSuchCORSConfiguration is a MEASURED absence -> the empty set, never unknown, so
+	// a bucket a browser upload needs but which has no rule reads as [] and a hard
+	// `equals` constraint blocks it.
+	if st, body, err := d.s3Do("GET", region, bucket, "/?cors", ""); err == nil && st == http.StatusOK {
+		var cc struct {
+			Rules []struct {
+				AllowedOrigins []string `xml:"AllowedOrigin"`
+			} `xml:"CORSRule"`
+		}
+		if xml.Unmarshal(body, &cc) != nil {
+			diags = append(diags, "cors.allowedOrigins not observed: GetBucketCors unparseable")
+		} else {
+			seen := map[string]bool{}
+			origins := []any{}
+			for _, r := range cc.Rules {
+				for _, o := range r.AllowedOrigins {
+					if !seen[o] {
+						seen[o] = true
+						origins = append(origins, o)
+					}
+				}
+			}
+			sort.Slice(origins, func(i, j int) bool { return origins[i].(string) < origins[j].(string) })
+			obs = append(obs, provider.Observation{Path: "cors.allowedOrigins",
+				Value: origins, Derivation: "measured"})
+		}
+	} else if err == nil && (st == http.StatusNotFound || awsErrCode(body) == "NoSuchCORSConfiguration") {
+		obs = append(obs, provider.Observation{Path: "cors.allowedOrigins",
+			Value: []any{}, Derivation: "measured"})
+	} else {
+		diags = append(diags, "cors.allowedOrigins not observed: "+s3ReadWhy("GetBucketCors", st, body, err))
+	}
 	// publicExposure: policy-status IsPublic is AWS's verdict on the BUCKET POLICY
 	// document's publicness — it folds in Block Public Access at NEITHER the bucket
 	// nor the account level (D240). So a public policy under an effective
@@ -661,6 +705,10 @@ func classifyS3Change(path string, desired any, impl map[string]any) (string, st
 	case "network.publicExposure":
 		return "mutable", ""
 	case "encryption.customerManagedKeys":
+		return "mutable", ""
+	case "cors.allowedOrigins":
+		// PutBucketCors / DeleteBucketCors patch the rule set in place — the bucket
+		// identity is untouched, never a replacement.
 		return "mutable", ""
 	case "replication.enabled", "replication.destinationRegion":
 		// CRR config is a re-assertable PutBucketReplication (or a
@@ -750,6 +798,19 @@ func (d *Driver) updateS3(capability, environment, providerID string,
 			}
 			if r := d.s3PatchStep(region, bucket, "PUT", "/?encryption", body, providerID, "encryption"); r != nil {
 				return *r
+			}
+		case "cors.allowedOrigins":
+			// declared origins -> PutBucketCors with the projected rules; declared
+			// empty -> DeleteBucketCors. plan.Cors carries the method BuildS3Requests
+			// chose (and its projection gate already checked operand vs attribute).
+			if plan.Cors != nil && plan.Cors.Method == "PUT" {
+				if r := d.s3PatchStep(region, bucket, "PUT", "/?cors", plan.Cors.Body, providerID, "cors"); r != nil {
+					return *r
+				}
+			} else {
+				if r := d.s3DeleteCorsStep(region, bucket, providerID); r != nil {
+					return *r
+				}
 			}
 		case "replication.enabled", "replication.destinationRegion":
 			// both fold to ONE re-assertion of the bucket's replication config; when
@@ -853,6 +914,32 @@ func (d *Driver) s3DeletePolicyStep(region, bucket, pid string) *provider.Create
 
 // s3DeleteReplicationStep removes the bucket's replication config (CRR off). A
 // missing config (404 / ReplicationConfigurationNotFoundError) is already-off.
+// s3DeleteCorsStep removes the bucket CORS config (declared cors.allowedOrigins: []).
+// NoSuchCORSConfiguration is already-absent success — the delete-tolerant twin of the
+// replication removal.
+func (d *Driver) s3DeleteCorsStep(region, bucket, pid string) *provider.CreateResult {
+	st, resp, err := d.s3Do("DELETE", region, bucket, "/?cors", "")
+	if err != nil {
+		r := provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: "cors removal outcome unknown — reconcile"}
+		return &r
+	}
+	if st == http.StatusNotFound || awsErrCode(resp) == "NoSuchCORSConfiguration" {
+		return nil // already absent
+	}
+	if st >= 500 {
+		r := provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("cors removal HTTP %d (server error) — reconcile", st)}
+		return &r
+	}
+	if st < 200 || st >= 300 {
+		r := provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("cors removal failed: HTTP %d (%s)", st, awsErrCode(resp))}
+		return &r
+	}
+	return nil
+}
+
 func (d *Driver) s3DeleteReplicationStep(region, bucket, pid string) *provider.CreateResult {
 	st, resp, err := d.s3Do("DELETE", region, bucket, "/?replication", "")
 	if err != nil {

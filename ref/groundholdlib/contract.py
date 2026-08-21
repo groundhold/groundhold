@@ -350,6 +350,12 @@ AUTONOMY_LIST_KEYS = ("forbidden", "allow_replace_stateful", "allow_intrusive_pr
 # with validate reporting OK. A misspelled KEY does the identical thing.
 AUTONOMY_KEYS = set(AUTONOMY_LIST_KEYS) | {"auto_execute", "no_assumed_hard_basis"}
 
+# D1166: D8's short form, and exactly what the schema publishes for it. The sugar builds
+# a hard constraint with a STATIC bar and reads nothing else, so a `verify:` written here
+# was silently dropped — the same residency requirement is blocking as a constraint and
+# satisfied as sugar, with no typo involved.
+REQUIREMENT_KEYS = {"op", "value"}
+
 CONSTRAINT_KEYS = {"id", "subject", "path", "op", "value", "verify"}
 SOFT_CONSTRAINT_KEYS = CONSTRAINT_KEYS | {"objective"}
 BUDGET_CONSTRAINT_KEYS = CONSTRAINT_KEYS | {"severity"}
@@ -490,6 +496,12 @@ def load_contract(path: str) -> Contract:
     for cap_id, cap in caps.items():
         for j, (rpath, spec) in enumerate(
                 sorted((cap.get("requirements") or {}).items())):
+            _check_known_keys(
+                spec, REQUIREMENT_KEYS,
+                f"capabilities.{cap_id}.requirements.{rpath}",
+                "this short form is STATIC-bar sugar (D8) and reads only `op` and "
+                "`value` — a verification bar written here is dropped, so put the "
+                "requirement under `constraints.hard` with its `verify:` instead")
             constraints.append(_constraint(
                 {"id": f"req-{cap_id}-{rpath}", "subject": cap_id, "path": rpath,
                  "op": spec.get("op", "equals"), "value": spec.get("value"),

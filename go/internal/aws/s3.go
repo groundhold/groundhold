@@ -12,6 +12,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"groundhold/internal/scalars"
@@ -39,6 +41,9 @@ type S3Plan struct {
 	Lifecycle       *s3Req // retention.maximum -> a lifecycle expiration rule
 	Encryption      *s3Req // encryption.customerManagedKeys -> SSE-KMS default
 	Replication     *s3Req // replication.enabled -> PutBucketReplication (CRR)
+	// Cors: cors.allowedOrigins -> PutBucketCors (non-empty) or DeleteBucketCors
+	// (declared empty). Undeclared leaves it nil — the surface is unmanaged.
+	Cors *s3Req
 	// ObjectLock* mirror the ObjectLock request in scalar form (create-time facts
 	// the shell/observe reason about without re-parsing XML).
 	ObjectLockEnabled bool
@@ -111,6 +116,8 @@ func BuildS3Requests(account, environment, capability string,
 	retentionMinDays := int64(0)
 	retentionMinSet := false
 	retentionLocked := false
+	var corsOrigins []string
+	corsSet := false
 
 	paths := sortedKeys(attrs)
 	for _, path := range paths {
@@ -138,6 +145,14 @@ func BuildS3Requests(account, environment, capability string,
 					"encryption.atRest=false cannot be honored by S3 (objects are " +
 						"always encrypted at rest with SSE-S3)")
 			}
+		case "cors.allowedOrigins":
+			// the EFFECT: the origin set the contract asserts. The rule DOCUMENT is
+			// the implementation.cors operand; the projection gate below requires the
+			// operand's origin-union to equal this set, so the attribute cannot claim
+			// an effect the rules do not produce (the write-only-operand smuggling
+			// channel the forged-plan-field lesson closes).
+			corsOrigins = toStrSlice(raw)
+			corsSet = true
 		case "encryption.customerManagedKeys":
 			// CMEK: default encryption stays SSE-S3 unless a customer key is
 			// declared. Only true is actionable — a true value sets the bucket's
@@ -341,7 +356,113 @@ func BuildS3Requests(account, environment, capability string,
 				"</Rule></ReplicationConfiguration>"}
 		plan.Replication = &rep
 	}
+	if corsSet {
+		if len(corsOrigins) == 0 {
+			// declared empty -> "no cross-origin", enforced: DeleteBucketCors.
+			plan.Cors = &s3Req{Method: "DELETE", Path: "/?cors"}
+		} else {
+			rulesRaw, ok := impl["cors"].([]any)
+			if !ok || len(rulesRaw) == 0 {
+				return S3Plan{}, fmt.Errorf(
+					"cors.allowedOrigins declares origins but implementation.cors is missing — " +
+						"the rule document (origins/methods/headers) is the source the attribute " +
+						"projects; refusing rather than synthesising a default rule that would pass " +
+						"verify and still block the browser call")
+			}
+			body, union, err := buildCorsBody(rulesRaw)
+			if err != nil {
+				return S3Plan{}, err
+			}
+			// projection gate: the attribute MUST be the exact origin-union of the
+			// operand, or the effect the contract asserts is not the effect the rules
+			// produce (operand is write-only; the attribute is what observe compares).
+			if !stringSetEqual(union, corsOrigins) {
+				return S3Plan{}, fmt.Errorf(
+					"cors.allowedOrigins %v is not the origin-union of implementation.cors %v — "+
+						"the attribute must be the exact projection of the rules (else a hard "+
+						"constraint would pass over a rule set that allows different origins)",
+					sortedUnique(corsOrigins), sortedUnique(union))
+			}
+			plan.Cors = &s3Req{Method: "PUT", Path: "/?cors", Body: body}
+		}
+	}
 	return plan, nil
+}
+
+// buildCorsBody renders a CORSConfiguration from the implementation.cors operand (a
+// list of rules) and returns the body plus the UNION of allowed origins across rules —
+// the value observe reverse-maps and the projection gate checks the attribute against.
+func buildCorsBody(rulesRaw []any) (body string, originUnion []string, err error) {
+	var b strings.Builder
+	b.WriteString(`<CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`)
+	seen := map[string]bool{}
+	for i, rr := range rulesRaw {
+		rule, ok := rr.(map[string]any)
+		if !ok {
+			return "", nil, fmt.Errorf("implementation.cors[%d] must be a rule map "+
+				"(allowedOrigins/allowedMethods/allowedHeaders/exposeHeaders/maxAgeSeconds)", i)
+		}
+		origins := toStrSlice(rule["allowedOrigins"])
+		methods := toStrSlice(rule["allowedMethods"])
+		if len(origins) == 0 || len(methods) == 0 {
+			return "", nil, fmt.Errorf("implementation.cors[%d] needs at least one "+
+				"allowedOrigins and one allowedMethods (an S3 CORS rule requires both)", i)
+		}
+		b.WriteString("<CORSRule>")
+		for _, o := range origins {
+			b.WriteString("<AllowedOrigin>" + xmlEsc(o) + "</AllowedOrigin>")
+			if !seen[o] {
+				seen[o] = true
+				originUnion = append(originUnion, o)
+			}
+		}
+		for _, m := range methods {
+			b.WriteString("<AllowedMethod>" + xmlEsc(m) + "</AllowedMethod>")
+		}
+		for _, h := range toStrSlice(rule["allowedHeaders"]) {
+			b.WriteString("<AllowedHeader>" + xmlEsc(h) + "</AllowedHeader>")
+		}
+		for _, h := range toStrSlice(rule["exposeHeaders"]) {
+			b.WriteString("<ExposeHeader>" + xmlEsc(h) + "</ExposeHeader>")
+		}
+		if ma, ok := intOperand(rule["maxAgeSeconds"]); ok && ma > 0 {
+			b.WriteString("<MaxAgeSeconds>" + strconv.Itoa(ma) + "</MaxAgeSeconds>")
+		}
+		b.WriteString("</CORSRule>")
+	}
+	b.WriteString("</CORSConfiguration>")
+	sort.Strings(originUnion)
+	return b.String(), originUnion, nil
+}
+
+// stringSetEqual compares two string slices as SETS (order/dup-insensitive).
+func stringSetEqual(a, b []string) bool {
+	return equalStringSlices(sortedUnique(a), sortedUnique(b))
+}
+
+func sortedUnique(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // PublicReadPolicy is the bucket policy granting anonymous s3:GetObject — the

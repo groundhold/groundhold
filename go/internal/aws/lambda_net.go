@@ -35,6 +35,8 @@ import (
 const (
 	lambdaFnPath       = "/2015-03-31/functions"    // CreateFunction / GetFunction / DeleteFunction / AddPermission
 	lambdaURLPath      = "/2021-10-31/functions"    // CreateFunctionUrlConfig / GetFunctionUrlConfig
+	lambdaConcPutPath  = "/2017-10-31/functions"    // PutFunctionConcurrency (the API dates it 2017-10-31)
+	lambdaConcGetPath  = "/2019-09-30/functions"    // GetFunctionConcurrency (a later API version)
 	lambdaReadAttempts = 4                          // bounded transient-read retry (D260 read-storm gate)
 	lambdaPublicStmtID = "groundhold-public-invoke" // deterministic AddPermission statement id
 
@@ -60,6 +62,14 @@ const (
 	// attribute silently diverging from reality. UpdateFunctionConfiguration has
 	// always carried Role, so only the observation was missing.
 	lambdaRoleOperand = provider.OperandPrefix + "role"
+	// memory_size: memory in MB, which on Lambda is the CPU allocation. Rides
+	// UpdateFunctionConfiguration like Timeout, observed from GetFunctionConfiguration,
+	// so a change to the declared operand patches online rather than being ignored.
+	lambdaMemOperand = provider.OperandPrefix + "memorySize"
+	// reserved_concurrency: the per-function concurrency ceiling. Rides a SEPARATE
+	// PutFunctionConcurrency call and is read back from GetFunctionConcurrency (its own
+	// endpoint, not GetFunctionConfiguration), so a declared change patches in place.
+	lambdaConcOperand = provider.OperandPrefix + "reservedConcurrency"
 )
 
 // lambdaRoleObservation renders the live execution role for comparison against
@@ -166,6 +176,9 @@ type lambdaConfig struct {
 	Role        string `json:"Role"`
 	StateReason string `json:"StateReason"`
 	Timeout     int    `json:"Timeout"`
+	// MemorySize is the live memory-in-MB (== CPU share). Read for operand drift so
+	// a change to the declared memory_size on a bound function is drift, not a no-op.
+	MemorySize int `json:"MemorySize"`
 	// FunctionArn is the live identity GetFunction reports. Claim (takeover) checks
 	// it against the ARN built from the providerId so a name that resolves to a
 	// DIFFERENT function (a foreign resource in the acting account) is refused
@@ -242,8 +255,11 @@ func (d *Driver) createLambda(region, account, environment, capability string,
 					"match) — refusing to adopt it; run `groundhold discover --provider aws --region %s "+
 					"%s` then `adopt` to take over a foreign function", region, perr.AtNow)}
 		}
-		// ours already — ensure exposure and conclude (idempotent repair).
+		// ours already — ensure exposure + concurrency and conclude (idempotent repair).
 		if res := d.ensureLambdaExposure(region, pid, plan); res != nil {
+			return *res
+		}
+		if res := d.ensureLambdaConcurrency(region, pid, plan.Name, plan); res != nil {
 			return *res
 		}
 		return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
@@ -288,6 +304,12 @@ func (d *Driver) createLambda(region, account, environment, capability string,
 		if res := d.ensureLambdaInvokers(region, pid, plan.Name, plan.Invokers); res != nil {
 			return *res
 		}
+	}
+	// the concurrency ceiling, after the function exists — a create that reported success
+	// while the declared ceiling was unset would be the same lie the exposure/invoker
+	// gates above refuse to tell (the rate limiter's multiplier stays uncapped).
+	if res := d.ensureLambdaConcurrency(region, pid, plan.Name, plan); res != nil {
+		return *res
 	}
 	return provider.CreateResult{ProviderID: pid, Status: "succeeded"}
 }
@@ -494,7 +516,24 @@ func (d *Driver) observeLambda(capability, providerID string) ([]provider.Observ
 		obs = append(obs, provider.Observation{Path: "timeout.maximum",
 			Value: fmt.Sprintf("%ds", cfg.Timeout), Derivation: "measured"})
 	}
+	if cfg.MemorySize > 0 {
+		// operand drift: the live memory, rendered exactly as OperandTargets renders
+		// the DECLARED memory_size, so the compiler compares like for like.
+		obs = append(obs, provider.Observation{Path: lambdaMemOperand,
+			Value: fmt.Sprintf("%d", cfg.MemorySize), Derivation: "measured"})
+	}
 	var diags []string
+
+	// reserved concurrency rides its OWN endpoint (GetFunctionConcurrency): emit the
+	// operand only when a reservation is set. An unreadable read records a diagnostic and
+	// NOTHING — never a fabricated "no reservation", which would make a declared ceiling
+	// falsely drift (the invokers rule: what we could not read, we do not assert).
+	if rc, present, readable, why := d.getLambdaConcurrency(region, name); !readable {
+		diags = append(diags, "reserved concurrency unread: "+why)
+	} else if present {
+		obs = append(obs, provider.Observation{Path: lambdaConcOperand,
+			Value: fmt.Sprintf("%d", rc), Derivation: "measured"})
+	}
 
 	// D852: the grants the `invokers` operand owns, read back from the function's
 	// own resource policy. An unreadable policy records NOTHING rather than an
@@ -654,6 +693,14 @@ func classifyLambdaChange(path string) (string, string) {
 		// F-LC3: VpcConfig / Environment drift patches online via the full
 		// UpdateFunctionConfiguration (updateConfigBody re-pushes both).
 		return "mutable", "operand patched online via UpdateFunctionConfiguration"
+	case lambdaMemOperand:
+		// memory rides UpdateFunctionConfiguration (updateConfigBody re-pushes it),
+		// so a memory_size change patches online — never a replacement.
+		return "mutable", "memory size patched online via UpdateFunctionConfiguration"
+	case lambdaConcOperand:
+		// reserved concurrency rides its own PutFunctionConcurrency call — a change
+		// is a secondary patch, never a replacement of the function.
+		return "mutable", "reserved concurrency patched in place via PutFunctionConcurrency"
 	case lambdaPkgOperand:
 		// F-LC3: a container-image swap patches online via UpdateFunctionCode
 		// (no replacement — the function identity survives).
@@ -749,6 +796,18 @@ func (d *Driver) OperandTargets(service string, attrs, impl map[string]any) ([]p
 	if plan.ArchitectureSet {
 		targets = append(targets, provider.OperandTarget{Path: lambdaArchOperand, Desired: plan.Architecture})
 	}
+	// memory_size target ONLY when declared — an adopted function whose contract is
+	// silent must not drift toward AWS's 128 MB default (the arch/D774 declared-only rule).
+	if plan.MemorySizeSet {
+		targets = append(targets, provider.OperandTarget{Path: lambdaMemOperand,
+			Desired: fmt.Sprintf("%d", plan.MemorySize)})
+	}
+	// reserved_concurrency target ONLY when declared — an adopted function's live
+	// reservation must not drift to "unset" just because the contract is silent.
+	if plan.ReservedConcurrencySet {
+		targets = append(targets, provider.OperandTarget{Path: lambdaConcOperand,
+			Desired: fmt.Sprintf("%d", plan.ReservedConcurrency)})
+	}
 	targets = append(targets, provider.OperandTarget{Path: lambdaEnvOperand, Desired: env})
 	if packageKnown {
 		targets = append(targets, provider.OperandTarget{Path: lambdaPkgOperand, Desired: pkg})
@@ -821,10 +880,11 @@ func (d *Driver) updateLambda(capability, environment, providerID string,
 
 	wantConfig, wantExposure, wantCode := false, false, false
 	wantInvokers := false
+	wantConcurrency := false
 	for _, path := range changes {
 		switch path {
-		case "timeout.maximum", lambdaVpcOperand, lambdaEnvOperand:
-			// timeout + VpcConfig + Environment all ride the full-config
+		case "timeout.maximum", lambdaVpcOperand, lambdaEnvOperand, lambdaMemOperand:
+			// timeout + VpcConfig + Environment + memory all ride the full-config
 			// UpdateFunctionConfiguration (updateConfigBody re-pushes them, F-LC3).
 			wantConfig = true
 		case "network.publicExposure":
@@ -833,6 +893,8 @@ func (d *Driver) updateLambda(capability, environment, providerID string,
 			wantCode = true // F-LC3: a container-image swap via UpdateFunctionCode
 		case lambdaInvokersOperand:
 			wantInvokers = true // D852: the declared callers moved
+		case lambdaConcOperand:
+			wantConcurrency = true // the concurrency ceiling moved (PutFunctionConcurrency)
 		default:
 			return provider.CreateResult{Status: "failed",
 				Reason: fmt.Sprintf("lambda path %s is not patchable in place", path)}
@@ -874,6 +936,11 @@ func (d *Driver) updateLambda(capability, environment, providerID string,
 	// candidate is withdrawn rather than merely un-added.
 	if wantInvokers {
 		if r := d.ensureLambdaInvokers(region, providerID, name, plan.Invokers); r != nil {
+			return *r
+		}
+	}
+	if wantConcurrency {
+		if r := d.ensureLambdaConcurrency(region, providerID, name, plan); r != nil {
 			return *r
 		}
 	}
@@ -1132,6 +1199,56 @@ func lambdaPolicyGrantsAnonymousInvoke(policy string) bool {
 		}
 	}
 	return false
+}
+
+// getLambdaConcurrency reads the function's reserved concurrency from its OWN endpoint
+// (GetFunctionConcurrency, not GetFunctionConfiguration). present=false is a readable
+// "no reservation set" (the function draws from the account's unreserved pool); a
+// transport/HTTP/parse failure is readable=false with a named cause, never a fabricated
+// absence (D296) — so a read we could not make is not mistaken for "no reservation".
+func (d *Driver) getLambdaConcurrency(region, name string) (value int, present, readable bool, why string) {
+	st, resp, rerr := d.lambdaGet(region, lambdaConcGetPath+"/"+name+"/concurrency")
+	if rerr != nil {
+		return 0, false, false, rerr.Error()
+	}
+	if st == http.StatusNotFound {
+		return 0, false, true, "" // no function / no reservation — a readable absence
+	}
+	if st != http.StatusOK {
+		return 0, false, false, fmt.Sprintf("GetFunctionConcurrency HTTP %d: %s", st, lambdaErr(resp))
+	}
+	var out struct {
+		ReservedConcurrentExecutions *int `json:"ReservedConcurrentExecutions"`
+	}
+	if json.Unmarshal(resp, &out) != nil {
+		return 0, false, false, "GetFunctionConcurrency returned unparseable JSON"
+	}
+	if out.ReservedConcurrentExecutions == nil {
+		return 0, false, true, "" // readable: no reservation is set
+	}
+	return *out.ReservedConcurrentExecutions, true, true, ""
+}
+
+// ensureLambdaConcurrency reconciles the reserved concurrency to the DECLARED value via
+// PutFunctionConcurrency (a secondary call, like the Function URL and invoke grants). It
+// acts ONLY when the operand is declared — an adopted function's live reservation is left
+// alone (the declared-only rule) — and reads the live value first, so a reservation
+// already at the ceiling issues no call.
+func (d *Driver) ensureLambdaConcurrency(region, pid, name string, plan LambdaPlan) *provider.CreateResult {
+	if !plan.ReservedConcurrencySet {
+		return nil
+	}
+	live, present, readable, why := d.getLambdaConcurrency(region, name)
+	if !readable {
+		return &provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: "reserved concurrency not reconciled: " + why + " — the live value could not be read"}
+	}
+	if present && live == plan.ReservedConcurrency {
+		return nil // already at the declared ceiling
+	}
+	body, _ := json.Marshal(map[string]any{"ReservedConcurrentExecutions": plan.ReservedConcurrency})
+	st, resp, err := d.lambdaDo("PUT", region, lambdaConcPutPath+"/"+name+"/concurrency", body)
+	return lambdaPatchOutcome("PutFunctionConcurrency", pid, st, resp, err)
 }
 
 func anyStarLeaf(v any) bool {

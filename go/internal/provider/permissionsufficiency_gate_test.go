@@ -49,18 +49,20 @@ const ambiguousRouteCount = 6
 // time and added six, each traced the same way. Twenty entries; the count is not the point,
 // the tracing is.
 var discoveryOnlyOperations = map[string]string{
-	"backup:ListBackupPlans":       "discoverBackupPlans — the onboarding sweep",
-	"backup:ListBackupVaults":      "discoverBackupVaults — the onboarding sweep",
-	"cloudfront:ListDistributions": "discoverCloudFront, and observeWAF's protection read",
-	"eks:ListAddons":               "discoverEKSAddon and reconcileEKSAddon, which runs under resume",
-	"eks:ListClusters":             "discoverEKS/discoverEKSAddon/discoverEKSPodIdentity and the pod-identity reconcile scan",
-	"es:ListDomainNames":           "discoverOpenSearch — the onboarding sweep",
-	"lambda:ListFunctions":         "discoverLambda — the paged onboarding sweep (D809)",
-	"route53:ListHealthChecks":     "discoverRoute53Health — the onboarding sweep",
-	"route53:ListHostedZones":      "discoverRoute53 and reconcileRoute53's rc7ListHostedZones, which runs under resume",
+	"backup:ListBackupPlans":        "discoverBackupPlans — the onboarding sweep",
+	"backup:ListBackupVaults":       "discoverBackupVaults — the onboarding sweep",
+	"cloudfront:ListDistributions":  "discoverCloudFront, and observeWAF's protection read",
+	"eks:ListAddons":                "discoverEKSAddon and reconcileEKSAddon, which runs under resume",
+	"eks:ListClusters":              "discoverEKS/discoverEKSAddon/discoverEKSPodIdentity and the pod-identity reconcile scan",
+	"es:ListDomainNames":            "discoverOpenSearch — the onboarding sweep",
+	"lambda:GetFunctionConcurrency": "observeLambda's reserved-concurrency read (its own endpoint) and ensureLambdaConcurrency's pre-write read",
+	"lambda:ListFunctions":          "discoverLambda — the paged onboarding sweep (D809)",
+	"route53:ListHealthChecks":      "discoverRoute53Health — the onboarding sweep",
+	"route53:ListHostedZones":       "discoverRoute53 and reconcileRoute53's rc7ListHostedZones, which runs under resume",
 	// The S3 sub-resource reads, visible only since the recorded routes kept their
 	// markers (D850). Each is a read behind observe or discovery; the one that was NOT —
 	// the pre-delete object-lock guard — is declared on delete instead.
+	"s3:GetBucketCors":         "observeS3's cors read",
 	"s3:GetBucketEncryption":   "observeS3's encryption read",
 	"s3:GetBucketLocation":     "discoverS3's s3BucketRegion and observeS3's s3DestinationRegion",
 	"s3:GetBucketPolicyStatus": "observeS3's public-policy read",

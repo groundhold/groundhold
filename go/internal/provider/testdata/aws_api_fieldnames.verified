@@ -115,6 +115,7 @@ LogFileValidationEnabled
 ManagedRuleGroupStatement
 Marker
 MatchingEventTypes
+MemorySize
 Message
 MinRetentionDays
 MinSize
@@ -134,6 +135,7 @@ ProductionAccessEnabled
 RegionName
 RenewalEligibility
 Replicas
+ReservedConcurrentExecutions
 ResourceId
 ResourcePolicy
 ResourceTagList

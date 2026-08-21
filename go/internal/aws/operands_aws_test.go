@@ -17,7 +17,7 @@ func TestConsumedOperands_KnownServices(t *testing.T) {
 			"manageMasterUserPassword", "masterPassword", "masterUsername", "serverlessMaxACU",
 			"serverlessMinACU", "serverlessSecondsUntilAutoPause", "subnetGroupName", "subnetIds",
 			"vpcSecurityGroupIds"},
-		"lambda":         {"architectures", "environment", "image_uri", "invokers", "role_arn", "security_groups", "subnets", "url_auth"},
+		"lambda":         {"architectures", "environment", "image_uri", "invokers", "memory_size", "reserved_concurrency", "role_arn", "security_groups", "subnets", "url_auth"},
 		"secretsmanager": {"kms_key_id"},
 		"cwlogs":         {"kmsKeyArn", "log_group"},
 		"ses-inbound": {"recipientDomain", "ruleName", "ruleSetName", "s3BucketName",
