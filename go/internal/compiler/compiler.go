@@ -1991,7 +1991,6 @@ func foldDriftRefs(consumerCap string, impl map[string]any, cand *contract.Candi
 
 // refuseUnknownOperands is the SILENT-IGNORE GUARD. The candidate's
 // implementation block is free-form (D26), but a driver silently drops any
-// implementation block is free-form (D26), but a driver silently drops any
 // operand key it does not read — a candidate with e.g. implementation.vpcSubnetIds
 // on a driver that never reads it would compile clean, preflight "ready" and
 // apply to "succeeded" with the operand dropped, a cardinal-invariant violation

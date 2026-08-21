@@ -38049,3 +38049,58 @@ another way does not test what its name says, so it now carries one. And the gat
 draft read the prose registry by filtering words, which duly extracted `set` out of
 "(closed set, fail-closed)"; it now stops at the parenthetical, because prose about a
 registry is not a member of it.
+
+## D1160 — the guard was one floor below the mistake
+
+Reported from the field and left open since: a driver operand written one level too high
+passes `plan` without a word and yields zero actions.
+
+The `implementation:` block is free-form by D26, and a key no driver reads is refused
+there — `unknown-operand`, before the plan is sealed, because a driver silently drops
+what it does not consume and the apply would report "succeeded" with the operand gone.
+That guard is careful and it has been fixed twice already (D530 moved it off the action
+list so a converged deployment was covered too).
+
+The block ABOVE it had no guard at all. A capability block takes four keys —
+`attributes`, `implementation`, `provider`, `service` — and the loader collected
+everything that was not `attributes` into an `extras` map that four consumers read two
+keys out of. Anything else was carried and dropped. Measured, with a real driver:
+
+    implementation: { memory_mb: 512 }   ->  plan refused, exit 2, names memory_mb
+    memory_mb: 512  (one level up)       ->  plan SEALED, exit 0, silence
+
+So the author believes they set the memory; nothing did, and the function keeps being
+killed at the default. It is the same silent-ignore defect the operand guard exists to
+prevent, one floor up, where nobody was looking.
+
+The rule was already written down here. Two lines above the collecting loop, D677 refuses
+an `id:` field with the reasoning that "silently ignoring it would be the D673 shape — a
+declared field the loader does not read". That is exactly the general rule, applied to
+exactly one key. What was missing was not the insight; it was the set.
+
+So the four keys are a named closed set in both implementations, refused at load, and the
+published schema now closes the block too — a stray key used to validate cleanly for a
+consumer while the runtime dropped it, which is the same disagreement from the other
+side. A three-way gate holds the loader, the reference and the schema to one shape,
+deriving the expected set from the schema rather than restating it: a hand-typed copy in
+a test is a fourth place to drift.
+
+The refusal names the key AND says where an operand belongs. A message that only reports
+a mistake leaves a reader who wrote `role_arn:` at the wrong indentation to find the
+right one themselves; there is a mutant on that sentence, because advice is the part
+that decays first.
+
+Closing the block made an OLDER mutant survive, and the meter said so. D677's specific
+`id:` refusal is now subsumed by the general one — disable it and the block check catches
+`id` anyway — so the mutant proving that check had teeth stopped proving anything. The
+specific check still earns its place, but for its MESSAGE: "the identity is the key it is
+written under, and a second one can only disagree with it" tells a reader what went
+wrong, where "not one of the four keys" tells them only that something did. So the case
+now pins the REASON rather than the refusal, which is what the sharper check is for. A
+general guard laid over a specific one quietly converts the specific one into decoration
+unless something holds it to the thing it says better.
+
+The shape, which is not the same as "a closed set needs a gate": **a guard learns the
+level it was written at.** The operand check knows about operands, so it looks inside the
+operand block — and a mistake one level out is invisible to it precisely because it is
+looking so carefully somewhere else.

@@ -14,6 +14,11 @@ from .yamlcompat import safe_load as _core12_load
 
 from . import scalars
 
+# D1160: the capability block's shape, CLOSED. `implementation` is the free-form
+# half (D26); this level is structure, and a key the loader does not read here is a
+# stated intent nothing will act on.
+CANDIDATE_CAPABILITY_KEYS = {"attributes", "implementation", "provider", "service"}
+
 VALID_STATUSES = {"declared", "inferred", "assumed", "unknown"}
 VALID_SEVERITIES = {"hard", "soft"}
 VALID_METHODS = {"static", "provider-api", "probe"}
@@ -563,6 +568,20 @@ def load_candidate(path: str, contract: Contract | None = None,
                 f"capabilities.{cap_id} carries an `id:` field — the capability's "
                 "identity is the key it is written under, and a second one can only "
                 "disagree with it")
+        # D1160: the `id:` rule above, applied to the whole block. It was stated
+        # there and enforced for one key, so every other stray key was collected
+        # and dropped — an operand written one level too high sealed a plan at
+        # exit 0 while the resource kept the default the author thought they had
+        # changed. `implementation:` is the free-form half (D26); this level is
+        # structure.
+        for k in body:
+            if k != "attributes" and k not in CANDIDATE_CAPABILITY_KEYS:
+                raise ContractError(
+                    f"capabilities.{cap_id} carries {k!r}, which is not one of the "
+                    "four keys a capability block takes (attributes, implementation, "
+                    "provider, service). If it is a driver operand, it belongs under "
+                    "`implementation:` — written here it is read by nothing and "
+                    "silently dropped")
         extra = {k: v for k, v in body.items() if k != "attributes"}
         if extra:
             extras[cap_id] = extra
