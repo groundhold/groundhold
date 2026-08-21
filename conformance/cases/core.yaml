@@ -3,6 +3,62 @@
 # MUST produce these verdicts. Semantics live here, not in any codebase.
 
 cases:
+  # An assumption is a RECORD — it travels in the contract's hash, into an audit and
+  # into a capsule. It is NOT a reserved block: it does what its name promises, and
+  # `affects` is reference-checked so it cannot cite a constraint that is not there.
+  # What it does not do is change a verdict, so the stake here is smaller than the
+  # blocks around it — and a misspelled `confidance` still drops the number from the
+  # record, and a reader cannot tell that from "nobody stated a confidence".
+  - name: a-misspelled-assumption-key-is-refused
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: as1, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      assumptions:
+        - id: a-guess
+          statement: "the platform manages it"
+          status: assumed
+          confidance: 0.9
+    expect:
+      error: contract
+      errorContains:
+        - "confidance"
+        - "will not be there when someone reads it back"
+
+  - name: every-published-assumption-key-loads
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: as2, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - { id: c-managed, subject: db, path: service.managed, op: equals, value: true }
+      assumptions:
+        - id: a-full
+          statement: "the platform manages it"
+          status: assumed
+          source: "the runbook"
+          confidence: 0.9
+          affects: [c-managed]
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: as2
+      capabilities:
+        db:
+          attributes:
+            service.managed: true
+          provider: fake
+          service: sql
+    expect:
+      executable: true
+
   # D1166. `requirements` is D8's short form for a hard constraint, and the loader
   # builds that constraint with `verify: {method: static}` HARDCODED, reading nothing
   # else. So a bar written in a requirement was dropped in silence — no typo needed:

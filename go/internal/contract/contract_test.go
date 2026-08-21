@@ -296,6 +296,13 @@ func TestLoadContractDocErrors(t *testing.T) {
 			c["requirements"] = map[string]any{"service.managed": map[string]any{
 				"op": "equals", "value": true}}
 		}, ""},
+		// An assumption is a record; a key the loader drops is a part of it that
+		// will not be there when someone reads the audit back.
+		{"a misspelled assumption key", func(d map[string]any) {
+			d["assumptions"] = []any{map[string]any{
+				"id": "a-guess", "statement": "x", "status": "assumed",
+				"confidance": 0.9}}
+		}, "confidance"},
 		// D1164: the consent block. A misspelled key here is not a refusal later — it
 		// is a gate nobody armed, and `forbidden` is the one where that is fail-OPEN.
 		{"a misspelled autonomy key", func(d map[string]any) {
@@ -957,6 +964,7 @@ func TestContractInnerKeysMatchThePublishedShape(t *testing.T) {
 		// bar and reads nothing else, so anything more written here is dropped.
 		{"requirement", dig(contract, "properties", "capabilities", "items",
 			"properties", "requirements", "additionalProperties"), requirementKeys},
+		{"assumption", dig(contract, "properties", "assumptions", "items"), assumptionKeys},
 		{"contract meta",
 			dig(contract, "properties", "meta"), contractMetaKeys},
 		{"provenanced attribute",

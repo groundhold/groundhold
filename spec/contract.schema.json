@@ -125,6 +125,9 @@
       "type": "array",
       "items": {
         "type": "object",
+        "$comment": "an assumption is a RECORD: it travels in the contract's hash, into an audit and into a capsule, and `affects` is reference-checked. It does not change a verdict — the summary's verdictsOnAssumedValues comes from the CANDIDATE's provenance — so this block is documentary, which is different from reserved: it does exactly what its name promises. Closed anyway, because a misspelled `confidance` drops the number from the record and a reader cannot tell that from nobody having stated one.",
+        "patternProperties": { "^x-": {} },
+        "additionalProperties": false,
         "required": ["id", "statement", "status"],
         "properties": {
           "id": { "$ref": "#/$defs/identifier" },

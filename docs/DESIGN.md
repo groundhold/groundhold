@@ -38449,3 +38449,36 @@ follow-ups (not this slice): a "no wildcard" recommended rule would need a `not-
 Azure's account-level CORS scope needs a honored-with-caveat decision at parity. The consult was the whole
 value here — it turned a design that would have shipped the tool's cardinal failure mode into one that
 catches it.
+
+## D1169 — the assumption record, and why it is not a reserved block
+
+The last open level in the contract document. A misspelled key in an assumption —
+`confidance` for `confidence` — loaded clean at exit 0 and the number was gone.
+
+The interesting part is what this block is NOT. It has the same surface shape as the two
+reserved blocks found beside it: parsed, validated, folded into the hash, and it changes
+no verdict. Measured, adding an assumptions block moves the contract hash and nothing
+else; the summary's `verdictsOnAssumedValues` comes from the CANDIDATE's provenance
+(D5), not from here. It would have been easy — and wrong — to mark it reserved for
+matching a pattern.
+
+The test is what the NAME promises. `outcomes` promises a probe and probes nothing.
+`auto_execute` promises a cap on what may run automatically and caps nothing. An
+assumption promises to be WRITTEN DOWN, and it is: it travels in the contract's hash,
+into an audit and into a capsule, and `affects` is reference-checked so it cannot cite a
+constraint that does not exist. The block does exactly what it says. Documentary is not
+the same as inert, and a marker that flattened the difference would make the honest
+blocks harder to trust rather than easier.
+
+So only the key set is closed, and the stake is smaller than in the slices around it: the
+record loses a field. That still matters, because the record is the thing that travels —
+a reader of that audit sees an assumption with no confidence and cannot tell "nobody
+stated one" from "someone misspelled it", and the second is the case where a number was
+meant to be there.
+
+With this the contract document has no unchecked level left: top (D673), meta and
+capability (D1161), constraint and verify (D1162), autonomy (D1164), the requirements
+sugar (D1166), assumption (here) — and on the candidate side capability (D1160) and the
+provenanced attribute (D1161). `implementation` stays free-form by D26, guarded by the
+operand check; `outcomes` and `auto_execute` stay open because closing a block nobody
+reads would be theatre.
