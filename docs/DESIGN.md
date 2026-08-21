@@ -37879,3 +37879,65 @@ The shape, for the next time: **the artefact a stranger validates against is the
 nobody in the repository ever runs anything through.** Every other copy of a closed set
 has a peer to disagree with; the published schema has only the runtime, and the runtime
 does not read it.
+
+## D1157 — a field published as required that neither implementation read
+
+D1156 pushed real OUTPUT through the published schema. The same question on the input
+side — has anyone run a real contract through `spec/contract.schema.json` — had the same
+answer, and the way to ask it was not one document but all of them.
+
+Both input schemas were taken apart into the thirty fields they mark `required`, and each
+was deleted in turn from a real document to see whether the runtime noticed. The control
+matters as much as the result: the intact document passes, so the probe is not empty. Of
+the ten contract fields reachable that way the runtime enforces nine, and the candidate
+side is enforced entirely. Exactly one field is published as required and read by nobody:
+
+    assumptions[].statement    schema: required
+                               Go:     never read
+                               Python: never read
+
+The consequence had already shipped. `examples/voice/drafted.contract.yaml` carries two
+assumptions with a `source` citing the transcript turn they came from and nothing saying
+WHAT was assumed — so it does not validate against our own published schema, while
+`groundhold validate` reports OK and says nothing about assumptions at all. A newcomer
+copying the example writes a document a conforming consumer rejects.
+
+And it was not a slip in one file. Two skills instruct an author to write `assumptions:`
+with "`status: assumed`, a source, a confidence, and `affects:`" — naming four fields and
+never the fifth. The example is a faithful execution of that instruction, which is why
+fixing the example alone would have left the generators producing the same document
+tomorrow. Both now name `statement` and say what distinguishes it from `source`: one is
+the proposition, the other is its provenance.
+
+The direction was not a judgement call. The schema requires it, the conformance cases
+beside the new ones were already written as if it were enforced, and every other
+assumption in the tree carries one — the blast radius of enforcing it is two assumptions,
+both in that single example. An assumption with no statement travels into a verdict's
+`basis` and into a capsule as a citation for a claim nobody wrote down, which is the
+opposite of what the block exists for. Blank counts as absent: spaces satisfy the letter
+and record nothing.
+
+The forcing function is the input-side twin of D1156: every shipped contract and
+candidate is now validated against its published schema, discovered by the same `find`
+the other example checks use, with a floor so a broken discovery cannot read as a clean
+run. One checker serves both directions — `examples/schemacheck.py`, beside the harness
+because the public tree carries `examples/` and not the private scripts. Two copies would
+have been free to agree with each other by luck.
+
+Extending that checker to the input schemas produced the best evidence that its design
+was right. It covered the ten keywords `outputs.schema.json` uses; the input schemas need
+`maxLength`, `minItems` and `propertyNames`, and because the checker REPORTS a keyword it
+cannot read rather than passing over it, all three announced themselves as failures the
+first time it ran. A checker that ignored them would have printed PASS over three rules
+it never read — and `propertyNames` is the only rule an open map carries. It now covers
+all fifteen keywords the four published schemas use between them, and agrees with a real
+JSON Schema library on all twenty-one shipped documents, including the injected defect.
+
+Two costs worth recording, both mine. Updating the suite counts with a repository-wide
+substitution rewrote a LINE NUMBER inside a historical entry (`gke.go:263` became
+`gke.go:265`) and two counts that were true when they were written — this record is
+append-only and a blind `sed` does not know that. Reverted by hand, not by checkout,
+because the tree held uncommitted work. And two existing fixtures began failing on the
+new refusal before reaching the condition they name; they now carry a statement, which
+makes them sharper rather than weaker — a fixture for "invalid status" that is ALSO
+invalid some other way does not test what its name says.

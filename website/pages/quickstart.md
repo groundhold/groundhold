@@ -237,7 +237,7 @@ Using it does not require building it.
 
 ```sh
 git clone https://github.com/groundhold/groundhold.git && cd groundhold
-make check        # vet + tests + the full conformance suite (558 cases); 263 run through both implementations, the rest Go-only
+make check        # vet + tests + the full conformance suite (560 cases); 265 run through both implementations, the rest Go-only
 cd go && go build -o ../bin/groundhold-go ./cmd/groundhold && cd ..   # the CLI binary
 ```
 

@@ -52,8 +52,11 @@ integrations all look like infrastructure dependencies. Guards:
    (rpo/rto), budget, regions/residency, exposure policy, compliance,
    org vendor commitments, team skills: ASK, and record the answers as
    `declared`. If the user cannot answer, the value enters
-   `assumptions:` with `status: assumed`, a stated source, a
+   `assumptions:` with a `statement:` saying WHAT is assumed,
+   `status: assumed`, a stated `source:` saying where it came from, a
    confidence, and `affects:` listing the constraints resting on it.
+   The statement is required and is not the source: one is the
+   proposition, the other is its provenance (D1157).
 
 ## Procedure
 

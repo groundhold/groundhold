@@ -63,6 +63,46 @@ cases:
     expect:
       error: contract
 
+  # D1157. `spec/contract.schema.json` publishes `statement` as required beside `id`
+  # and `status`, every other assumption in the repository carries one, and the cases
+  # above were written as if it were enforced. Neither implementation read it. So a
+  # shipped example — the voice track's drafted contract — held two assumptions with a
+  # `source` citing where they came from and no statement of WHAT was assumed, and
+  # `validate` called it OK while the published schema rejected it.
+  #
+  # An assumption with no statement is provenance for a proposition nobody wrote down.
+  # It travels into a verdict's basis and into a capsule, where a reader is left to
+  # infer the claim from a transcript quote.
+  - name: assumption-without-a-statement-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: r4b, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      assumptions:
+        - id: a-unstated
+          status: assumed
+          source: "the meeting"
+    expect:
+      error: contract
+
+  - name: assumption-with-a-blank-statement-is-load-error
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: r4c, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      assumptions:
+        - id: a-blank
+          statement: "   "
+          status: assumed
+    expect:
+      error: contract
+
   - name: assumption-confidence-out-of-range-is-load-error
     contract:
       apiVersion: contract/v0.1
