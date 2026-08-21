@@ -311,3 +311,145 @@ cases:
           - type: report-executable
     expect:
       error: document
+
+  - name: plan-action-with-a-misspelled-dependson-is-load-error
+    description: >
+      D1171. Nine cases pinned this document before this one and every one of them was
+      about a VALUE or a RELATION — an unknown operation, a cycle, a dangling
+      dependency. None was about a KEY, which is D673's sentence ("true of values,
+      false of keys") one document further along and on the EXECUTION path. `dependsOn`
+      is read OPTIONALLY, so `dependson:` is not an error — it reads as "this action
+      has no dependencies", and apply trusts the graph verbatim for BOTH the execution
+      order and the fail-isolation set. In a D48 create-before-destroy composition the
+      destroy leg depends on the create leg; lose that edge and the destroy may go
+      first, on a stateful resource.
+    document:
+      apiVersion: plan/v0
+      kind: SealedPlan
+      plan:
+        contract: h1
+        reads:
+          contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+          candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+          heads: { db: genesis }
+          toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+        writes: [db]
+        actions:
+          - id: a-create
+            capability: db
+            operation: create
+            target: cloudsql.instance/primary
+            idempotencyKey: db-create-1
+            risk:
+              reversibility: R2
+              dataLoss: none
+              downtime: none
+              securityExposure: none
+              costDelta: { amount: 0, currency: EUR }
+              identityReplacement: false
+          - id: a-delete
+            capability: db
+            operation: delete
+            target: cloudsql.instance/primary
+            idempotencyKey: db-delete-1
+            targetProviderId: projects/p/instances/db
+            targetGeneration: 1
+            dependson: [a-create]
+            risk:
+              reversibility: R4
+              dataLoss: certain
+              downtime: certain
+              securityExposure: none
+              costDelta: { amount: 0, currency: EUR }
+              identityReplacement: false
+        preconditions:
+          - type: report-executable
+    expect:
+      error: document
+
+  - name: plan-extension-key-is-not-a-load-error
+    description: >
+      The other side of D1171, so the refusal cannot widen into "a plan may carry
+      nothing the runtime reads". The shipped example is a document a reader copies and
+      edits, so it gets the same `x-` escape every other document in this project has.
+    document:
+      apiVersion: plan/v0
+      kind: SealedPlan
+      plan:
+        contract: h1
+        reads:
+          contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+          candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+          heads: { db: genesis }
+          toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+        writes: [db]
+        actions:
+          - id: a-create
+            capability: db
+            operation: create
+            target: cloudsql.instance/primary
+            idempotencyKey: db-create-1
+            risk:
+              reversibility: R2
+              dataLoss: none
+              downtime: none
+              securityExposure: none
+              costDelta: { amount: 0, currency: EUR }
+              identityReplacement: false
+          - id: a-second
+            capability: db
+            operation: noop
+            target: cloudsql.instance/primary
+            idempotencyKey: db-noop-1
+            x-note: "an author's marker, deliberately not runtime data"
+            risk:
+              reversibility: R0
+              dataLoss: none
+              downtime: none
+              securityExposure: none
+              costDelta: { amount: 0, currency: EUR }
+              identityReplacement: false
+        preconditions:
+          - type: report-executable
+    expect:
+      hash: sha256:354d67c2e0a12054cc2fc76b0891c569c5559f3fc7a12bc87c34e4a9b9a693b6
+
+  - name: plan-with-a-claim-action-loads
+    description: >
+      D1171. `claim` (D52) stamps authorship on a resource this tool ADOPTED rather
+      than created, so a later delete is permitted — a driver refuses to destroy an
+      object carrying no ownership label. The Go compiler has emitted it and apply has
+      executed it since D52, while the reference implementation's operation set and
+      `spec/sealed-plan.md` both listed six members. So this implementation refused a
+      plan our own compiler produces, and no case exercised the difference. This is
+      that case.
+    document:
+      apiVersion: plan/v0
+      kind: SealedPlan
+      plan:
+        contract: h1
+        reads:
+          contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+          candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+          heads: { db: genesis }
+          toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+        writes: [db]
+        actions:
+          - id: a-claim
+            capability: db
+            operation: claim
+            target: cloudsql.instance/primary
+            idempotencyKey: db-claim-1
+            targetProviderId: projects/p/instances/db
+            targetGeneration: 1
+            risk:
+              reversibility: R1
+              dataLoss: none
+              downtime: none
+              securityExposure: none
+              costDelta: { amount: 0, currency: EUR }
+              identityReplacement: false
+        preconditions:
+          - type: report-executable
+    expect:
+      hash: sha256:20d659c0092f8dcb8ed839c5f876df6146b1e527393bffb39a947cd0c31c9fa5

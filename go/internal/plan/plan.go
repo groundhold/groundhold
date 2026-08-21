@@ -26,6 +26,74 @@ var Reversibility = map[string]bool{
 	"R0": true, "R1": true, "R2": true, "R3": true, "R4": true,
 }
 
+// The key sets this document admits, one per level the loader walks. D1171.
+//
+// Nine conformance cases pinned the plan's semantics before this and every one of
+// them was about a VALUE or a RELATION — an unknown operation, a cycle, a dangling
+// dependency, an unpinned write, a missing precondition, a bad risk vector. None was
+// about a KEY, which is D673's sentence ("true of values, false of keys") one
+// document further along and on the EXECUTION path.
+//
+// The sharp one is `dependsOn`: an OPTIONAL read (below), so `dependson:` is not an
+// error — it reads as "this action has no dependencies". apply then trusts the graph
+// verbatim in topoOrder AND depFailed, so a lost edge moves both the execution order
+// and the fail-isolation set. In a D48 replace composition the destroy leg depends on
+// the create leg; lose that edge and the destroy may go first, on a stateful resource.
+//
+// These sets are DERIVED from what the compiler emits, not from what this loader
+// reads — the loader reads 7 of the 12 fields in a plan body, so closing on its own
+// reads would refuse `requiredPermissions` (D75, read by apply), `references` (D226),
+// `folds` (D283), the D249 triple and the two sealed consents. The gate in
+// plancompilerparity_gate_test.go holds them to the compiler's struct tags, so the
+// rule is "the loader accepts exactly what our compiler emits" and neither side can
+// drift alone.
+var (
+	planDocKeys = map[string]bool{"apiVersion": true, "kind": true, "plan": true}
+
+	planBodyKeys = map[string]bool{
+		"contract": true, "environment": true, "reads": true, "writes": true,
+		"actions": true, "witnessed": true, "blocked": true, "unverified": true,
+		"noop": true, "preconditions": true, "advisories": true,
+	}
+
+	planReadsKeys = map[string]bool{
+		"contractHash": true, "candidateHash": true, "heads": true,
+		"vocabularies": true, "toolchain": true, "provider": true,
+	}
+
+	planActionKeys = map[string]bool{
+		"id": true, "capability": true, "operation": true, "target": true,
+		"idempotencyKey": true, "dependsOn": true, "changes": true,
+		"targetProviderId": true, "targetGeneration": true, "replaces": true,
+		"deposed": true, "fieldReclaim": true, "emissionAdopt": true,
+		"requiredPermissions": true, "references": true, "folds": true, "risk": true,
+	}
+
+	planRiskKeys = map[string]bool{
+		"reversibility": true, "dataLoss": true, "downtime": true,
+		"securityExposure": true, "costDelta": true, "identityReplacement": true,
+	}
+
+	planChangeKeys = map[string]bool{
+		"path": true, "from": true, "to": true, "caveat": true,
+	}
+
+	planWitnessKeys = map[string]bool{
+		"capability": true, "provider": true, "service": true, "reason": true,
+	}
+
+	planPreconditionKeys = map[string]bool{"type": true}
+
+	// D1171. The shipped example and the published prose both wrote
+	// `provider: { name, project, region }`. The compiler emits name and project;
+	// apply reads name and project; nothing anywhere reads a region here. A reader
+	// consults a sealed plan to learn WHERE it will act, finds `region:
+	// europe-west1` in the example this project ships, and believes the plan pins
+	// it. It does not — region reaches a driver from the candidate, and this line
+	// was decoration in the block D28 calls the pinned read-set.
+	planProviderKeys = map[string]bool{"name": true, "project": true}
+)
+
 var hashRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 func requireHash(v any, what string) error {
@@ -40,6 +108,12 @@ func checkRisk(aid string, riskAny any) error {
 	risk, ok := riskAny.(map[string]any)
 	if !ok {
 		return fmt.Errorf("action %s: risk vector is required (D33)", aid)
+	}
+	if err := docio.CheckKnownKeys(risk, planRiskKeys,
+		fmt.Sprintf("action %s: risk", aid),
+		"the risk vector is what the autonomy gate reads (D33); a dimension "+
+			"nothing reads is a dimension nothing gates on"); err != nil {
+		return err
 	}
 	if r, _ := risk["reversibility"].(string); !Reversibility[r] {
 		return fmt.Errorf("action %s: invalid reversibility", aid)
@@ -86,9 +160,19 @@ func LoadPlan(path string) (map[string]any, error) {
 	if s, _ := doc["apiVersion"].(string); s != "plan/v0" {
 		return nil, fmt.Errorf("apiVersion must be plan/v0")
 	}
+	if err := docio.CheckKnownKeys(doc, planDocKeys, "sealed plan",
+		"a plan is executed, and a block the executor does not read decides nothing "+
+			"while looking like it does"); err != nil {
+		return nil, err
+	}
 	p, ok := doc["plan"].(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("plan block is required")
+	}
+	if err := docio.CheckKnownKeys(p, planBodyKeys, "plan",
+		"a plan is executed, and a block the executor does not read decides nothing "+
+			"while looking like it does"); err != nil {
+		return nil, err
 	}
 	if c, _ := p["contract"].(string); c == "" {
 		return nil, fmt.Errorf("plan.contract is required")
@@ -97,6 +181,17 @@ func LoadPlan(path string) (map[string]any, error) {
 	reads, ok := p["reads"].(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("plan.reads is required (D28: pin the read-set)")
+	}
+	if err := docio.CheckKnownKeys(reads, planReadsKeys, "plan.reads",
+		"the read-set is what D28 pins; an entry nothing reads pins nothing"); err != nil {
+		return nil, err
+	}
+	if pv, present := reads["provider"].(map[string]any); present {
+		if err := docio.CheckKnownKeys(pv, planProviderKeys, "plan.reads.provider",
+			"this block is the PINNED provider identity (D28); a key nothing reads "+
+				"tells a reader something is pinned when it is not"); err != nil {
+			return nil, err
+		}
 	}
 	if err := requireHash(reads["contractHash"], "reads.contractHash"); err != nil {
 		return nil, err
@@ -173,6 +268,13 @@ func LoadPlan(path string) (map[string]any, error) {
 		if aid == "" {
 			return nil, fmt.Errorf("action missing id")
 		}
+		if err := docio.CheckKnownKeys(a, planActionKeys, "action "+aid,
+			"`dependsOn` is read OPTIONALLY, so a misspelling is not an error — it "+
+				"reads as `no dependencies`, and apply trusts the graph verbatim for "+
+				"both ordering and fail-isolation (a D48 replace would destroy before "+
+				"it created)"); err != nil {
+			return nil, err
+		}
 		if ids[aid] {
 			return nil, fmt.Errorf("duplicate action id: %s", aid)
 		}
@@ -215,6 +317,12 @@ func LoadPlan(path string) (map[string]any, error) {
 				if !ok {
 					return nil, fmt.Errorf(
 						"action %s: each change needs path and to", aid)
+				}
+				if err := docio.CheckKnownKeys(ch, planChangeKeys,
+					"action "+aid+": change",
+					"an update is a REVIEWED change-set (D46), and a field nothing "+
+						"reads was never reviewed"); err != nil {
+					return nil, err
 				}
 				_, hasTo := ch["to"]
 				if p, _ := ch["path"].(string); p == "" || !hasTo {
@@ -279,6 +387,11 @@ func LoadPlan(path string) (map[string]any, error) {
 	hasExecutable := false
 	for _, it := range pre {
 		pc, _ := it.(map[string]any)
+		if err := docio.CheckKnownKeys(pc, planPreconditionKeys, "precondition",
+			"a precondition is a gate; a key nothing reads is a gate nothing "+
+				"applies"); err != nil {
+			return nil, err
+		}
 		t, _ := pc["type"].(string)
 		if !PreconditionTypes[t] {
 			return nil, fmt.Errorf("unknown precondition type: %q", pc["type"])
@@ -309,6 +422,13 @@ func LoadPlan(path string) (map[string]any, error) {
 			capID, _ := w["capability"].(string)
 			if capID == "" {
 				return nil, fmt.Errorf("witnessed entry missing capability")
+			}
+			if err := docio.CheckKnownKeys(w, planWitnessKeys,
+				"witnessed "+capID,
+				"a witness record is the claim that something was VERIFIED but not "+
+					"authored (D177); a key nothing reads weakens that claim "+
+					"silently"); err != nil {
+				return nil, err
 			}
 			for _, k := range []string{"provider", "service", "reason"} {
 				if s, _ := w[k].(string); s == "" {

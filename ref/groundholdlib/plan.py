@@ -12,12 +12,53 @@ from .yamlcompat import safe_load as _core12_load
 
 from .contract import ContractError, read_document
 
-OPERATIONS = {"create", "update", "replace", "delete", "adopt", "noop"}
+# D1171: `claim` was missing here while the Go runtime has emitted and executed it
+# since D52 — a takeover stamps authorship on an adopted resource, and without it
+# adopt → retire produces a plan that cannot apply. So this implementation REFUSED a
+# plan our own compiler produces, and `spec/sealed-plan.md` published the six-member
+# list beside it. Three copies, two answers, and no case exercised the difference.
+OPERATIONS = {"create", "update", "replace", "delete", "adopt", "noop", "claim"}
 PRECONDITION_TYPES = {"report-executable", "no-assumed-basis", "within-autonomy",
                       "no-assumed-hard-basis"}  # D195: hard-only, assumed-only gate
 RISK_LEVELS = {"none", "possible", "certain"}
 REVERSIBILITY = {"R0", "R1", "R2", "R3", "R4"}
+# The key sets this document admits, mirroring go/internal/plan/plan.go. D1171: nine
+# conformance cases pinned the plan and every one was about a VALUE or a RELATION;
+# none about a KEY. `dependsOn` is read optionally, so `dependson:` reads as "no
+# dependencies" and apply trusts the graph verbatim for ordering AND fail-isolation.
+# The sets are what the COMPILER emits, not what this loader reads.
+PLAN_DOC_KEYS = {"apiVersion", "kind", "plan"}
+PLAN_BODY_KEYS = {"contract", "environment", "reads", "writes", "actions",
+                  "witnessed", "blocked", "unverified", "noop", "preconditions",
+                  "advisories"}
+PLAN_READS_KEYS = {"contractHash", "candidateHash", "heads", "vocabularies",
+                   "toolchain", "provider"}
+PLAN_PROVIDER_KEYS = {"name", "project"}
+PLAN_ACTION_KEYS = {"id", "capability", "operation", "target", "idempotencyKey",
+                    "dependsOn", "changes", "targetProviderId", "targetGeneration",
+                    "replaces", "deposed", "fieldReclaim", "emissionAdopt",
+                    "requiredPermissions", "references", "folds", "risk"}
+PLAN_RISK_KEYS = {"reversibility", "dataLoss", "downtime", "securityExposure",
+                  "costDelta", "identityReplacement"}
+PLAN_CHANGE_KEYS = {"path", "from", "to", "caveat"}
+PLAN_WITNESS_KEYS = {"capability", "provider", "service", "reason"}
+PLAN_PRECONDITION_KEYS = {"type"}
+
+_WHY_EXECUTED = ("a plan is executed, and a block the executor does not read "
+                 "decides nothing while looking like it does")
+
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _check_plan_keys(doc: dict, known: set, where: str, why: str) -> None:
+    """Refuse a mapping carrying a key nothing reads (D673, D1170, D1171)."""
+    unknown = sorted(k for k in doc
+                     if k not in known and not str(k).startswith("x-"))
+    if unknown:
+        raise ContractError(
+            f"{where} declares unknown key(s) {', '.join(unknown)} — {why}. "
+            "Rename it, or prefix it with `x-` if it is deliberately not "
+            "runtime data")
 
 
 def _require_hash(v: Any, what: str) -> None:
@@ -28,6 +69,9 @@ def _require_hash(v: Any, what: str) -> None:
 def _check_risk(aid: str, risk: Any) -> None:
     if not isinstance(risk, dict):
         raise ContractError(f"action {aid}: risk vector is required (D33)")
+    _check_plan_keys(risk, PLAN_RISK_KEYS, f"action {aid}: risk",
+                     "the risk vector is what the autonomy gate reads (D33); a "
+                     "dimension nothing reads is a dimension nothing gates on")
     if risk.get("reversibility") not in REVERSIBILITY:
         raise ContractError(f"action {aid}: invalid reversibility")
     for dim in ("dataLoss", "downtime", "securityExposure"):
@@ -51,15 +95,26 @@ def load_plan(path: str) -> dict[str, Any]:
         raise ContractError("kind must be SealedPlan")
     if doc.get("apiVersion") != "plan/v0":
         raise ContractError("apiVersion must be plan/v0")
+    _check_plan_keys(doc, PLAN_DOC_KEYS, "sealed plan", _WHY_EXECUTED)
     p = doc.get("plan")
     if not isinstance(p, dict):
         raise ContractError("plan block is required")
+    _check_plan_keys(p, PLAN_BODY_KEYS, "plan", _WHY_EXECUTED)
     if not p.get("contract"):
         raise ContractError("plan.contract is required")
 
     reads = p.get("reads")
     if not isinstance(reads, dict):
         raise ContractError("plan.reads is required (D28: pin the read-set)")
+    _check_plan_keys(reads, PLAN_READS_KEYS, "plan.reads",
+                     "the read-set is what D28 pins; an entry nothing reads "
+                     "pins nothing")
+    if isinstance(reads.get("provider"), dict):
+        _check_plan_keys(reads["provider"], PLAN_PROVIDER_KEYS,
+                         "plan.reads.provider",
+                         "this block is the PINNED provider identity (D28); a key "
+                         "nothing reads tells a reader something is pinned when "
+                         "it is not")
     _require_hash(reads.get("contractHash"), "reads.contractHash")
     _require_hash(reads.get("candidateHash"), "reads.candidateHash")
     heads = reads.get("heads")
@@ -94,6 +149,11 @@ def load_plan(path: str) -> dict[str, Any]:
         if aid in ids:
             raise ContractError(f"duplicate action id: {aid}")
         ids.add(aid)
+        _check_plan_keys(a, PLAN_ACTION_KEYS, f"action {aid}",
+                         "`dependsOn` is read OPTIONALLY, so a misspelling is not "
+                         "an error — it reads as `no dependencies`, and apply "
+                         "trusts the graph verbatim for both ordering and "
+                         "fail-isolation")
         if a.get("capability") not in writes:
             raise ContractError(
                 f"action {aid}: capability outside plan.writes")
@@ -120,6 +180,11 @@ def load_plan(path: str) -> dict[str, Any]:
                 raise ContractError(
                     f"action {aid}: update requires a non-empty changes list")
             for ch in changes:
+                if isinstance(ch, dict):
+                    _check_plan_keys(ch, PLAN_CHANGE_KEYS,
+                                     f"action {aid}: change",
+                                     "an update is a REVIEWED change-set (D46), "
+                                     "and a field nothing reads was never reviewed")
                 if not isinstance(ch, dict) or not ch.get("path") \
                         or "to" not in ch:
                     raise ContractError(
@@ -158,6 +223,10 @@ def load_plan(path: str) -> dict[str, Any]:
         raise ContractError("plan.preconditions must be a non-empty list")
     types = set()
     for pc in pre:
+        if isinstance(pc, dict):
+            _check_plan_keys(pc, PLAN_PRECONDITION_KEYS, "precondition",
+                             "a precondition is a gate; a key nothing reads is a "
+                             "gate nothing applies")
         t = pc.get("type") if isinstance(pc, dict) else None
         if t not in PRECONDITION_TYPES:
             raise ContractError(f"unknown precondition type: {t!r}")
@@ -181,6 +250,10 @@ def load_plan(path: str) -> dict[str, Any]:
             cap = w.get("capability")
             if not cap:
                 raise ContractError("witnessed entry missing capability")
+            _check_plan_keys(w, PLAN_WITNESS_KEYS, f"witnessed {cap}",
+                             "a witness record is the claim that something was "
+                             "VERIFIED but not authored (D177); a key nothing "
+                             "reads weakens that claim silently")
             for k in ("provider", "service", "reason"):
                 if not w.get(k):
                     raise ContractError(f"witnessed {cap}: {k} is required")

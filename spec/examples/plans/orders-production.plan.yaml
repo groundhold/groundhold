@@ -19,11 +19,9 @@ plan:
     toolchain:
       compiler: groundhold-go/0.1.0
       spec: contract/v0.1
-    pricingCatalog: gcp-eu-2026-07
     provider:
       name: gcp
       project: acme-prod
-      region: europe-west1
 
   writes: [orders-db]
 
