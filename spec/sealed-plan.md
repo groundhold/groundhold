@@ -22,8 +22,7 @@ plan:
                                          # (D41); "genesis" = no history
     vocabularies: { capability.database.relational: "0.1" }   # optional
     toolchain: { compiler: groundhold-go/0.1.0, spec: contract/v0.1 }
-    pricingCatalog: gcp-eu-2026-07       # optional
-    provider: { name: gcp, project: acme-prod, region: europe-west1 }
+    provider: { name: gcp, project: acme-prod }   # the PINNED identity, D28
 
   # write-set: every written capability MUST have its head pinned in
   # reads.heads — you cannot write what you did not read
@@ -56,11 +55,40 @@ plan:
 
   preconditions:                         # closed registry; MUST include
     - type: report-executable            #   report-executable
+
+  # Emitted by the compiler, all optional, all part of the plan hash:
+  blocked: []        # D249: a BOUND capability the compile could not reconcile
+  unverified: []     #       at all, or could not verify — held back per
+  noop: []           #       capability (no action, never in `writes`) instead
+                     #       of aborting the whole compile. NEVER converged.
+  advisories: []     # D388: things the compile NOTICED — not proven, not
+                     #       blocking, carried so an agent reads them.
 ```
+
+An action may also carry `fieldReclaim: true` (D699) or `emissionAdopt: true`
+(D1034). Both are CONSENTS the contract granted, sealed into the plan rather
+than re-derived at apply — granting one after sealing must produce a different
+plan, not silently change what an existing one does. They are listed here
+because someone auditing a plan for what was authorised must be able to find
+them: until D1171 the runtime emitted both and this document named neither.
+
+Every key above is the whole set. Both loaders REFUSE a mapping carrying
+anything else (D673 for the contract, D1170 for its root, D1171 here), because
+`dependsOn` is read optionally — so `dependson:` is not an error, it reads as
+"this action has no dependencies", and apply trusts the graph verbatim for both
+execution order and fail-isolation. In a create-before-destroy composition that
+lost edge destroys before it creates. `x-` is the escape for data deliberately
+outside the runtime.
 
 ## Rules (fail-closed, D19)
 
-- **Operations**: `create | update | replace | delete | adopt | noop`.
+- **Operations**: `create | update | replace | delete | adopt | noop | claim`.
+  A `claim` (D52) stamps authorship on a resource this tool adopted rather than
+  created, so a later delete is permitted — a driver refuses to destroy an object
+  carrying no ownership label, which made `adopt` → `retire` with nothing in
+  between compile into a plan that could not apply. Until D1171 this list said
+  six: the runtime emitted and executed the seventh, and the reference
+  implementation REFUSED a plan the compiler produces.
 - **Update actions carry a reviewed change-set** (D46): a non-empty
   `changes: [{path, from, to, caveat?}]` list. from/to are denormalized
   audit fields; the executor patches from the hash-pinned candidate,

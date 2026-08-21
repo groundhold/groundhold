@@ -419,24 +419,11 @@ var knownTopLevel = map[string]map[string]bool{
 //
 // `where` names the level in the refusal, because "unknown key(s) owner" is a
 // different problem to solve depending on whether it sat in `meta` or a capability.
+// checkKnownKeys stays under this name because seven of the meter's mutants aim at
+// its CALL SITES; the body moved to docio in D1171 so the sealed plan uses the same
+// one rather than a second copy free to drift from it.
 func checkKnownKeys(doc map[string]any, known map[string]bool, where, why string) error {
-	if known == nil {
-		return nil
-	}
-	unknown := make([]string, 0, 2)
-	for k := range doc {
-		if known[k] || strings.HasPrefix(k, "x-") {
-			continue
-		}
-		unknown = append(unknown, k)
-	}
-	if len(unknown) == 0 {
-		return nil
-	}
-	sort.Strings(unknown)
-	return fmt.Errorf("%s declares unknown key(s) %s — %s. Rename it, or prefix it "+
-		"with `x-` if it is deliberately not runtime data",
-		where, strings.Join(unknown, ", "), why)
+	return docio.CheckKnownKeys(doc, known, where, why)
 }
 
 func checkTopLevelKeys(doc map[string]any, kind string) error {
@@ -444,17 +431,13 @@ func checkTopLevelKeys(doc map[string]any, kind string) error {
 	if known == nil {
 		return nil
 	}
-	unknown := make([]string, 0, 2)
-	for k := range doc {
-		if known[k] || strings.HasPrefix(k, "x-") {
-			continue
-		}
-		unknown = append(unknown, k)
-	}
+	// One escape implementation, shared with every other level (D1171 follow-up):
+	// the copy that used to live here differed only in its message, and a mutant
+	// aimed at the escape hit whichever copy came first in the file.
+	unknown := docio.UnknownKeys(doc, known)
 	if len(unknown) == 0 {
 		return nil
 	}
-	sort.Strings(unknown)
 	// D1170: the example is kind-specific. A candidate has no `constraints` block, so
 	// telling its author about a misspelled one sends them looking for something they
 	// do not have — the D730 failure, in the message that exists to prevent it.

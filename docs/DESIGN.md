@@ -38540,3 +38540,104 @@ The general lesson is about the sweep, not the keys. An audit that walks inward 
 the defect that started it will cover everything the defect touched and stop exactly
 where the defect stopped — and the level nobody tripped over is not the obscure one,
 it is the one so obvious that the sweep began below it.
+
+## D1171 — the document that gets executed had no closed sets, and nothing had ever loaded its own example
+
+D1170 closed the root of the contract and the candidate. The same question asked of the
+SEALED PLAN — the artefact the executor acts on — found four things at once, and the
+fourth explains the other three.
+
+**Nine cases pinned this document, and every one was about a value or a relation.** An
+unknown operation, a cycle, a dangling dependency, an unpinned write, a missing
+precondition, a bad risk vector, a witness that also writes. Not one was about a KEY.
+That is D673's sentence — "true of VALUES and false of KEYS" — one document further
+along, this time on the execution path.
+
+The sharp edge is `dependsOn`. It is read OPTIONALLY (`if dl, ok := a["dependsOn"]`),
+so `dependson:` is not an error: it reads as *this action has no dependencies*. `apply`
+then trusts the graph verbatim in two places — `topoOrder` and `depFailed` — so a lost
+edge moves both the execution ORDER and the FAIL-ISOLATION set. In a D48
+create-before-destroy composition the destroy leg depends on the create leg. Lose that
+edge and the destroy may go first, on a stateful resource. The neighbours are safe by
+contrast, and the contrast is the point: `targetProviderId`, `targetGeneration` and
+`idempotencyKey` are all REQUIRED reads, so a misspelling there raises. Only the
+optional reads fail silently.
+
+**`claim` was in one implementation and not the other.** The Go runtime has emitted it
+since D52 (a takeover stamps authorship on an ADOPTED resource so a later delete is
+permitted — a driver refuses to destroy an object carrying no ownership label, which
+made `adopt` → `retire` compile into a plan that could not apply), `apply` executes it,
+`planview` renders it, a driver implements it. The reference implementation's operation
+set listed six members and `spec/sealed-plan.md` listed the same six. So our reference
+implementation REFUSED a plan our own compiler produces, and the published spec
+described an execution IR that is missing an operation. No conformance case used
+`claim` at all, which is why three copies could hold two answers.
+
+**Two dead keys were in the shipped example.** `pricingCatalog` — read by nothing,
+anywhere. And `provider.region`, inside the block D28 calls the pinned read-set: the
+compiler emits `{name, project}`, apply reads `{name, project}`, and nothing reads a
+region there. A reader consults a sealed plan to learn WHERE it will act, finds
+`region: europe-west1` in the example this project ships, and concludes the plan pins
+it. It does not.
+
+**Why all three survived: nothing had ever loaded the example.** No test, no script, no
+harness touched `spec/examples/plans/orders-production.plan.yaml`. The document this
+project publishes as the model of its own execution IR had never been through the
+loader it is an example of. That is the D1151 pattern again — a published artefact
+checked only against other descriptions, never against the thing — and it is the reason
+the drift accumulated undisturbed.
+
+The fix is one mechanism in four artefacts. `checkKnownKeys` moved to `docio`
+(unchanged, and `contract.checkKnownKeys` stays as a wrapper because seven of the
+meter's mutants aim at that name), and both loaders now close nine levels of the plan:
+the root, the body, `reads`, the pinned `provider`, each action, its `risk`, each
+change, each precondition, each witness record. The sets are derived from what the
+COMPILER emits, not from what the loader reads — the loader reads 7 of the 12 fields in
+a plan body, so closing on its own reads would have refused `requiredPermissions`
+(D75), `references` (D226), `folds` (D283), the D249 triple and the two sealed consents.
+`TestPlanKeySetsMatchWhatTheCompilerEmits` holds the sets to the compiler's struct tags
+by reflection, so the rule is *the loader accepts exactly what our compiler emits* and
+neither side can move alone. `TestTheOperationSetAgreesAcrossEveryCopy` does for the
+operation set what D1159 did for observation sources. `TestTheShippedExamplePlanLoads`
+is the small one that matters most: the example now runs through the loader every time.
+
+The prose was brought to the same standard — the operation list gained `claim`, the
+example lost its two dead keys, and five emitted fields that appeared nowhere in the
+spec are now documented (`blocked`, `unverified`, `advisories` and, because someone
+auditing a plan for what was AUTHORISED goes looking for exactly these, the two sealed
+consents `fieldReclaim` and `emissionAdopt`).
+
+What stays open, said plainly rather than left to be discovered: the loader does not
+walk the ITEMS of `references`, `folds`, `replaces`, `blocked`, `unverified`, `noop` or
+`advisories`, so their inner keys are still unclosed. They are emitted by the compiler
+and read by apply, so the same derivation would work; it needs the loader to iterate
+them, which is a change with its own validation semantics and belongs in its own slice.
+
+The lesson generalises past this document. `vocab.go` deliberately puts its key closure
+in a GATE over `spec/vocab` rather than in the loader, so a third party's vocabulary is
+not refused — and that reasoning is right there in the file. It does not carry to the
+plan: a plan is not a third party's document, it is sealed to our toolchain and
+consumed by our executor, so the refusal belongs in the loader. The question to ask of
+any closed set is not only "is it enforced" but "enforced against WHOSE document".
+
+**Follow-up, same session — the meter caught this slice moving code out from under a
+mutant.** The first full run after D1171 landed reported one SURVIVOR: `contract: break
+the x- escape the guard advertises (D1161)`. Nothing about the escape had changed. What
+changed is that the escape was implemented TWICE — in the body moved to `docio`, and
+again in the contract's top-level check, which duplicated the whole loop only to word
+its error differently — and the mutant's substitution takes the FIRST match in the
+file. Before the move it landed on the copy `TestLoadContractDocErrors` covers; after,
+on the copy nothing covered, so a real bug re-injected broke no test.
+
+Rule (r) says grep the meter for a function name before changing it, and that is what
+was done: seven mutants aim at `checkKnownKeys`'s CALL SITES, and all seven still
+applied. None of them named the identifier this one edits. The rule needs the wider
+form — before moving a body, grep the meter for the code the body CONTAINS, not only
+for what it is called.
+
+The fix is not the mutant. `docio.UnknownKeys` is now the one implementation of the
+escape, the top-level check formats its own message around it, and the mutant is
+re-aimed at that single site with a test that loads a document using the hatch at the
+top level and every known block below it. A second copy of a rule is a second place for
+a gate to point at while the first goes unwatched — which is the same sentence this
+whole family keeps writing, this time about a gate rather than a document.
