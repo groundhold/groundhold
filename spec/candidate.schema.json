@@ -5,6 +5,11 @@
   "description": "What an agent emits INSTEAD of writing Terraform: capability attributes with provenance, verified against a contract. Provider detail rides in the free-form implementation block (D26) — ignored by the verifier, consumed by the compiler, never the source of truth (D18: the compiler re-derives attributes from its own output and verification runs again).",
   "type": "object",
   "required": ["apiVersion", "kind", "contract", "capabilities"],
+  "$comment": "closed at the root (D1170): the runtime refuses a top-level key it does not read, and until this was written the published schema did not — a `constraint:` (singular) block, the exact defect D673 refused, validated here without a word. `x-` is the escape, on both sides.",
+  "patternProperties": {
+    "^x-": { "$comment": "the escape a document uses for data the runtime deliberately does not read" }
+  },
+  "additionalProperties": false,
   "properties": {
     "apiVersion": { "const": "candidate/v0.1" },
     "kind": { "const": "ImplementationCandidate" },

@@ -650,3 +650,75 @@ cases:
             service.managed: true
     expect:
       executable: true
+
+  - name: candidate-meta-is-a-load-error
+    description: >
+      D1170. `meta` sat in the candidate's allowed top-level set and was read by
+      NOBODY: no loader field, absent from `spec/candidate.schema.json`, used by
+      none of the shipped candidates. Measured: a candidate carrying it and one
+      without produce the IDENTICAL candidateHash — it does not even reach the
+      canonical form, so to this tool the two documents are the same document.
+      That is exactly the shape D673 refused for contracts, sitting inside the set
+      D673 built. Removed rather than hashed: candidate identity is the hash every
+      sealed plan pins.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e-candmeta, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-enc
+            subject: db
+            path: encryption.atRest
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: e-candmeta
+      meta: { author: someone, reviewed: true }
+      capabilities:
+        db:
+          attributes:
+            encryption.atRest: true
+    expect:
+      error: candidate
+
+  - name: candidate-extension-key-is-not-a-load-error
+    description: >
+      The other side of D1170, so the removal cannot read as "a candidate may carry
+      nothing but the four keys". An author who wants a note has the same `x-`
+      escape the contract has, and the refusal above names it — a refusal that
+      offers an escape the document then rejects would be worse than no advice.
+    contract:
+      apiVersion: contract/v0.1
+      kind: InfrastructureContract
+      meta: { id: e-candext, environment: test, version: 1 }
+      capabilities:
+        - id: db
+          type: capability.database.relational
+      constraints:
+        hard:
+          - id: c-enc
+            subject: db
+            path: encryption.atRest
+            op: equals
+            value: true
+            verify: { method: static }
+    candidate:
+      apiVersion: candidate/v0.1
+      kind: ImplementationCandidate
+      contract: e-candext
+      x-notes: { author: "not runtime data" }
+      capabilities:
+        db:
+          attributes:
+            encryption.atRest: true
+    expect:
+      executable: true
+      verdicts:
+        c-enc: satisfied

@@ -383,11 +383,28 @@ var knownTopLevel = map[string]map[string]bool{
 	"InfrastructureContract": {
 		"apiVersion": true, "kind": true, "meta": true, "capabilities": true,
 		"constraints": true, "assumptions": true, "outcomes": true,
-		"autonomy": true, "budget": true, "requirements": true,
+		"autonomy": true, "budget": true,
+		// D1170: top-level `requirements` was here and is the SAME defect as the
+		// candidate's `meta` below — the two lived in one set. Requirements are a
+		// CAPABILITY's short form (D8, `capabilities[].requirements`); nothing has
+		// ever read one at the root, no shipped document writes one, and no prose
+		// teaches it. Measured: a contract with a root `requirements:` block hashes
+		// IDENTICALLY to one without, so an author writing requirements at the wrong
+		// depth had them accepted, dropped, and verified against as if absent.
 	},
+	// D1170: `meta` was in this set and read by NOBODY. Measured: a candidate with an
+	// authorship note and one without produce the IDENTICAL candidateHash — it is not
+	// merely unread, it does not even reach the canonical form, so the two documents
+	// are the same document to this tool. That is the exact shape the comment above
+	// describes ("a block this loader does not read is silently non-gating"), sitting
+	// inside the set that comment built.
+	//
+	// Removed rather than hashed. Making it part of candidate identity would move the
+	// hash every sealed plan pins, which is not a thing to do while tidying. An author
+	// who wants a note has `x-`, which says by its name that the runtime does not read
+	// it — and the schema publishes exactly these four, so this is a convergence.
 	"ImplementationCandidate": {
 		"apiVersion": true, "kind": true, "contract": true, "capabilities": true,
-		"meta": true,
 	},
 }
 
@@ -438,11 +455,18 @@ func checkTopLevelKeys(doc map[string]any, kind string) error {
 		return nil
 	}
 	sort.Strings(unknown)
+	// D1170: the example is kind-specific. A candidate has no `constraints` block, so
+	// telling its author about a misspelled one sends them looking for something they
+	// do not have — the D730 failure, in the message that exists to prevent it.
+	why := "a misspelling of `constraints` proves a candidate that violates them"
+	if kind == "ImplementationCandidate" {
+		why = "a misspelled `capabilities` implements nothing, and the contract it " +
+			"claims to satisfy is verified against an empty document"
+	}
 	return fmt.Errorf("%s declares unknown top-level key(s) %s — a block this "+
-		"loader does not read is silently non-gating, and a misspelling of "+
-		"`constraints` proves a candidate that violates them. Rename it, or prefix "+
+		"loader does not read is silently non-gating, and %s. Rename it, or prefix "+
 		"it with `x-` if it is deliberately not runtime data",
-		kind, strings.Join(unknown, ", "))
+		kind, strings.Join(unknown, ", "), why)
 }
 
 func LoadContractDoc(doc map[string]any) (*Contract, error) {

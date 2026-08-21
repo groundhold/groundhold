@@ -37,7 +37,7 @@ external security audit, and no sustained customer production beyond it.
 
 | Subsystem | verdict | basis | evidence / honest gap |
 |---|---|---|---|
-| Four-valued verifier, typed scalars, no-coercion | **proven** | measured | Dual impl (Go + Python) through one 579-case conformance suite — 284 of the 579 run through both, the rest Go-only; Strong-Kleene + injective canonicalization adversarially audited (D178–D179). The strongest claim in the system. |
+| Four-valued verifier, typed scalars, no-coercion | **proven** | measured | Dual impl (Go + Python) through one 581-case conformance suite — 286 of the 581 run through both, the rest Go-only; Strong-Kleene + injective canonicalization adversarially audited (D178–D179). The strongest claim in the system. |
 | Canonicalization + hashing (cross-language identity) | **proven** | config-intent | Byte-identical hashes pinned across both impls + `make differential`; audited for round-trip injectivity (D179). "measured" would mean external cryptographic review — not done. |
 | Ledger / state model (hash chain, replay, snapshot, anchor) | **proven** | config-intent | Adversarially audited D182–D185 (forest-anchor, snapshot projections, replay); snapshot-equivalence fuzz. It is a local deterministic engine — "real cloud" does not apply; "measured" would mean an external tamper-evidence review. |
 | Capsules, ed25519 signatures, DR restore/merge | **proven** | config-intent | Recompute-from-bytes verify, fail-closed signatures, fork-refusal + write-then-replay restore; audited D187. No external crypto review. |

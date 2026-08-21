@@ -321,10 +321,16 @@ def _int_version(meta: dict) -> int:
 _KNOWN_TOP_LEVEL = {
     "InfrastructureContract": {
         "apiVersion", "kind", "meta", "capabilities", "constraints",
-        "assumptions", "outcomes", "autonomy", "budget", "requirements",
+        # D1170: root `requirements` removed — requirements are a CAPABILITY's
+        # short form (D8); a root block hashed identically to no block at all.
+        "assumptions", "outcomes", "autonomy", "budget",
     },
+    # D1170: `meta` was here and read by nobody — a candidate with a note and one
+    # without hash IDENTICALLY, so it does not even reach the canonical form. Removed
+    # rather than hashed: candidate identity is pinned by every sealed plan. `x-` is
+    # the escape for a note, and the schema publishes exactly these four.
     "ImplementationCandidate": {
-        "apiVersion", "kind", "contract", "capabilities", "meta",
+        "apiVersion", "kind", "contract", "capabilities",
     },
 }
 
@@ -388,10 +394,14 @@ def _check_top_level_keys(doc: dict, kind: str) -> None:
     unknown = sorted(k for k in doc
                      if k not in known and not str(k).startswith("x-"))
     if unknown:
+        # D1170: kind-specific example — a candidate has no `constraints` block.
+        why = ("a misspelling of `constraints` proves a candidate that violates them"
+               if kind != "ImplementationCandidate" else
+               "a misspelled `capabilities` implements nothing, and the contract it "
+               "claims to satisfy is verified against an empty document")
         raise ContractError(
             f"{kind} declares unknown top-level key(s) {', '.join(unknown)} — a "
-            "block this loader does not read is silently non-gating, and a "
-            "misspelling of `constraints` proves a candidate that violates them. "
+            f"block this loader does not read is silently non-gating, and {why}. "
             "Rename it, or prefix it with `x-` if it is deliberately not runtime "
             "data")
 
