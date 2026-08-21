@@ -44,10 +44,38 @@ PLAN_CHANGE_KEYS = {"path", "from", "to", "caveat"}
 PLAN_WITNESS_KEYS = {"capability", "provider", "service", "reason"}
 PLAN_PRECONDITION_KEYS = {"type"}
 
+# D1172: the seven nested lists the loaders admitted by NAME and never walked.
+# Measured harm on `replaces`: apply builds `lineage.replaces` from `providerId`
+# here and nothing else, so a misspelling drops the record of what a resource
+# SUCCEEDED. The D48 backstop does NOT fall with it — D1056 re-derives that id
+# from the paired delete's required pin — so the damage is to the evidence.
+PLAN_REPLACES_KEYS = {"providerId", "generation", "because"}
+PLAN_REFERENCE_KEYS = {"slot", "producerAction", "capability", "output", "kind"}
+PLAN_FOLD_KEYS = {"slot", "capability", "output", "value", "observedAt",
+                  "ttlSeconds"}
+PLAN_BLOCKED_KEYS = {"capability", "reason"}
+PLAN_UNVERIFIED_KEYS = {"capability", "attributes"}
+PLAN_NOOP_KEYS = {"capability", "reason"}
+PLAN_ADVISORY_KEYS = {"code", "capability", "pointer", "detail", "next"}
+
 _WHY_EXECUTED = ("a plan is executed, and a block the executor does not read "
                  "decides nothing while looking like it does")
 
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _check_nested_items(v: Any, known: set, where: str, why: str) -> None:
+    """Close ONE list of mappings. Absent is fine (all are omitempty); present
+    must be a list of mappings, or the loader would be reading the document less
+    carefully than the shape it then refuses keys against."""
+    if v is None:
+        return
+    if not isinstance(v, list):
+        raise ContractError(f"{where} must be a list")
+    for i, it in enumerate(v):
+        if not isinstance(it, dict):
+            raise ContractError(f"{where}[{i}] must be a mapping")
+        _check_plan_keys(it, known, f"{where}[{i}]", why)
 
 
 def _check_plan_keys(doc: dict, known: set, where: str, why: str) -> None:
@@ -100,6 +128,21 @@ def load_plan(path: str) -> dict[str, Any]:
     if not isinstance(p, dict):
         raise ContractError("plan block is required")
     _check_plan_keys(p, PLAN_BODY_KEYS, "plan", _WHY_EXECUTED)
+    for key, known, why in (
+        ("blocked", PLAN_BLOCKED_KEYS,
+         "a blocked capability is the record that a compile could NOT reconcile it "
+         "(D249) — a key nothing reads weakens the one thing standing between this "
+         "and being read as converged"),
+        ("unverified", PLAN_UNVERIFIED_KEYS,
+         "same record, same consequence (D249)"),
+        ("noop", PLAN_NOOP_KEYS,
+         "a no-op entry says a capability needed nothing done; a key nothing reads "
+         "makes that claim less legible, not more"),
+        ("advisories", PLAN_ADVISORY_KEYS,
+         "an advisory is carried so an AGENT reads it (D388); a field nothing reads "
+         "is an advisory nobody receives"),
+    ):
+        _check_nested_items(p.get(key), known, f"plan.{key}", why)
     if not p.get("contract"):
         raise ContractError("plan.contract is required")
 
@@ -154,6 +197,24 @@ def load_plan(path: str) -> dict[str, Any]:
                          "an error — it reads as `no dependencies`, and apply "
                          "trusts the graph verbatim for both ordering and "
                          "fail-isolation")
+        if "replaces" in a:
+            if not isinstance(a["replaces"], dict):
+                raise ContractError(f"action {aid}: replaces must be a mapping")
+            _check_plan_keys(a["replaces"], PLAN_REPLACES_KEYS,
+                             f"action {aid}: replaces",
+                             "apply builds the binding's `lineage.replaces` from "
+                             "`providerId` here and nothing else, so a misspelling "
+                             "drops the record of what this resource SUCCEEDED")
+        _check_nested_items(a.get("references"), PLAN_REFERENCE_KEYS,
+                            f"action {aid}: references",
+                            "a reference resolves an operand from another action's "
+                            "receipt at apply (D226); a key nothing reads is an "
+                            "operand silently unresolved")
+        _check_nested_items(a.get("folds"), PLAN_FOLD_KEYS,
+                            f"action {aid}: folds",
+                            "a fold is a literal SEALED into the decision (D283) — "
+                            "its identity fields are what a reader checks the seal "
+                            "against")
         if a.get("capability") not in writes:
             raise ContractError(
                 f"action {aid}: capability outside plan.writes")

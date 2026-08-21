@@ -453,3 +453,86 @@ cases:
           - type: report-executable
     expect:
       hash: sha256:20d659c0092f8dcb8ed839c5f876df6146b1e527393bffb39a947cd0c31c9fa5
+  - name: plan-replaces-with-a-misspelled-key-is-load-error
+    description: >
+      D1172. D1171 closed the plan's own levels and recorded the debt it did not pay:
+      seven nested lists the loader admitted by NAME and never walked, so their inner
+      keys stayed as open as the whole document had been. `replaces` is the one with
+      measured harm — apply builds the binding's `lineage.replaces` from `providerId`
+      here and NOTHING else, so a misspelling drops the record of what this resource
+      succeeded, which is the question an audit and a capsule are read for. What does
+      NOT fall with it is the D48 backstop: D1056 re-derives the replaced id from the
+      paired delete's REQUIRED pin, precisely so the guard never rests on this
+      forgeable field. The damage is to the evidence, and that distinction is the
+      reason this case exists instead of a louder one.
+    document:
+      apiVersion: plan/v0
+      kind: SealedPlan
+      plan:
+        contract: h1
+        reads:
+          contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+          candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+          heads: { db: genesis }
+          toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+        writes: [db]
+        actions:
+          - id: a-create
+            capability: db
+            operation: create
+            target: cloudsql.instance/primary
+            idempotencyKey: db-create-1
+            targetGeneration: 2
+            replaces: { providerid: projects/p/instances/old, generation: 1,
+                        because: [engine-version-immutable] }
+            risk:
+              reversibility: R2
+              dataLoss: none
+              downtime: none
+              securityExposure: none
+              costDelta: { amount: 0, currency: EUR }
+              identityReplacement: false
+        preconditions:
+          - type: report-executable
+    expect:
+      error: document
+
+  - name: plan-reference-with-a-misspelled-key-is-load-error
+    description: >
+      D1172, the same closure one list over. A reference resolves an operand from
+      another action's receipt at apply (D226); a key nothing reads there is an operand
+      silently unresolved, in the document that gets executed.
+    document:
+      apiVersion: plan/v0
+      kind: SealedPlan
+      plan:
+        contract: h1
+        reads:
+          contractHash: "sha256:c07bcf79091106cb2fc4b21306ae4a1f31fafe2134198a2e5c7bb6ac0c15a825"
+          candidateHash: "sha256:eb5959117c0065812904b828078b0b1672bf6e99e7d2b724529b8ff61a1df2b8"
+          heads: { db: genesis }
+          toolchain: { compiler: groundhold-ref/0.1, spec: contract/v0.1 }
+        writes: [db]
+        actions:
+          - id: a-create
+            capability: db
+            operation: create
+            target: cloudsql.instance/primary
+            idempotencyKey: db-create-1
+            references:
+              - slott: endpoint
+                producerAction: a-create
+                capability: db
+                output: host
+                kind: string
+            risk:
+              reversibility: R2
+              dataLoss: none
+              downtime: none
+              securityExposure: none
+              costDelta: { amount: 0, currency: EUR }
+              identityReplacement: false
+        preconditions:
+          - type: report-executable
+    expect:
+      error: document
