@@ -135,6 +135,7 @@
     },
     "autonomy": { "type": "object" },
     "outcomes": {
+      "$comment": "reserved in v0 (D1163): NOTHING in the runtime reads this block. It is parsed, shape-gated and folded into the contract's hash, and no verb changes behaviour because of it — `probe` derives what to measure from the ledger's bindings and reads the contract only for the intrusive-probe consent (D59). Declared here rather than left to be inferred, because it appears in a shipped example and a reader who writes it is entitled to know it does nothing yet. Held by TestAReservedBlockChangesNothingButTheHash: adding the block may change the contract's hash and nothing else, so implementing it fails that gate until this marker comes off.",
       "type": "array",
       "items": {
         "type": "object",
