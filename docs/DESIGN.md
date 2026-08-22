@@ -39551,3 +39551,44 @@ is printed.
 
 The check is structural and says so: exercising it for real would mean landing a commit
 in the middle of a seventeen-minute run.
+
+## D1197 — the role's data-plane grants were never parsed, and only the safe omission was disclosed
+
+An Azure role definition carries control-plane grants in `actions` and DATA-plane grants
+in `dataActions`. The observer parsed only the first list. So a role whose writes live
+in the second — the ordinary shape of every built-in data role, `Storage Blob Data
+Contributor` among them — presented an empty or read-only action set, and reported:
+
+	role.permissions   the control-plane actions only, silently incomplete
+	access.mutating    FALSE, over a role that can write blobs
+	access.privileged  computed from the same short list
+
+Both `role.permissions` and `access.mutating` are floored paths, so the audit treats
+those answers as WITNESSED rather than taken on the candidate's word. The value was
+wrong and the floor made it authoritative.
+
+**What makes this worth an entry rather than a one-line patch is what sits beside it.**
+The same function already handles `notActions`, and it handles them carefully: they are
+deliberately NOT subtracted, and the observation carries a diagnostic saying so —
+"ignoring a narrowing over-reports privilege, which is the safe side of a security
+attribute, but the reported set is a ceiling rather than an exact grant". That is an
+author thinking clearly about a direction of error and disclosing it.
+
+The omission that under-reports had no diagnostic and no parse. The code documented the
+way it might say too much, and was silent about the way it said too little. Between the
+two, only the second is a false-secure — and it is the one that went unremarked.
+
+The fix unions `dataActions` into the same set. It can only ENLARGE it, so `mutating`
+and `privileged` move toward true, which is the safe direction for both; the classifier
+needed no change, because a `.../blobs/write` action is not a `/read` and it was already
+right about that shape — those actions simply never reached it. `notDataActions` joins
+`notActions` in the narrowing diagnostic, for the same reason the original said it.
+
+The test is a table with the defect first and two controls after it: a control-plane
+read-only role and a DATA-plane read-only role must both stay non-mutating. Without them
+this fixture would pass just as happily over a change that called every role mutating,
+which is the failure mode a green tick hides best.
+
+Found by asking, of a fix made hours earlier in another cloud, whether the same question
+had been put to the siblings — the third time today that question has produced a defect
+(D1195, D1194, and this).

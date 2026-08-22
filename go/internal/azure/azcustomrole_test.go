@@ -181,3 +181,76 @@ func TestRoleActionsUnionEveryPermissionBlock(t *testing.T) {
 		t.Fatal("notActions present but the reported set was not flagged as a ceiling")
 	}
 }
+
+// D1197. An Azure role keeps its DATA-plane grants in `dataActions`, a list this
+// driver did not parse. A role whose only writes live there — the ordinary shape of
+// every built-in data role — presented an empty control-plane action set and measured
+// `access.mutating` FALSE while it could write blobs. Both that path and
+// `role.permissions` are floored, so the audit treats the answer as witnessed.
+//
+// The first case is the defect. The others are controls: a genuinely read-only role
+// must stay non-mutating, or this fixture would pass by calling everything mutating.
+func TestRoleActionsIncludeDataPlaneGrants(t *testing.T) {
+	for _, tc := range []struct {
+		name, body       string
+		wantMutating     bool
+		wantInPermission string
+		why              string
+	}{
+		{"data-plane writes only", `{"properties":{"permissions":[{"actions":[],
+			"dataActions":["Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write"]}]}}`,
+			true, "blobs/write",
+			"THE DEFECT: a role that can write blobs read as non-mutating"},
+
+		{"control-plane read only", `{"properties":{"permissions":[{
+			"actions":["Microsoft.Storage/storageAccounts/read"]}]}}`,
+			false, "storageAccounts/read",
+			"the control: a read-only role must stay non-mutating"},
+
+		{"data-plane read only", `{"properties":{"permissions":[{"actions":[],
+			"dataActions":["Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read"]}]}}`,
+			false, "blobs/read",
+			"the second control: reading data is not mutating either"},
+
+		{"both planes", `{"properties":{"permissions":[{
+			"actions":["Microsoft.Storage/storageAccounts/read"],
+			"dataActions":["Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write"]}]}}`,
+			true, "blobs/write",
+			"the union carries both planes into role.permissions"},
+
+		// notDataActions is the data-plane twin of notActions: it NARROWS, so it is
+		// not subtracted, and its presence must raise the same "this set is a ceiling"
+		// diagnostic. Served here rather than allowlisted — a decoded field no fixture
+		// feeds is a branch no test can reach in either value (D756).
+		{"data-plane narrowing", `{"properties":{"permissions":[{"actions":[],
+			"dataActions":["Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write"],
+			"notDataActions":["Microsoft.Storage/storageAccounts/blobServices/containers/blobs/delete"]}]}}`,
+			true, "blobs/write",
+			"a narrowed data-plane role still writes, and the narrowing is disclosed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var doc azureCustomRoleDoc
+			if err := json.Unmarshal([]byte(tc.body), &doc); err != nil {
+				t.Fatalf("fixture does not parse: %v", err)
+			}
+			actions, narrowed := azRoleActions(doc)
+			if strings.Contains(tc.body, "notDataActions") && !narrowed {
+				t.Error("notDataActions present and the observation does not report the " +
+					"set as narrowed — a reader is told an exact grant when it is a ceiling")
+			}
+			found := false
+			for _, a := range actions {
+				if strings.Contains(a, tc.wantInPermission) {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("role.permissions = %v, missing %q — the reported permission set "+
+					"omits a grant the role actually carries", actions, tc.wantInPermission)
+			}
+			if got := azRoleMutating(actions); got != tc.wantMutating {
+				t.Errorf("access.mutating = %v, want %v — %s", got, tc.wantMutating, tc.why)
+			}
+		})
+	}
+}
