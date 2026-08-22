@@ -17,6 +17,38 @@ var Operations = map[string]bool{
 	"create": true, "update": true, "replace": true,
 	"delete": true, "adopt": true, "noop": true, "claim": true,
 }
+
+// LoadOnlyOperations names the members of `Operations` that this project's compiler
+// never emits and its executor refuses. D1174.
+//
+// They were not declared anywhere; they were simply in the set, which meant the
+// published closed set invited a producer to write an action our own executor turns
+// away. `replace` is the sharp one: `planview/helpers.go` says in so many words that
+// "there is no `replace` operation in the IR" — a replacement is composed as
+// create-before-destroy (D48) — while `spec/sealed-plan.md` published it as a valid
+// operation. We were publishing an operation we had documented as nonexistent.
+//
+// They stay ACCEPTED rather than being deleted, for reasons that differ per member
+// and are worth stating rather than assuming:
+//
+//   - `adopt`   a conformance case pins what `forecast` says about one
+//     (`unsupported-effect-model`) — the honest answer for an action whose
+//     effect this project does not model. Refusing it at load would delete
+//     that answer rather than improve it. Note the collision: `groundhold
+//     adopt` is a VERB (D52 onboarding) that writes bindings directly and
+//     compiles no plan; this is the plan ACTION of the same name.
+//   - `noop`    a converged plan has zero ACTIONS (D533), not a no-op one, so nothing
+//     emits it; it is accepted so a third-party producer that spells
+//     "nothing to do" this way still loads.
+//   - `replace` accepted for the same reason and for no other: it is what a reader of
+//     the old published list would have written.
+//
+// What changes is that the fact is now DECLARED and gated, so the published prose can
+// say which operations apply and which merely load, and a new member cannot join
+// `Operations` without a reader deciding which of the two it is.
+var LoadOnlyOperations = map[string]bool{
+	"replace": true, "adopt": true, "noop": true,
+}
 var PreconditionTypes = map[string]bool{
 	"report-executable": true, "no-assumed-basis": true, "within-autonomy": true,
 	"no-assumed-hard-basis": true, // D195: hard-only, assumed-only gate

@@ -38721,3 +38721,60 @@ anyone reads what is in it.
 `TestTheShippedExamplePlanLoads` is therefore not filling a void — `check.sh` already
 covered this. It is a cheaper copy that runs under `go test`, and the comment inside it
 has been corrected to say so rather than to repeat the claim.
+
+## D1174 — four artefacts described one closed set and no two agreed
+
+The plan's operation set, asked the question D1171 asked of its key sets: what does the
+compiler actually EMIT, and what does the executor actually APPLY?
+
+	the compiler emits          create, update, delete, claim
+	the executor applies        create, update, delete, claim   (refuses the rest,
+	                            `unsupported-operation`, exit 2, before the lease)
+	both loaders accept         those four plus replace, adopt, noop
+	spec/sealed-plan.md         all seven, as "the closed set"
+	spec/executor.md            create, update, delete — and the word `claim`
+	                            appears nowhere in the document
+
+`claim` has been applied since D52. The only artefact that named the four correctly was
+a hand-typed sentence inside one error message — `"executor supports create, update,
+delete and claim"` — correct by luck, with nothing holding it so.
+
+`replace` is the sharp one. `planview/helpers.go` says, in a comment written long
+before this: *there is no `replace` operation in the IR* — a replacement is composed as
+create-before-destroy (D48). We were publishing, as a valid operation of our execution
+IR, something our own source says does not exist. A third party writing a compiler
+against the published spec would emit it and produce plans our executor turns away.
+
+**This entry corrects D1171, and the correction is the interesting part.** That slice
+derived the plan's KEY sets from what the compiler emits — the right principle — and
+then, in the same file, held the OPERATION set to inter-copy AGREEMENT. It caught a real
+defect (`claim` missing from two copies) and simultaneously froze three members nothing
+emits and nothing executes. Agreement is not correctness: three artefacts can say the
+same wrong thing, and a gate comparing them to each other will keep them saying it.
+Having just written the better test one screen above, I reached for the weaker one.
+
+What is built instead: `apply.SupportedOperations` names what the executor applies and
+the refusal's wording is DERIVED from it, so the sentence a user reads cannot drift from
+the branch that produced it. `plan.LoadOnlyOperations` names the three that load and do
+not run, each with its reason in the source — `adopt` has a pinned `forecast` answer
+(`unsupported-effect-model`, honest for an effect this project does not model; note the
+name collision with the `groundhold adopt` VERB, which writes bindings directly and
+compiles no plan), `noop` because a converged plan carries zero actions (D533) and a
+third-party producer spelling "nothing to do" that way should still load, `replace` for
+that reason and no other. A gate requires the two sets to PARTITION the accepted set, so
+a new operation cannot join without a reader deciding which it is.
+
+**And that gate was not enough, which its own mutant proved.** Moving `replace` from
+load-only into supported keeps the partition perfectly consistent, so the first version
+passed. A self-consistent classification can still be a lie about the code. The second
+gate reads the executor's `case` branches, so a name in the list with no branch behind
+it fails — and so does a branch removed while the list still promises it.
+
+That check is STRUCTURAL, and the distinction is worth naming rather than glossing:
+D317's lesson is that scraping an implementation is not the same as asking it. Asking
+would mean applying a one-action plan per operation and looking for the refusal, which
+needs an apply harness that does not exist yet. Recorded as debt, in the gate's own
+comment, where the next person meets it.
+
+Both published documents now say which operations apply and which merely load, and why
+each of the three is accepted rather than deleted.

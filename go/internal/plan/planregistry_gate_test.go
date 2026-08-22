@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"groundhold/internal/apply"
 	"groundhold/internal/compiler"
 )
 
@@ -406,4 +407,128 @@ func TestAMisspelledKeyInsideANestedBlockIsRefused(t *testing.T) {
 				"hatch at every other level of every other document here", err)
 		}
 	})
+}
+
+// TestTheOperationSetIsClassifiedByBehaviour is D1174, and it is a correction to the
+// gate above as much as an addition.
+//
+// `TestTheOperationSetAgreesAcrossEveryCopy` (D1171) holds three copies of
+// `Operations` in agreement with EACH OTHER. That caught a real defect — `claim` was
+// missing from two of them — and it also froze three members nothing has ever emitted
+// and nothing can execute. Agreement is not correctness: three artefacts can say the
+// same wrong thing, and a gate that only compares them will keep them saying it.
+//
+// D1171 derived the plan's KEY sets from what the compiler emits and then, in the same
+// slice, held the OPERATION set to inter-copy agreement instead. This applies the same
+// principle to the axis that was missed: what the executor can apply is a fact about
+// behaviour, and every member of the accepted set must be classified as one this
+// executor applies or one it only loads — with the second list carrying its reasons in
+// the source, where a reader meets them.
+func TestTheOperationSetIsClassifiedByBehaviour(t *testing.T) {
+	// Every accepted operation is either applied or declared load-only. A new member
+	// cannot join `Operations` without someone deciding which it is.
+	for op := range Operations {
+		applied := apply.SupportedOperations[op]
+		loadOnly := LoadOnlyOperations[op]
+		switch {
+		case applied && loadOnly:
+			t.Errorf("%q is declared both applied and load-only — the two lists must "+
+				"partition the accepted set, or neither says anything", op)
+		case !applied && !loadOnly:
+			t.Errorf("%q is accepted by the loader, applied by nothing, and declared "+
+				"nowhere. A closed set the executor cannot honour invites a producer "+
+				"to write an action we turn away — say which it is in "+
+				"LoadOnlyOperations, with the reason.", op)
+		}
+	}
+
+	// The other direction: an operation the executor implements and the loader refuses
+	// is a branch no document can reach.
+	for op := range apply.SupportedOperations {
+		if !Operations[op] {
+			t.Errorf("the executor applies %q and this loader REFUSES it — a plan "+
+				"carrying it never reaches the branch that would run it", op)
+		}
+	}
+
+	// Floors. Both sets must be non-empty and the applied set must not have quietly
+	// become the whole accepted set (which would make the partition vacuous).
+	if len(apply.SupportedOperations) == 0 || len(LoadOnlyOperations) == 0 {
+		t.Fatal("one of the two sets is EMPTY, so the partition above compares nothing " +
+			"(D328)")
+	}
+	if len(apply.SupportedOperations)+len(LoadOnlyOperations) != len(Operations) {
+		t.Errorf("applied(%d) + load-only(%d) != accepted(%d) — the classification has "+
+			"drifted from the set it classifies",
+			len(apply.SupportedOperations), len(LoadOnlyOperations), len(Operations))
+	}
+}
+
+// TestTheRefusalNamesWhatTheExecutorActuallyApplies pins the sentence a user reads to
+// the set the switch implements. It used to be typed by hand in the error itself, and
+// it was the ONLY artefact in the project that named the four correctly — correct by
+// luck, with nothing to keep it so.
+func TestTheRefusalNamesWhatTheExecutorActuallyApplies(t *testing.T) {
+	got := apply.SupportedOperationList()
+	for op := range apply.SupportedOperations {
+		if !strings.Contains(got, op) {
+			t.Errorf("the refusal says %q and does not name %q, which the executor "+
+				"applies — a user told the wrong set reconciles the wrong thing", got, op)
+		}
+	}
+	for op := range LoadOnlyOperations {
+		if strings.Contains(got, op) {
+			t.Errorf("the refusal says %q, which names %q — an operation this executor "+
+				"REFUSES. Naming it as supported is the advice failure the message "+
+				"exists to prevent.", got, op)
+		}
+	}
+}
+
+// TestSupportedOperationsMatchTheExecutorsBranches closes the hole the previous gate
+// left, and the hole was found by mutating it: moving `replace` from LoadOnly into
+// SupportedOperations kept the partition perfectly consistent and the gate passed. A
+// self-consistent classification can still be a lie about what the code does.
+//
+// This reads the SWITCH — the implementation — rather than the list beside it. That is
+// a structural check, not a behavioural one, and the difference matters enough to name:
+// D317's lesson is that a static scrape of an implementation is not the same as asking
+// it. Asking would mean applying a one-action plan per operation and looking for
+// `unsupported-operation`, which needs an apply harness this package does not have and
+// `internal/apply` does not yet expose. **Debt, stated rather than hidden:** the
+// behavioural version belongs in `internal/apply`, where the provider fake and ledger
+// fixtures already live.
+//
+// What it does catch is the drift that actually happened here — a name in the list with
+// no branch behind it, or a branch quietly removed while the list still promises it.
+func TestSupportedOperationsMatchTheExecutorsBranches(t *testing.T) {
+	src := readRepoFileForPlan(t, "go", "internal", "apply", "apply.go")
+
+	// The vacuity floor first: this scan must find the switch it thinks it is reading.
+	// A rename would otherwise leave every assertion below trivially true (D328).
+	found := 0
+	for op := range apply.SupportedOperations {
+		if strings.Contains(src, "\t\tcase \""+op+"\":") {
+			found++
+		}
+	}
+	if found == 0 {
+		t.Fatal("no `case \"<operation>\":` branch was found in apply.go at all — the " +
+			"scan lost its subject, and every check below would pass over anything")
+	}
+
+	for op := range apply.SupportedOperations {
+		if !strings.Contains(src, "\t\tcase \""+op+"\":") {
+			t.Errorf("the executor DECLARES it applies %q and has no branch for it. The "+
+				"refusal message is derived from this set, so a user is told an "+
+				"operation is supported and then meets the default branch.", op)
+		}
+	}
+	for op := range LoadOnlyOperations {
+		if strings.Contains(src, "\t\tcase \""+op+"\":") {
+			t.Errorf("%q is declared load-only and the executor HAS a branch for it — "+
+				"either it is applied after all (move it, and say so in the spec) or "+
+				"that branch is unreachable code wearing a real name", op)
+		}
+	}
 }

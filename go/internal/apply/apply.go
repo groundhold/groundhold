@@ -164,6 +164,38 @@ func actionPerms(a map[string]any, providerName string, c *contract.Contract,
 // unattested). A resource check that cannot read the surface (missing resource,
 // network) yields unattested, NEVER denied. Returns the authoritative denials,
 // the unattested set, and a fatal error only if the PROJECT check could not run.
+// SupportedOperations is what this executor can APPLY. D1174.
+//
+// It was a hand-typed list inside one error message — "executor supports create,
+// update, delete and claim" — and that message is the only place in the project that
+// said the true thing. `plan.Operations` accepts SEVEN, and three of them
+// (`replace`, `adopt`, `noop`) are emitted by nothing, executed by nothing, and
+// published as members of the closed set anyway. `spec/executor.md`'s effect-model
+// limit names three and does not contain the word `claim` at all, which the executor
+// has applied since D52.
+//
+// So four artefacts described the same set and no two agreed. Naming it here, and
+// deriving the refusal's wording from it, means the sentence a user reads cannot
+// drift from the branch that produced it — which is how the old wording stayed
+// correct only by luck.
+var SupportedOperations = map[string]bool{
+	"create": true, "update": true, "delete": true, "claim": true,
+}
+
+// SupportedOperationList renders the set for a human, so the refusal names exactly
+// what the switch above implements.
+func SupportedOperationList() string {
+	out := make([]string, 0, len(SupportedOperations))
+	for op := range SupportedOperations {
+		out = append(out, op)
+	}
+	sort.Strings(out)
+	if len(out) < 2 {
+		return strings.Join(out, "")
+	}
+	return strings.Join(out[:len(out)-1], ", ") + " and " + out[len(out)-1]
+}
+
 func scopedPreflight(pf provider.Preflighter, prov provider.Provider,
 	project string, actions []any, providerName string, c *contract.Contract,
 	cand *contract.Candidate, vocabs map[string]vocab.Vocabulary) (denied, unattested []string, err error) {
@@ -620,8 +652,8 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 			}
 		default:
 			return refused(perr.UnsupportedOperation, 2, fmt.Sprintf(
-				"executor supports create, update, delete and claim, action %v is %v",
-				a["id"], a["operation"]))
+				"executor supports %s, action %v is %v",
+				SupportedOperationList(), a["id"], a["operation"]))
 		}
 	}
 
