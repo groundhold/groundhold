@@ -39592,3 +39592,52 @@ which is the failure mode a green tick hides best.
 Found by asking, of a fix made hours earlier in another cloud, whether the same question
 had been put to the siblings — the third time today that question has produced a defect
 (D1195, D1194, and this).
+
+## D1198 — one attribute, two questions across clouds — resolved by the owner
+
+The false-green sweep gave AWS S3, SNS, and SQS a `network.publicExposure` that answers
+ANONYMOUS ACCESS — can the data be read without credentials (policy + ACL / resource
+policy). Azure's D989 had, by an owner directive, mapped the same attribute to
+`publicNetworkAccess` — NETWORK REACHABILITY, so every Azure driver answered it uniformly.
+Session A caught the consequence while sweeping siblings: within `capability.storage.object`
+the one attribute now meant two different things across clouds, so a contract
+`publicExposure equals false` written once promised anonymous-access-blocked on AWS and
+network-unreachable on Azure — the portability premise broken, and not a defect either
+session could settle because D989 was the owner's call.
+
+The owner chose to unify on ANONYMOUS ACCESS. S3 forces the resolution: a bucket is always
+network-reachable, so its `publicExposure` can only mean anonymous access — and that is the
+GDPR/data-exposure intent of the control. So Azure blob now reads the anonymous-access
+knobs it always had: `allowBlobPublicAccess` on the account (the twin of an S3 Block Public
+Access — false blocks anonymous access account-wide, the definitive not-public case, no
+container read needed) AND the container's `publicAccess` (None/Blob/Container). The
+account stays `publicNetworkAccess: Enabled` — reachable like an S3 bucket; network
+lockdown is a separate concern this object-storage attribute no longer expresses. Build,
+observe, and the round-trip fixture all move together; a container GET is a new read
+(recorded route, reads are not permission-gated). Other Azure drivers keep
+`publicExposure = publicNetworkAccess` because a key vault or a search service has no
+anonymous-access concept — the only "public" question there IS reachability. The attribute
+is not cloud-relative; it is capability-relative, and within one capability it now means
+one thing everywhere. The lesson: when a portability premise and a prior owner directive
+collide, the resolution is the owner's, and the honest move is to surface it, not to pick.
+
+## D1199 — sweeping my own D1198, and naming the gap it made salient
+
+Applying the sibling question (D1197) to my own D1198: I changed what Azure blob
+`network.publicExposure` MEANS, so I checked every path that touches it. Discovery
+delegates to `observeBlob` (gets the fix for free); build moved with observe; there is no
+independent adopt-control or reconcile literal to drift. One thing the change made salient
+rather than broke: `classifyBlobChange` returned the generic `default` for
+`network.publicExposure` — "no azure blob in-place mapping" — because the blob driver has
+no update path wired at all. Under D989 that was invisible; under D1198 it is the security
+control an operator would most want to REMEDIATE (a discovered public blob flipped to
+private), and Azure supports exactly that online — `allowBlobPublicAccess` is a PATCH and
+the container's `publicAccess` is a PUT.
+
+`unsupported` is still the honest verdict (the path is not wired, so fail-closed — never a
+silent no-op, never a data-destroying replacement of a stateful account). What was wrong
+was the REASON: an opaque "no mapping" reads as "impossible", when the truth is "Azure can,
+groundhold hasn't". So the reason now names the gap, matching the retention and replication
+cases D824 already made legible. Wiring the blob update path is a real enhancement left for
+a directed slice, not built unprompted; recording the gap so the operator (and the next
+author) can see it is the part that belonged with the change that surfaced it.

@@ -18,6 +18,7 @@ actionGroupId
 actions
 agentPoolProfiles
 allOf
+allowBlobPublicAccess
 allowInsecure
 amount
 apiServerAccessProfile
@@ -160,6 +161,7 @@ profiles
 properties
 protocol
 provisioningState
+publicAccess
 publicIPAddress
 publicIPAddressConfiguration
 publicNetworkAccess

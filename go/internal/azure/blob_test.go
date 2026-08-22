@@ -1,6 +1,7 @@
 package azure
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -225,6 +226,77 @@ func TestCreateObserveDeleteBlob(t *testing.T) {
 	}
 }
 
+// D1198: network.publicExposure is ANONYMOUS access, not network reachability. The
+// account's allowBlobPublicAccess is the twin of an S3 Block Public Access — false blocks
+// all anonymous access account-wide (definitive false, no container read); true defers to
+// the container's publicAccess. An unreadable container withholds, never fabricates false.
+func TestObserveBlobAnonymousAccess(t *testing.T) {
+	blobAnonFake := func(allowPublic *bool, containerAccess string, containerFails bool) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path := strings.SplitN(r.URL.Path, "?", 2)[0]
+			isImmut := strings.Contains(path, "/immutabilityPolicies/")
+			isContainer := strings.Contains(path, "/containers/") && !isImmut
+			switch {
+			case isImmut:
+				w.WriteHeader(404)
+			case isContainer:
+				if containerFails {
+					w.WriteHeader(500)
+					return
+				}
+				_, _ = w.Write([]byte(`{"properties":{"publicAccess":"` + containerAccess + `"}}`))
+			default:
+				acct := map[string]any{"provisioningState": "Succeeded"}
+				if allowPublic != nil {
+					acct["allowBlobPublicAccess"] = *allowPublic
+				}
+				b, _ := json.Marshal(map[string]any{
+					"location":   "eastus",
+					"sku":        map[string]any{"name": "Standard_ZRS"},
+					"tags":       map[string]any{"groundhold-capability": "assets", "groundhold-environment": "prod"},
+					"properties": acct,
+				})
+				_, _ = w.Write(b)
+			}
+		}))
+	}
+	tt := true
+	cases := []struct {
+		name           string
+		allowPublic    *bool
+		container      string
+		containerFails bool
+		want           any // false, true, or nil (withheld)
+	}{
+		{"account blocks anonymous (allowBlobPublicAccess=false)", new(bool), "Blob", false, false},
+		{"account allows + container Blob", &tt, "Blob", false, true},
+		{"account allows + container Container", &tt, "Container", false, true},
+		{"account allows + container None", &tt, "None", false, false},
+		{"account allows + container unreadable -> withheld", &tt, "", true, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := blobAnonFake(c.allowPublic, c.container, c.containerFails)
+			defer srv.Close()
+			d := vnetTestDriver(t, srv)
+			pid := blobProviderID(d.Subscription, "rg1", "acct", "assets")
+			obs, _, err := d.observeBlob("assets", pid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got any
+			for _, o := range obs {
+				if o.Path == "network.publicExposure" {
+					got = o.Value
+				}
+			}
+			if got != c.want {
+				t.Fatalf("publicExposure = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // TestClassifyBlobChange pins every branch of the pure classifier: WORM/
 // replacement paths, and the default "unsupported" fallback for anything else.
 func TestClassifyBlobChange(t *testing.T) {
@@ -242,11 +314,18 @@ func TestClassifyBlobChange(t *testing.T) {
 		"replication.destinationRegion": "unsupported",
 		"versioning.enabled":            "unsupported",
 		"cost.monthly":                  "unsupported",
+		// D1199: anonymous-access remediation is patchable in Azure but not wired here —
+		// unsupported (fail-closed), with a reason that names the gap not the tool.
+		"network.publicExposure": "unsupported",
 	}
 	for path, want := range cases {
 		if got, reason := classifyBlobChange(path); got != want {
 			t.Errorf("classifyBlobChange(%q) = (%q, %q), want verb %q", path, got, reason, want)
 		}
+	}
+	// the publicExposure gap must name Azure's in-place support (a legible gap, not "no mapping")
+	if _, reason := classifyBlobChange("network.publicExposure"); !strings.Contains(reason, "allowBlobPublicAccess") {
+		t.Errorf("publicExposure classify reason must name the patchable knobs, got %q", reason)
 	}
 }
 

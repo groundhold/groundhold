@@ -57,17 +57,15 @@ func (d *Driver) createBlob(environment, capability string,
 
 	// ---- 1. storage account (the constitutive substrate; async) ----
 	acctURL, _ := d.armURL(rg, d.acctPath(plan.Account), storageAPIVersion)
-	// D989 (user-directed): network.publicExposure governs NETWORK reachability
-	// (publicNetworkAccess), matching every other Azure driver — not the anonymous-blob
-	// -access toggle. Anonymous access is a separate control, defaulted OFF (the secure
-	// choice, and Azure's own modern default).
-	pna := "Disabled"
-	if plan.Public {
-		pna = "Enabled"
-	}
+	// D1198 (owner decision, supersedes D989 for object storage): network.publicExposure
+	// is ANONYMOUS DATA ACCESS, unified with AWS S3 within this capability — so it drives
+	// allowBlobPublicAccess (and the container's publicAccess below), NOT publicNetworkAccess.
+	// The account stays network-reachable (Enabled, like an always-reachable S3 bucket);
+	// network-level lockdown is a separate concern this object-storage attribute no longer
+	// expresses. allowBlobPublicAccess gates whether any container may be anonymous.
 	acctProps := map[string]any{
-		"publicNetworkAccess":   pna,
-		"allowBlobPublicAccess": false,
+		"publicNetworkAccess":   "Enabled",
+		"allowBlobPublicAccess": plan.Public,
 		"minimumTlsVersion":     "TLS1_2",
 	}
 	if plan.KmsKeyVaultURI != "" {
@@ -314,9 +312,10 @@ type blobAccountDoc struct {
 	Tags       map[string]string     `json:"tags"`
 	Sku        struct{ Name string } `json:"sku"`
 	Properties struct {
-		ProvisioningState   string `json:"provisioningState"`
-		PublicNetworkAccess string `json:"publicNetworkAccess"`
-		Encryption          struct {
+		ProvisioningState     string `json:"provisioningState"`
+		PublicNetworkAccess   string `json:"publicNetworkAccess"`
+		AllowBlobPublicAccess *bool  `json:"allowBlobPublicAccess"`
+		Encryption            struct {
 			KeySource string `json:"keySource"`
 		} `json:"encryption"`
 	} `json:"properties"`
@@ -365,16 +364,23 @@ func (d *Driver) observeBlob(capability, providerID string) ([]provider.Observat
 	case "Standard_GZRS":
 		obs = append(obs, provider.Observation{Path: "durability.class", Value: "multi-regional", Derivation: "measured"})
 	}
-	// D989: network.publicExposure from publicNetworkAccess (network reachability), as
-	// every other Azure driver does. An absent field must NOT collapse to a measured
-	// false (the false-safe direction) — it is left unread.
-	switch doc.Properties.PublicNetworkAccess {
-	case "Enabled":
-		obs = append(obs, provider.Observation{Path: "network.publicExposure", Value: true, Derivation: "measured"})
-	case "Disabled":
+	// network.publicExposure (D1198, owner decision): for capability.storage.object this
+	// is ANONYMOUS DATA ACCESS — the same question AWS S3 answers, and the GDPR/data-
+	// exposure intent of the control — NOT the network reachability D989 read from
+	// publicNetworkAccess (the meaning every OTHER Azure driver keeps, but which made one
+	// attribute mean two things across clouds within one capability). Anonymous access
+	// needs the account to ALLOW it (allowBlobPublicAccess) AND the container to be set to
+	// it (publicAccess). An account with allowBlobPublicAccess=false blocks all anonymous
+	// access account-wide — the definitive not-public case (Azure's twin of an S3 Block
+	// Public Access), no container read needed.
+	if doc.Properties.AllowBlobPublicAccess != nil && !*doc.Properties.AllowBlobPublicAccess {
 		obs = append(obs, provider.Observation{Path: "network.publicExposure", Value: false, Derivation: "measured"})
-	default:
-		diags = append(diags, "network.publicExposure not observed: publicNetworkAccess absent from the storage account's properties")
+	} else if level, known := d.blobContainerPublicAccess(rg, account, container); known {
+		public := level == "Blob" || level == "Container"
+		obs = append(obs, provider.Observation{Path: "network.publicExposure", Value: public, Derivation: "measured"})
+	} else {
+		diags = append(diags, "network.publicExposure not observed: allowBlobPublicAccess does not block anonymous "+
+			"access and the container's publicAccess could not be read — anonymous exposure undetermined (never fabricated private)")
 	}
 	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: doc.Properties.Encryption.KeySource == "Microsoft.Keyvault", Derivation: "measured"})
 	// retention.minimum / retention.locked: the container's immutability policy
@@ -406,6 +412,34 @@ func (d *Driver) observeBlob(capability, providerID string) ([]provider.Observat
 // period reverse-maps to retention.minimum (a day-granular duration floor), and
 // the policy state (Locked vs Unlocked) reverse-maps to retention.locked (the
 // WORM guarantee vs a soft, shortenable floor).
+// blobContainerPublicAccess reads the container's anonymous-access level (None / Blob /
+// Container) from its ARM properties. known=false when the container was unreadable, so
+// the caller withholds rather than fabricating "private". Azure omits publicAccess for a
+// private container, which reads as "None".
+func (d *Driver) blobContainerPublicAccess(rg, account, container string) (level string, known bool) {
+	cURL, err := d.armURL(rg,
+		d.acctPath(account)+"/blobServices/default/containers/"+container, storageAPIVersion)
+	if err != nil {
+		return "", false
+	}
+	st, resp, e := d.doARM("GET", cURL, nil)
+	if e != nil || st != http.StatusOK {
+		return "", false
+	}
+	var doc struct {
+		Properties struct {
+			PublicAccess string `json:"publicAccess"`
+		} `json:"properties"`
+	}
+	if json.Unmarshal(resp, &doc) != nil {
+		return "", false
+	}
+	if doc.Properties.PublicAccess == "" {
+		return "None", true
+	}
+	return doc.Properties.PublicAccess, true
+}
+
 func (d *Driver) observeBlobImmutability(rg, account, container string) ([]provider.Observation, []string) {
 	ipURL, err := d.armURL(rg,
 		d.acctPath(account)+"/blobServices/default/containers/"+container+"/immutabilityPolicies/default",
@@ -591,6 +625,18 @@ func classifyBlobChange(path string) (string, string) {
 		return "unsupported", "object replication is not wired for in-place update on the " +
 			"blob driver — Azure configures it as a policy on existing accounts, so this is " +
 			"a gap in groundhold rather than a reason to replace the account and its data"
+	case "network.publicExposure":
+		// D1199: since D1198 this is anonymous access — allowBlobPublicAccess on the
+		// account and the container's publicAccess, BOTH patchable in place (a PATCH to
+		// the account, a PUT of the container's publicAccess). So remediating a public
+		// blob to private is an ONLINE change Azure supports; groundhold has not wired the
+		// blob update path yet, so it is `unsupported` (fail-closed — never a silent no-op,
+		// and never a reason to replace the account and destroy its data). Documented like
+		// the retention/replication gaps (D824) so the reason names the gap, not the tool.
+		return "unsupported", "in-place remediation of network.publicExposure is not wired for " +
+			"the blob driver — Azure supports it online (allowBlobPublicAccess and the container's " +
+			"publicAccess are both patchable), so this is a gap in groundhold rather than a reason " +
+			"to replace the account and its data"
 	default:
 		return "unsupported", "no azure blob in-place mapping for " + path
 	}
