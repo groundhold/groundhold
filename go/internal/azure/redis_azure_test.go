@@ -1,6 +1,8 @@
 package azure
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -247,5 +249,123 @@ func TestCreateRedisAzureRefusesRegionWithoutAvailabilityZones(t *testing.T) {
 				t.Errorf("a multi-AZ region must NOT be preflight-refused: %+v", res)
 			}
 		})
+	}
+}
+
+// D1206: updateRedisAzure remediates network.publicExposure in place — a PATCH of the cache's
+// publicNetworkAccess, so a public cache is made private WITHOUT a replacement (which would
+// destroy its data and rotate its hostname and keys). Ownership re-checked; foreign refused.
+func TestUpdateRedisAzurePublicExposure(t *testing.T) {
+	newSrv := func(tagCap string, seen *[]string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case "GET":
+				_, _ = w.Write([]byte(`{"location":"westeurope",` +
+					`"tags":{"groundhold-capability":"` + tagCap + `","groundhold-environment":"prod"},` +
+					`"properties":{"provisioningState":"Succeeded","publicNetworkAccess":"Enabled"}}`))
+			case "PATCH":
+				body, _ := io.ReadAll(r.Body)
+				var d struct {
+					Properties struct {
+						PublicNetworkAccess string `json:"publicNetworkAccess"`
+					} `json:"properties"`
+				}
+				_ = json.Unmarshal(body, &d)
+				*seen = append(*seen, d.Properties.PublicNetworkAccess)
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Updating"}}`))
+			default:
+				t.Errorf("unexpected %s", r.Method)
+				w.WriteHeader(404)
+			}
+		}))
+	}
+
+	t.Run("remediate public->private (PATCH publicNetworkAccess=Disabled)", func(t *testing.T) {
+		var seen []string
+		srv := newSrv("sessions", &seen)
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		pid := redisAzureProviderID(d.Subscription, "rg1", "sessions-cache")
+		res := d.updateRedisAzure("sessions", "prod", pid,
+			map[string]any{"network.publicExposure": false}, []string{"network.publicExposure"})
+		if res.Status != "succeeded" {
+			t.Fatalf("update: %+v", res)
+		}
+		if len(seen) != 1 || seen[0] != "Disabled" {
+			t.Fatalf("must PATCH publicNetworkAccess=Disabled, got %+v", seen)
+		}
+	})
+
+	t.Run("foreign cache refused, no write", func(t *testing.T) {
+		var seen []string
+		srv := newSrv("someone-else", &seen)
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		pid := redisAzureProviderID(d.Subscription, "rg1", "sessions-cache")
+		res := d.updateRedisAzure("sessions", "prod", pid,
+			map[string]any{"network.publicExposure": false}, []string{"network.publicExposure"})
+		if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
+			t.Fatalf("a foreign cache must be refused, got %+v", res)
+		}
+		if len(seen) != 0 {
+			t.Fatalf("a refused update must issue NO write, got %+v", seen)
+		}
+	})
+}
+
+func TestClassifyRedisAzureChange(t *testing.T) {
+	for _, p := range []string{"network.publicExposure", "encryption.inTransit"} {
+		if got, _ := classifyRedisAzureChange(p); got != "mutable" {
+			t.Fatalf("%s must be mutable (in-place), got %q", p, got)
+		}
+	}
+	for _, p := range []string{"location.region", "engine.protocol", "availability.class"} {
+		if got, _ := classifyRedisAzureChange(p); got != "immutable" {
+			t.Fatalf("%s must be immutable (replacement), got %q", p, got)
+		}
+	}
+}
+
+// D1209: updateRedisAzure enforces encryption.inTransit in place — a PATCH of enableNonSslPort,
+// so a cache accepting plaintext is closed to the non-SSL port WITHOUT a replacement.
+func TestUpdateRedisAzureInTransit(t *testing.T) {
+	var seen []bool // enableNonSslPort seen on PATCH
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case "GET":
+			// a cache that accepts plaintext: enableNonSslPort=true => inTransit observed false
+			_, _ = w.Write([]byte(`{"location":"westeurope",` +
+				`"tags":{"groundhold-capability":"sessions","groundhold-environment":"prod"},` +
+				`"properties":{"provisioningState":"Succeeded","enableNonSslPort":true}}`))
+		case "PATCH":
+			body, _ := io.ReadAll(r.Body)
+			var d struct {
+				Properties struct {
+					EnableNonSslPort *bool `json:"enableNonSslPort"`
+				} `json:"properties"`
+			}
+			_ = json.Unmarshal(body, &d)
+			if d.Properties.EnableNonSslPort != nil {
+				seen = append(seen, *d.Properties.EnableNonSslPort)
+			}
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Updating"}}`))
+		default:
+			t.Errorf("unexpected %s", r.Method)
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	d := vnetTestDriver(t, srv)
+	pid := redisAzureProviderID(d.Subscription, "rg1", "sessions-cache")
+	res := d.updateRedisAzure("sessions", "prod", pid,
+		map[string]any{"encryption.inTransit": true}, []string{"encryption.inTransit"})
+	if res.Status != "succeeded" {
+		t.Fatalf("update: %+v", res)
+	}
+	// enforcing TLS closes the non-SSL port: enableNonSslPort must be PATCHed to false.
+	if len(seen) != 1 || seen[0] != false {
+		t.Fatalf("must PATCH enableNonSslPort=false, got %+v", seen)
 	}
 }

@@ -62,12 +62,12 @@ func serviceCases(t *testing.T, src, method string) map[string]bool {
 // burn-down of the F15 class on Azure (D210), not a green light. Reconciling a
 // bound resource of one of these still errors; wiring ClassifyChange removes it.
 var azureClassifyAllowlist = map[string]bool{
-	"aisearch": true, "apim": true, "azkafka": true, "azurecdn": true, "azurefiles": true,
+	"apim": true, "azkafka": true, "azurecdn": true, "azurefiles": true,
 	"changefeed": true, "containerapps": true, "containerappsjob": true, "cosmos": true,
-	"customroledef": true, "dnszone": true, "eventhubs": true, "flexpostgres": true,
+	"customroledef": true, "dnszone": true, "eventhubs": true,
 	"backupvault":  true, // retention/lock/CMK/region are baked at create — a change is a replacement (D215 default)
 	"frontdoorwaf": true, "keyvault": true, "keyvaultkey": true, "managedidentity": true,
-	"metricalert": true, "portaldash": true, "rediscache": true, "roleassignment": true,
+	"metricalert": true, "portaldash": true, "roleassignment": true,
 	"scheduledquery": true, "servicebustopic": true, "vnet": true, "webtest": true,
 }
 

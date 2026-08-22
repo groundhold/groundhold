@@ -373,3 +373,87 @@ func (d *Driver) rssDelete(region, action, body, pid, what string) *provider.Cre
 	}
 	return nil
 }
+
+// classifyRedshiftServerlessChange decides whether a drift on a Redshift Serverless workgroup
+// is reconciled in place or replaced. Before D1208 redshiftserverless had NO ClassifyChange, so
+// every drift fell to the AWS driver default of "immutable" = replacement. That verdict was
+// being applied to network.publicExposure — and replacing the workgroup tears down the compute
+// endpoint (its address changes, breaking every client), for a knob AWS toggles online.
+//
+// D1208: this is the AWS twin of the Azure flexpostgres/rediscache/aisearch remediations
+// (D1205/D1206/D1207). publiclyAccessible is an UpdateWorkgroup parameter, so a public
+// warehouse is turned private by an in-place update — never a replacement. Everything else
+// stays "immutable" with the honest replacement reason.
+func classifyRedshiftServerlessChange(path string) (string, string) {
+	switch path {
+	case "network.publicExposure":
+		return "mutable", "network.publicExposure is updated in place: publiclyAccessible on the " +
+			"workgroup (UpdateWorkgroup), so a public warehouse is made private without replacing " +
+			"the workgroup (which would tear down its endpoint address)"
+	default:
+		return "immutable", fmt.Sprintf(
+			"Redshift Serverless has no in-place update path for %q — reconciling a drift is a replacement", path)
+	}
+}
+
+// updateRedshiftServerless remediates network.publicExposure in place (D1208): an
+// UpdateWorkgroup that flips publiclyAccessible. Ownership is re-checked by tags first (never
+// touch a workgroup that is not ours), and a gone workgroup is a clean failure distinct from a
+// foreign one. Four-valued: an ambiguous UpdateWorkgroup keeps the deterministic providerID; a
+// terminal 4xx is an honest failure, never a data-losing replacement.
+func (d *Driver) updateRedshiftServerless(capability, environment, providerID string,
+	attrs, impl map[string]any, changes []string) provider.CreateResult {
+	region, name, err := splitRSSProviderID(providerID)
+	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	wg, found, rerr := d.getWorkgroup(region, name)
+	if rerr != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update read gave no answer — reconcile: " + rerr.Error()}
+	}
+	if !found {
+		return provider.CreateResult{Status: "failed", Reason: "workgroup no longer exists — cannot update"}
+	}
+	tags, terr := d.rssTagsFor(region, wg.WorkgroupArn)
+	if terr != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update tag read gave no answer — reconcile: " + terr.Error()}
+	}
+	if !groundholdTagsMatch(tags, capability, environment) {
+		return provider.CreateResult{Status: "failed",
+			Reason: "workgroup tags do not match — refusing to update a resource that is not ours"}
+	}
+
+	for _, path := range changes {
+		switch path {
+		case "network.publicExposure":
+			public, ok := attrs["network.publicExposure"].(bool)
+			if !ok {
+				return provider.CreateResult{Status: "failed", Reason: "network.publicExposure must be a bool"}
+			}
+			body, _ := json.Marshal(map[string]any{"workgroupName": name, "publiclyAccessible": public})
+			st, resp, cerr := d.rssCall(region, "UpdateWorkgroup", string(body))
+			switch {
+			case cerr != nil:
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: fmt.Sprintf("UpdateWorkgroup outcome unknown (may have landed): %v", cerr)}
+			case st == http.StatusOK:
+				// accepted — the workgroup enters MODIFYING and applies the flip
+			case st >= 500:
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: fmt.Sprintf("UpdateWorkgroup HTTP %d (server error — may have landed): %s", st, ecsErr(resp))}
+			default:
+				if r := provider.MutationResult(st, ecsErr(resp), nil, providerID, "UpdateWorkgroup"); r != nil {
+					return *r
+				}
+				return provider.CreateResult{Status: "failed",
+					Reason: fmt.Sprintf("UpdateWorkgroup HTTP %d: %s", st, ecsErr(resp))}
+			}
+		default:
+			return provider.CreateResult{Status: "failed",
+				Reason: "no redshiftserverless in-place mapping for " + path}
+		}
+	}
+	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+}

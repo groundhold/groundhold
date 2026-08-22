@@ -41,8 +41,9 @@ var updateForeignGated = map[string]string{
 	"lambda":               "TestRefusesForeignUpdateLambda",
 	"budgets":              "TestRefusesForeignUpdateBudgets", // D459: found a real bug
 	"ses-inbound":          "TestRefusesForeignUpdateSESInbound",
-	"dynamodb":             "TestRefusesForeignUpdateDynamoDB", // D1004
-	"eventbridgescheduler": "TestRefusesForeignUpdateEBS",      // D1004
+	"dynamodb":             "TestRefusesForeignUpdateDynamoDB",           // D1004
+	"eventbridgescheduler": "TestRefusesForeignUpdateEBS",                // D1004
+	"redshiftserverless":   "TestRefusesForeignUpdateRedshiftServerless", // D1208: publicExposure remediation (AWS twin)
 }
 
 // updateForeignNotApplicable: reviewed, with evidence a test re-derives (D404).

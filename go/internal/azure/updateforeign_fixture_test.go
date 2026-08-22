@@ -103,6 +103,84 @@ func TestRefusesForeignUpdateAzAKS(t *testing.T) {
 		changes: []string{"cluster.version"}})
 }
 
+// TestRefusesForeignUpdateAzBlob (D1200): the publicExposure remediation PATCHes the
+// storage account, whose tags are the ownership boundary — a foreign account is refused
+// with no write (an ARM PATCH to an occupied path would otherwise rewrite it).
+func TestRefusesForeignUpdateAzBlob(t *testing.T) {
+	runAzForeignUpdate(t, azUpdateCase{svc: "blob", cap: "capability.storage.object",
+		server: func(t *testing.T) *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"location":"eastus","sku":{"name":"Standard_ZRS"},` +
+					`"tags":{"groundhold-capability":"someone-else","groundhold-environment":"prod"},` +
+					`"properties":{"provisioningState":"Succeeded"}}`))
+			}))
+		},
+		pid:     blobProviderID(testSub, "rg1", "acct", "assets"),
+		attrs:   map[string]any{"network.publicExposure": false},
+		changes: []string{"network.publicExposure"}})
+}
+
+// TestRefusesForeignUpdateAzFlexServer (D1205): the publicExposure remediation PATCHes the
+// server, whose tags are the ownership boundary — a foreign server is refused with no write
+// (a PATCH turning publicNetworkAccess Disabled on a database that is not ours is exactly the
+// mistake the tag check exists to stop).
+func TestRefusesForeignUpdateAzFlexServer(t *testing.T) {
+	runAzForeignUpdate(t, azUpdateCase{svc: "flexpostgres", cap: "capability.database.relational",
+		server: func(t *testing.T) *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					t.Errorf("update must not %s a foreign-tagged flexible server", r.Method)
+				}
+				_, _ = w.Write([]byte(`{"location":"westeurope",` +
+					`"tags":{"groundhold-capability":"someone-else","groundhold-environment":"prod"},` +
+					`"properties":{"state":"Ready","network":{"publicNetworkAccess":"Enabled"}}}`))
+			}))
+		},
+		pid:     flexProviderID(testSub, "rg1", "someones-db"),
+		attrs:   map[string]any{"network.publicExposure": false},
+		changes: []string{"network.publicExposure"}})
+}
+
+// TestRefusesForeignUpdateAzRedis (D1206): the twin of the flexpostgres remediation. The
+// publicExposure PATCH targets the cache, whose tags are the ownership boundary — a foreign
+// cache is refused with no write.
+func TestRefusesForeignUpdateAzRedis(t *testing.T) {
+	runAzForeignUpdate(t, azUpdateCase{svc: "rediscache", cap: "capability.cache.keyvalue",
+		server: func(t *testing.T) *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					t.Errorf("update must not %s a foreign-tagged cache", r.Method)
+				}
+				_, _ = w.Write([]byte(`{"location":"westeurope",` +
+					`"tags":{"groundhold-capability":"someone-else","groundhold-environment":"prod"},` +
+					`"properties":{"provisioningState":"Succeeded","publicNetworkAccess":"Enabled"}}`))
+			}))
+		},
+		pid:     redisAzureProviderID(testSub, "rg1", "someones-cache"),
+		attrs:   map[string]any{"network.publicExposure": false},
+		changes: []string{"network.publicExposure"}})
+}
+
+// TestRefusesForeignUpdateAzAISearch (D1207): third twin of the flexpostgres remediation. The
+// publicExposure PATCH targets the search service, whose tags are the ownership boundary — a
+// foreign service is refused with no write.
+func TestRefusesForeignUpdateAzAISearch(t *testing.T) {
+	runAzForeignUpdate(t, azUpdateCase{svc: "aisearch", cap: "capability.search.index",
+		server: func(t *testing.T) *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					t.Errorf("update must not %s a foreign-tagged search service", r.Method)
+				}
+				_, _ = w.Write([]byte(`{"location":"westeurope",` +
+					`"tags":{"groundhold-capability":"someone-else","groundhold-environment":"prod"},` +
+					`"properties":{"provisioningState":"succeeded","publicNetworkAccess":"enabled"}}`))
+			}))
+		},
+		pid:     aiSearchProviderID(testSub, "rg1", "someones-search"),
+		attrs:   map[string]any{"network.publicExposure": false},
+		changes: []string{"network.publicExposure"}})
+}
+
 // TestRefusesForeignUpdateAzDNSRecord: the repoint. The evidence is the parent ZONE's
 // tags — the same boundary AWS and GCP drew independently (D408/D420/D449).
 func TestRefusesForeignUpdateAzDNSRecord(t *testing.T) {

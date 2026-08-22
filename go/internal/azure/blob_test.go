@@ -2,10 +2,14 @@ package azure
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"groundhold/internal/provider"
 )
 
 func blobAttrs() map[string]any {
@@ -297,6 +301,343 @@ func TestObserveBlobAnonymousAccess(t *testing.T) {
 	}
 }
 
+// D1204: while an async redundancy migration runs, observe reports durability.class from
+// the STANDING SKU (the redundancy is still that until it converts) AND surfaces a diag
+// that the account is converting — read for free from the same account GET.
+func TestObserveBlobMigrationInProgress(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.SplitN(r.URL.Path, "?", 2)[0]
+		switch {
+		case strings.Contains(path, "/immutabilityPolicies/"):
+			w.WriteHeader(404)
+		case strings.Contains(path, "/containers/"):
+			_, _ = w.Write([]byte(`{"properties":{"publicAccess":"None"}}`))
+		default: // account: LRS, migrating to Standard_ZRS
+			_, _ = w.Write([]byte(`{"location":"eastus","sku":{"name":"Standard_LRS"},` +
+				`"tags":{"groundhold-capability":"assets","groundhold-environment":"prod"},` +
+				`"properties":{"provisioningState":"Succeeded","allowBlobPublicAccess":false,` +
+				`"storageAccountSkuConversionStatus":{"skuConversionStatus":"InProgress","targetSkuName":"Standard_ZRS"}}}`))
+		}
+	}))
+	defer srv.Close()
+	d := vnetTestDriver(t, srv)
+	pid := blobProviderID(d.Subscription, "rg1", "acct", "assets")
+	obs, diags, err := d.observeBlob("assets", pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dur any
+	for _, o := range obs {
+		if o.Path == "durability.class" {
+			dur = o.Value
+		}
+	}
+	if dur != "single-zone" {
+		t.Fatalf("durability.class must stay the standing SKU (single-zone) during migration, got %v", dur)
+	}
+	found := false
+	for _, dg := range diags {
+		if strings.Contains(dg, "migration to regional") && strings.Contains(dg, "IN PROGRESS") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("observe must surface the in-progress migration as a diag, got %v", diags)
+	}
+}
+
+// D1200: updateBlob remediates network.publicExposure in place — PATCH the account's
+// allowBlobPublicAccess (the account-wide gate, set FIRST) then PUT the container's
+// publicAccess. Ownership is re-checked; a foreign account is refused with no write.
+func TestUpdateBlobPublicExposure(t *testing.T) {
+	type req struct {
+		method string
+		gate   *bool  // allowBlobPublicAccess seen on an account PATCH
+		access string // publicAccess seen on a container PUT
+	}
+	newSrv := func(tagCap string, seen *[]req) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path := strings.SplitN(r.URL.Path, "?", 2)[0]
+			isContainer := strings.Contains(path, "/containers/")
+			switch r.Method {
+			case "GET":
+				_, _ = w.Write([]byte(`{"location":"eastus","sku":{"name":"Standard_ZRS"},` +
+					`"tags":{"groundhold-capability":"` + tagCap + `","groundhold-environment":"prod"},` +
+					`"properties":{"provisioningState":"Succeeded"}}`))
+			case "PATCH":
+				body, _ := io.ReadAll(r.Body)
+				var d struct {
+					Properties struct {
+						AllowBlobPublicAccess *bool `json:"allowBlobPublicAccess"`
+					} `json:"properties"`
+				}
+				_ = json.Unmarshal(body, &d)
+				*seen = append(*seen, req{method: "PATCH", gate: d.Properties.AllowBlobPublicAccess})
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded"}}`))
+			case "PUT":
+				if isContainer {
+					body, _ := io.ReadAll(r.Body)
+					var d struct {
+						Properties struct {
+							PublicAccess string `json:"publicAccess"`
+						} `json:"properties"`
+					}
+					_ = json.Unmarshal(body, &d)
+					*seen = append(*seen, req{method: "PUT", access: d.Properties.PublicAccess})
+				}
+				w.WriteHeader(200)
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	}
+
+	falseB := false
+	trueB := true
+	t.Run("remediate public->private (gate false first, then container None)", func(t *testing.T) {
+		var seen []req
+		srv := newSrv("assets", &seen)
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		pid := blobProviderID(d.Subscription, "rg1", "acct", "assets")
+		res := d.updateBlob("assets", "prod", pid, map[string]any{"network.publicExposure": false}, []string{"network.publicExposure"})
+		if res.Status != "succeeded" {
+			t.Fatalf("update: %+v", res)
+		}
+		if len(seen) != 2 || seen[0].method != "PATCH" || seen[0].gate == nil || *seen[0].gate != falseB {
+			t.Fatalf("first write must PATCH allowBlobPublicAccess=false, got %+v", seen)
+		}
+		if seen[1].method != "PUT" || seen[1].access != "None" {
+			t.Fatalf("second write must PUT publicAccess=None, got %+v", seen)
+		}
+	})
+	t.Run("enable private->public", func(t *testing.T) {
+		var seen []req
+		srv := newSrv("assets", &seen)
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		pid := blobProviderID(d.Subscription, "rg1", "acct", "assets")
+		res := d.updateBlob("assets", "prod", pid, map[string]any{"network.publicExposure": true}, []string{"network.publicExposure"})
+		if res.Status != "succeeded" {
+			t.Fatalf("update: %+v", res)
+		}
+		if seen[0].gate == nil || *seen[0].gate != trueB || seen[1].access != "Blob" {
+			t.Fatalf("expected gate=true then publicAccess=Blob, got %+v", seen)
+		}
+	})
+	t.Run("foreign account refused, no write", func(t *testing.T) {
+		var seen []req
+		srv := newSrv("someone-else", &seen)
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		pid := blobProviderID(d.Subscription, "rg1", "acct", "assets")
+		res := d.updateBlob("assets", "prod", pid, map[string]any{"network.publicExposure": false}, []string{"network.publicExposure"})
+		if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
+			t.Fatalf("a foreign account must be refused, got %+v", res)
+		}
+		if len(seen) != 0 {
+			t.Fatalf("a refused update must issue NO write, got %+v", seen)
+		}
+	})
+}
+
+// D1201: updateBlob patches an UNLOCKED retention floor (immutability policy PUT with the
+// policy ETag as If-Match; absent policy created without one) and REFUSES a LOCKED one
+// (WORM — a locked floor is changed explicitly, never by a converge).
+func TestUpdateBlobRetentionMinimum(t *testing.T) {
+	type seen struct {
+		verb    string // "PUT" or "POST-extend"
+		ifMatch string
+		days    *int
+	}
+	// policyState: "Unlocked", "Locked", or "" for a 404 (no policy yet). curDays is the
+	// current floor the policy reports.
+	newSrv := func(policyState string, curDays int, calls *[]seen) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path := strings.SplitN(r.URL.Path, "?", 2)[0]
+			isExtend := strings.HasSuffix(path, "/extend")
+			isImmut := strings.Contains(path, "/immutabilityPolicies/")
+			readDays := func() *int {
+				body, _ := io.ReadAll(r.Body)
+				var d struct {
+					Properties struct {
+						Days *int `json:"immutabilityPeriodSinceCreationInDays"`
+					} `json:"properties"`
+				}
+				_ = json.Unmarshal(body, &d)
+				return d.Properties.Days
+			}
+			switch {
+			case r.Method == "POST" && isExtend:
+				*calls = append(*calls, seen{verb: "POST-extend", ifMatch: r.Header.Get("If-Match"), days: readDays()})
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{"etag":"\"pol-etag-2\"","properties":{"state":"Locked"}}`))
+			case r.Method == "GET" && isImmut:
+				if policyState == "" {
+					w.WriteHeader(404)
+					return
+				}
+				w.Header().Set("ETag", "\"pol-etag-1\"")
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"etag":"\"pol-etag-1\"","properties":{"immutabilityPeriodSinceCreationInDays":%d,"state":"%s"}}`, curDays, policyState)))
+			case r.Method == "GET": // account ownership
+				_, _ = w.Write([]byte(`{"location":"eastus","sku":{"name":"Standard_ZRS"},` +
+					`"tags":{"groundhold-capability":"assets","groundhold-environment":"prod"},` +
+					`"properties":{"provisioningState":"Succeeded"}}`))
+			case r.Method == "PUT" && isImmut:
+				*calls = append(*calls, seen{verb: "PUT", ifMatch: r.Header.Get("If-Match"), days: readDays()})
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{"etag":"\"pol-etag-2\"","properties":{"state":"Unlocked"}}`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	}
+	run := func(policyState string, curDays int, want string) (provider.CreateResult, []seen) {
+		var calls []seen
+		srv := newSrv(policyState, curDays, &calls)
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		pid := blobProviderID(d.Subscription, "rg1", "acct", "assets")
+		return d.updateBlob("assets", "prod", pid, map[string]any{"retention.minimum": want}, []string{"retention.minimum"}), calls
+	}
+
+	t.Run("unlocked -> PUT with If-Match=etag, new days", func(t *testing.T) {
+		res, calls := run("Unlocked", 30, "90d")
+		if res.Status != "succeeded" {
+			t.Fatalf("update: %+v", res)
+		}
+		if len(calls) != 1 || calls[0].verb != "PUT" || calls[0].ifMatch != "\"pol-etag-1\"" || calls[0].days == nil || *calls[0].days != 90 {
+			t.Fatalf("expected PUT with If-Match=pol-etag-1 and days=90, got %+v", calls)
+		}
+	})
+	t.Run("absent -> PUT with no If-Match (create)", func(t *testing.T) {
+		res, calls := run("", 0, "90d")
+		if res.Status != "succeeded" || len(calls) != 1 || calls[0].verb != "PUT" || calls[0].ifMatch != "" || *calls[0].days != 90 {
+			t.Fatalf("expected a create PUT with no If-Match and days=90, got res=%+v calls=%+v", res, calls)
+		}
+	})
+	t.Run("locked + extend -> POST :extend with If-Match, larger days", func(t *testing.T) {
+		res, calls := run("Locked", 30, "90d")
+		if res.Status != "succeeded" {
+			t.Fatalf("extending a locked floor must succeed, got %+v", res)
+		}
+		if len(calls) != 1 || calls[0].verb != "POST-extend" || calls[0].ifMatch != "\"pol-etag-1\"" || *calls[0].days != 90 {
+			t.Fatalf("expected POST :extend with If-Match and days=90, got %+v", calls)
+		}
+	})
+	t.Run("locked + shorten -> refused, no write", func(t *testing.T) {
+		res, calls := run("Locked", 30, "10d")
+		if res.Status != "failed" || !strings.Contains(res.Reason, "EXTENDED") {
+			t.Fatalf("shortening a locked WORM floor must be refused, got %+v", res)
+		}
+		if len(calls) != 0 {
+			t.Fatalf("a refused locked shorten must issue NO write, got %+v", calls)
+		}
+	})
+}
+
+// D1203: durability.class is changed in place. A geo-only change (ZRS<->GZRS, same zone-
+// redundancy) is a synchronous SKU PATCH; a zone-redundancy flip (LRS<->ZRS/GZRS) is an
+// async customer-initiated migration — idempotent against an in-progress one, refusing a
+// conflicting one, never a replacement of the data-bearing account.
+func TestUpdateBlobDurability(t *testing.T) {
+	type ev struct {
+		verb   string // "PATCH-sku" | "POST-migrate"
+		target string
+	}
+	// currentSku is what the account GET reports; migStatus/migTarget model any running
+	// migration (migStatus "" => accountMigrations 404); migPostCode is the startAccountMigration status.
+	newSrv := func(currentSku, migStatus, migTarget string, migPostCode int, seen *[]ev) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path := strings.SplitN(r.URL.Path, "?", 2)[0]
+			readSku := func() string {
+				body, _ := io.ReadAll(r.Body)
+				var d struct {
+					Sku        struct{ Name string } `json:"sku"`
+					Properties struct {
+						TargetSkuName string `json:"targetSkuName"`
+					} `json:"properties"`
+				}
+				_ = json.Unmarshal(body, &d)
+				if d.Sku.Name != "" {
+					return d.Sku.Name
+				}
+				return d.Properties.TargetSkuName
+			}
+			switch {
+			case r.Method == "POST" && strings.HasSuffix(path, "/startAccountMigration"):
+				*seen = append(*seen, ev{verb: "POST-migrate", target: readSku()})
+				w.WriteHeader(migPostCode)
+			case r.Method == "GET" && strings.HasSuffix(path, "/accountMigrations/default"):
+				if migStatus == "" {
+					w.WriteHeader(404)
+					return
+				}
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"properties":{"migrationStatus":"%s","targetSkuName":"%s"}}`, migStatus, migTarget)))
+			case r.Method == "PATCH":
+				*seen = append(*seen, ev{verb: "PATCH-sku", target: readSku()})
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded"}}`))
+			case r.Method == "GET": // account ownership + current SKU
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"location":"eastus","sku":{"name":"%s"},`+
+					`"tags":{"groundhold-capability":"assets","groundhold-environment":"prod"},`+
+					`"properties":{"provisioningState":"Succeeded"}}`, currentSku)))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	}
+	run := func(currentSku, class, migStatus, migTarget string, migPostCode int) (provider.CreateResult, []ev) {
+		var seen []ev
+		srv := newSrv(currentSku, migStatus, migTarget, migPostCode, &seen)
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		pid := blobProviderID(d.Subscription, "rg1", "acct", "assets")
+		return d.updateBlob("assets", "prod", pid, map[string]any{"durability.class": class}, []string{"durability.class"}), seen
+	}
+
+	t.Run("geo-only ZRS->GZRS: synchronous SKU PATCH", func(t *testing.T) {
+		res, seen := run("Standard_ZRS", "multi-regional", "", "", 0)
+		if res.Status != "succeeded" || len(seen) != 1 || seen[0].verb != "PATCH-sku" || seen[0].target != "Standard_GZRS" {
+			t.Fatalf("expected a SKU PATCH to Standard_GZRS, got res=%+v seen=%+v", res, seen)
+		}
+	})
+	t.Run("zone flip LRS->ZRS: async migration (202) -> unknown in-progress", func(t *testing.T) {
+		res, seen := run("Standard_LRS", "regional", "", "", 202)
+		if res.Status != "unknown" || !strings.Contains(res.Reason, "in progress") && !strings.Contains(res.Reason, "initiated") {
+			t.Fatalf("a 202 migration must read unknown-in-progress, got %+v", res)
+		}
+		if len(seen) != 1 || seen[0].verb != "POST-migrate" || seen[0].target != "Standard_ZRS" {
+			t.Fatalf("expected POST-migrate to Standard_ZRS, got %+v", seen)
+		}
+	})
+	t.Run("zone flip, sync 200 -> succeeded", func(t *testing.T) {
+		res, seen := run("Standard_LRS", "regional", "", "", 200)
+		if res.Status != "succeeded" || len(seen) != 1 || seen[0].verb != "POST-migrate" {
+			t.Fatalf("a 200 migration must succeed, got res=%+v seen=%+v", res, seen)
+		}
+	})
+	t.Run("idempotent: migration to same target already in progress -> unknown, no new POST", func(t *testing.T) {
+		res, seen := run("Standard_LRS", "regional", "InProgress", "Standard_ZRS", 202)
+		if res.Status != "unknown" {
+			t.Fatalf("an in-progress migration to our target must read unknown, got %+v", res)
+		}
+		if len(seen) != 0 {
+			t.Fatalf("must NOT start a second migration, got %+v", seen)
+		}
+	})
+	t.Run("conflict: a migration to a different target is running -> refuse", func(t *testing.T) {
+		res, seen := run("Standard_LRS", "regional", "InProgress", "Standard_GZRS", 202)
+		if res.Status != "failed" || !strings.Contains(res.Reason, "already in progress") {
+			t.Fatalf("a conflicting migration must be refused, got %+v", res)
+		}
+		if len(seen) != 0 {
+			t.Fatalf("a refused migration must issue NO POST, got %+v", seen)
+		}
+	})
+}
+
 // TestClassifyBlobChange pins every branch of the pure classifier: WORM/
 // replacement paths, and the default "unsupported" fallback for anything else.
 func TestClassifyBlobChange(t *testing.T) {
@@ -304,9 +645,11 @@ func TestClassifyBlobChange(t *testing.T) {
 		"location.region": "immutable",
 		// D824: Microsoft publishes "Change how a storage account is replicated" — the
 		// redundancy is editable, so a replacement destroys every blob for nothing.
-		"durability.class": "unsupported",
+		// D1203: redundancy changed in place (sync PATCH or async migration).
+		"durability.class": "mutable",
 		// D824: an unlocked policy can be shortened or lengthened, a locked one extended.
-		"retention.minimum": "unsupported",
+		// D1201: an unlocked retention floor is patched in place; locked refused at apply.
+		"retention.minimum": "mutable",
 		"retention.locked":  "immutable",
 		// D824: object replication is a policy Azure applies to accounts that already
 		// exist, so replacing a stateful account was never what it needed.
@@ -314,18 +657,17 @@ func TestClassifyBlobChange(t *testing.T) {
 		"replication.destinationRegion": "unsupported",
 		"versioning.enabled":            "unsupported",
 		"cost.monthly":                  "unsupported",
-		// D1199: anonymous-access remediation is patchable in Azure but not wired here —
-		// unsupported (fail-closed), with a reason that names the gap not the tool.
-		"network.publicExposure": "unsupported",
+		// D1200: anonymous-access remediation is patched in place (updateBlob).
+		"network.publicExposure": "mutable",
 	}
 	for path, want := range cases {
 		if got, reason := classifyBlobChange(path); got != want {
 			t.Errorf("classifyBlobChange(%q) = (%q, %q), want verb %q", path, got, reason, want)
 		}
 	}
-	// the publicExposure gap must name Azure's in-place support (a legible gap, not "no mapping")
+	// the publicExposure mapping must name the patched knobs (legible, not opaque)
 	if _, reason := classifyBlobChange("network.publicExposure"); !strings.Contains(reason, "allowBlobPublicAccess") {
-		t.Errorf("publicExposure classify reason must name the patchable knobs, got %q", reason)
+		t.Errorf("publicExposure classify reason must name the patched knobs, got %q", reason)
 	}
 }
 

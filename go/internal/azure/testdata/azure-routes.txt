@@ -152,6 +152,7 @@ GET	Microsoft.ServiceBus/namespaces/{}/queues/{}
 GET	Microsoft.ServiceBus/namespaces/{}/topics
 GET	Microsoft.Storage/storageAccounts
 GET	Microsoft.Storage/storageAccounts/{}
+GET	Microsoft.Storage/storageAccounts/{}/accountMigrations/{}
 GET	Microsoft.Storage/storageAccounts/{}/blobServices/{}/containers
 GET	Microsoft.Storage/storageAccounts/{}/blobServices/{}/containers/{}
 GET	Microsoft.Storage/storageAccounts/{}/blobServices/{}/containers/{}/immutabilityPolicies/{}
@@ -159,12 +160,17 @@ GET	Microsoft.Storage/storageAccounts/{}/fileServices/{}/shares
 GET	Microsoft.Storage/storageAccounts/{}/managementPolicies/{}
 GET	Microsoft.Storage/storageAccounts/{}/objectReplicationPolicies
 GET	P/x
+PATCH	Microsoft.Cache/Redis/{}
 PATCH	Microsoft.DBforPostgreSQL/flexibleServers/{}
+PATCH	Microsoft.DBforPostgreSQL/flexibleServers/{}/configurations/{}
 PATCH	Microsoft.DocumentDB/databaseAccounts/{}
 PATCH	Microsoft.KeyVault/vaults/{}
 PATCH	Microsoft.OperationalInsights/workspaces/{}
+PATCH	Microsoft.Search/searchServices/{}
 PATCH	Microsoft.Storage/storageAccounts/{}
+POST	Microsoft.Storage/storageAccounts/{}/blobServices/{}/containers/{}/immutabilityPolicies/{}/extend
 POST	Microsoft.Storage/storageAccounts/{}/blobServices/{}/containers/{}/immutabilityPolicies/{}/lock
+POST	Microsoft.Storage/storageAccounts/{}/startAccountMigration
 PUT	Microsoft.ApiManagement/service/{}
 PUT	Microsoft.App/containerApps/{}
 PUT	Microsoft.App/jobs/{}

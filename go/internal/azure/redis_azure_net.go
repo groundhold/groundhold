@@ -250,3 +250,103 @@ func (d *Driver) regionLogicalZones(region string) (zones []string, known bool) 
 	}
 	return zones, known
 }
+
+// classifyRedisAzureChange decides whether a drift on a Cache for Redis is reconciled in
+// place or replaced. Before D1206 rediscache had NO ClassifyChange, so every drift fell to
+// the driver default of "immutable" = replacement — and replacing a cache does not just lose
+// its data, it mints a new hostname and access keys, breaking every client. That verdict was
+// being applied to network.publicExposure, so the plan for "make this public cache private"
+// was "destroy it and rebuild". D1206: publicNetworkAccess is Enabled/Disabled in
+// RedisUpdateProperties (via RedisCommonProperties, not readOnly in the 2023-08-01 swagger),
+// so a public cache is turned private by a PATCH — never a replacement. This mirrors the
+// flexpostgres remediation (D1205); the twin was found by sweeping the siblings.
+func classifyRedisAzureChange(path string) (string, string) {
+	switch path {
+	case "network.publicExposure":
+		return "mutable", "network.publicExposure is patched in place: publicNetworkAccess " +
+			"Enabled/Disabled on the cache, so a public cache is made private without replacing " +
+			"it (which would destroy its data and rotate its hostname and keys)"
+	case "encryption.inTransit":
+		// D1209: inTransit is observed as !enableNonSslPort, and enableNonSslPort is patchable
+		// (RedisCommonProperties, not readOnly). So enforcing TLS on a cache that was accepting
+		// plaintext is a PATCH that closes the non-SSL port — never a replacement.
+		return "mutable", "encryption.inTransit is patched in place: enableNonSslPort on the " +
+			"cache, so a cache accepting plaintext is closed to the non-SSL port without replacing it"
+	default:
+		return "immutable", fmt.Sprintf(
+			"Cache for Redis has no in-place update path for %q — reconciling a drift is a replacement", path)
+	}
+}
+
+// updateRedisAzure remediates the cache's online-patchable security knobs in place:
+// network.publicExposure via publicNetworkAccess (D1206) and encryption.inTransit via
+// enableNonSslPort (D1209). Ownership is re-checked by tags first (never patch a cache that is
+// not ours). Four-valued via patchSetting: an ambiguous PATCH keeps the deterministic
+// providerID, a terminal 4xx is an honest unknown, never a data-losing replacement.
+func (d *Driver) updateRedisAzure(capability, environment, providerID string,
+	attrs map[string]any, changes []string) provider.CreateResult {
+	sub, rg, name, err := splitRedisAzureProviderID(providerID)
+	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if sub != d.Subscription && d.Subscription != "" {
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("providerId subscription %q is not the driver's", sub)}
+	}
+	rURL, _ := d.armURL(rg, d.redisPath(name), redisAPIVersion)
+	st, resp, e := d.doARM("GET", rURL, nil)
+	if e != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update read gave no answer — reconcile: " + azReadWhy(st, resp, e)}
+	}
+	if st == http.StatusNotFound {
+		return provider.CreateResult{Status: "failed", Reason: "cache no longer exists — cannot update"}
+	}
+	if st != http.StatusOK {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: fmt.Sprintf("pre-update read HTTP %d — reconcile", st)}
+	}
+	var doc redisAzureDoc
+	if json.Unmarshal(resp, &doc) != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update read answered HTTP 200 with an unparseable body — reconcile"}
+	}
+	if doc.Tags["groundhold-capability"] != sanitizeAzTag(capability) ||
+		doc.Tags["groundhold-environment"] != sanitizeAzTag(environment) {
+		return provider.CreateResult{Status: "failed",
+			Reason: "cache tags do not match — refusing to patch a resource that is not ours"}
+	}
+
+	for _, path := range changes {
+		switch path {
+		case "network.publicExposure":
+			public, ok := attrs["network.publicExposure"].(bool)
+			if !ok {
+				return provider.CreateResult{Status: "failed", Reason: "network.publicExposure must be a bool"}
+			}
+			access := "Disabled"
+			if public {
+				access = "Enabled"
+			}
+			body, _ := json.Marshal(map[string]any{"properties": map[string]any{"publicNetworkAccess": access}})
+			if r := d.patchSetting(rURL, body, providerID, "cache publicNetworkAccess"); r != nil {
+				return *r
+			}
+		case "encryption.inTransit":
+			inTransit, ok := attrs["encryption.inTransit"].(bool)
+			if !ok {
+				return provider.CreateResult{Status: "failed", Reason: "encryption.inTransit must be a bool"}
+			}
+			// inTransit is observed as !enableNonSslPort: TLS-only means the non-SSL port is
+			// closed. Patch enableNonSslPort to agree with the contract.
+			body, _ := json.Marshal(map[string]any{"properties": map[string]any{"enableNonSslPort": !inTransit}})
+			if r := d.patchSetting(rURL, body, providerID, "cache enableNonSslPort"); r != nil {
+				return *r
+			}
+		default:
+			return provider.CreateResult{Status: "failed",
+				Reason: "no azure rediscache in-place mapping for " + path}
+		}
+	}
+	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+}

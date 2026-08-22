@@ -256,6 +256,14 @@ func (d *Driver) putSetting(url string, body []byte, pid, what string) *provider
 	return terminalOr(st, resp, err, pid, what)
 }
 
+// patchSetting PATCHes a partial property update onto a resource the caller has ALREADY
+// ownership-checked (a PATCH leaves untouched properties alone). Four-valued via
+// terminalOr; nil on success.
+func (d *Driver) patchSetting(url string, body []byte, pid, what string) *provider.CreateResult {
+	st, resp, err := d.doARM("PATCH", url, body)
+	return terminalOr(st, resp, err, pid, what)
+}
+
 // azErrCode extracts the normalized error code from an Azure JSON error body:
 // {"error":{"code":"TooManyRequests","message":"..."}}. Empty when unparseable.
 func azErrCode(body []byte) string {
@@ -318,6 +326,12 @@ type blobAccountDoc struct {
 		Encryption            struct {
 			KeySource string `json:"keySource"`
 		} `json:"encryption"`
+		// D1204: an in-progress redundancy migration is reported on the account itself,
+		// so observe surfaces it for FREE from this same GET (no accountMigrations read).
+		StorageAccountSkuConversionStatus struct {
+			SkuConversionStatus string `json:"skuConversionStatus"`
+			TargetSkuName       string `json:"targetSkuName"`
+		} `json:"storageAccountSkuConversionStatus"`
 	} `json:"properties"`
 }
 
@@ -363,6 +377,19 @@ func (d *Driver) observeBlob(capability, providerID string) ([]provider.Observat
 		obs = append(obs, provider.Observation{Path: "durability.class", Value: "regional", Derivation: "measured"})
 	case "Standard_GZRS":
 		obs = append(obs, provider.Observation{Path: "durability.class", Value: "multi-regional", Derivation: "measured"})
+	}
+	// D1204: durability.class is MEASURED from the standing SKU, which stays the OLD value
+	// during an async redundancy migration (up to 72h). Surface the in-progress conversion —
+	// read for free from this same account GET — so a read (observe/verify/posture) shows the
+	// account is CONVERTING, not that the change silently failed to take. The value stays the
+	// current SKU's class (honest: the redundancy IS still that until the migration completes).
+	if cs := doc.Properties.StorageAccountSkuConversionStatus; cs.SkuConversionStatus == "InProgress" {
+		tgt := blobSkuDurability(cs.TargetSkuName)
+		if tgt == "" {
+			tgt = cs.TargetSkuName
+		}
+		diags = append(diags, fmt.Sprintf("durability.class: a redundancy migration to %s is IN PROGRESS "+
+			"(async, up to 72h) — the value above is the standing SKU and converts when the migration completes", tgt))
 	}
 	// network.publicExposure (D1198, owner decision): for capability.storage.object this
 	// is ANONYMOUS DATA ACCESS — the same question AWS S3 answers, and the GDPR/data-
@@ -412,6 +439,24 @@ func (d *Driver) observeBlob(capability, providerID string) ([]provider.Observat
 // period reverse-maps to retention.minimum (a day-granular duration floor), and
 // the policy state (Locked vs Unlocked) reverse-maps to retention.locked (the
 // WORM guarantee vs a soft, shortenable floor).
+// blobSkuZonal reports whether a storage SKU is ZONE-redundant (ZRS/GZRS). Flipping this
+// dimension (LRS<->ZRS/GZRS) needs a customer-initiated migration; a change that keeps it
+// (ZRS<->GZRS, only the geo dimension moving) is a synchronous SKU PATCH.
+func blobSkuZonal(sku string) bool { return strings.Contains(sku, "ZRS") }
+
+// blobSkuDurability reverse-maps a storage SKU to a durability.class ("" if unrecognized).
+func blobSkuDurability(sku string) string {
+	switch sku {
+	case "Standard_LRS":
+		return "single-zone"
+	case "Standard_ZRS":
+		return "regional"
+	case "Standard_GZRS":
+		return "multi-regional"
+	}
+	return ""
+}
+
 // blobContainerPublicAccess reads the container's anonymous-access level (None / Blob /
 // Container) from its ARM properties. known=false when the container was unreadable, so
 // the caller withholds rather than fabricating "private". Azure omits publicAccess for a
@@ -599,24 +644,26 @@ func classifyBlobChange(path string) (string, string) {
 		// read-access settings are changed from the portal, PowerShell or the CLI, and
 		// LRS→ZRS has a documented conversion (Start-AzStorageAccountMigration). Replacing
 		// a storage account to change this destroys every blob in it.
-		return "unsupported", "in-place redundancy change is not wired for the blob driver " +
-			"in this slice — Azure does support it (the geo-redundancy and read-access " +
-			"settings are editable, and LRS→ZRS has a conversion path, with limits for ZRS " +
-			"Classic and NFSv3 accounts), so this is a gap in groundhold rather than a reason " +
-			"to replace the account and its data"
+		// D1203: redundancy is changed in place, no account replacement. A geo-only change
+		// that keeps the zone-redundancy (ZRS<->GZRS) is a synchronous SKU PATCH; a change
+		// that flips the zone-redundancy (LRS<->ZRS/GZRS) is a customer-initiated MIGRATION
+		// (POST startAccountMigration, async up to 72h), reported unknown-in-progress until
+		// it completes. So `mutable`; the update sorts the two and never replaces the data.
+		return "mutable", "redundancy is changed in place: a geo-only change (ZRS<->GZRS) is a " +
+			"synchronous SKU PATCH; a zone-redundancy change (LRS<->ZRS/GZRS) is an async " +
+			"customer-initiated migration reported in-progress until it converts"
 	case "retention.locked":
 		return "immutable", "locking an immutability policy is irreversible — a WORM floor " +
 			"cannot be unlocked, so removing the lock is a replacement"
 	case "retention.minimum":
-		// D824: this shared a case with retention.locked and inherited its verdict, but the
-		// two are not the same claim — the sentence even said the floor "can only be
-		// extended", which is a change. Microsoft: "You can modify an unlocked time-based
-		// retention policy to shorten or lengthen the retention interval", and a locked one
-		// can be extended (az storage container immutability-policy extend).
-		return "unsupported", "in-place retention-floor change is not wired for the blob " +
-			"driver in this slice — Azure does support it (an unlocked policy can be " +
-			"shortened or lengthened, a locked one extended), so this is a gap in groundhold " +
-			"rather than a reason to replace the account and its data"
+		// D1201/D1202: the immutability floor is patched in place. An UNLOCKED policy is a
+		// plain PUT with the policy's ETag as If-Match (shorten or lengthen). A LOCKED WORM
+		// floor is a one-way ratchet: it can only be EXTENDED, via a dedicated POST :extend
+		// with If-Match, and a request to shorten it is REFUSED at apply (acting would breach
+		// the compliance guarantee the lock exists to make). So `mutable`, with the locked
+		// shorten fenced off in the update — the AKS apiExposure shape.
+		return "mutable", "the retention floor is patched in place: an unlocked policy PUT, a " +
+			"locked policy EXTENDED (increase-only) via :extend; a locked shorten is refused"
 	case "replication.enabled", "replication.destinationRegion":
 		// D824: the reason already said this was about the DRIVER, not about Azure — and
 		// `immutable` still made the plan destroy a stateful account. Object replication is
@@ -626,20 +673,241 @@ func classifyBlobChange(path string) (string, string) {
 			"blob driver — Azure configures it as a policy on existing accounts, so this is " +
 			"a gap in groundhold rather than a reason to replace the account and its data"
 	case "network.publicExposure":
-		// D1199: since D1198 this is anonymous access — allowBlobPublicAccess on the
-		// account and the container's publicAccess, BOTH patchable in place (a PATCH to
-		// the account, a PUT of the container's publicAccess). So remediating a public
-		// blob to private is an ONLINE change Azure supports; groundhold has not wired the
-		// blob update path yet, so it is `unsupported` (fail-closed — never a silent no-op,
-		// and never a reason to replace the account and destroy its data). Documented like
-		// the retention/replication gaps (D824) so the reason names the gap, not the tool.
-		return "unsupported", "in-place remediation of network.publicExposure is not wired for " +
-			"the blob driver — Azure supports it online (allowBlobPublicAccess and the container's " +
-			"publicAccess are both patchable), so this is a gap in groundhold rather than a reason " +
-			"to replace the account and its data"
+		// D1200: anonymous access (D1198) is remediated ONLINE — a PATCH of the account's
+		// allowBlobPublicAccess (the account-wide gate) and a PUT of the container's
+		// publicAccess, both in place. So a discovered public blob converges to private
+		// without replacing the account or destroying its data. D1199 recorded this as a
+		// gap; updateBlob now closes it.
+		return "mutable", "network.publicExposure is patched in place: allowBlobPublicAccess on " +
+			"the account and the container's publicAccess"
 	default:
 		return "unsupported", "no azure blob in-place mapping for " + path
 	}
+}
+
+// updateBlob remediates network.publicExposure in place (D1200): a PATCH of the
+// account's allowBlobPublicAccess (the account-wide anonymous-access gate) and a PUT of
+// the container's publicAccess. Ownership re-checked first (never patch a foreign
+// account); four-valued (an ambiguous PATCH/PUT keeps the pid). Going to PRIVATE sets the
+// account gate false FIRST — the account-wide lock lands before the container edit, so
+// there is no window where the container is public with the gate already opened.
+func (d *Driver) updateBlob(capability, environment, providerID string,
+	attrs map[string]any, changes []string) provider.CreateResult {
+	sub, rg, account, container, err := splitBlobProviderID(providerID)
+	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if sub != d.Subscription && d.Subscription != "" {
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("providerId subscription %q is not the driver's", sub)}
+	}
+	acctURL, _ := d.armURL(rg, d.acctPath(account), storageAPIVersion)
+	st, resp, e := d.doARM("GET", acctURL, nil)
+	if e != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update read gave no answer — reconcile: " + azReadWhy(st, resp, e)}
+	}
+	if st == http.StatusNotFound {
+		return provider.CreateResult{Status: "failed", Reason: "storage account no longer exists — cannot update"}
+	}
+	if st != http.StatusOK {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: fmt.Sprintf("pre-update read HTTP %d — reconcile", st)}
+	}
+	var doc blobAccountDoc
+	if json.Unmarshal(resp, &doc) != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update read answered HTTP 200 with an unparseable body — reconcile"}
+	}
+	if doc.Tags["groundhold-capability"] != sanitizeAzTag(capability) ||
+		doc.Tags["groundhold-environment"] != sanitizeAzTag(environment) {
+		return provider.CreateResult{Status: "failed",
+			Reason: "storage account tags do not match — refusing to patch a resource that is not ours"}
+	}
+
+	for _, path := range changes {
+		switch path {
+		case "network.publicExposure":
+			public, ok := attrs["network.publicExposure"].(bool)
+			if !ok {
+				return provider.CreateResult{Status: "failed", Reason: "network.publicExposure must be a bool"}
+			}
+			// (1) the account gate — allowBlobPublicAccess. false blocks all anonymous
+			// access account-wide (the definitive lock); a PATCH leaves other properties alone.
+			acctBody, _ := json.Marshal(map[string]any{"properties": map[string]any{"allowBlobPublicAccess": public}})
+			if r := d.patchSetting(acctURL, acctBody, providerID, "account allowBlobPublicAccess"); r != nil {
+				return *r
+			}
+			// (2) the container grant — publicAccess, set to agree with the gate.
+			pubAccess := "None"
+			if public {
+				pubAccess = "Blob"
+			}
+			cURL, _ := d.armURL(rg, d.acctPath(account)+"/blobServices/default/containers/"+container, storageAPIVersion)
+			cBody, _ := json.Marshal(map[string]any{"properties": map[string]any{"publicAccess": pubAccess}})
+			if r := d.putSetting(cURL, cBody, providerID, "container publicAccess"); r != nil {
+				return *r
+			}
+		case "retention.minimum":
+			// D1201: patch an UNLOCKED immutability floor; REFUSE a locked one (WORM).
+			days, derr := durationDays(attrs["retention.minimum"])
+			if derr != nil {
+				return provider.CreateResult{Status: "failed", Reason: "retention.minimum: " + derr.Error()}
+			}
+			if days <= 0 {
+				return provider.CreateResult{Status: "failed",
+					Reason: "in-place removal of a retention floor (retention.minimum -> 0/absent) is not wired " +
+						"in this subset — refusing rather than silently dropping a compliance floor"}
+			}
+			ipURL, _ := d.armURL(rg,
+				d.acctPath(account)+"/blobServices/default/containers/"+container+"/immutabilityPolicies/default", storageAPIVersion)
+			gst, gresp, ge := d.doARM("GET", ipURL, nil)
+			if ge != nil {
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: "pre-update immutability read gave no answer — reconcile: " + azReadWhy(gst, gresp, ge)}
+			}
+			etag := ""
+			handled := false
+			switch {
+			case gst == http.StatusOK:
+				var cur struct {
+					Properties struct {
+						Days  *int   `json:"immutabilityPeriodSinceCreationInDays"`
+						State string `json:"state"`
+					} `json:"properties"`
+				}
+				if json.Unmarshal(gresp, &cur) != nil {
+					return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+						Reason: "immutability policy read answered 200 with an unparseable body — reconcile"}
+				}
+				if cur.Properties.State == "Locked" {
+					// D1202: a LOCKED WORM floor can only be EXTENDED (increased), via a
+					// dedicated POST :extend with If-Match — never a plain PUT, never a
+					// shorten. A request to shorten (or leave equal) is refused: WORM is a
+					// one-way ratchet, so acting would either fail at the API or breach the
+					// compliance guarantee the lock exists to make.
+					curDays := int64(0)
+					if cur.Properties.Days != nil {
+						curDays = int64(*cur.Properties.Days)
+					}
+					if days <= curDays {
+						return provider.CreateResult{Status: "failed",
+							Reason: fmt.Sprintf("retention.minimum on a LOCKED immutability policy (WORM) can only be "+
+								"EXTENDED, never shortened — requested %dd is not greater than the locked floor of %dd; refusing", days, curDays)}
+					}
+					extURL, _ := d.armURL(rg, d.acctPath(account)+
+						"/blobServices/default/containers/"+container+"/immutabilityPolicies/default/extend", storageAPIVersion)
+					extBody, _ := json.Marshal(map[string]any{
+						"properties": map[string]any{"immutabilityPeriodSinceCreationInDays": days}})
+					est, eresp, ee := d.doARMIfMatch("POST", extURL, extBody, jsonEtag(gresp))
+					if r := terminalOr(est, eresp, ee, providerID, "immutability-extend"); r != nil {
+						return *r
+					}
+					handled = true
+				} else {
+					etag = jsonEtag(gresp) // an unlocked policy edit is a CAS — ARM requires If-Match
+				}
+			case gst == http.StatusNotFound:
+				// no policy yet — create it (no If-Match)
+			default:
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: fmt.Sprintf("pre-update immutability read HTTP %d — reconcile", gst)}
+			}
+			if !handled { // Unlocked edit or fresh create — a plain PUT
+				body, _ := json.Marshal(map[string]any{
+					"properties": map[string]any{"immutabilityPeriodSinceCreationInDays": days}})
+				var pst int
+				var presp []byte
+				var pe error
+				if etag != "" {
+					pst, presp, pe = d.doARMIfMatch("PUT", ipURL, body, etag)
+				} else {
+					pst, presp, pe = d.doARM("PUT", ipURL, body)
+				}
+				if r := terminalOr(pst, presp, pe, providerID, "immutability-policy"); r != nil {
+					return *r
+				}
+			}
+		case "durability.class":
+			// D1203: change redundancy in place — never a replacement of a data-bearing
+			// account. A geo-only change that keeps zone-redundancy (ZRS<->GZRS) is a
+			// synchronous SKU PATCH; a change that flips zone-redundancy (LRS<->ZRS/GZRS)
+			// is an async customer-initiated migration (up to 72h), reported in-progress.
+			cls, _ := attrs["durability.class"].(string)
+			target := ""
+			switch cls {
+			case "single-zone":
+				target = "Standard_LRS"
+			case "regional":
+				target = "Standard_ZRS"
+			case "multi-regional":
+				target = "Standard_GZRS"
+			default:
+				return provider.CreateResult{Status: "failed",
+					Reason: fmt.Sprintf("durability.class %q has no Azure SKU mapping", cls)}
+			}
+			current := doc.Sku.Name // from the ownership pre-read above
+			if current == target {
+				break // already at the target SKU — nothing to do for this change
+			}
+			if blobSkuZonal(current) == blobSkuZonal(target) {
+				// geo-only change (ZRS<->GZRS): a synchronous SKU PATCH, no migration.
+				skuBody, _ := json.Marshal(map[string]any{"sku": map[string]any{"name": target}})
+				if r := d.patchSetting(acctURL, skuBody, providerID, "storage account SKU"); r != nil {
+					return *r
+				}
+				break
+			}
+			// zone-redundancy change: a customer-initiated migration. Idempotency first —
+			// a converge must not start a SECOND migration while one is already running.
+			migURL, _ := d.armURL(rg, d.acctPath(account)+"/accountMigrations/default", storageAPIVersion)
+			mst, mresp, me := d.doARM("GET", migURL, nil)
+			if me != nil {
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: "pre-migration read gave no answer — reconcile: " + azReadWhy(mst, mresp, me)}
+			}
+			if mst == http.StatusOK {
+				var cur struct {
+					Properties struct {
+						MigrationStatus string `json:"migrationStatus"`
+						TargetSkuName   string `json:"targetSkuName"`
+					} `json:"properties"`
+				}
+				_ = json.Unmarshal(mresp, &cur)
+				if cur.Properties.MigrationStatus == "SubmittedForConversion" || cur.Properties.MigrationStatus == "InProgress" {
+					if cur.Properties.TargetSkuName == target {
+						return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+							Reason: fmt.Sprintf("a redundancy migration to %s is already in progress (async, up to 72h) — reconcile confirms when it converts", target)}
+					}
+					return provider.CreateResult{Status: "failed",
+						Reason: fmt.Sprintf("a redundancy migration to %s is already in progress; refusing to start a second migration to %s", cur.Properties.TargetSkuName, target)}
+				}
+			}
+			// no active migration — initiate it.
+			startURL, _ := d.armURL(rg, d.acctPath(account)+"/startAccountMigration", storageAPIVersion)
+			startBody, _ := json.Marshal(map[string]any{"properties": map[string]any{"targetSkuName": target}})
+			sst, sresp, se := d.doARM("POST", startURL, startBody)
+			switch {
+			case se != nil:
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: fmt.Sprintf("startAccountMigration to %s outcome unknown (may have started): %v", target, se)}
+			case sst == http.StatusOK:
+				// synchronous completion (a small account) — the SKU is converted.
+			case sst == http.StatusAccepted:
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: fmt.Sprintf("redundancy migration to %s initiated (async, up to 72h) — reconcile confirms when the SKU converts", target)}
+			default:
+				if r := terminalOr(sst, sresp, se, providerID, "startAccountMigration"); r != nil {
+					return *r
+				}
+			}
+		default:
+			// classifyBlobChange gates this (unsupported/immutable), so a reviewed plan
+			// never reaches here — refuse honestly rather than silently no-op.
+			return provider.CreateResult{Status: "failed", Reason: "no in-place azure blob mapping for " + path}
+		}
+	}
+	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
 }
 
 func (d *Driver) deleteBlob(capability, environment, providerID string) provider.CreateResult {

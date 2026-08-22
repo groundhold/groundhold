@@ -329,6 +329,7 @@ redshift-serverless	POST	/?Op=GetNamespace
 redshift-serverless	POST	/?Op=GetWorkgroup
 redshift-serverless	POST	/?Op=ListTagsForResource
 redshift-serverless	POST	/?Op=ListWorkgroups
+redshift-serverless	POST	/?Op=UpdateWorkgroup
 route53	DELETE	/2013-04-01/healthcheck/hc-123
 route53	DELETE	/2013-04-01/hostedzone/Z123ABC
 route53	GET	/2013-04-01/healthcheck

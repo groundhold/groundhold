@@ -73,7 +73,7 @@ var classifyChangeAllowlist = map[string]bool{
 	"ecs": true, "efs": true, "elasticache": true,
 	"iam": true, "kinesis": true, "kms": true, "msk": true,
 	// lambda now wires ClassifyChange (timeout.maximum + network.publicExposure patch in place)
-	"opensearch": true, "redshiftserverless": true, "rolepolicy": true, "route53": true,
+	"opensearch": true, "rolepolicy": true, "route53": true,
 	"route53health": true, // route53record now wires ClassifyChange (dns.target repoints in place)
 	"vpc":           true, "vpngateway": true, "waf": true,
 }

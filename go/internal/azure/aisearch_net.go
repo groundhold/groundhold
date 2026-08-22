@@ -165,3 +165,86 @@ func (d *Driver) deleteAISearch(capability, environment, providerID string) prov
 	// timeout.
 	return *d.deleteAndConfirm(url, providerID, "cognitive search")
 }
+
+// classifyAISearchChange decides whether a drift on a Cognitive/AI Search service is
+// reconciled in place or replaced. Before D1207 aisearch had NO ClassifyChange, so every
+// drift fell to the driver default of "immutable" = replacement — and replacing a search
+// service destroys every index it holds. That verdict was being applied to
+// network.publicExposure, so the plan for "make this public search service private" was
+// "drop it and re-index from scratch". D1207: publicNetworkAccess (enabled/disabled) is in
+// SearchServiceUpdate.properties (SearchServiceProperties, not readOnly in the 2023-11-01
+// swagger), so a public service is turned private by a PATCH — never a replacement. The third
+// twin of the flexpostgres/rediscache remediation (D1205/D1206), found by sweeping siblings.
+func classifyAISearchChange(path string) (string, string) {
+	switch path {
+	case "network.publicExposure":
+		return "mutable", "network.publicExposure is patched in place: publicNetworkAccess " +
+			"enabled/disabled on the service, so a public search service is made private without " +
+			"replacing it (which would destroy every index)"
+	default:
+		return "immutable", fmt.Sprintf(
+			"Cognitive Search has no in-place update path for %q — reconciling a drift is a replacement", path)
+	}
+}
+
+// updateAISearch remediates network.publicExposure in place (D1207): a PATCH of the service's
+// publicNetworkAccess. Ownership is re-checked by tags first (never patch a service that is not
+// ours). Four-valued via patchSetting: an ambiguous PATCH keeps the deterministic providerID, a
+// terminal 4xx is an honest unknown, never a data-losing replacement. The enum is lowercase
+// (enabled/disabled) — the casing the Search API and this driver's observe/build already use.
+func (d *Driver) updateAISearch(capability, environment, providerID string,
+	attrs map[string]any, changes []string) provider.CreateResult {
+	sub, rg, name, err := splitAISearchProviderID(providerID)
+	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if sub != d.Subscription && d.Subscription != "" {
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("providerId subscription %q is not the driver's", sub)}
+	}
+	url, _ := d.armURL(rg, d.aiSearchPath(name), searchAPIVersion)
+	st, resp, e := d.doARM("GET", url, nil)
+	if e != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update read gave no answer — reconcile: " + azReadWhy(st, resp, e)}
+	}
+	if st == http.StatusNotFound {
+		return provider.CreateResult{Status: "failed", Reason: "search service no longer exists — cannot update"}
+	}
+	if st != http.StatusOK {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: fmt.Sprintf("pre-update read HTTP %d — reconcile", st)}
+	}
+	var doc aiSearchDoc
+	if json.Unmarshal(resp, &doc) != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update read answered HTTP 200 with an unparseable body — reconcile"}
+	}
+	if doc.Tags["groundhold-capability"] != sanitizeAzTag(capability) ||
+		doc.Tags["groundhold-environment"] != sanitizeAzTag(environment) {
+		return provider.CreateResult{Status: "failed",
+			Reason: "search service tags do not match — refusing to patch a resource that is not ours"}
+	}
+
+	for _, path := range changes {
+		switch path {
+		case "network.publicExposure":
+			public, ok := attrs["network.publicExposure"].(bool)
+			if !ok {
+				return provider.CreateResult{Status: "failed", Reason: "network.publicExposure must be a bool"}
+			}
+			access := "disabled"
+			if public {
+				access = "enabled"
+			}
+			body, _ := json.Marshal(map[string]any{"properties": map[string]any{"publicNetworkAccess": access}})
+			if r := d.patchSetting(url, body, providerID, "search publicNetworkAccess"); r != nil {
+				return *r
+			}
+		default:
+			return provider.CreateResult{Status: "failed",
+				Reason: "no azure aisearch in-place mapping for " + path}
+		}
+	}
+	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+}

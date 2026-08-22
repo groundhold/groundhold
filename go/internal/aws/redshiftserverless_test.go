@@ -1,6 +1,8 @@
 package aws
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -382,4 +384,78 @@ func TestAdoptsExistingRedshiftServerless(t *testing.T) {
 		AllowedMutations: 2, // the two refused creates — namespace and workgroup
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
+
+// D1208: updateRedshiftServerless remediates network.publicExposure in place — an
+// UpdateWorkgroup that flips publiclyAccessible, so a public warehouse is made private WITHOUT
+// replacing the workgroup (which would tear down its endpoint address). Ownership re-checked by
+// tags; foreign refused with no UpdateWorkgroup.
+func TestUpdateRedshiftServerlessPublicExposure(t *testing.T) {
+	name := RSSName("prod", "lake", 1)
+	newSrv := func(capLabel string, seen *[]bool) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch rssAction(r) {
+			case "GetWorkgroup":
+				_, _ = w.Write([]byte(`{"workgroup":{"workgroupName":"` + name + `","workgroupArn":"arn:wg",` +
+					`"namespaceName":"n","status":"AVAILABLE","publiclyAccessible":true}}`))
+			case "ListTagsForResource":
+				_, _ = w.Write([]byte(`{"tags":[{"key":"groundhold-capability","value":"` + capLabel +
+					`"},{"key":"groundhold-environment","value":"prod"}]}`))
+			case "UpdateWorkgroup":
+				body, _ := io.ReadAll(r.Body)
+				var d struct {
+					PubliclyAccessible bool `json:"publiclyAccessible"`
+				}
+				_ = json.Unmarshal(body, &d)
+				*seen = append(*seen, d.PubliclyAccessible)
+				_, _ = w.Write([]byte(`{"workgroup":{"workgroupName":"` + name + `","status":"MODIFYING","publiclyAccessible":false}}`))
+			default:
+				t.Errorf("unexpected action %q", rssAction(r))
+				w.WriteHeader(400)
+			}
+		}))
+	}
+
+	t.Run("remediate public->private (UpdateWorkgroup publiclyAccessible=false)", func(t *testing.T) {
+		var seen []bool
+		srv := newSrv("lake", &seen)
+		defer srv.Close()
+		d := rssDriver(t, srv)
+		pid := rssProviderID("eu-central-1", name)
+		res := d.updateRedshiftServerless("lake", "prod", pid,
+			map[string]any{"network.publicExposure": false}, nil, []string{"network.publicExposure"})
+		if res.Status != "succeeded" {
+			t.Fatalf("update: %+v", res)
+		}
+		if len(seen) != 1 || seen[0] != false {
+			t.Fatalf("must UpdateWorkgroup publiclyAccessible=false, got %+v", seen)
+		}
+	})
+
+	t.Run("foreign workgroup refused, no UpdateWorkgroup", func(t *testing.T) {
+		var seen []bool
+		srv := newSrv("someone-else", &seen)
+		defer srv.Close()
+		d := rssDriver(t, srv)
+		pid := rssProviderID("eu-central-1", name)
+		res := d.updateRedshiftServerless("lake", "prod", pid,
+			map[string]any{"network.publicExposure": false}, nil, []string{"network.publicExposure"})
+		if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
+			t.Fatalf("a foreign workgroup must be refused, got %+v", res)
+		}
+		if len(seen) != 0 {
+			t.Fatalf("a refused update must issue NO UpdateWorkgroup, got %+v", seen)
+		}
+	})
+}
+
+func TestClassifyRedshiftServerlessChange(t *testing.T) {
+	if got, _ := classifyRedshiftServerlessChange("network.publicExposure"); got != "mutable" {
+		t.Fatalf("network.publicExposure must be mutable (in-place), got %q", got)
+	}
+	for _, p := range []string{"location.region", "encryption.customerManagedKeys", "capacity.baseRPU"} {
+		if got, _ := classifyRedshiftServerlessChange(p); got != "immutable" {
+			t.Fatalf("%s must be immutable (replacement), got %q", p, got)
+		}
+	}
 }
