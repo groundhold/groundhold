@@ -83,6 +83,20 @@ outside the runtime.
 ## Rules (fail-closed, D19)
 
 - **Operations**: `create | update | replace | delete | adopt | noop | claim`.
+  Four of those seven are what the EXECUTOR applies — `create`, `update`,
+  `delete`, `claim` — and an action carrying any of the other three is refused
+  `unsupported-operation` (exit 2) before anything is mutated. The three are
+  accepted at LOAD and each for its own reason, stated here because a closed set
+  that quietly cannot be honoured invites a producer to write an action we turn
+  away: `adopt` has a pinned answer from `forecast` (`unsupported-effect-model`,
+  the honest verdict for an effect this project does not model — note that
+  `groundhold adopt` is a separate VERB that writes bindings directly and compiles
+  no plan); `noop` because a converged plan carries zero ACTIONS (D533), so nothing
+  emits one, and a third-party producer spelling "nothing to do" this way should
+  still load; `replace` for that reason and no other — **there is no `replace`
+  operation in this IR**, a replacement is composed as create-before-destroy (D48),
+  and until D1174 this document published it as though the executor would run it
+  while the runtime's own source said it does not exist.
   A `claim` (D52) stamps authorship on a resource this tool adopted rather than
   created, so a later delete is permitted — a driver refuses to destroy an object
   carrying no ownership label, which made `adopt` → `retire` with nothing in

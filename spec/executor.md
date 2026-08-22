@@ -18,9 +18,17 @@ pin; what the scenarios prove is what apply obeys.
    precondition outside the registry is refused for the same reason —
    the executor never skips what it cannot judge.
 3. **Effect-model limit**: `create`, `update` (D46: update requires a
-   binding, every listed change must classify as honorable in place) and
+   binding, every listed change must classify as honorable in place),
    `delete` (D47: the pinned target identity must match the current
-   binding — exit 3 with "re-seal" otherwise). A delete marked
+   binding — exit 3 with "re-seal" otherwise) and `claim` (D52: stamp
+   authorship on a resource this tool ADOPTED rather than created, so a
+   later delete is permitted — a driver refuses to destroy an object
+   carrying no ownership label). Those four are the whole set: an action
+   with any other operation is refused `unsupported-operation` (exit 2)
+   BEFORE the lease, so nothing is mutated. `spec/sealed-plan.md` lists
+   three more that a plan may LOAD carrying — `replace`, `adopt`, `noop`
+   — and says there why they are accepted and not applied. Until D1174
+   this list omitted `claim`, which the executor has applied since D52. A delete marked
    `deposed: true` (D71) validates its pin against the FRESH deposed
    projection instead — an orphan's capability is by definition bound
    to its successor; an id no longer deposed refuses stale-decision.
