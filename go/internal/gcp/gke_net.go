@@ -18,6 +18,7 @@ package gcp
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -27,6 +28,36 @@ import (
 )
 
 const gkeBaseURL = "https://container.googleapis.com/v1"
+
+// gkeCidrBlock is one masterAuthorizedNetworks entry.
+type gkeCidrBlock struct {
+	CidrBlock string `json:"cidrBlock"`
+}
+
+// cidrIsWholeInternet reports whether a CIDR authorizes EVERY address — a /0 mask,
+// so 0.0.0.0/0 and ::/0 (the honest whole-internet forms). An authorized-networks
+// list that contains one is not a restriction at all; treating it as "restricted"
+// (apiExposure=mixed, or accepting it as a masterAuthorizedCidrs operand) certifies a
+// control that does not exist over an internet-open API server.
+func cidrIsWholeInternet(cidr string) bool {
+	_, n, err := net.ParseCIDR(strings.TrimSpace(cidr))
+	if err != nil {
+		return false // GCP validates the format; an unparseable entry is not our call to guess
+	}
+	ones, _ := n.Mask.Size()
+	return ones == 0
+}
+
+// gkeAuthorizesWholeInternet reports whether ANY authorized-network block opens the
+// API server to the whole internet.
+func gkeAuthorizesWholeInternet(blocks []gkeCidrBlock) bool {
+	for _, b := range blocks {
+		if cidrIsWholeInternet(b.CidrBlock) {
+			return true
+		}
+	}
+	return false
+}
 
 // gkeBaseURLOverride points the container API at a stub in tests (see the package
 // note above). Empty in production.
@@ -129,7 +160,8 @@ type gkeCluster struct {
 		EnablePrivateEndpoint bool `json:"enablePrivateEndpoint"`
 	} `json:"privateClusterConfig"`
 	MasterAuthorizedNetworksConfig struct {
-		Enabled bool `json:"enabled"`
+		Enabled    bool           `json:"enabled"`
+		CidrBlocks []gkeCidrBlock `json:"cidrBlocks"`
 	} `json:"masterAuthorizedNetworksConfig"`
 	DatabaseEncryption struct {
 		State   string `json:"state"` // ENCRYPTED | DECRYPTED
@@ -370,12 +402,16 @@ func (d *Driver) observeGKE(capability, providerID string) ([]provider.Observati
 	}
 
 	// network.apiExposure: private endpoint -> private; public endpoint restricted
-	// by authorized networks -> mixed; otherwise public.
+	// by authorized networks -> mixed; otherwise public. "Restricted" is not the
+	// Enabled flag alone: an authorized-networks list that CONTAINS 0.0.0.0/0 (or
+	// ::/0) authorizes the whole internet, so the API server is reachable by anyone
+	// and the honest value is "public", not "mixed". Reading only Enabled reported
+	// "mixed" over an internet-open control plane — a false-green (D1182).
 	exposure := "public"
 	switch {
 	case c.PrivateClusterConfig.EnablePrivateEndpoint:
 		exposure = "private"
-	case c.MasterAuthorizedNetworksConfig.Enabled:
+	case c.MasterAuthorizedNetworksConfig.Enabled && !gkeAuthorizesWholeInternet(c.MasterAuthorizedNetworksConfig.CidrBlocks):
 		exposure = "mixed"
 	}
 	obs = append(obs, provider.Observation{Path: "network.apiExposure", Value: exposure, Derivation: "measured"})

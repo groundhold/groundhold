@@ -258,7 +258,15 @@ func (d *Driver) sweepNamespaces() ([]provider.Discovered, []string, error) {
 	for _, it := range doc.Items {
 		obs := []provider.Observation{{Path: "service.managed", Value: true, Derivation: "measured"}}
 		if lvl := it.Metadata.Labels[podSecurityEnforceLabel]; lvl != "" && validPodSecurity[lvl] {
-			obs = append(obs, provider.Observation{Path: "security.podSecurity", Value: lvl, Derivation: "measured"})
+			// D1060 parity: the enforce LABEL is read, but the standard is only ENFORCED if
+			// the API server runs the PodSecurity admission plugin, which a static list cannot
+			// witness. The verify lens emits this config-intent for exactly this reason (a
+			// `measured restricted` over a cluster with admission OFF reads securely-restricted
+			// while privileged pods are admitted — the dangerous direction). Discovery must not
+			// claim more confidence than verify: config-intent, not measured.
+			obs = append(obs, provider.Observation{Path: "security.podSecurity", Value: lvl, Derivation: "config-intent"})
+			diags = append(diags, "security.podSecurity for "+it.Metadata.Name+" is CONFIG-INTENT: read from the "+
+				"enforce label; enforcement depends on the PodSecurity admission plugin being enabled — a static read cannot witness it")
 		}
 		out = append(out, provider.Discovered{
 			ProviderID:   nsProviderID(it.Metadata.Name),

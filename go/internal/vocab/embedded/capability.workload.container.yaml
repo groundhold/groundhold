@@ -106,10 +106,13 @@ attributes:
       gcp.cloudrun: HTTPS-only by construction
       gcp.cloudfunctions: HTTPS-only by construction
       aws.apprunner: HTTPS-only by construction (managed endpoint)
-      aws.ecs: the HTTPS/TLS listener of the load balancer fronting the service —
-        traced targetGroupArn -> DescribeTargetGroups -> DescribeListeners. A service
-        behind no load balancer has no front door to measure and the attribute is not
-        emitted (a diagnostic says the trace failed rather than assuming plaintext)
+      aws.ecs: EVERY listener of the load balancer fronting the service must be a TLS
+        front door (HTTPS/TLS) or an HTTP->HTTPS redirect — traced targetGroupArn ->
+        DescribeTargetGroups -> DescribeListeners; a single plaintext-forwarding
+        listener makes it false (a coexisting HTTP:80 is a cleartext ingress the "any
+        TLS listener" rule used to miss). A service behind no load balancer has no front
+        door to measure and the attribute is not emitted (a diagnostic says the trace
+        failed rather than assuming plaintext)
       azure.containerapps: NOT configuration.ingress.allowInsecure — the ingress
         accepts plaintext only when that flag is set, so TLS is enforced when it is
         false. An app with no ingress has no front door and the attribute is not

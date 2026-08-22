@@ -1153,9 +1153,29 @@ func (d *Driver) lambdaAnonymouslyInvokable(region, name string, urlCfg []byte) 
 	return lambdaPolicyGrantsAnonymousInvoke(pol.Policy), true, ""
 }
 
+// iamActionCoversInvokeURL reports whether one Action entry in a resource policy
+// GRANTS lambda:InvokeFunctionUrl — not only the exact action but every wildcard
+// that COVERS it (`*`, `lambda:*`, `lambda:Invoke*`, `lambda:InvokeFunction*`). IAM
+// actions are case-insensitive and support a trailing-`*` glob, so matching the
+// literal string alone read a world-invokable URL under `Action:"*"` as PRIVATE — a
+// false-green over an anonymous endpoint. Over-matching a covering wildcard is the
+// safe direction (it can only report MORE public).
+func iamActionCoversInvokeURL(action string) bool {
+	const target = "lambda:invokefunctionurl"
+	a := strings.ToLower(action)
+	if a == "*" || a == target {
+		return true
+	}
+	if strings.HasSuffix(a, "*") {
+		return strings.HasPrefix(target, strings.TrimSuffix(a, "*"))
+	}
+	return false
+}
+
 // lambdaPolicyGrantsAnonymousInvoke reports whether the resource policy lets the
-// WORLD invoke the Function URL: an Allow of lambda:InvokeFunctionUrl to principal
-// "*" (AWS documents both the bare string and {"AWS":"*"}).
+// WORLD invoke the Function URL: an Allow of lambda:InvokeFunctionUrl (or a wildcard
+// that covers it) to principal "*" (AWS documents both the bare string and
+// {"AWS":"*"}).
 func lambdaPolicyGrantsAnonymousInvoke(policy string) bool {
 	var doc struct {
 		Statement []struct {
@@ -1183,10 +1203,10 @@ func lambdaPolicyGrantsAnonymousInvoke(policy string) bool {
 	hasInvoke := func(v any) bool {
 		switch t := v.(type) {
 		case string:
-			return t == "lambda:InvokeFunctionUrl"
+			return iamActionCoversInvokeURL(t)
 		case []any:
 			for _, a := range t {
-				if s, _ := a.(string); s == "lambda:InvokeFunctionUrl" {
+				if s, _ := a.(string); iamActionCoversInvokeURL(s) {
 					return true
 				}
 			}

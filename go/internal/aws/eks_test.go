@@ -51,7 +51,7 @@ func TestObserveEKSReverseMap(t *testing.T) {
 			return
 		}
 		fmt.Fprint(w, `{"cluster":{"version":"1.29",
-		  "resourcesVpcConfig":{"endpointPublicAccess":true,"endpointPrivateAccess":true},
+		  "resourcesVpcConfig":{"endpointPublicAccess":true,"endpointPrivateAccess":true,"publicAccessCidrs":["10.0.0.0/8"]},
 		  "encryptionConfig":[{"resources":["secrets"]}]}}`)
 	}))
 	defer srv.Close()
@@ -78,23 +78,30 @@ func TestObserveEKSReverseMap(t *testing.T) {
 	}
 }
 
-// TestObserveEKSExposureVariants: the endpoint-access flags map to public/private.
+// TestObserveEKSExposureVariants: the endpoint-access flags AND publicAccessCidrs map
+// to public/private/mixed. "mixed" requires a RESTRICTED public endpoint; a public
+// endpoint open to 0.0.0.0/0 (EKS's default) is public even alongside a private one
+// (D1182), and a both-endpoints cluster with no demonstrated cidr restriction is not
+// "mixed".
 func TestObserveEKSExposureVariants(t *testing.T) {
 	for _, tc := range []struct {
 		pub, priv bool
+		cidrs     string // JSON fragment appended into resourcesVpcConfig; "" = omit
 		want      string
 	}{
-		{true, false, "public"},
-		{false, true, "private"},
-		{true, true, "mixed"},
+		{true, false, `,"publicAccessCidrs":["203.0.113.0/24"]`, "public"}, // public-only endpoint
+		{false, true, "", "private"},
+		{true, true, `,"publicAccessCidrs":["10.0.0.0/8"]`, "mixed"}, // restricted public + private
+		{true, true, `,"publicAccessCidrs":["0.0.0.0/0"]`, "public"}, // public open to /0 -> public
+		{true, true, "", "public"},                                   // both, no restriction demonstrated -> not mixed
 	} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, `{"cluster":{"version":"1.29","resourcesVpcConfig":{"endpointPublicAccess":%t,"endpointPrivateAccess":%t}}}`, tc.pub, tc.priv)
+			fmt.Fprintf(w, `{"cluster":{"version":"1.29","resourcesVpcConfig":{"endpointPublicAccess":%t,"endpointPrivateAccess":%t%s}}}`, tc.pub, tc.priv, tc.cidrs)
 		}))
 		d := eksDriver(t, srv)
 		m := eksObsMap(t, d, "eks:eu-central-1:c")
 		if m["network.apiExposure"] != tc.want {
-			t.Errorf("pub=%t priv=%t -> %v, want %v", tc.pub, tc.priv, m["network.apiExposure"], tc.want)
+			t.Errorf("pub=%t priv=%t cidrs=%s -> %v, want %v", tc.pub, tc.priv, tc.cidrs, m["network.apiExposure"], tc.want)
 		}
 		if m["encryption.secrets"] != false {
 			t.Errorf("no encryptionConfig must map to secrets=false, got %v", m["encryption.secrets"])
@@ -231,7 +238,8 @@ func (f *fakeEKS) handler(t *testing.T, rec *capture) *httptest.Server {
 				"status":  f.clusterStatus,
 				"version": "1.29",
 				"resourcesVpcConfig": map[string]any{
-					"endpointPublicAccess": true, "endpointPrivateAccess": true},
+					"endpointPublicAccess": true, "endpointPrivateAccess": true,
+					"publicAccessCidrs": []any{"10.0.0.0/8"}},
 				"tags": f.tags,
 			}})
 			_, _ = w.Write(cj)

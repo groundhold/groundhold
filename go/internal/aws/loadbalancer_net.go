@@ -77,11 +77,12 @@ func (d *Driver) describeLoadBalancer(region, name string) (lb elbv2LB, found bo
 	return elbv2LB{}, false, nil // not in the set — does not exist
 }
 
-// listenerProtocols reads a load balancer's listener protocols. readable=false on
-// any transport/HTTP/parse failure — an unreadable listener list must NOT silently
-// become "no TLS listener" (a false plaintext claim); the caller turns it into
-// unknown.
-func (d *Driver) listenerProtocols(region, lbArn string) (protocols []string, err error) {
+// listenerProtocols reads a load balancer's listeners — protocol AND default action,
+// because "the front door is encrypted" is a property of EVERY listener, not any one
+// (D1186). readable=false on any transport/HTTP/parse failure — an unreadable listener
+// list must NOT silently become "no TLS listener" (a false plaintext claim); the caller
+// turns it into unknown.
+func (d *Driver) listenerProtocols(region, lbArn string) (listeners []elbListener, err error) {
 	const op = "DescribeListeners"
 	st, body, cerr := d.elbv2Post(region, encodeForm(map[string]string{
 		"Action": "DescribeListeners", "Version": elbv2Version, "LoadBalancerArn": lbArn}))
@@ -93,16 +94,34 @@ func (d *Driver) listenerProtocols(region, lbArn string) (protocols []string, er
 	}
 	var out struct {
 		Listeners []struct {
-			Protocol string `xml:"Protocol"`
+			Protocol       string `xml:"Protocol"`
+			DefaultActions struct {
+				Members []struct {
+					Type           string `xml:"Type"`
+					RedirectConfig struct {
+						Protocol string `xml:"Protocol"`
+					} `xml:"RedirectConfig"`
+				} `xml:"member"`
+			} `xml:"DefaultActions"`
 		} `xml:"DescribeListenersResult>Listeners>member"`
 	}
 	if xml.Unmarshal(body, &out) != nil {
 		return nil, readBody(op, st)
 	}
 	for _, l := range out.Listeners {
-		protocols = append(protocols, l.Protocol)
+		el := elbListener{Protocol: l.Protocol}
+		// An HTTP listener whose default action redirects to HTTPS is not a plaintext
+		// data path (it serves a 301 to the TLS front door, forwarding nothing in clear).
+		if !listenerTerminatesTLS(l.Protocol) {
+			for _, a := range l.DefaultActions.Members {
+				if a.Type == "redirect" && a.RedirectConfig.Protocol == "HTTPS" {
+					el.RedirectsToTLS = true
+				}
+			}
+		}
+		listeners = append(listeners, el)
 	}
-	return protocols, nil
+	return listeners, nil
 }
 
 // observeLoadBalancer reverse-maps a live load balancer: DescribeLoadBalancers for

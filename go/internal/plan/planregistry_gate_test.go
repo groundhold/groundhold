@@ -493,11 +493,16 @@ func TestTheRefusalNamesWhatTheExecutorActuallyApplies(t *testing.T) {
 // This reads the SWITCH — the implementation — rather than the list beside it. That is
 // a structural check, not a behavioural one, and the difference matters enough to name:
 // D317's lesson is that a static scrape of an implementation is not the same as asking
-// it. Asking would mean applying a one-action plan per operation and looking for
-// `unsupported-operation`, which needs an apply harness this package does not have and
-// `internal/apply` does not yet expose. **Debt, stated rather than hidden:** the
-// behavioural version belongs in `internal/apply`, where the provider fake and ledger
-// fixtures already live.
+// it. Asking means applying a one-action plan per operation and looking for
+// `unsupported-operation`.
+//
+// That debt is PAID (D1177):
+// `apply.TestTheExecutorReallyAppliesWhatItDeclares` does exactly that, and it catches
+// what this scan cannot — a branch that exists and falls through, a branch guarded by a
+// condition that is never true, a refusal routed to the wrong code. This check stays
+// because it is cheap and it fails on a different thing: a name in the list with no
+// branch at all, which the behavioural gate reports as a refusal rather than as a
+// missing branch. Two failures, two messages, one for each way the two can disagree.
 //
 // What it does catch is the drift that actually happened here — a name in the list with
 // no branch behind it, or a branch quietly removed while the list still promises it.

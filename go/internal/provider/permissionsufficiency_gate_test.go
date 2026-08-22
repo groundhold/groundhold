@@ -62,6 +62,7 @@ var discoveryOnlyOperations = map[string]string{
 	// The S3 sub-resource reads, visible only since the recorded routes kept their
 	// markers (D850). Each is a read behind observe or discovery; the one that was NOT —
 	// the pre-delete object-lock guard — is declared on delete instead.
+	"s3:GetBucketAcl":          "observeS3's s3BucketAclExposureLeg — the public-ACL read behind publicExposure",
 	"s3:GetBucketCors":         "observeS3's cors read",
 	"s3:GetBucketEncryption":   "observeS3's encryption read",
 	"s3:GetBucketLocation":     "discoverS3's s3BucketRegion and observeS3's s3DestinationRegion",

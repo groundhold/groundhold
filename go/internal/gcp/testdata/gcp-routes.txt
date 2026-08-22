@@ -262,6 +262,7 @@ AMBIGUOUS:BaseURL,IAMBaseURL	GET	/projects/acme-prod/roles
 AMBIGUOUS:BaseURL,IAMBaseURL	GET	/projects/acme-prod/roles/appRole
 AMBIGUOUS:BaseURL,IAMBaseURL	GET	/projects/acme-prod/serviceAccounts
 AMBIGUOUS:BaseURL,IAMBaseURL	GET	/projects/acme-prod/serviceAccounts/app-runner@acme-prod.iam.gserviceaccount.com
+AMBIGUOUS:BaseURL,IAMBaseURL	GET	/projects/acme-prod/serviceAccounts/app-runner@acme-prod.iam.gserviceaccount.com/keys
 AMBIGUOUS:BaseURL,KMSBaseURL	GET	/projects/acme-prod/locations/europe-west1/keyRings
 AMBIGUOUS:BaseURL,KMSBaseURL	GET	/projects/acme-prod/locations/europe-west1/keyRings/app-ring/cryptoKeys
 AMBIGUOUS:BaseURL,KMSBaseURL	GET	/projects/acme-prod/locations/europe-west1/keyRings/app-ring/cryptoKeys/data-key
@@ -549,13 +550,18 @@ IAMBaseURL	GET	/projects/acme-prod/roles/pv_viewer_prod_fd260336
 IAMBaseURL	GET	/projects/acme-prod/roles/viewer
 IAMBaseURL	GET	/projects/acme-prod/serviceAccounts
 IAMBaseURL	GET	/projects/acme-prod/serviceAccounts/app-runner@acme-prod.iam.gserviceaccount.com
+IAMBaseURL	GET	/projects/acme-prod/serviceAccounts/app-runner@acme-prod.iam.gserviceaccount.com/keys
 IAMBaseURL	GET	/projects/acme-prod/serviceAccounts/pv-sa-abc@acme-prod.iam.gserviceaccount.com
 IAMBaseURL	GET	/projects/acme-prod/serviceAccounts/runner-prod-86900a4d@acme-prod.iam.gserviceaccount.com
+IAMBaseURL	GET	/projects/acme-prod/serviceAccounts/runner-prod-86900a4d@acme-prod.iam.gserviceaccount.com/keys
+IAMBaseURL	GET	/projects/acme-prod/serviceAccounts/runner-prod-x@acme-prod.iam.gserviceaccount.com
+IAMBaseURL	GET	/projects/acme-prod/serviceAccounts/runner-prod-x@acme-prod.iam.gserviceaccount.com/keys
 IAMBaseURL	POST	/projects/-/serviceAccounts/wi-runner@acme-prod.iam.gserviceaccount.com:getIamPolicy
 IAMBaseURL	POST	/projects/-/serviceAccounts/wi-runner@acme-prod.iam.gserviceaccount.com:setIamPolicy
 IAMBaseURL	POST	/projects/acme-prod/roles
 IAMBaseURL	POST	/projects/acme-prod/serviceAccounts
 IAMBaseURL	POST	/projects/acme-prod/serviceAccounts/runner-prod-86900a4d@acme-prod.iam.gserviceaccount.com:getIamPolicy
+IAMBaseURL	POST	/projects/acme-prod/serviceAccounts/runner-prod-x@acme-prod.iam.gserviceaccount.com:getIamPolicy
 KMSBaseURL	GET	/projects/acme-prod/locations/europe-west1/keyRings/groundhold-prod/cryptoKeys/datakey-prod-692bf53e
 KMSBaseURL	GET	/projects/acme-prod/locations/europe-west1/keyRings/groundhold-prod/cryptoKeys/datakey-prod-692bf53e/cryptoKeyVersions
 KMSBaseURL	GET	/projects/acme-prod/locations/europe-west1/keyRings/groundhold-prod/cryptoKeys/x

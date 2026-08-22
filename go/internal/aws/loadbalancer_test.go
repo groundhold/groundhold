@@ -13,24 +13,32 @@ import (
 // --- the pure reverse map: the load-bearing truth table ---
 
 func TestReverseMapLoadBalancer(t *testing.T) {
+	https := elbListener{Protocol: "HTTPS"}
+	tls := elbListener{Protocol: "TLS"}
+	httpPlain := elbListener{Protocol: "HTTP"}
+	httpRedirect := elbListener{Protocol: "HTTP", RedirectsToTLS: true}
 	cases := []struct {
 		name          string
 		scheme        string
-		protocols     []string
+		listeners     []elbListener
 		wantPublic    bool
 		wantInTransit bool
 	}{
-		{"internet-facing HTTPS ALB", "internet-facing", []string{"HTTPS"}, true, true},
-		{"internal HTTP ALB", "internal", []string{"HTTP"}, false, false},
-		{"internet-facing plaintext (public + no TLS)", "internet-facing", []string{"HTTP"}, true, false},
-		{"internal TLS NLB", "internal", []string{"TLS"}, false, true},
-		{"mixed HTTP+HTTPS -> inTransit true", "internet-facing", []string{"HTTP", "HTTPS"}, true, true},
+		{"internet-facing HTTPS ALB", "internet-facing", []elbListener{https}, true, true},
+		{"internal HTTP ALB", "internal", []elbListener{httpPlain}, false, false},
+		{"internet-facing plaintext (public + no TLS)", "internet-facing", []elbListener{httpPlain}, true, false},
+		{"internal TLS NLB", "internal", []elbListener{tls}, false, true},
+		// D1186: a plaintext HTTP:80 forwarding alongside HTTPS:443 is a cleartext path —
+		// inTransit must be FALSE (the old "any TLS listener" rule read this true).
+		{"mixed HTTP-forward + HTTPS -> inTransit FALSE", "internet-facing", []elbListener{httpPlain, https}, true, false},
+		// an HTTP:80 that only REDIRECTS to HTTPS is not a cleartext data path -> true.
+		{"HTTP-redirect + HTTPS -> inTransit true", "internet-facing", []elbListener{httpRedirect, https}, true, true},
 		{"no listeners -> inTransit false", "internal", nil, false, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			m := map[string]any{}
-			for _, o := range reverseMapLoadBalancer(c.scheme, c.protocols) {
+			for _, o := range reverseMapLoadBalancer(c.scheme, c.listeners) {
 				if o.Derivation != "measured" {
 					t.Errorf("%s must be measured, got %q", o.Path, o.Derivation)
 				}

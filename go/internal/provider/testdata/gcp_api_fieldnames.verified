@@ -34,6 +34,8 @@ budgetFilter
 budgets
 calendarPeriod
 certificates
+cidrBlock
+cidrBlocks
 clusters
 cmekConfig
 cmekSettings
@@ -127,6 +129,8 @@ items
 jobs
 keyName
 keyRings
+keys
+keyType
 kmsKey
 kmsKeyName
 labels

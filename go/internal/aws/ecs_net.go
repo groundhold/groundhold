@@ -369,7 +369,7 @@ func (d *Driver) observeECS(capability, providerID string) ([]provider.Observati
 				" on the fronting load balancer — probe/reconcile")
 		} else {
 			obs = append(obs, provider.Observation{Path: "tls.enforced",
-				Value: hasTLSListener(protocols), Derivation: "measured"})
+				Value: listenersAllEncrypted(protocols), Derivation: "measured"})
 		}
 	} else {
 		// D1069-class: a service behind NO load balancer has no front door to measure.
@@ -409,16 +409,6 @@ func (d *Driver) targetGroupLB(region, tgArn string) (lbArn string, ok bool) {
 		return "", false
 	}
 	return out.Groups[0].LoadBalancerArns[0], true
-}
-
-// hasTLSListener reports whether any listener terminates TLS (HTTPS or TLS).
-func hasTLSListener(protocols []string) bool {
-	for _, p := range protocols {
-		if p == "HTTPS" || p == "TLS" {
-			return true
-		}
-	}
-	return false
 }
 
 // deleteECS: ownership pre-check, then delete the service (force) and the

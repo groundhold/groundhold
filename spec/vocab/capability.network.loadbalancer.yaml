@@ -49,8 +49,10 @@ attributes:
       broker's `enable_https` flag flips.
     mappings:
       aws.loadbalancer: >
-        true when any listener protocol is HTTPS/TLS; a listener set that is all
-        plaintext is false
+        true only when EVERY listener is a TLS front door (HTTPS/TLS) or an HTTP
+        listener that solely redirects to HTTPS; a single plaintext-forwarding
+        listener (a common HTTP:80 beside HTTPS:443) makes it false — that path
+        carries cleartext, so "any TLS listener" would be a false-green over it
       azure.loadbalancer: >
         an Application Gateway listener with Protocol=Https makes it true. The L4
         load balancer has no protocol to read, so it reports FALSE as

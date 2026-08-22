@@ -64,26 +64,44 @@ func listenerTerminatesTLS(protocol string) bool {
 	}
 }
 
+// elbListener is one listener's encryption posture: its protocol, and — for a
+// plaintext HTTP listener — whether its default action only redirects to HTTPS.
+type elbListener struct {
+	Protocol       string
+	RedirectsToTLS bool
+}
+
+// listenersAllEncrypted reports whether EVERY listener is a TLS front door or an
+// HTTP listener that only redirects to HTTPS — i.e. there is NO plaintext data path.
+// The old rule was "ANY listener speaks TLS", which read encryption.inTransit=true
+// over a load balancer that ALSO had an HTTP:80 listener forwarding cleartext to the
+// backend (a common shape) — a false-green on the encryption constraint (D1186). An
+// empty listener set is not encrypted: there is no TLS front door to speak of.
+func listenersAllEncrypted(listeners []elbListener) bool {
+	if len(listeners) == 0 {
+		return false
+	}
+	for _, l := range listeners {
+		if !listenerTerminatesTLS(l.Protocol) && !l.RedirectsToTLS {
+			return false
+		}
+	}
+	return true
+}
+
 // reverseMapLoadBalancer is the PURE reverse map at the heart of the driver: a
-// load balancer's Scheme + its listeners' Protocols -> the three governed
+// load balancer's Scheme + its listeners -> the three governed
 // capability.network.loadbalancer attributes.
 //   - network.publicExposure = Scheme == "internet-facing" (else internal)
-//   - encryption.inTransit  = any listener speaks HTTPS or TLS (a TLS front door)
+//   - encryption.inTransit  = EVERY listener is TLS or an HTTP->HTTPS redirect
 //   - service.managed       = true (a cloud ELB is managed by construction)
 //
 // The region rides in the providerId, not the observation set — the loadbalancer
 // vocabulary (v0.1) deliberately carries only the exposure posture, nothing else.
-func reverseMapLoadBalancer(scheme string, listenerProtocols []string) []provider.Observation {
-	inTransit := false
-	for _, p := range listenerProtocols {
-		if listenerTerminatesTLS(p) {
-			inTransit = true
-			break
-		}
-	}
+func reverseMapLoadBalancer(scheme string, listeners []elbListener) []provider.Observation {
 	return []provider.Observation{
 		{Path: "network.publicExposure", Value: scheme == "internet-facing", Derivation: "measured"},
-		{Path: "encryption.inTransit", Value: inTransit, Derivation: "measured"},
+		{Path: "encryption.inTransit", Value: listenersAllEncrypted(listeners), Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
 }

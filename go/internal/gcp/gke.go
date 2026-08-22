@@ -251,6 +251,17 @@ func BuildGKE(project, environment, capability string,
 					"a public endpoint restricted to authorized networks IS the authorized-network set; " +
 					"refusing to expose the API server to the whole internet under a \"mixed\" label")
 		}
+		// D1182: a whole-internet CIDR in the authorized set is not a restriction — it
+		// would create the exact resource observe now reads as "public", under a "mixed"
+		// label. Refuse it here so the build cannot mint the false-green.
+		for _, c := range p.MasterAuthorizedCidrs {
+			if cidrIsWholeInternet(c) {
+				return GKEPlan{}, fmt.Errorf(
+					"network.apiExposure=mixed with masterAuthorizedCidrs %q authorizes the WHOLE "+
+						"internet — that is apiExposure=public, not mixed; a /0 block is not an "+
+						"authorized-network restriction", c)
+			}
+		}
 	case "public":
 		if len(p.MasterAuthorizedCidrs) > 0 {
 			return GKEPlan{}, fmt.Errorf(

@@ -116,12 +116,19 @@ func TestBuildECSTLSTargetGroup(t *testing.T) {
 // plaintext HTTP listener => false (measured, never trusting the operand name).
 func TestObserveECSTLSEnforced(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		protocol string
-		want     bool
+		name      string
+		listeners string // inner <member>...</member>, one per listener
+		want      bool
 	}{
-		{"https listener", "HTTPS", true},
-		{"http listener", "HTTP", false},
+		{"https listener", `<member><Protocol>HTTPS</Protocol></member>`, true},
+		{"http listener", `<member><Protocol>HTTP</Protocol></member>`, false},
+		// D1186: a plaintext HTTP:80 forwarding alongside HTTPS:443 is a cleartext front
+		// door — tls.enforced must be FALSE (the old "any TLS listener" rule read it true).
+		{"mixed http-forward + https", `<member><Protocol>HTTP</Protocol></member><member><Protocol>HTTPS</Protocol></member>`, false},
+		// an HTTP:80 that only redirects to HTTPS is not cleartext -> true.
+		{"http-redirect + https", `<member><Protocol>HTTP</Protocol><DefaultActions><member><Type>redirect</Type>` +
+			`<RedirectConfig><Protocol>HTTPS</Protocol></RedirectConfig></member></DefaultActions></member>` +
+			`<member><Protocol>HTTPS</Protocol></member>`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(
@@ -151,9 +158,9 @@ func TestObserveECSTLSEnforced(t *testing.T) {
 							`<LoadBalancerArns><member>arn:aws:elasticloadbalancing:eu-central-1:000000000000:loadbalancer/app/lb/1</member></LoadBalancerArns>` +
 							`</member></TargetGroups></DescribeTargetGroupsResult></DescribeTargetGroupsResponse>`))
 					case "DescribeListeners":
-						_, _ = w.Write([]byte(`<DescribeListenersResponse><DescribeListenersResult><Listeners><member>` +
-							`<Protocol>` + tc.protocol + `</Protocol>` +
-							`</member></Listeners></DescribeListenersResult></DescribeListenersResponse>`))
+						_, _ = w.Write([]byte(`<DescribeListenersResponse><DescribeListenersResult><Listeners>` +
+							tc.listeners +
+							`</Listeners></DescribeListenersResult></DescribeListenersResponse>`))
 					default:
 						w.WriteHeader(400)
 					}

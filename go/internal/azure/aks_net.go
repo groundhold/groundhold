@@ -270,13 +270,16 @@ func (d *Driver) observeAKS(capability, providerID string) ([]provider.Observati
 	}
 
 	// network.apiExposure: private cluster -> private; public API server restricted by
-	// authorized IP ranges -> mixed; otherwise public.
+	// authorized IP ranges -> mixed; otherwise public. "Restricted" is not len>0 alone:
+	// an authorized-IP-range list that CONTAINS 0.0.0.0/0 (or ::/0) authorizes the whole
+	// internet, so the API server is open to anyone and the honest value is "public",
+	// not "mixed" (D1182 — the AKS twin of the GKE/EKS false-green).
 	exposure := "public"
 	ap := doc.Properties.APIServerAccessProfile
 	switch {
 	case ap.EnablePrivateCluster != nil && *ap.EnablePrivateCluster:
 		exposure = "private"
-	case len(ap.AuthorizedIPRanges) > 0:
+	case len(ap.AuthorizedIPRanges) > 0 && !aksRangesAuthorizeWholeInternet(ap.AuthorizedIPRanges):
 		exposure = "mixed"
 	}
 	obs = append(obs, provider.Observation{Path: "network.apiExposure", Value: exposure, Derivation: "measured"})
@@ -292,6 +295,19 @@ func (d *Driver) observeAKS(capability, providerID string) ([]provider.Observati
 		diags = append(diags, "availability.class not derivable (no readable agent pool zones) — omitted rather than fabricated")
 	}
 	return obs, diags, nil
+}
+
+// aksRangesAuthorizeWholeInternet reports whether any authorized-IP-range opens the
+// API server to every address — a 0.0.0.0/0 or ::/0 entry, which is no restriction at
+// all, so the endpoint is "public", not "mixed".
+func aksRangesAuthorizeWholeInternet(ranges []string) bool {
+	for _, r := range ranges {
+		switch strings.TrimSpace(r) {
+		case "0.0.0.0/0", "::/0":
+			return true
+		}
+	}
+	return false
 }
 
 // aksAvailabilityClass derives availability.class from the system pool's zone spread:

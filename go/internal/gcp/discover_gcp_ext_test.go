@@ -84,6 +84,8 @@ func TestDiscoverServiceAccounts(t *testing.T) {
 				]}`))
 			case "/projects/acme-prod/serviceAccounts/app-runner@acme-prod.iam.gserviceaccount.com":
 				w.Write([]byte(`{"email":"app-runner@acme-prod.iam.gserviceaccount.com","displayName":"App SA"}`))
+			case "/projects/acme-prod/serviceAccounts/app-runner@acme-prod.iam.gserviceaccount.com/keys":
+				w.Write([]byte(`{"keys":[]}`)) // keyless: no user-managed key
 			default:
 				t.Errorf("unexpected call: %s %s", r.Method, r.URL.Path)
 			}

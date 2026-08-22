@@ -55,7 +55,9 @@ attributes:
         otherwise a non-empty authorizedIPRanges makes it `mixed`; else `public`
       gcp.gke: >
         privateClusterConfig.enablePrivateEndpoint makes it `private`; otherwise
-        masterAuthorizedNetworksConfig.enabled makes it `mixed`; else `public`
+        masterAuthorizedNetworksConfig.enabled with authorized cidrBlocks that do NOT
+        include a whole-internet /0 makes it `mixed`; a 0.0.0.0/0 (or ::/0) block is no
+        restriction, so it is `public`
     recommended:
       op: in
       value: [private, mixed]

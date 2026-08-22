@@ -83,6 +83,42 @@ func TestPublicExposureIsTrueWhenAnonymousInvokeIsGranted(t *testing.T) {
 	}
 }
 
+// A resource policy that grants the WORLD invoke via a WILDCARD action — Action:"*",
+// "lambda:*", "lambda:Invoke*", "lambda:InvokeFunction*" — is public: AWS honors any
+// of those for lambda:InvokeFunctionUrl. The old exact-string match read all of them
+// as PRIVATE, a false-green over a world-invokable endpoint. The exact action, a
+// case-variant, and an array entry stay public; an unrelated or non-covering action
+// (even to principal *) stays private.
+func TestAnonymousInvokeCoversWildcardActions(t *testing.T) {
+	stmt := func(principal, action string) string {
+		return `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":` +
+			principal + `,"Action":` + action + `}]}`
+	}
+	cases := []struct {
+		name   string
+		policy string
+		want   bool
+	}{
+		{"star-action", stmt(`"*"`, `"*"`), true},
+		{"lambda-star", stmt(`"*"`, `"lambda:*"`), true},
+		{"invoke-star", stmt(`"*"`, `"lambda:Invoke*"`), true},
+		{"invokefunction-star", stmt(`"*"`, `"lambda:InvokeFunction*"`), true},
+		{"exact", stmt(`"*"`, `"lambda:InvokeFunctionUrl"`), true},
+		{"case-insensitive", stmt(`"*"`, `"LAMBDA:INVOKEFUNCTIONURL"`), true},
+		{"aws-star-principal", stmt(`{"AWS":"*"}`, `"lambda:*"`), true},
+		{"array-with-cover", stmt(`"*"`, `["s3:GetObject","lambda:Invoke*"]`), true},
+		{"non-covering-action", stmt(`"*"`, `"lambda:GetFunction"`), false},
+		{"unrelated-service", stmt(`"*"`, `"s3:*"`), false},
+		{"specific-principal", stmt(`"arn:aws:iam::111122223333:root"`, `"*"`), false},
+	}
+	for _, c := range cases {
+		if got := lambdaPolicyGrantsAnonymousInvoke(c.policy); got != c.want {
+			t.Errorf("%s: lambdaPolicyGrantsAnonymousInvoke = %v, want %v\n  policy: %s",
+				c.name, got, c.want, c.policy)
+		}
+	}
+}
+
 func obsValue(obs []provider.Observation, path string) (any, bool) {
 	for _, o := range obs {
 		if o.Path == path {
