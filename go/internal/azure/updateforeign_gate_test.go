@@ -17,7 +17,11 @@ var updateForeignGatedAz = map[string]string{
 	"consumptionbudget": "TestRefusesForeignUpdateAzConsumptionBudget",
 	"servicebusqueue":   "TestRefusesForeignUpdateAzServiceBus", // D460: found a real bug
 	"aks":               "TestRefusesForeignUpdateAzAKS",
-	"dnsrecord":         "TestRefusesForeignUpdateAzDNSRecord", // parent zone is the boundary
+	"blob":              "TestRefusesForeignUpdateAzBlob",       // D1200: publicExposure remediation
+	"flexpostgres":      "TestRefusesForeignUpdateAzFlexServer", // D1205: publicExposure remediation
+	"rediscache":        "TestRefusesForeignUpdateAzRedis",      // D1206: publicExposure remediation (twin of flexpostgres)
+	"aisearch":          "TestRefusesForeignUpdateAzAISearch",   // D1207: publicExposure remediation (twin of flexpostgres)
+	"dnsrecord":         "TestRefusesForeignUpdateAzDNSRecord",  // parent zone is the boundary
 	"acsemail":          "TestRefusesForeignUpdateAzACSEmail",
 	"activitylog":       "TestRefusesForeignUpdateAzActivityLog",
 }

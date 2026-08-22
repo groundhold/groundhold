@@ -183,7 +183,9 @@ type flexDoc struct {
 		State   string `json:"state"`
 		Version string `json:"version"`
 		Network struct {
-			PublicNetworkAccess string `json:"publicNetworkAccess"`
+			PublicNetworkAccess         string `json:"publicNetworkAccess"`
+			DelegatedSubnetResourceID   string `json:"delegatedSubnetResourceId"`
+			PrivateDNSZoneArmResourceID string `json:"privateDnsZoneArmResourceId"`
 		} `json:"network"`
 		Backup struct {
 			BackupRetentionDays int `json:"backupRetentionDays"`
@@ -354,4 +356,119 @@ func (d *Driver) flexRequireSecureTransport(rg, name string) (enforced, readable
 		return false, true
 	}
 	return false, false // a value we cannot read is not a value we can vouch for
+}
+
+// classifyFlexServerChange decides whether a drift on a PostgreSQL Flexible Server is
+// reconciled in place or is a replacement. Before D1205 the driver had NO classify for
+// flexpostgres, so EVERY attribute fell to the driver-level default of "immutable" — and
+// for a DATABASE, immutable means the reconcile is a destroy-and-recreate that loses every
+// row. That is the honest classification when a knob truly is fixed at creation, but it is
+// a catastrophic one to apply to a knob that Azure changes online.
+//
+// D1205: network.publicExposure is patched in place. publicNetworkAccess is Enabled/Disabled
+// in ServerPropertiesForUpdate.network (not readOnly in the 2023-06-01-preview swagger), so a
+// server that was discovered PUBLIC is turned PRIVATE by a PATCH — never by replacing the
+// database. Everything else stays "immutable" with the same honest replacement reason the
+// driver default gives, so the change in behaviour is scoped to the one exposure knob.
+func classifyFlexServerChange(path string) (string, string) {
+	switch path {
+	case "network.publicExposure":
+		return "mutable", "network.publicExposure is patched in place: publicNetworkAccess " +
+			"Enabled/Disabled on the server, so a public database is made private without " +
+			"replacing it (and destroying its data)"
+	case "encryption.inTransit":
+		// D1210: inTransit is observed from the require_secure_transport server PARAMETER (D761),
+		// a DYNAMIC configuration (patchable online, no restart). So a server accepting plaintext
+		// is made TLS-only by a configuration PATCH — never by replacing the database.
+		return "mutable", "encryption.inTransit is patched in place: the require_secure_transport " +
+			"server parameter, so a database accepting plaintext is made TLS-only without replacing it"
+	default:
+		return "immutable", fmt.Sprintf(
+			"PostgreSQL Flexible Server has no in-place update path for %q — reconciling a drift is a replacement", path)
+	}
+}
+
+// updateFlexServer remediates the server's online-patchable security knobs in place:
+// network.publicExposure via network.publicNetworkAccess (D1205) and encryption.inTransit via
+// the require_secure_transport configuration (D1210). Ownership is re-checked first (never
+// patch a server that is not ours). The publicExposure PATCH preserves the VNet-integration
+// fields (delegatedSubnetResourceId / privateDnsZoneArmResourceId) it read, so narrowing
+// exposure on a VNet-injected server can never blank out its subnet. Four-valued: an ambiguous
+// PATCH keeps the deterministic providerID (a terminal 4xx from Azure — e.g. a private-access
+// server that cannot take a public endpoint — is an honest unknown, never a data-losing
+// replacement).
+func (d *Driver) updateFlexServer(capability, environment, providerID string,
+	attrs map[string]any, changes []string) provider.CreateResult {
+	sub, rg, name, err := splitFlexProviderID(providerID)
+	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if sub != d.Subscription && d.Subscription != "" {
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("providerId subscription %q is not the driver's", sub)}
+	}
+	doc, found, rerr := d.getFlex(rg, name)
+	if rerr != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update read gave no answer — reconcile: " + rerr.Error()}
+	}
+	if !found {
+		return provider.CreateResult{Status: "failed", Reason: "flexible server no longer exists — cannot update"}
+	}
+	if doc.Tags["groundhold-capability"] != sanitizeAzTag(capability) ||
+		doc.Tags["groundhold-environment"] != sanitizeAzTag(environment) {
+		return provider.CreateResult{Status: "failed",
+			Reason: "flexible server tags do not match — refusing to patch a resource that is not ours"}
+	}
+
+	url, _ := d.armURL(rg, d.flexPath(name), pgAPIVersion)
+	for _, path := range changes {
+		switch path {
+		case "network.publicExposure":
+			public, ok := attrs["network.publicExposure"].(bool)
+			if !ok {
+				return provider.CreateResult{Status: "failed", Reason: "network.publicExposure must be a bool"}
+			}
+			access := "Disabled"
+			if public {
+				access = "Enabled"
+			}
+			// Preserve the VNet-integration fields the pre-read saw — a PATCH that sent only
+			// publicNetworkAccess could be treated as a full replace of the network object and
+			// blank the subnet on a VNet-injected server.
+			network := map[string]any{"publicNetworkAccess": access}
+			if doc.Properties.Network.DelegatedSubnetResourceID != "" {
+				network["delegatedSubnetResourceId"] = doc.Properties.Network.DelegatedSubnetResourceID
+			}
+			if doc.Properties.Network.PrivateDNSZoneArmResourceID != "" {
+				network["privateDnsZoneArmResourceId"] = doc.Properties.Network.PrivateDNSZoneArmResourceID
+			}
+			body, _ := json.Marshal(map[string]any{"properties": map[string]any{"network": network}})
+			if r := d.patchSetting(url, body, providerID, "flexible server publicNetworkAccess"); r != nil {
+				return *r
+			}
+		case "encryption.inTransit":
+			inTransit, ok := attrs["encryption.inTransit"].(bool)
+			if !ok {
+				return provider.CreateResult{Status: "failed", Reason: "encryption.inTransit must be a bool"}
+			}
+			// require_secure_transport is the server parameter the observe reads inTransit from
+			// (D761): on => TLS-only, off => plaintext accepted. It is a DYNAMIC config, so the
+			// PATCH applies online without a restart. A user-override source pins the operator's
+			// intent over the platform default.
+			value := "off"
+			if inTransit {
+				value = "on"
+			}
+			cfgURL, _ := d.armURL(rg, d.flexPath(name)+"/configurations/require_secure_transport", pgAPIVersion)
+			body, _ := json.Marshal(map[string]any{"properties": map[string]any{"value": value, "source": "user-override"}})
+			if r := d.patchSetting(cfgURL, body, providerID, "require_secure_transport"); r != nil {
+				return *r
+			}
+		default:
+			return provider.CreateResult{Status: "failed",
+				Reason: "no azure flexpostgres in-place mapping for " + path}
+		}
+	}
+	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
 }

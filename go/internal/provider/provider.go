@@ -2160,6 +2160,7 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 					"redshift-serverless:TagResource", "redshift-serverless:ListTagsForResource"})
 			case "update":
 				return sortedDedup([]string{
+					"redshift-serverless:UpdateWorkgroup",
 					"redshift-serverless:GetWorkgroup", "redshift-serverless:ListTagsForResource"})
 			case "delete":
 				return sortedDedup([]string{
@@ -2344,7 +2345,16 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			case "update":
 				return sortedDedup([]string{
 					"Microsoft.Storage/storageAccounts/read",
-					"Microsoft.Storage/storageAccounts/write"})
+					"Microsoft.Storage/storageAccounts/write",
+					"Microsoft.Storage/storageAccounts/blobServices/containers/read",
+					"Microsoft.Storage/storageAccounts/blobServices/containers/write",
+					"Microsoft.Storage/storageAccounts/blobServices/containers/immutabilityPolicies/read",
+					"Microsoft.Storage/storageAccounts/blobServices/containers/immutabilityPolicies/write",
+					"Microsoft.Storage/storageAccounts/blobServices/containers/immutabilityPolicies/extend/action",
+					// D1203: durability.class — a geo-only change PATCHes the SKU (storageAccounts/write,
+					// above); a zone-redundancy flip reads the migration status and POSTs startAccountMigration.
+					"Microsoft.Storage/storageAccounts/accountMigrations/read",
+					"Microsoft.Storage/storageAccounts/startAccountMigration/action"})
 			case "delete":
 				return sortedDedup([]string{
 					"Microsoft.Storage/storageAccounts/delete",
@@ -2379,7 +2389,10 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			case "update":
 				return sortedDedup([]string{
 					"Microsoft.DBforPostgreSQL/flexibleServers/read",
-					"Microsoft.DBforPostgreSQL/flexibleServers/write"})
+					"Microsoft.DBforPostgreSQL/flexibleServers/write",
+					// D1210: encryption.inTransit patches the require_secure_transport
+					// configuration (a sub-resource write).
+					"Microsoft.DBforPostgreSQL/flexibleServers/configurations/write"})
 			case "delete":
 				return sortedDedup([]string{
 					"Microsoft.DBforPostgreSQL/flexibleServers/delete",

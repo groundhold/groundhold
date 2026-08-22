@@ -39641,3 +39641,283 @@ groundhold hasn't". So the reason now names the gap, matching the retention and 
 cases D824 already made legible. Wiring the blob update path is a real enhancement left for
 a directed slice, not built unprompted; recording the gap so the operator (and the next
 author) can see it is the part that belonged with the change that surfaced it.
+
+## D1200 — remediating a public blob in place, the enhancement D1199 pointed at
+
+D1199 recorded that the blob driver had no in-place update path, so a discovered public
+blob classified `unsupported` — the operator could not converge it to private without a
+data-destroying account replacement. D1198 had just made `network.publicExposure` the
+anonymous-access control, which is exactly the state a security remediation flips, so this
+is the enhancement that gap pointed at, now built.
+
+`updateBlob` PATCHes the account's `allowBlobPublicAccess` — the account-wide gate, the
+twin of an S3 Block Public Access — and PUTs the container's `publicAccess`, both online,
+so the account and its blobs stand throughout. Two disciplines carry over from the create
+and delete paths. Ownership first: the account's tags are re-read and a foreign account is
+refused with NO write (an ARM PATCH to an occupied path is an unconditional upsert, D254,
+so an update that skipped the check would rewrite a stranger's account into ours). And
+order matters for the direction that matters: going to PRIVATE sets the gate false FIRST,
+so the account-wide lock lands before the container edit — there is no instant where the
+container is still public with the gate already opened. `classifyBlobChange` moves from
+`unsupported` to `mutable`, and the update register's foreign-refusal gate gets its blob
+entry with a test that proves the refusal.
+
+The wider point is the one the two slices make together: D1199 made a gap legible without
+building past it, and D1200 built it when it was the next honest step — the record shows a
+gap named, then closed, rather than a silent jump. Wiring the OTHER blob attributes for
+in-place update (durability, retention — Azure supports them too, per D824) stays the next
+directed slice; this one did the security control the sweep had just put in the spotlight.
+
+## D1201 — the unlocked half of the retention floor, and the WORM half fenced off
+
+D824 recorded that Azure supports changing a container's immutability floor in place — "an
+unlocked policy can be shortened or lengthened, a locked one extended" — and the blob
+driver had wired none of it. D1200 built the update path for `network.publicExposure`;
+this extends it to `retention.minimum`, taking the SAFE half of that support and refusing
+the compliance-sensitive half rather than getting WORM wrong under a converge.
+
+Unlocked is a clean online edit: read the policy for its ETag, then PUT the new
+`immutabilityPeriodSinceCreationInDays` with that ETag as `If-Match` (ARM requires the
+compare-and-swap so a converge cannot clobber a concurrent change); an absent policy is
+created with no If-Match. A LOCKED policy is REFUSED at apply — a locked floor cannot be
+shortened at all (that is the whole point of WORM), and extending one is a deliberate
+compliance operation an operator performs explicitly, never a side effect of a converge
+reconciling a drifted contract. So `classifyBlobChange` is `mutable` (the plan may propose
+the change) and the update fences the locked sub-case off with a failed refusal — the same
+shape AKS uses for `apiExposure`, where the attribute is mutable but the
+private-cluster conversion is refused in the update.
+
+The direction the refusal points matters: a `mutable` verdict that then quietly did nothing
+for a locked policy would be the silent no-op the driver keeps rejecting; a `mutable`
+verdict that shortened a locked WORM floor would be a compliance breach. The honest middle
+is to plan the change, attempt it, and refuse LOUDLY the one case where acting would be
+wrong. The locked-EXTEND path (a `:extend` POST, monotonic-increase only) stays the next
+directed slice; this one is the case an operator hits day to day — a retention floor on an
+unlocked container, adjusted by converge without touching the data.
+
+## D1202 — the locked half: a WORM floor is a one-way ratchet you can only tighten
+
+D1201 wired the unlocked retention floor and refused the locked one whole. This finishes
+the pair: a LOCKED immutability policy is remediated the only way Azure (and WORM) permit —
+EXTENDED, never shortened. The API is a dedicated `POST .../immutabilityPolicies/default/
+extend` with the policy's ETag as `If-Match`, distinct from the unlocked PUT, because
+tightening a compliance lock is a different act from editing a mutable setting.
+
+The direction is the whole design. updateBlob reads the locked policy's current floor and
+compares: a requested value GREATER than the lock extends it (the ratchet turns one way);
+a value equal or LESS is refused, loudly, because shortening a locked WORM floor is exactly
+the compliance breach the lock exists to prevent — and a converge that silently did nothing
+there would be the no-op the driver keeps rejecting. So the verdict stays `mutable` (the
+plan may propose any retention.minimum), and the update sorts the request into three honest
+outcomes: unlocked → PUT, locked-increase → :extend, locked-decrease → refuse. The new
+`extend/action` permission is declared on the capability's update arm alongside the
+container and immutability writes the path already needed.
+
+The pair D1201/D1202 is the shape worth naming: when a provider supports a control in a
+SAFE mode and an UNSAFE-if-mishandled mode, wire the safe mode first and fence the other
+off with a loud refusal (D1201), then come back and wire the unsafe mode CORRECTLY — with
+the direction check that makes it safe — rather than leaving a documented gap or, worse,
+shipping the whole thing at once and getting the WORM ratchet backwards.
+
+## D1203 — changing redundancy without replacing the data: sync PATCH vs 72-hour migration
+
+The last blob in-place gap, and the one D824 flagged as the heaviest: `durability.class`
+(single-zone=LRS, regional=ZRS, multi-regional=GZRS). The naive plan destroyed a
+data-bearing account to change its redundancy; Azure supports changing it in place, in two
+very different ways, and the design is telling them apart.
+
+A change that keeps the ZONE-redundancy and only moves the GEO dimension — ZRS<->GZRS — is
+a synchronous SKU PATCH: `PATCH storageAccounts {"sku":{"name":...}}`, done in one call. A
+change that FLIPS the zone-redundancy — LRS<->ZRS or LRS<->GZRS — is a customer-initiated
+MIGRATION: `POST startAccountMigration {"targetSkuName":...}`, which Azure runs
+asynchronously and which can take up to 72 hours for a large account. `blobSkuZonal` (does
+the SKU carry "ZRS") is the whole discriminator.
+
+The async migration does not fit converge-to-completion, so the honest outcome is
+`unknown` — the migration was initiated (202 Accepted) or is already running, and a later
+reconcile confirms when the SKU converts; a synchronous 200 (a small account) is
+`succeeded`. Two disciplines keep the async case safe. IDEMPOTENCY: before starting, the
+update reads `accountMigrations/default` — a migration already running toward OUR target is
+reported `unknown` WITHOUT starting a second (a converge that re-proposes the still-drifted
+SKU each cycle must not stack migrations); a migration toward a DIFFERENT target is refused.
+And the outcome never overclaims: an async migration is `unknown-in-progress`, never a
+`succeeded` over a redundancy that has not converted (the async-outruns-poll trap this
+project has hit before). No observe change was needed — the update's idempotent `unknown`
+already surfaces the in-progress state with a clear reason, so a per-observe migration read
+would be cost for no clarity.
+
+That closes the blob in-place set — publicExposure (D1200), retention.minimum (D1201/D1202),
+and durability (D1203): every governed attribute Azure can change online is now changed
+online, and the one thing the driver still refuses to do to a storage account is destroy it.
+
+## D1204 — showing the migration on the read path, for free
+
+D1203 said no observe change was needed for the durability migration — the update's
+idempotent `unknown` already surfaces the in-progress state. That was true for the WRITE
+path but not the READ path: a bare `observe`/`verify`/`posture`, which never runs the
+update, saw only `durability.class` measured from the standing (old) SKU, with no sign the
+account was mid-conversion. To a reader, a 72-hour migration looked identical to a change
+that had simply not been made.
+
+The fix costs nothing: Azure reports the conversion on the account itself
+(`properties.storageAccountSkuConversionStatus.skuConversionStatus` = `InProgress`, plus
+`targetSkuName`), and observe ALREADY fetches that account. So it now emits `durability.class`
+from the standing SKU as before — honest, the redundancy IS still that until the migration
+completes — AND a diagnostic naming the target class and that a migration is IN PROGRESS
+(async, up to 72h). No extra ARM call: the earlier reasoning against a per-observe
+`accountMigrations` read still holds, but it was aimed at the wrong door — the signal was
+already in a response we read.
+
+The small lesson: "the write path already surfaces it" is not the same as "the state is
+visible." A migration is a fact about the resource, and the read path is where a person
+looks to understand a resource — so a long-running conversion belongs in the observation,
+especially when it is free to include. This completes the durability slice (D1203) and, with
+it, the blob in-place set: every governed attribute changed online, and every in-flight
+change visible on the read path.
+
+## D1205 — a public database made private in place, not by replacing it
+
+Before this, `flexpostgres` (Azure PostgreSQL Flexible Server — the `capability.database.relational`
+driver) had NO `ClassifyChange` of its own, so every attribute drift fell through to the Azure
+driver's default: `immutable`, "reconciling a drift is a replacement". For a stateless resource
+that default is honest. For a DATABASE it is the most expensive verdict the tool can reach — a
+replacement destroys every row. And it was being applied to `network.publicExposure`, the one
+knob a discovered-public database most needs remediated: the plan for "make this public database
+private" was "drop it and build a new one".
+
+It does not have to be. `publicNetworkAccess` (Enabled/Disabled) sits in
+`ServerPropertiesForUpdate.network` in the 2023-06-01-preview swagger and is not `readOnly` —
+Azure changes it online with a PATCH. So `classifyFlexServerChange` now returns `mutable` for
+`network.publicExposure` and `immutable` (with the same honest replacement reason) for everything
+else, and `updateFlexServer` PATCHes `network.publicNetworkAccess` to match the contract. A
+public database converges to private without a replacement; its data is never touched.
+
+Two guards keep the PATCH safe. Ownership is re-checked against the server's tags before any
+write (a foreign server is refused, no PATCH). And the PATCH preserves the VNet-integration
+fields it read (`delegatedSubnetResourceId` / `privateDnsZoneArmResourceId`) rather than sending
+`network` with only `publicNetworkAccess` — a partial network body could be treated as a replace
+and blank the subnet on a VNet-injected server. A server Azure will not toggle (e.g. a
+private-access server that cannot take a public endpoint) returns a terminal 4xx, which the
+four-valued discipline turns into `unknown` with the deterministic providerID — an honest
+"reconcile", never a data-losing replacement. The scope is deliberately the one exposure knob:
+the other stateful attributes stay `immutable` until each has a proven online path, exactly as
+the blob in-place set (D1200) started with `publicExposure` alone.
+
+## D1206 — the same public-database fix, on its Redis twin
+
+D1205 fixed `flexpostgres`: a public Postgres server was being reconciled to private by a
+REPLACEMENT (the driver had no `ClassifyChange`, so the drift fell to the `immutable` default).
+The lesson `sweep-the-twins` says: when a defect has a shape, look for the siblings that share
+it before waiting for the field to find them. `rediscache` (Azure Cache for Redis,
+`capability.cache.keyvalue`) is that sibling — and it had the identical defect.
+
+rediscache observes `network.publicExposure` from `publicNetworkAccess` (its own comment: "Cache
+for Redis CAN have a public endpoint, so network.publicExposure is a REAL toggle here"), but it
+was on the classify allowlist with no `ClassifyChange` of its own — so a public cache's drift to
+private classified `immutable` = replacement. For a cache that is worse than for a database: a
+replacement does not just drop the cached data, it mints a new hostname and new access keys, so
+every client breaks. The plan for "make this public cache private" was "destroy it and rebuild".
+
+`publicNetworkAccess` (Enabled/Disabled) lives in `RedisUpdateProperties` (via
+`RedisCommonProperties`, not `readOnly` in the 2023-08-01 swagger), so Azure PATCHes it online.
+`classifyRedisAzureChange` now returns `mutable` for `network.publicExposure` and `immutable`
+(honest replacement) for the rest; `updateRedisAzure` re-checks ownership by tags and PATCHes
+`publicNetworkAccess` to match the contract. This is simpler than the flexpostgres PATCH — here
+`publicNetworkAccess` is a top-level property of the update body, so there is no nested network
+object to preserve. A terminal 4xx stays `unknown` with the deterministic providerID; the data,
+the hostname and the keys are never touched. The PATCH route was newly captured; the update
+permission (Microsoft.Cache/redis read+write) already existed.
+
+## D1207 — the third twin: a public search service made private in place
+
+D1205 (flexpostgres) and D1206 (rediscache) fixed the same defect on two Azure resources; the
+sweep that found D1206 kept going. `aisearch` (Azure AI/Cognitive Search,
+`capability.search.index`) was the third resource with the identical shape: it observes
+`network.publicExposure` from `publicNetworkAccess`, but sat on the classify allowlist with no
+`ClassifyChange` — so a public search service's drift to private classified `immutable` =
+replacement, and replacing a search service destroys every index it holds. The plan for "make
+this public search service private" was "drop it and re-index from scratch".
+
+`publicNetworkAccess` (`enabled`/`disabled`, lowercase on this RP) is in
+`SearchServiceUpdate.properties` (`SearchServiceProperties`, not `readOnly` in the 2023-11-01
+swagger, and `searchServices` exposes a PATCH), so Azure changes it online. `classifyAISearchChange`
+now returns `mutable` for `network.publicExposure` and `immutable` (honest replacement) for the
+rest; `updateAISearch` re-checks ownership by tags and PATCHes `publicNetworkAccess` to the
+lowercase value the API and this driver's observe/build already use. Terminal 4xx → `unknown`
+with the deterministic providerID; the indexes are never touched. The PATCH route was newly
+captured; the update permission (searchServices read+write) already existed.
+
+### The sweep, and where it stops
+The three twins (D1205/D1206/D1207) share one shape: a STATEFUL resource that observes
+`network.publicExposure`, has no `ClassifyChange`, and whose exposure knob the provider changes
+online — so the default `immutable` verdict was proposing a data-destroying replacement to
+remediate a knob a PATCH fixes. The sweep also cleared the resources that merely resemble the
+shape but are honestly immutable: AWS OpenSearch (`opensearch`) derives `publicExposure` from VPC
+placement, which is genuinely fixed at domain creation — a replacement IS the only path, so its
+`immutable` is correct; GCP Cloud SQL already classifies `publicExposure` explicitly (it refuses
+to remove public access without a prepared private-network link — the SAFE direction, not a
+silent replacement). One AWS twin of the same shape remains for a later slice: Redshift
+Serverless (`redshiftserverless`) observes `publicExposure` from the workgroup's
+`publiclyAccessible`, has no `ClassifyChange` (→ default replacement), and `UpdateWorkgroup`
+toggles that flag online — the AWS-side counterpart of this Azure campaign.
+
+## D1208 — the AWS leg: a public data warehouse made private in place
+
+The three Azure twins (D1205/D1206/D1207) had an AWS counterpart the sweep named but left for a
+slice: `redshiftserverless` (Redshift Serverless, `capability.warehouse.analytics`). It observes
+`network.publicExposure` from the workgroup's `publiclyAccessible`, had no `ClassifyChange`, and
+so fell to the AWS driver default — `immutable` = replacement. Replacing the workgroup does not
+lose the namespace's data (compute and storage are separate here), but it tears down the compute
+endpoint: the address every client connects to changes. To narrow exposure, that is both
+destructive and unnecessary.
+
+`publiclyAccessible` is an `UpdateWorkgroup` parameter, so AWS flips it online.
+`classifyRedshiftServerlessChange` now returns `mutable` for `network.publicExposure` and
+`immutable` (honest replacement) for the rest; `updateRedshiftServerless` re-checks ownership by
+tags — distinguishing a GONE workgroup (a clean failure) from a FOREIGN one (a refusal) — and
+then issues `UpdateWorkgroup{publiclyAccessible}`. Four-valued: an ambiguous call keeps the
+providerID; a terminal 4xx is an honest failure. The update permission gained
+`redshift-serverless:UpdateWorkgroup` (the mutation it now performs).
+
+With this the campaign spans both clouds: a stateful resource whose public/private exposure the
+provider changes online is now remediated in place on Azure Postgres, Redis, and AI Search, and
+on AWS Redshift Serverless — never by a replacement that destroys data or breaks every client.
+The honestly-immutable look-alikes (AWS OpenSearch's create-fixed VPC placement, GCP Cloud SQL's
+already-explicit refuse-safe classify) were checked and left as they were.
+
+## D1209 — enforcing TLS on a Redis cache in place, not by replacing it
+
+The publicExposure campaign (D1205-D1208) fixed one knob; the same class covers every online
+security control a stateful driver classifies as a replacement. rediscache observes
+`encryption.inTransit` as `!enableNonSslPort` (D-era: a cache with the non-SSL port open accepts
+plaintext), and after D1206 its classify returned `immutable` for everything but publicExposure —
+so a plaintext-accepting cache that a contract wants TLS-only was being reconciled by REPLACEMENT,
+destroying its data and rotating its keys to close a port a PATCH closes.
+
+`enableNonSslPort` is in `RedisCommonProperties` (reachable from `RedisUpdateProperties`, not
+`readOnly` in the 2023-08-01 swagger), so Azure changes it online. `classifyRedisAzureChange` now
+returns `mutable` for `encryption.inTransit`, and `updateRedisAzure` PATCHes `enableNonSslPort` to
+`!inTransit` — enforcing TLS closes the non-SSL port in place. The observe reads inTransit from
+exactly this field, so the round-trip is exact. Same PATCH endpoint, ownership check, permission,
+and four-valued discipline as D1206; no new route or permission.
+
+## D1210 — enforcing TLS on a Postgres server in place, via its own parameter
+
+The Redis TLS fix (D1209) has a Postgres sibling. flexserver observes `encryption.inTransit` from
+the `require_secure_transport` server parameter (D761 established this is a real per-server
+parameter, not a platform constant), but after D1205 its classify returned `immutable` for
+inTransit — so a server accepting plaintext that a contract wants TLS-only was reconciled by
+REPLACEMENT, destroying the database to flip a parameter.
+
+`require_secure_transport` is a DYNAMIC configuration (`isDynamicConfig=true` in the 2023-06-01-
+preview swagger — it applies online, no restart), and `Configuration.properties.value` is writable
+via a PATCH to `.../configurations/require_secure_transport`. `classifyFlexServerChange` now
+returns `mutable` for `encryption.inTransit`, and `updateFlexServer` PATCHes the configuration to
+`on`/`off` with a `user-override` source (pinning the operator's intent over the platform default).
+The observe reads inTransit from exactly this parameter, so the round-trip is exact. New route
+(PATCH the configurations sub-resource) and permission (flexibleServers/configurations/write); the
+same ownership check and four-valued discipline as the publicExposure arm.
+
+With D1209/D1210 the TLS knob joins publicExposure in the in-place set on both the Redis and
+Postgres drivers: every online security control these stateful resources expose is now remediated
+by a patch, never by a replacement that destroys the data.

@@ -1,6 +1,8 @@
 package azure
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -351,5 +353,157 @@ func TestCreateFlexServerRefusesUnsupportedZoneRedundantHA(t *testing.T) {
 				t.Errorf("a region that supports zone-redundant HA must NOT be preflight-refused: %+v", res)
 			}
 		})
+	}
+}
+
+// D1205: updateFlexServer remediates network.publicExposure in place — a PATCH of the
+// server's network.publicNetworkAccess, so a public database is made private WITHOUT a
+// replacement that would destroy its data. Ownership is re-checked; the PATCH preserves the
+// VNet-integration fields it read; a foreign server is refused with no write.
+func TestUpdateFlexServerPublicExposure(t *testing.T) {
+	type patch struct {
+		access string
+		subnet string
+		dns    string
+	}
+	newSrv := func(tagCap, subnet string, seen *[]patch) *httptest.Server {
+		net := `"publicNetworkAccess":"Enabled"`
+		if subnet != "" {
+			net += `,"delegatedSubnetResourceId":"` + subnet + `"` +
+				`,"privateDnsZoneArmResourceId":"` + subnet + "-zone" + `"`
+		}
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case "GET":
+				_, _ = w.Write([]byte(`{"location":"eastus",` +
+					`"tags":{"groundhold-capability":"` + tagCap + `","groundhold-environment":"prod"},` +
+					`"properties":{"state":"Ready","network":{` + net + `}}}`))
+			case "PATCH":
+				body, _ := io.ReadAll(r.Body)
+				var d struct {
+					Properties struct {
+						Network struct {
+							PublicNetworkAccess         string `json:"publicNetworkAccess"`
+							DelegatedSubnetResourceID   string `json:"delegatedSubnetResourceId"`
+							PrivateDNSZoneArmResourceID string `json:"privateDnsZoneArmResourceId"`
+						} `json:"network"`
+					} `json:"properties"`
+				}
+				_ = json.Unmarshal(body, &d)
+				*seen = append(*seen, patch{access: d.Properties.Network.PublicNetworkAccess,
+					subnet: d.Properties.Network.DelegatedSubnetResourceID,
+					dns:    d.Properties.Network.PrivateDNSZoneArmResourceID})
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{"properties":{"state":"Updating"}}`))
+			default:
+				t.Errorf("unexpected %s", r.Method)
+				w.WriteHeader(404)
+			}
+		}))
+	}
+
+	t.Run("remediate public->private (PATCH publicNetworkAccess=Disabled)", func(t *testing.T) {
+		var seen []patch
+		srv := newSrv("db", "", &seen)
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		pid := flexProviderID(d.Subscription, "rg1", "orders-db")
+		res := d.updateFlexServer("db", "prod", pid,
+			map[string]any{"network.publicExposure": false}, []string{"network.publicExposure"})
+		if res.Status != "succeeded" {
+			t.Fatalf("update: %+v", res)
+		}
+		if len(seen) != 1 || seen[0].access != "Disabled" {
+			t.Fatalf("must PATCH publicNetworkAccess=Disabled, got %+v", seen)
+		}
+	})
+
+	t.Run("VNet subnet preserved in the PATCH", func(t *testing.T) {
+		var seen []patch
+		subnet := "/subscriptions/s/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vn/subnets/db"
+		srv := newSrv("db", subnet, &seen)
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		pid := flexProviderID(d.Subscription, "rg1", "orders-db")
+		res := d.updateFlexServer("db", "prod", pid,
+			map[string]any{"network.publicExposure": false}, []string{"network.publicExposure"})
+		if res.Status != "succeeded" {
+			t.Fatalf("update: %+v", res)
+		}
+		if len(seen) != 1 || seen[0].subnet != subnet || seen[0].dns != subnet+"-zone" {
+			t.Fatalf("PATCH must preserve delegatedSubnetResourceId + privateDnsZoneArmResourceId, got %+v", seen)
+		}
+	})
+
+	t.Run("foreign server refused, no write", func(t *testing.T) {
+		var seen []patch
+		srv := newSrv("someone-else", "", &seen)
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		pid := flexProviderID(d.Subscription, "rg1", "orders-db")
+		res := d.updateFlexServer("db", "prod", pid,
+			map[string]any{"network.publicExposure": false}, []string{"network.publicExposure"})
+		if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
+			t.Fatalf("a foreign server must be refused, got %+v", res)
+		}
+		if len(seen) != 0 {
+			t.Fatalf("a refused update must issue NO write, got %+v", seen)
+		}
+	})
+}
+
+func TestClassifyFlexServerChange(t *testing.T) {
+	for _, p := range []string{"network.publicExposure", "encryption.inTransit"} {
+		if got, _ := classifyFlexServerChange(p); got != "mutable" {
+			t.Fatalf("%s must be mutable (in-place), got %q", p, got)
+		}
+	}
+	// A database's stateful knobs stay immutable — an honest replacement, never a
+	// silent in-place claim the driver cannot honour.
+	for _, p := range []string{"location.region", "durability.class", "engine.protocol", "availability.class"} {
+		if got, _ := classifyFlexServerChange(p); got != "immutable" {
+			t.Fatalf("%s must be immutable (replacement), got %q", p, got)
+		}
+	}
+}
+
+// D1210: updateFlexServer enforces encryption.inTransit in place — a PATCH of the
+// require_secure_transport configuration, so a server accepting plaintext is made TLS-only
+// WITHOUT replacing the database.
+func TestUpdateFlexServerInTransit(t *testing.T) {
+	var seenValue []string // require_secure_transport value seen on the config PATCH
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		isConfig := strings.Contains(r.URL.Path, "/configurations/require_secure_transport")
+		switch {
+		case r.Method == "GET":
+			_, _ = w.Write([]byte(`{"location":"eastus",` +
+				`"tags":{"groundhold-capability":"db","groundhold-environment":"prod"},` +
+				`"properties":{"state":"Ready","network":{"publicNetworkAccess":"Disabled"}}}`))
+		case r.Method == "PATCH" && isConfig:
+			body, _ := io.ReadAll(r.Body)
+			var d struct {
+				Properties struct {
+					Value string `json:"value"`
+				} `json:"properties"`
+			}
+			_ = json.Unmarshal(body, &d)
+			seenValue = append(seenValue, d.Properties.Value)
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"properties":{"value":"on"}}`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	d := vnetTestDriver(t, srv)
+	pid := flexProviderID(d.Subscription, "rg1", "orders-db")
+	res := d.updateFlexServer("db", "prod", pid,
+		map[string]any{"encryption.inTransit": true}, []string{"encryption.inTransit"})
+	if res.Status != "succeeded" {
+		t.Fatalf("update: %+v", res)
+	}
+	if len(seenValue) != 1 || seenValue[0] != "on" {
+		t.Fatalf("must PATCH require_secure_transport value=on, got %+v", seenValue)
 	}
 }

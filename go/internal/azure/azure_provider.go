@@ -617,6 +617,12 @@ func (d *Driver) ClassifyChange(service, path string, current, desired any,
 		return classifyACRChange(path)
 	case "blob":
 		return classifyBlobChange(path)
+	case "flexpostgres":
+		return classifyFlexServerChange(path)
+	case "rediscache":
+		return classifyRedisAzureChange(path)
+	case "aisearch":
+		return classifyAISearchChange(path)
 	case "servicebusqueue":
 		return classifyServiceBusQueueChange(path)
 	case "loadbalancer":
@@ -680,6 +686,14 @@ func (d *Driver) update(service, capability, environment, providerID string,
 		return d.updateDefender(capability, environment, providerID, attrs, impl, changes)
 	case "servicebusqueue":
 		return d.updateServiceBus(capability, environment, providerID, attrs, impl, changes)
+	case "blob":
+		return d.updateBlob(capability, environment, providerID, attrs, changes)
+	case "flexpostgres":
+		return d.updateFlexServer(capability, environment, providerID, attrs, changes)
+	case "rediscache":
+		return d.updateRedisAzure(capability, environment, providerID, attrs, changes)
+	case "aisearch":
+		return d.updateAISearch(capability, environment, providerID, attrs, changes)
 	case "aks":
 		return d.updateAKS(capability, environment, providerID, attrs, impl, changes)
 	case "aks-addon":

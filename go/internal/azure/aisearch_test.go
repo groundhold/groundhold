@@ -304,3 +304,76 @@ func TestMetamorphicAISearchRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+// D1207: updateAISearch remediates network.publicExposure in place — a PATCH of the service's
+// publicNetworkAccess (lowercase enabled/disabled), so a public search service is made private
+// WITHOUT a replacement that would destroy every index. Ownership re-checked; foreign refused.
+func TestUpdateAISearchPublicExposure(t *testing.T) {
+	newSrv := func(tagCap string, seen *[]string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case "GET":
+				_, _ = w.Write([]byte(`{"location":"eastus",` +
+					`"tags":{"groundhold-capability":"` + tagCap + `","groundhold-environment":"prod"},` +
+					`"properties":{"provisioningState":"succeeded","publicNetworkAccess":"enabled"}}`))
+			case "PATCH":
+				body, _ := io.ReadAll(r.Body)
+				var d struct {
+					Properties struct {
+						PublicNetworkAccess string `json:"publicNetworkAccess"`
+					} `json:"properties"`
+				}
+				_ = json.Unmarshal(body, &d)
+				*seen = append(*seen, d.Properties.PublicNetworkAccess)
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{"properties":{"provisioningState":"succeeded"}}`))
+			default:
+				t.Errorf("unexpected %s", r.Method)
+				w.WriteHeader(404)
+			}
+		}))
+	}
+
+	t.Run("remediate public->private (PATCH publicNetworkAccess=disabled)", func(t *testing.T) {
+		var seen []string
+		srv := newSrv("catalog", &seen)
+		defer srv.Close()
+		d := aiSearchDriver(t, srv)
+		pid := aiSearchProviderID(d.Subscription, "rg1", "catalog-search")
+		res := d.updateAISearch("catalog", "prod", pid,
+			map[string]any{"network.publicExposure": false}, []string{"network.publicExposure"})
+		if res.Status != "succeeded" {
+			t.Fatalf("update: %+v", res)
+		}
+		if len(seen) != 1 || seen[0] != "disabled" {
+			t.Fatalf("must PATCH publicNetworkAccess=disabled (lowercase), got %+v", seen)
+		}
+	})
+
+	t.Run("foreign service refused, no write", func(t *testing.T) {
+		var seen []string
+		srv := newSrv("someone-else", &seen)
+		defer srv.Close()
+		d := aiSearchDriver(t, srv)
+		pid := aiSearchProviderID(d.Subscription, "rg1", "catalog-search")
+		res := d.updateAISearch("catalog", "prod", pid,
+			map[string]any{"network.publicExposure": false}, []string{"network.publicExposure"})
+		if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
+			t.Fatalf("a foreign service must be refused, got %+v", res)
+		}
+		if len(seen) != 0 {
+			t.Fatalf("a refused update must issue NO write, got %+v", seen)
+		}
+	})
+}
+
+func TestClassifyAISearchChange(t *testing.T) {
+	if got, _ := classifyAISearchChange("network.publicExposure"); got != "mutable" {
+		t.Fatalf("network.publicExposure must be mutable (in-place), got %q", got)
+	}
+	for _, p := range []string{"location.region", "engine.protocol", "capacity.replicas"} {
+		if got, _ := classifyAISearchChange(p); got != "immutable" {
+			t.Fatalf("%s must be immutable (replacement), got %q", p, got)
+		}
+	}
+}

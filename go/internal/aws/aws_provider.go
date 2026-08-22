@@ -1009,6 +1009,8 @@ func (d *Driver) ClassifyChange(service, path string, current, desired any,
 		return classifyDynamoDBChange(path)
 	case "eventbridgescheduler":
 		return classifyEBSChange(path)
+	case "redshiftserverless":
+		return classifyRedshiftServerlessChange(path)
 	default:
 		// D215: a create service with no explicit ClassifyChange has no in-place
 		// update path, so reconciling a drift is honestly a REPLACEMENT
@@ -1113,6 +1115,8 @@ func (d *Driver) update(service, capability, environment, providerID string,
 		// Environment via UpdateFunctionConfiguration; network.publicExposure toggles
 		// the Function URL).
 		return d.updateLambda(capability, environment, providerID, attrs, impl, changes)
+	case "redshiftserverless":
+		return d.updateRedshiftServerless(capability, environment, providerID, attrs, impl, changes)
 	default:
 		return provider.CreateResult{Status: "failed",
 			Reason: fmt.Sprintf("aws service %q in-place update is not wired yet", service)}
