@@ -55,7 +55,16 @@ pin; what the scenarios prove is what apply obeys.
    `provider-permission-denied`; a check that cannot RUN (provider IAM API
    unreachable, token/scope) refuses `preflight-inconclusive` FAIL-CLOSED; a
    provider with no `Preflighter` SKIPS loudly (surfaced in the result)
-   unless `--require-preflight`. Best-effort fail-fast, NOT an authorization
+   unless `--require-preflight`. An EMPTY required set does the same (D1175):
+   there are two ways to skip this check — the provider cannot answer, or
+   there was nothing to ask — and both are surfaced as `skipped` and both
+   refuse `preflight-inconclusive` under `--require-preflight`. The second
+   said nothing at all until D1175, so a run that verified nothing read
+   exactly like one that verified everything, and the flag returned success
+   having checked no permission. An empty set is reachable by the most
+   ordinary route there is: a service added to a driver without its
+   `PermissionsFor` case. All 145 served services declare permissions today,
+   which is now GATED rather than merely true. Best-effort fail-fast, NOT an authorization
    proof: a refusal is trustworthy, a pass is evidence, not proof — IAM deny
    policies, conditional bindings, propagation lag, org policy, VPC-SC and
    OAuth scope can all diverge at call time, so mid-apply permission failure

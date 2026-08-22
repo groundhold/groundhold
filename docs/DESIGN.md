@@ -38778,3 +38778,77 @@ comment, where the next person meets it.
 
 Both published documents now say which operations apply and which merely load, and why
 each of the three is accepted rather than deleted.
+
+## D1175 — the preflight can be skipped two ways, and only one of them said so
+
+`spec/executor.md` has promised since D75 that a provider without a `Preflighter`
+"SKIPS loudly (surfaced in the result) unless `--require-preflight`". That promise is
+kept — for that reason. There is a second way to skip the check, and it said nothing at
+all.
+
+`apply` reaches the permission check through `if needed := requiredUnion(...);
+len(needed) > 0`. There is no `else`. When the required set is EMPTY the whole block is
+stepped over: `res.Preflight` stays nil, no status is recorded, nothing is printed —
+and `--require-preflight`, the flag whose entire meaning is *I demand certainty*,
+returns success having verified no permission at all. Ask this project's own question
+of it: what would that flag print if the permission map were emptied? Exactly what it
+prints when every permission is attested.
+
+The route to an empty set is the most ordinary one there is. `PermissionsFor` ends in
+`return nil`, so a service added to a driver without its case falls through, and the
+compiler asks the same function — so the plan's SEALED `requiredPermissions` is empty
+too, and the union of the two is empty. Adding a service is routine work in this
+repository.
+
+Measured before deciding: 145 services across three clouds (gcp 46, aws 54, azure 45)
+declare permissions for create, update and delete — 435 pairs, zero empty. On that
+measurement the first draft of this entry said "so the hole has never been reached; it
+was held shut by care". **That was wrong, and it was wrong the same way D1173 was:** a
+negative claim drawn from a measurement that covered only what I had looked at. It was
+caught before publication, which is the only reason it is being corrected here rather
+than in a later entry.
+
+`PermissionsFor` has cases for `gcp`, `aws`, `azure` and `fake`. `driverFor` builds
+those and FOUR more that mutate — `k8s`, `upstash`, `hetzner`, `cloudflare`, each with
+a `Create`. None of them has a permission case, so every one of their services returns
+nil and the required union for such a plan is EMPTY. The silent path was not latent: it
+is the path every k8s apply has taken.
+
+Worse, and this is the part that makes it a broken promise rather than a gap: `k8s`
+implements no `Preflighter` either, so it is exactly the case
+`spec/executor.md` describes when it says a provider without one "SKIPS loudly
+(surfaced in the result)". That loud branch never fired for it. The empty-union check
+comes FIRST and returned silently, so the documented behaviour was unreachable for the
+very providers it was written to cover.
+
+What follows for the flag is a real change and is stated plainly rather than buried: a
+k8s apply under `--require-preflight` now REFUSES `preflight-inconclusive` instead of
+succeeding. That is the honest answer — RBAC is not this permission model and nothing
+was checked — and it is the same answer the other skip already gave.
+
+Both halves are now closed. The empty set records `skipped` — a status
+`spec/outputs.schema.json` has published beside `passed` all along and the runtime
+emitted for only one of the two reasons — and `--require-preflight` refuses
+`preflight-inconclusive`, the same code and exit the other skip already used.
+`TestEveryServedServiceDeclaresPermissions` walks the three IAM drivers' registries and
+requires a non-empty set for `create` and `delete`. The four providers with no IAM
+permission model are named in the gate as an explicit exclusion with the reason — a
+declared absence, not a silent omission, which is the standard this record holds every
+other closed set to.
+
+Those two operations and not `update`, deliberately: create and delete are universal, so
+a missing declaration there is a gap and never a choice, while several services have no
+in-place update wired at all (`gcp/update.go` answers "in-place update is not wired yet"
+for nine of them) and asserting `update` would enshrine declarations that may describe
+an operation the driver refuses. That is D1174's lesson applied one slice later — do not
+gate a set into place without asking whether it is right.
+
+**The test I wrote first proved nothing, and two mutants said so.** It made the union
+empty by overriding the provider object's `Name()`. `requiredUnion` never asks the
+object: it reads the name from `reads.provider` in the sealed plan. Both mutants
+survived. The second draft edited the plan and still proved nothing, because the union
+has TWO sources and the compiler had already sealed a `requiredPermissions` list into
+each action. Only the third — plan name changed AND the sealed lists cleared, which is
+exactly what a plan compiled for a service with no permission case looks like — actually
+reached the branch. Three drafts of one fixture, and the empty-probe failure caught each
+time by mutating rather than by reading the result and believing it.

@@ -767,6 +767,29 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 			res.Preflight = &PreflightResult{Status: "skipped",
 				Reason: "provider " + prov.Name() + " cannot check permissions"}
 		}
+	} else if requirePreflight {
+		// D1175. There are TWO ways this check can be skipped and only one of them
+		// said so. "The provider cannot check" is handled above, loudly and with the
+		// flag honoured. "There was nothing to check" — an EMPTY required set — fell
+		// out of the `if` with no branch at all: no status, no note, and
+		// `--require-preflight` returning success having verified nothing. Ask the
+		// question this project asks of every gate: what would `--require-preflight`
+		// print if the permission map were empty? The same thing it prints when every
+		// permission is attested.
+		//
+		// It is reachable by the most ordinary route there is — a service added to a
+		// driver without a `PermissionsFor` case falls through to `return nil`, and
+		// `requiredUnion` is then empty for a plan touching only that service. All 145
+		// services declare permissions today (gated by
+		// TestEveryServedServiceDeclaresPermissions), which is why this has never been
+		// hit; the flag must not depend on that holding.
+		return refused(perr.PreflightInconclusive, 2,
+			"no permissions are declared for this plan's actions, so the preflight "+
+				"checked NOTHING and --require-preflight is set")
+	} else {
+		res.Preflight = &PreflightResult{Status: "skipped",
+			Reason: "no permissions are declared for the operations in this plan, " +
+				"so there was nothing to check"}
 	}
 
 	// ---- execution ----
