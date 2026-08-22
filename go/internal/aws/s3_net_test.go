@@ -10,6 +10,13 @@ import (
 	"groundhold/internal/provider"
 )
 
+// s3PrivateACL is an owner-only bucket ACL (no AllUsers/AuthenticatedUsers grant) —
+// the GetBucketAcl response for a NON-public bucket, so observeS3's ACL leg reads
+// definitively non-public and publicExposure can settle to a measured false.
+const s3PrivateACL = `<AccessControlPolicy><Owner><ID>owner</ID></Owner>` +
+	`<AccessControlList><Grant><Grantee><ID>owner</ID></Grantee>` +
+	`<Permission>FULL_CONTROL</Permission></Grant></AccessControlList></AccessControlPolicy>`
+
 // s3Server routes path-style S3 sub-resource calls (the driver uses path-style
 // when S3BaseURL is set). It asserts the SHA-256 body checksum is present on body PUTs
 // (x-amz-checksum-sha256, field-verified live) and tracks tag state so a create sequence and an
@@ -62,6 +69,8 @@ func s3Server(t *testing.T, createStatus int, createErrCode string) *httptest.Se
 			case r.Method == "GET" && q == "policyStatus":
 				w.WriteHeader(404)
 				_, _ = w.Write([]byte("<Error><Code>NoSuchBucketPolicy</Code></Error>"))
+			case r.Method == "GET" && q == "acl":
+				_, _ = w.Write([]byte(s3PrivateACL))
 			case r.Method == "DELETE":
 				w.WriteHeader(204)
 			default:
@@ -209,6 +218,8 @@ func TestObserveS3Replication(t *testing.T) {
 			case "policyStatus":
 				w.WriteHeader(404)
 				_, _ = w.Write([]byte("<Error><Code>NoSuchBucketPolicy</Code></Error>"))
+			case "acl":
+				_, _ = w.Write([]byte(s3PrivateACL))
 			default:
 				w.WriteHeader(404)
 			}
@@ -322,6 +333,8 @@ func TestObserveS3ObjectLock(t *testing.T) {
 			case "policyStatus":
 				w.WriteHeader(404)
 				_, _ = w.Write([]byte("<Error><Code>NoSuchBucketPolicy</Code></Error>"))
+			case "acl":
+				_, _ = w.Write([]byte(s3PrivateACL))
 			default:
 				w.WriteHeader(404)
 			}
@@ -409,6 +422,8 @@ func s3ExistingOursServer(t *testing.T) *httptest.Server {
 			case r.Method == "GET" && q == "policyStatus":
 				w.WriteHeader(404)
 				_, _ = w.Write([]byte("<Error><Code>NoSuchBucketPolicy</Code></Error>"))
+			case r.Method == "GET" && q == "acl":
+				_, _ = w.Write([]byte(s3PrivateACL))
 			case r.Method == "PUT":
 				// configuration writes onto a bucket we already own (tags, PAB,
 				// versioning) — convergence onto an adopted bucket, not a duplicate.

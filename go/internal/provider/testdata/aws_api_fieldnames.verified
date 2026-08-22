@@ -277,6 +277,7 @@ policy
 properties
 protocolType
 provisioned
+publicAccessCidrs
 publiclyAccessible
 repositories
 repositoryName

@@ -357,12 +357,33 @@ func methodRank(method string) int {
 // WITNESSED (provider-api or better), never satisfied by the candidate's own declared
 // word (the D1003/D1040/D1071 false-secure). This Go predicate is the FAIL-CLOSED
 // authority: it is present even under --no-vocab (a vocab-only marker would fail open,
-// Codex review). It is HAND-MAINTAINED and pinned by TestIsSecurityPath — there is no
-// vocab `security:` marker and no parity lint (assessed low-value: a per-path marker only
-// syncs docs for already-floored paths and cannot force a new namespace unless the author
-// volunteers it — the same vigilance as this list). So the discipline is: EVERY
-// capability's security-posture attributes must be listed here, and an omission is a
-// silently-reopened false-secure. The identity paths below were exactly such an omission,
+// Codex review). It is HAND-MAINTAINED and pinned by TestIsSecurityPath. There is still
+// no vocab `security:` marker and so no PARITY lint between a marker and this list —
+// that was assessed low-value, because a per-path marker only syncs docs for paths
+// already floored and cannot force a new namespace unless the author volunteers it.
+//
+// D1181: this paragraph used to end there, and it read as "nothing guards this list but
+// vigilance". That describes the state before D1075. A KEYWORD lint does guard it —
+// `TestSecurityFloorCoversEverySecurityPostureAttr`, named thirty lines below, which
+// scans every vocabulary and FAILS THE BUILD on a security-posture attribute missing
+// here. It found a dozen the hand-enumeration had missed, and D1076 widened it after
+// two more dodged every keyword. Saying so here is not decoration: a maintainer reading
+// the register learns from this comment whether adding an attribute is guarded, and the
+// answer changed without the sentence changing.
+//
+// What the keyword lint cannot do is see a control whose NAME matches nothing — the
+// caveat D1076 patched by hand, which is the shape that says the mechanism is wrong
+// rather than incomplete. The stronger forcing function is an EXHAUSTIVE classification:
+// require every vocabulary attribute to be either here or in an explicit not-a-security-
+// posture list, so a new attribute cannot be added without a decision. Measured for
+// feasibility rather than guessed: 145 unique attribute paths across the 57
+// vocabularies, of which this list already classifies these. That is a one-time
+// classification of about a hundred paths, and it overturns the assessment recorded
+// above on DIFFERENT grounds (forced, not volunteered), so it is proposed rather than
+// done here.
+//
+// So the discipline is: EVERY capability's security-posture attributes must be listed
+// here, and an omission is a silently-reopened false-secure. The identity paths below were exactly such an omission,
 // found by the D323/D325-class hunt — worst-case, because the identity capabilities are
 // declared-ONLY (no observer driver), so a hard identity security constraint could ONLY
 // ever be satisfied by intent, i.e. it was ALWAYS false-secure without this floor.

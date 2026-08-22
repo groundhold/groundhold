@@ -101,6 +101,43 @@ func TestEnumerateNamespaces(t *testing.T) {
 	}
 }
 
+// D1060 parity in the DISCOVERY sweep: reading the enforce label proves INTENT, not
+// enforcement (the PodSecurity admission plugin may be off), so the discovered
+// observation must be config-intent — the same verdict the verify lens reaches. A
+// `measured restricted` here would clear the security floor and read securely-restricted
+// over a cluster that admits privileged pods — the dangerous direction.
+func TestDiscoverNamespacePodSecurityIsConfigIntent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{
+			{"metadata": map[string]any{"name": "payments", "labels": map[string]any{
+				"pod-security.kubernetes.io/enforce": "restricted"}}},
+		}})
+	}))
+	defer srv.Close()
+	d := NewDriver(srv.URL, "tok")
+	got, _, err := d.sweepNamespaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, disc := range got {
+		for _, o := range disc.Observations {
+			if o.Path == "security.podSecurity" {
+				found = true
+				if o.Value != "restricted" {
+					t.Fatalf("value = %v, want restricted", o.Value)
+				}
+				if o.Derivation != "config-intent" {
+					t.Fatalf("derivation = %q, want config-intent (a measured label false-greens an admission-off cluster)", o.Derivation)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("security.podSecurity must be discovered for a namespace carrying the enforce label")
+	}
+}
+
 // TestEnumerateNamespacesTransportFailIsError: a non-200 (permission/transport)
 // failure is an error, never a fabricated empty scope list.
 func TestEnumerateNamespacesForbiddenIsError(t *testing.T) {

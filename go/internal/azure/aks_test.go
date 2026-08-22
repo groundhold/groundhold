@@ -349,9 +349,12 @@ func TestObserveAKS_ExposureVariants(t *testing.T) {
 		ranges []string
 		want   string
 	}{
-		{true, nil, "private"},                   // private cluster wins
-		{false, []string{"1.2.3.0/24"}, "mixed"}, // public restricted
-		{false, nil, "public"},                   // public unrestricted
+		{true, nil, "private"},                                 // private cluster wins
+		{false, []string{"1.2.3.0/24"}, "mixed"},               // public restricted
+		{false, nil, "public"},                                 // public unrestricted
+		{false, []string{"0.0.0.0/0"}, "public"},               // D1182: a /0 range is no restriction -> public, not mixed
+		{false, []string{"10.0.0.0/8", "0.0.0.0/0"}, "public"}, // one open range among real ones still opens it
+		{false, []string{"::/0"}, "public"},                    // the IPv6 whole-internet form too
 	} {
 		f := newFakeAKS(testSub, "rg1", name)
 		f.exists = true

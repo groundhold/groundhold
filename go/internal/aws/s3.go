@@ -118,6 +118,8 @@ func BuildS3Requests(account, environment, capability string,
 	retentionLocked := false
 	var corsOrigins []string
 	corsSet := false
+	var prefixRet []prefixExpiry // retention.maximumByPrefix, parsed
+	prefixRetSet := false
 
 	paths := sortedKeys(attrs)
 	for _, path := range paths {
@@ -145,6 +147,12 @@ func BuildS3Requests(account, environment, capability string,
 					"encryption.atRest=false cannot be honored by S3 (objects are " +
 						"always encrypted at rest with SSE-S3)")
 			}
+		case "retention.maximumByPrefix":
+			pr, err := parsePrefixExpiry(toStrSlice(raw))
+			if err != nil {
+				return S3Plan{}, err
+			}
+			prefixRet, prefixRetSet = pr, true
 		case "cors.allowedOrigins":
 			// the EFFECT: the origin set the contract asserts. The rule DOCUMENT is
 			// the implementation.cors operand; the projection gate below requires the
@@ -298,12 +306,42 @@ func BuildS3Requests(account, environment, capability string,
 				"</ObjectLockConfiguration>", mode, retentionMinDays)}
 		plan.ObjectLock = &ol
 	}
-	if expiryDays > 0 {
-		lc := s3Req{Method: "PUT", Path: "/?lifecycle",
-			Body: fmt.Sprintf("<LifecycleConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"+
-				"<Rule><ID>groundhold-retention-maximum</ID><Filter></Filter><Status>Enabled</Status>"+
-				"<Expiration><Days>%d</Days></Expiration></Rule></LifecycleConfiguration>", expiryDays)}
-		plan.Lifecycle = &lc
+	if expiryDays > 0 || prefixRetSet {
+		// G1: a per-prefix ceiling can only TIGHTEN the bucket-wide one. S3 applies the
+		// EARLIEST matching expiration, so a per-prefix rule LONGER than a bucket-wide one
+		// is silently unhonored (the object dies at the bucket-wide age) — refuse rather
+		// than let the contract assert a retention S3 will not deliver.
+		if expiryDays > 0 {
+			for _, r := range prefixRet {
+				if r.days > expiryDays {
+					return S3Plan{}, fmt.Errorf(
+						"retention.maximumByPrefix %q is %dd but the bucket-wide retention.maximum is "+
+							"%dd — S3 applies the EARLIEST matching expiration, so a longer per-prefix "+
+							"rule is silently unhonored; a per-prefix ceiling can only tighten the "+
+							"bucket-wide one", r.prefix, r.days, expiryDays)
+				}
+			}
+		}
+		// G2: a lifecycle rule must not delete before an Object-Lock retention floor —
+		// WORM says keep, lifecycle says delete is a contract contradiction.
+		if retentionMinSet {
+			for _, r := range prefixRet {
+				if r.days < retentionMinDays {
+					return S3Plan{}, fmt.Errorf(
+						"retention.maximumByPrefix %q is %dd but retention.minimum is %dd — a lifecycle "+
+							"rule that deletes before the Object-Lock floor is a contradiction "+
+							"(WORM keeps, lifecycle deletes)", r.prefix, r.days, retentionMinDays)
+				}
+			}
+		}
+		if expiryDays == 0 && len(prefixRet) == 0 {
+			// retention.maximumByPrefix declared EMPTY and no bucket-wide rule -> the owned
+			// lifecycle document is empty, so REMOVE it (DeleteBucketLifecycle), like cors [].
+			plan.Lifecycle = &s3Req{Method: "DELETE", Path: "/?lifecycle"}
+		} else {
+			plan.Lifecycle = &s3Req{Method: "PUT", Path: "/?lifecycle",
+				Body: buildLifecycleBody(expiryDays, prefixRet)}
+		}
 	}
 	if kmsKeyID != "" {
 		enc := s3Req{Method: "PUT", Path: "/?encryption",
@@ -463,6 +501,69 @@ func equalStringSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// prefixExpiry is one parsed retention.maximumByPrefix element: a key prefix and its
+// whole-day expiration ceiling.
+type prefixExpiry struct {
+	prefix string
+	days   int64
+}
+
+var prefixExpiryRE = regexp.MustCompile(`^(.+)=([0-9]+)d$`)
+
+// parsePrefixExpiry parses retention.maximumByPrefix elements "<prefix>=<N>d" fail-closed:
+// a malformed element, N<1, or a duplicate prefix REFUSES rather than being silently
+// dropped (a dropped rule would be a per-prefix retention nobody applied).
+func parsePrefixExpiry(elems []string) ([]prefixExpiry, error) {
+	out := make([]prefixExpiry, 0, len(elems))
+	seen := map[string]bool{}
+	for _, e := range elems {
+		m := prefixExpiryRE.FindStringSubmatch(e)
+		if m == nil {
+			return nil, fmt.Errorf("retention.maximumByPrefix element %q is not `<prefix>=<N>d` "+
+				"(whole days) — refusing rather than misreading a lifecycle ceiling", e)
+		}
+		days, _ := strconv.ParseInt(m[2], 10, 64)
+		if m[1] == "" || days < 1 {
+			return nil, fmt.Errorf(
+				"retention.maximumByPrefix element %q needs a non-empty prefix and at least 1 day", e)
+		}
+		if seen[m[1]] {
+			return nil, fmt.Errorf(
+				"retention.maximumByPrefix declares prefix %q twice — one ceiling per prefix", m[1])
+		}
+		seen[m[1]] = true
+		out = append(out, prefixExpiry{prefix: m[1], days: days})
+	}
+	return out, nil
+}
+
+var lifecycleSlugRE = regexp.MustCompile(`[^a-zA-Z0-9]+`)
+
+// buildLifecycleBody renders ONE LifecycleConfiguration: the bucket-wide rule (if any)
+// plus one Enabled prefix-filtered rule per prefix, sorted for a stable body. A single
+// PUT /?lifecycle replaces the whole document, so the contract OWNS it — an out-of-band
+// rule is drift, removed on the next converge.
+func buildLifecycleBody(bucketWideDays int64, prefixes []prefixExpiry) string {
+	var b strings.Builder
+	b.WriteString(`<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`)
+	if bucketWideDays > 0 {
+		b.WriteString(fmt.Sprintf(
+			"<Rule><ID>groundhold-retention-maximum</ID><Filter></Filter><Status>Enabled</Status>"+
+				"<Expiration><Days>%d</Days></Expiration></Rule>", bucketWideDays))
+	}
+	sorted := append([]prefixExpiry(nil), prefixes...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].prefix < sorted[j].prefix })
+	for _, r := range sorted {
+		slug := strings.Trim(lifecycleSlugRE.ReplaceAllString(r.prefix, "-"), "-")
+		b.WriteString(fmt.Sprintf(
+			"<Rule><ID>groundhold-retention-prefix-%s</ID><Filter><Prefix>%s</Prefix></Filter>"+
+				"<Status>Enabled</Status><Expiration><Days>%d</Days></Expiration></Rule>",
+			slug, xmlEsc(r.prefix), r.days))
+	}
+	b.WriteString("</LifecycleConfiguration>")
+	return b.String()
 }
 
 // PublicReadPolicy is the bucket policy granting anonymous s3:GetObject — the

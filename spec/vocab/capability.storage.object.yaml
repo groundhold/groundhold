@@ -71,6 +71,44 @@ attributes:
       gcp.gcs: lifecycle rule action=Delete condition.age (days)
       aws.s3: lifecycle rule Expiration.Days
 
+  retention.maximumByPrefix:
+    kind: list
+    unordered: true
+    evidence: resource
+    # A SET of per-key-class expiration ceilings, each encoded `<prefix>=<N>d`
+    # (whole days, canonical). The per-prefix twin of retention.maximum: some data
+    # classes in one bucket are kept longer than others (an ephemeral ingress prefix
+    # vs a retention prefix), which a single bucket-wide ceiling cannot express.
+    description: >
+      Per-prefix expiration ceilings — the SET of `<prefix>=<days>d` rules on this bucket,
+      the EFFECT (which key-class is kept how long), not the lifecycle document. Each element
+      is a lifecycle Expiration on a PURE prefix filter; observe includes a rule ONLY when it
+      is Enabled, has an Expiration in whole DAYS (not a Date, not a noncurrent-version rule),
+      and filters by prefix ALONE — a Disabled rule, a tag/AND filter, or a version-scoped
+      rule is EXCLUDED (it does not produce the per-prefix current-object effect the attribute
+      asserts), so a declared element then reads as missing and a hard `equals` goes RED rather
+      than green over a rule that does not do what it looks like. An empty list is MEASURED
+      absence (no qualifying rule), never unknown. The observed days are the EFFECTIVE
+      retention, not a rule read alone: S3 applies the EARLIEST matching expiration, so for
+      each prefix observe emits the MINIMUM over every rule whose prefix is a prefix of it — the
+      bucket-wide rule and any shorter overlapping prefix rule — never the raw rule days that a
+      shorter rule silently shadows (D1178). `cors.allowedOrigins`-style: the observed
+      value is that effective per-prefix days, so `retention.maximumByPrefix equals ["ingress/=1d",
+      "retain/=365d"]` blocks the tester's blind promotion (a missing, shortened, disabled, or
+      wrongly-filtered retain/ rule) AND catches an out-of-band rule (an extra element) — with
+      no verifier change. Two build-time coherence refusals, because S3 applies the EARLIEST
+      matching expiration: a per-prefix ceiling must be <= any declared bucket-wide
+      retention.maximum (a longer one is silently unhonored), and >= any declared
+      retention.minimum/locked (a lifecycle rule must not undercut an Object-Lock floor). The
+      lifecycle DOCUMENT (transitions, header/tag filters, noncurrent-version expiry) stays
+      implementation noise; a future implementation.lifecycle operand with a projection gate is
+      the door left open. The ULTIMATE per-object check, past rule-level projection, is a probe
+      of S3's resolved `x-amz-expiration` — complementary, not this attribute.
+    mappings:
+      aws.s3: lifecycle rules with a pure-prefix Filter and Expiration.Days (PUT/GetBucketLifecycleConfiguration)
+      gcp.gcs: lifecycle rules action=Delete, condition.age + matchesPrefix (one rule, N prefixes -> N elements)
+      azure.blob: management policy filters.prefixMatch + baseBlob delete daysAfterModification — ACCOUNT-scoped (honored with that caveat, like cors)
+
   retention.locked:
     kind: bool
     description: >
@@ -90,13 +128,27 @@ attributes:
 
   network.publicExposure:
     kind: bool
-    description: Whether any public read path to objects exists
+    description: >
+      Whether the bucket grants any public access path, using the provider's own
+      meaning of "public": a public bucket policy, OR a bucket ACL granting the
+      predefined groups AllUsers or AuthenticatedUsers (any AWS account holder —
+      effectively the internet), at ANY permission (a public write is an exposure
+      too). Not read-only: it is the configuration publicness the cited controls
+      (FSBP S3.2, CIS 2.1.5) enforce, not merely a GetObject path.
     mappings:
       gcp.gcs: iamConfiguration.publicAccessPrevention + IAM bindings
-      aws.s3: public access block + bucket policy
+      aws.s3: bucket policy status + effective Block Public Access + bucket ACL
     note: >
-      static verification proves configuration intent; an outcome probe
-      (anonymous GET attempt) proves the actual absence of public reads.
+      Static verification proves configuration intent at BUCKET scope, and only
+      when BOTH the policy and the bucket ACL read definitively — either unreadable
+      without the other proving public WITHHOLDS the verdict (a false negative is
+      the dangerous direction, never fabricated). Two residuals it cannot see from
+      bucket-level reads, disclosed rather than hidden: per-object ACLs (an
+      individually-public object under a private bucket policy and ACL — closed by
+      an enforced IgnorePublicAcls, which neutralizes public object ACLs) and S3
+      Access Point policies (a same-account access point with its own public policy).
+      An outcome probe (anonymous GET attempt) proves the actual absence of public
+      reads and closes both residuals.
     recommended:
       op: equals
       value: false

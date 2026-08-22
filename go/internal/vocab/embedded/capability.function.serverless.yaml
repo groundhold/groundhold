@@ -45,8 +45,9 @@ attributes:
       authenticated/internal callers.
     mappings:
       aws.lambda: >
-        a Function URL with AuthType NONE plus a resource-based
-        lambda:InvokeFunctionUrl grant to principal * (both, or the function
+        a Function URL with AuthType NONE plus a resource-based grant of
+        lambda:InvokeFunctionUrl — or any wildcard action that covers it
+        (lambda:*, lambda:Invoke*, *) — to principal * (both, or the function
         stays private) — false means no public Function URL
       gcp.cloudfunctions-fn: >
         ingressSettings ALLOW_ALL plus an allUsers invoker binding on the

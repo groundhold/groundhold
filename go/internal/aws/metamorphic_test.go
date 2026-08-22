@@ -75,6 +75,10 @@ func metamorphicS3Server(t *testing.T) *httptest.Server {
 				}
 				w.WriteHeader(404)
 				_, _ = w.Write([]byte("<Error><Code>NoSuchBucketPolicy</Code></Error>"))
+			case r.Method == "GET" && q == "acl":
+				// a private bucket ACL — the public round-trip cases assert via the
+				// policy leg (which short-circuits before this read).
+				_, _ = w.Write([]byte(s3PrivateACL))
 			default:
 				w.WriteHeader(404)
 			}

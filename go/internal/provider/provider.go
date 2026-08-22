@@ -1215,6 +1215,7 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 			cmek, _ := attrs["encryption.customerManagedKeys"].(bool)
 			replication, _ := attrs["replication.enabled"].(bool)
 			_, corsDeclared := attrs["cors.allowedOrigins"]
+			_, retentionMaxByPrefix := attrs["retention.maximumByPrefix"]
 			_, retentionMin := attrs["retention.minimum"]
 			retentionLocked, _ := attrs["retention.locked"].(bool)
 			switch operation {
@@ -1227,7 +1228,9 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 				if versioning {
 					p = append(p, "s3:PutBucketVersioning")
 				}
-				if retentionMax {
+				if retentionMax || retentionMaxByPrefix {
+					// one action authorises PutBucketLifecycleConfiguration AND
+					// DeleteBucketLifecycle (the declared-empty removal), like replication.
 					p = append(p, "s3:PutLifecycleConfiguration")
 				}
 				if cmek {

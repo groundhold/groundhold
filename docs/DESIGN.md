@@ -38852,3 +38852,367 @@ each action. Only the third — plan name changed AND the sealed lists cleared, 
 exactly what a plan compiled for a service with no permission case looks like — actually
 reached the branch. Three drafts of one fixture, and the empty-probe failure caught each
 time by mutating rather than by reading the result and believing it.
+
+## D1176 — per-prefix S3 retention: a consult that DISAGREED, and the fail-closed design that reconciled it
+The field's fifth "content/policy outside the contract" report, raised while the tester counted the family
+honestly: `retention.maximum` is bucket-wide, but one bucket often keeps some key-classes longer than others
+(an ephemeral ingress prefix vs a retention prefix). Their A/V pipeline promotes a file to the retention
+prefix, converge is green, and the file vanishes after a day because the per-prefix policy is outside the
+contract. This one got the same owner-directed consult as CORS (D1168) — and this time the two reviewers
+DISAGREED, which is exactly where a consult earns its keep.
+
+The skeptic said do NOT ship a per-prefix attribute: a flat per-prefix `Expiration.Days` scrape is a
+CORS-class false-green, blind to a Disabled rule, a tag/And filter, a version-scoped or Date expiration, and
+— the killer — S3's earliest-wins precedence, so it reads `retain/=365d` on the very bug of a promoted file
+dying in a day. The only faithful per-object signal is S3's resolved `x-amz-expiration`, which is a probe,
+not a static scrape; ship the probe, defer the attribute. Fable said ship `retention.maximumByPrefix`, but
+with a fail-closed projection and coherence gates that answer each of those blockers. They RECONCILE: the
+skeptic defined what a faithful design must do, and Fable's design does it. The attribute (`kind: list`,
+`unordered`, canonical `<prefix>=<N>d`) is observed fail-closed — a rule counts ONLY when it is Enabled,
+expires current objects in whole DAYS, and filters by prefix ALONE; a Disabled/Date/tag-or-And rule is
+EXCLUDED, so a declared element then reads as missing and a hard `equals` goes RED rather than green over a
+rule that does not do what it looks like. The precedence hole is closed by two build-time refusals, because
+S3 applies the earliest matching expiration: **G1** a per-prefix ceiling must be <= any declared bucket-wide
+`retention.maximum` (a longer one is silently unhonored — the tester's exact bug, now a build refusal), and
+**G2** a per-prefix ceiling must be >= any declared `retention.minimum`/`locked` (a lifecycle rule must not
+undercut an Object-Lock floor). The contract OWNS the single LifecycleConfiguration document (bucket-wide +
+per-prefix rules merged, one PUT replaces it), so an out-of-band rule is drift; declared `[]` with no
+bucket-wide rule is a DeleteBucketLifecycle; undeclared is hands-off. An out-of-band overlapping prefix rule
+surfaces as an extra element -> `equals` RED. `retention.maximumByPrefix equals ["ingress/=1d","retain/=365d"]`
+blocks the tester's blind promotion and catches wrong-retention drift, on the existing operator set, no
+verifier change. The skeptic's deepest point stands as the door left open: the ULTIMATE per-object check past
+rule-level projection is a probe of the resolved `x-amz-expiration` — complementary defense-in-depth, and a
+future `implementation.lifecycle` operand (transitions, noncurrent-version expiry) can hang off a projection
+gate like D1168's. No operand this slice — the (prefix, days) pair IS the whole semantic content of an
+expiration rule, unlike CORS's origin×method document. The family is now counted honestly AND this member is
+closed rather than papered over.
+
+## D1177 — paying D1174's debt, and what a written-down debt is worth
+
+D1174 classified the plan's operations by what the executor applies, and gated the
+classification twice: the two registers must PARTITION the accepted set, and every
+declared-supported operation must have a `case` branch in `apply.go`. The second check
+reads the switch as text, and its own comment says what that costs — D317's lesson is
+that scraping an implementation is not the same as asking it — and records the debt:
+the behavioural version would apply a one-action plan per operation and look at what
+comes back.
+
+The debt was smaller than the note claimed. `setupPlan` compiles a real plan and
+`Apply` runs it against the fake provider, both already in `internal/apply`; the
+harness the note said was missing was one file away, and D1175's fixture work had just
+mapped the plan document well enough to re-aim an action's operation in three lines.
+
+That is worth saying plainly rather than quietly fixing, because the lesson cuts the
+useful way: **a debt written down cost a search, and a debt not written down costs a
+defect.** The note is what made this pass look at all, and it was wrong about the price
+in the direction that does no harm.
+
+What the behavioural gate catches that the scan cannot, DEMONSTRATED rather than
+asserted: a refusal routed to the wrong error code. Change `perr.UnsupportedOperation`
+to `perr.ApplyFailed` in the default branch and the text is untouched, the scan is
+happy, and this gate reports that an operation the loader accepts came back
+`apply-failed` instead of being turned away by name. That is the one I can prove, and
+it is the one stated.
+
+The first draft of this entry claimed two more — a branch that exists and falls through,
+and a branch guarded by a condition that is never true. Both are plausible and neither
+was measured, and on inspection the text scan's load-only half catches a stray `case`
+branch too. Removed rather than left standing: an unproven claim about a gate is the
+same defect this record spent D1174 and D1175 fixing elsewhere, and writing it about my
+own work does not make it a smaller one.
+
+The second thing the meter taught here is about the gate's SHAPE. The first version
+walked the two registers, and the mutant that drops `replace` from `LoadOnlyOperations`
+survived it: the operation then belongs to neither list, so no case was generated for it
+and a plan carrying it would walk into the executor unexamined. It now walks
+`plan.Operations` — the set the LOADER admits — and classifies each by asking
+`SupportedOperations`, so the question is put about every operation a document can
+legally carry, whatever the registers happen to say.
+
+That mutant is re-aimed at the partition gate, which is what actually owns it: dropping
+an operation from the classification is a fact about the registers, not about the
+executor's behaviour, and the partition gate reports it exactly. **The mutant survived
+because I verified it by hand with a TWO-part edit** — drop it from load-only AND add it
+to supported — while the meter applies one. Rule (p) exists for precisely this: a mutant
+checked a different way than the meter checks it is not checked.
+
+The text scan stays. The two fail on different things: the scan reports a name with no
+branch at all, the behavioural gate reports a refusal that comes back wrong.
+
+The shape is not new here. `aws/updateforeign_gate_test.go` has never trusted its own
+`no-in-place-update` register either — it calls `Update` and asserts the driver really
+refuses. That precedent was found while sweeping for something else, which is the second
+small lesson: the answer to "how do I check this behaviourally" was already in the tree,
+written by someone solving the same problem one package over.
+
+## D1178 — the per-prefix retention I just shipped read green over a vanishing file
+
+D1176 added `retention.maximumByPrefix` — the SET of `<prefix>=<N>d` expiration
+ceilings a bucket enforces — and its observe emitted each rule's raw `Expiration.Days`.
+The consult's skeptic had named the failure mode I then walked into: S3 applies the
+EARLIEST matching expiration, so a rule is not the effect. A bucket-wide 1-day rule and
+a `retain/=365d` prefix rule both match a `retain/` object; the object dies in a day,
+and the driver reported `retain/=365d`. A contract pinning only the per-prefix set went
+GREEN over a file that was already gone — the precedence false-green, in my own fresh
+code, confirmed empirically before this fix (a bucket-wide 30d rule caps a declared
+`retain/=365d` to a real 30d).
+
+The honest projection is the EFFECTIVE retention, not the rule: for each prefix P,
+observe now emits the MINIMUM over every rule whose prefix is a prefix of P — the
+bucket-wide rule, and any shorter overlapping prefix rule. `data/logs/` under a
+`data/=5d` rule reads 5d, not its own 90d; `retain/` under a bucket-wide 30d reads 30d,
+not 365. The value the contract compares against is now what S3 will actually deliver,
+so a hard `equals` blocks a shortened, disabled, wrongly-filtered, OR precedence-shadowed
+rule with no verifier change.
+
+What this still cannot see is a rule the driver excludes on purpose (a Date expiration,
+a tag/And filter) that nonetheless shortens a matching object — those are fail-closed to
+RED, not counted, because a rule that does not do what a per-prefix days ceiling looks
+like must not read as one. The ULTIMATE per-object check past rule-level projection stays
+the same door D1176 left open: a probe of S3's resolved `x-amz-expiration`.
+
+The lesson is the one the consult already delivered and I under-weighted: when two
+sources both act on the same object, the observed value is the RESOLUTION of them, never
+either one read alone.
+
+## D1179 — publicExposure asked the policy and never asked the ACL
+
+`network.publicExposure` — a bool a contract pins `equals false`, tied to FSBP S3.2,
+CIS 2.1.5, GDPR Art.32 — observed only `GetBucketPolicyStatus`, whose `IsPublic` is a
+verdict on the BUCKET POLICY alone (D240 additionally folded in effective Block Public
+Access to stop a BPA-masked policy reading public). AWS's own meaning of "public",
+though, is a public policy OR a bucket ACL granting the predefined groups AllUsers /
+AuthenticatedUsers. A brownfield bucket made public by a public-read ACL with no policy
+read `IsPublic=false`, and the driver emitted `publicExposure=false` — green over a
+publicly readable bucket. The dangerous direction, on the one attribute whose whole job
+is to catch exposure.
+
+The consult that preceded this fix put a design premise in dispute: does `GetBucketAcl`
+return the STORED ACL or the EFFECTIVE one (with IgnorePublicAcls folded)? The skeptic
+said stored, and would have had the fix re-fold IgnorePublicAcls itself. The AWS API
+documentation settles it the other way — GetBucketAcl "always return the effective
+permissions in place... if IgnorePublicAcls is enabled, returns an ACL that reflects the
+permissions Amazon S3 is enforcing, rather than the actual ACL" — so the ACL leg needs
+no BPA fold. The evidence decided, not the louder argument.
+
+The verdict is now two independent legs OR'd, with the asymmetry that a bool over a
+security path demands: ONE confirmed-public leg is enough for `true`, but a measured
+`false` requires BOTH the policy and the ACL to read definitively non-public. Either leg
+unreadable, with the other not proving public, WITHHOLDS the observation rather than
+emitting a `false` over an ACL we could not read — the same never-fabricate rule D240
+applied to the policy leg. This also closed a second, quieter false-green: the old code
+let a BPA-masked public policy emit `false` directly; a masked policy with a public ACL
+is still public, so that branch now falls through to the ACL leg instead of short-cutting.
+
+Grantees are matched by EXACT group URI (`.../global/AllUsers`, `.../global/AuthenticatedUsers`),
+never a substring — the LogDelivery service group is not public, and an `https://` typo
+against the canonical `http://` URI would silently miss and false-green. Any permission
+to a public group counts, because the attribute is the AWS meaning-of-public (a public
+WRITE is an exposure; WRITE_ACP is a read one self-granted ACL away), and the description
+was widened from "read path to objects" to match. What bucket-level reads still cannot
+see — an individually-public OBJECT ACL, or an S3 Access Point policy — is disclosed as a
+residual in a diag and in the vocab note, with the anonymous-GET outcome probe named as
+the check that closes it. The bool does not claim what it cannot witness.
+
+## D1180 — a public Function URL under `Action:"*"` read as private
+
+`network.publicExposure` for a Lambda is TWO gates done right (D534): a Function URL with
+`AuthType=NONE` AND a resource policy that grants the world `lambda:InvokeFunctionUrl`.
+The second gate matched the action by EXACT string — `Action == "lambda:InvokeFunctionUrl"`
+— so a policy that granted the same access through a wildcard read as no grant at all.
+`{"Effect":"Allow","Principal":"*","Action":"*"}` is the canonical world-open statement,
+and AWS honors `*`, `lambda:*`, `lambda:Invoke*`, and `lambda:InvokeFunction*` for
+InvokeFunctionUrl just as it honors the literal action. Every one of them read
+`publicExposure=false`, MEASURED, over a function anyone on the internet can invoke — a
+hard `equals false` green on an anonymous endpoint.
+
+The sibling in the same package already knew better: `snsPolicyPublic` treats any
+unconditioned wildcard-principal Allow as public without even inspecting the action.
+Lambda was the outlier that under-reported. The fix matches the action the way IAM
+evaluates it — case-insensitively, honoring a trailing-`*` glob whose literal prefix is a
+prefix of `lambda:invokefunctionurl` — so a covering wildcard counts and a non-covering
+action (`lambda:GetFunction`, `s3:*`) still does not. Over-matching a covering wildcard is
+the safe direction: it can only report MORE public, never less.
+
+The lesson is the recurring one for security predicates read from policy text: the
+provider matches actions by GLOB and case-fold, so a string `==` is not the same question
+the cloud asks. Found by a read-only false-green sweep, alongside its GKE twin (D-sibling)
+where an authorized-networks boolean stood in for the CIDR blocks it never read.
+## D1181 — the security floor's own comment described the state before its lint
+
+`securityNamespaces` is the fail-closed authority behind D1071: a hard constraint on a
+path that carries a SECURITY posture must be WITNESSED, never satisfied by the
+candidate's own declared word. Its doc comment said the list is hand-maintained, that
+there is no vocab marker and no parity lint, and closed with "So the discipline is:
+EVERY capability's security-posture attributes must be listed here".
+
+Read as a whole, that says: nothing guards this list but vigilance. It describes the
+state before D1075. A keyword lint does guard it —
+`TestSecurityFloorCoversEverySecurityPostureAttr`, named thirty lines further down in
+the same file — which scans every vocabulary and fails the build on a security-posture
+attribute that is missing here. It found a dozen the hand-enumeration had missed, and
+D1076 widened it after two more dodged every keyword.
+
+Narrowly, the sentence is not false: a PARITY lint between a vocab marker and this list
+genuinely does not exist, because the marker does not exist. That is the D1131 shape
+rather than an untruth — prose describing a mechanism that was superseded — and it is
+worth correcting for a specific reason rather than for tidiness. This comment is where a
+maintainer decides how much care adding an attribute needs. The answer changed when
+D1075 landed and the sentence did not, so the file's own documentation understates its
+own protection, in the register whose omissions are silently-reopened false-secures.
+
+**A proposal is recorded rather than executed.** What the keyword lint cannot do is see a
+control whose NAME matches nothing — the caveat D1076 patched by widening the regex,
+which is the second manual widening of a list and therefore the signal that the
+mechanism's shape is wrong rather than merely incomplete. The stronger forcing function
+is exhaustive classification: every vocabulary attribute must be either in this list or
+in an explicit not-a-security-posture list, so a new attribute cannot be added without
+someone deciding which it is.
+
+It is feasible, and the number is measured rather than estimated: **145 unique attribute
+paths across the 57 vocabularies**, of which this list already classifies 31 — a one-time
+classification of roughly a hundred paths. It is not done here because it overturns an
+assessment already recorded in this file, and it overturns it on DIFFERENT grounds: that
+assessment was about a per-path vocab marker, which an author must volunteer, while this
+is a Go-side classification the build refuses to skip. Different mechanism, different
+verdict — and a change of that size to a security floor is a decision to put in front of
+the owner, not one to take while sweeping.
+
+The risk to weigh when deciding: classifying a hundred paths by hand means a hundred
+chances to mark something not-security that is, and each such slip reopens exactly the
+false-secure this floor exists to close. That is the argument against, and it belongs
+beside the argument for.
+
+## D1182 — "mixed" API exposure over an internet-open control plane, in all three clouds
+
+`network.apiExposure` folds each cloud's Kubernetes API-server access controls onto one
+three-valued surface — `private`, `mixed`, `public` — and a prod contract asks for `in
+[private, mixed]`: keep the API server off the fully public internet. `mixed` is supposed
+to mean the public endpoint exists but is RESTRICTED to an authorized set. All three
+drivers decided "restricted" from the wrong signal:
+
+- GKE read `masterAuthorizedNetworksConfig.Enabled` and never decoded `cidrBlocks`;
+- AKS read `len(authorizedIPRanges) > 0`;
+- EKS read `endpointPublicAccess && endpointPrivateAccess` and never read
+  `publicAccessCidrs` — whose DEFAULT is `0.0.0.0/0`, so a stock both-endpoints cluster is
+  wide open yet read `mixed`.
+
+An authorized list that CONTAINS `0.0.0.0/0` (or `::/0`) authorizes the whole internet —
+it is not a restriction at all. Every driver reported `mixed`, MEASURED, over an API
+server anyone can reach, and `apiExposure in [private, mixed]` went green on it. The
+recommended control was the one being evaded.
+
+The fix reads the CIDR set in each driver and treats a whole-internet block as `public`,
+not `mixed` (GKE decodes a /0 mask via `net.ParseCIDR`; AWS/Azure match `0.0.0.0/0`/`::/0`,
+reusing AWS's existing `isOpenCIDR`). "mixed" now requires a DEMONSTRATED restriction, so
+EKS's empty/absent `publicAccessCidrs` counts as open (the safe direction). GKE's build
+side is closed to match: it accepted `masterAuthorizedCidrs: ["0.0.0.0/0"]` under a "mixed"
+label — minting the exact resource observe used to mis-read — and now refuses it.
+
+This is the same shape as D1180 (a security predicate read from one field while the cloud
+resolves several), and the same lesson as the S3 publicExposure and per-prefix work: the
+observed value must be the EFFECT the provider enforces, not a flag that stands in for it.
+Found by the read-only false-green sweep; the three clouds shared one blind spot because
+they share one attribute, and the parity that makes the contract portable made the defect
+portable too.
+## D1183 — the leak gate's allowlist knew one shape of AWS's example accounts, not both
+
+`scripts/class-leak-scan.sh` refuses a commit carrying a real AWS account id inside an
+ARN. Its placeholder allowlist held every repeated-digit account and `123456789012`, and
+missed the other shape AWS's own documentation uses: grouped pairs, `111122223333` and
+`444455556666`, which run through their IAM and KMS policy examples.
+
+So a driver test doing exactly the right thing — copying a policy shape out of the AWS
+docs to pin what a specific-principal statement looks like — failed the export gate with
+a string that is not an account at all. Found when `make check` refused on the shared
+branch, over a fixture in the Lambda public-invoke work (D1180).
+
+Widened narrowly and only to the two grouped forms AWS publishes. The gate's own failure
+message says to add a value to the allowlist "if it IS a fixture", and the honest part of
+that instruction is the condition: this was checked by reading the line rather than by
+assuming, and it is a `specific-principal` case asserting that a policy naming one
+account is NOT anonymous invoke.
+
+Both directions were re-measured after the change, because widening a leak allowlist is
+the kind of edit that can quietly stop protecting: the documentation account now passes,
+and an account-shaped id outside the list is still refused. A gate that only got easier
+would be the exact defect this record spends its time on.
+
+## D1184 — key.exportable said "keyless" without ever asking for the keys
+
+`key.exportable` — a bool a service-account contract pins `equals false`, on the security
+floor (D1076) — means the identity has NO downloadable long-lived private key. groundhold
+never CREATES one (keyless is the only value it provisions, and `true` is refused at build
+per D53), so the create side is honest. The OBSERVE side was not: it emitted
+`{key.exportable: false, config-intent}` as a literal, with a comment asserting "a service
+account has no downloadable key" — and never called `serviceAccounts.keys.list`. A
+DISCOVERED or adopted account that carries a USER_MANAGED key — the exact exportable secret
+the control forbids — read as keyless.
+
+The `config-intent` tag kept it out of a HARD false-green: the security floor downgrades a
+non-`provider-api` derivation to unknown and blocks. But it false-greened everything the
+floor does not gate — a SOFT constraint read satisfied, and `discover`/`posture` classified
+a key-bearing account as keyless — and it was one edit (to `measured`, which every sibling
+field already is) from a hard false-green. The comment's premise was simply false.
+
+Observe now reads the key set: `key.exportable = any USER_MANAGED key`, MEASURED.
+SYSTEM_MANAGED keys (Google's internal signing keys, on every account, not downloadable)
+are excluded, or every account would read exportable. An unreadable key list WITHHOLDS
+rather than reporting keyless — the floor then blocks a hard constraint as unknown, never
+certifies it vacuously. A discovered account with a downloadable key now reads
+`key.exportable=true` and `equals false` goes RED, which is the whole point of an
+onboarding read. Same lesson as the sweep's other finds (D1180/D1182): the observed value
+must come from the provider's answer, not a constant that assumes the good case.
+
+## D1185 — the discovery sweep re-made the podSecurity false-green D1060 had fixed
+
+D1060 settled that `security.podSecurity` read from a namespace's
+`pod-security.kubernetes.io/enforce` label is `config-intent`, not `measured`: the label
+is INTENT, and the standard is only ENFORCED when the API server runs the PodSecurity
+admission plugin, which a static read cannot witness. Its comment names the stakes — "a
+namespace labelled `restricted` on a cluster with PodSecurity admission OFF admits
+privileged pods while `measured restricted` would read satisfied — the dangerous
+direction." `security.podSecurity` is on the audit security floor, so the verify lens's
+config-intent floors a hard constraint to unknown and blocks.
+
+The DISCOVERY sweep emitted the same attribute as `measured`. Discovery feeds onboarding
+and posture, and `measured` ranks provider-api — it CLEARS the floor. So the two paths
+disagreed on the same namespace: verify said config-intent (unwitnessed), discovery said
+measured (witnessed), and discovery was the optimistic one. A posture view built from the
+sweep would read a `restricted`-labelled namespace as securely-restricted with full
+confidence, over a cluster whose admission plugin might be off — exactly the false-green
+D1060 refused, re-made one file over because the fix lived in the lens and the sweep has
+its own reverse-map.
+
+The fix aligns the sweep with the lens: config-intent plus the same admission-plugin
+caveat. The general lesson, now three deep in this sweep: a single attribute observed by
+two code paths must reach the same derivation, or the more optimistic path becomes the
+hole. Worth a gate that a security-floor attribute is never emitted `measured` from a
+static read — noted, not yet built.
+
+## D1186 — "any TLS listener" read encrypted over a plaintext front door
+
+A load balancer's `encryption.inTransit` (and the ECS service's `tls.enforced`, which
+traces its service to the same fronting load balancer) was `true` when ANY listener
+terminated TLS. The comment even said so — "any listener speaks HTTPS or TLS." But a load
+balancer commonly runs an HTTP:80 listener ALONGSIDE HTTPS:443, and if that HTTP listener
+FORWARDS to the backend it is a cleartext path on the internet. "Any TLS listener" read
+`encryption.inTransit=true` over it — a false-green on the one attribute that exists to
+say the front door is encrypted, and the ECS comment claimed it "catches a plaintext front
+door as violated" while the code it named did the opposite.
+
+The honest rule is ALL, not ANY: `inTransit=true` only when EVERY listener is a TLS front
+door OR an HTTP listener whose default action solely redirects to HTTPS (a 301 to the TLS
+door forwards nothing in clear, so it is not a plaintext data path). One plaintext
+forwarding listener makes it false. This needed the listener's ACTION, not just its
+protocol — `DescribeListeners` already carries `DefaultActions`, so the reverse map now
+reads Type=redirect + RedirectConfig.Protocol=HTTPS and the observe was already making the
+call; no new API, route, or permission. An empty listener set is not encrypted (no front
+door). ECS's `tls.enforced` shares the exact predicate now, so the two cannot drift.
+
+The distinction the fix preserves matters in the field: the ubiquitous "HTTP:80 that only
+redirects to HTTPS" hardening stays `true` (a false-RED there would train users to ignore
+the check), while an HTTP:80 that forwards — the actual cleartext exposure — flips to
+false. This is the same ALL-not-ANY shape as D1182's authorized-CIDR set: a security
+property over a SET holds only when every member holds, and reading the optimistic member
+is the hole.

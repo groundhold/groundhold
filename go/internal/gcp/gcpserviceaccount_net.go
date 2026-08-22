@@ -69,6 +69,32 @@ func (d *Driver) getGSA(project, accountID string) (gsaDoc, bool, error) {
 	return doc, true, nil
 }
 
+// gsaExportableKeys reports whether the service account carries a USER_MANAGED key —
+// a downloadable, long-lived private key (the exportable secret key.exportable forbids).
+// SYSTEM_MANAGED keys (Google's internal signing keys, present on every account and not
+// downloadable) are EXCLUDED, or every account would read exportable. ok=false means the
+// key list was unreadable, so the caller withholds rather than fabricating "keyless".
+func (d *Driver) gsaExportableKeys(project, accountID string) (exportable, ok bool) {
+	st, body, err := d.call("GET", d.gsaURL(project, accountID)+"/keys", nil)
+	if err != nil || st != http.StatusOK {
+		return false, false
+	}
+	var doc struct {
+		Keys []struct {
+			KeyType string `json:"keyType"`
+		} `json:"keys"`
+	}
+	if json.Unmarshal(body, &doc) != nil {
+		return false, false
+	}
+	for _, k := range doc.Keys {
+		if k.KeyType == "USER_MANAGED" {
+			return true, true
+		}
+	}
+	return false, true
+}
+
 func (d *Driver) createGServiceAccount(environment, capability string,
 	attrs, impl map[string]any, generation int) provider.CreateResult {
 	plan, err := BuildGServiceAccount(d.Project, environment, capability, attrs, impl, generation)
@@ -142,10 +168,23 @@ func (d *Driver) observeGServiceAccountTrust(capability, providerID string, with
 		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
 		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
-		// a service account has no downloadable key (keyless / workload identity).
-		{Path: "key.exportable", Value: false, Derivation: "config-intent"},
 	}
 	var diags []string
+
+	// key.exportable: MEASURED from the real key set. groundhold never CREATES a key
+	// (keyless is the only honored value), but a DISCOVERED/adopted account may already
+	// carry a user-managed downloadable key — the exact long-lived secret this control
+	// forbids. The old code hardcoded false/config-intent, reading a key-bearing account
+	// as keyless: a false-green on discover/posture, and a hard `equals false` that passed
+	// vacuously. Now a USER_MANAGED key makes it true (measured) so the constraint goes RED;
+	// keyless stays false. An unreadable key list WITHHOLDS (never fabricate keyless) — the
+	// security floor then blocks a hard constraint as unknown rather than certifying it.
+	if exportable, ok := d.gsaExportableKeys(project, accountID); ok {
+		obs = append(obs, provider.Observation{Path: "key.exportable", Value: exportable, Derivation: "measured"})
+	} else {
+		diags = append(diags, "key.exportable not observed: serviceAccounts.keys.list gave no answer — "+
+			"whether this identity carries a downloadable user-managed key was not established")
+	}
 
 	// D868: WHO may assume this identity, from the account's OWN IAM policy. A second
 	// read, and worth it: an identity's permissions say what it can do, and this says who

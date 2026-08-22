@@ -351,6 +351,7 @@ s3	DELETE	/pv-assets-abcd1234/
 s3	DELETE	/pv-assets-abcd1234/?policy
 s3	GET	/
 s3	GET	/far-bucket/?location
+s3	GET	/here-bucket/?acl
 s3	GET	/here-bucket/?cors
 s3	GET	/here-bucket/?encryption
 s3	GET	/here-bucket/?lifecycle
@@ -359,6 +360,7 @@ s3	GET	/here-bucket/?object-lock
 s3	GET	/here-bucket/?policyStatus
 s3	GET	/here-bucket/?replication
 s3	GET	/here-bucket/?versioning
+s3	GET	/pv-assets-abcd1234/?acl
 s3	GET	/pv-assets-abcd1234/?cors
 s3	GET	/pv-assets-abcd1234/?encryption
 s3	GET	/pv-assets-abcd1234/?lifecycle
@@ -368,6 +370,7 @@ s3	GET	/pv-assets-abcd1234/?publicAccessBlock
 s3	GET	/pv-assets-abcd1234/?replication
 s3	GET	/pv-assets-abcd1234/?tagging
 s3	GET	/pv-assets-abcd1234/?versioning
+s3	GET	/pv-assets-prod-2777ed3c/?acl
 s3	GET	/pv-assets-prod-2777ed3c/?cors
 s3	GET	/pv-assets-prod-2777ed3c/?encryption
 s3	GET	/pv-assets-prod-2777ed3c/?lifecycle
@@ -377,6 +380,7 @@ s3	GET	/pv-assets-prod-2777ed3c/?publicAccessBlock
 s3	GET	/pv-assets-prod-2777ed3c/?replication
 s3	GET	/pv-assets-prod-2777ed3c/?tagging
 s3	GET	/pv-assets-prod-2777ed3c/?versioning
+s3	GET	/pv-media/?acl
 s3	GET	/pv-media/?cors
 s3	GET	/pv-media/?encryption
 s3	GET	/pv-media/?lifecycle
@@ -385,6 +389,7 @@ s3	GET	/pv-media/?policyStatus
 s3	GET	/pv-media/?replication
 s3	GET	/pv-media/?versioning
 s3	GET	/pv-replica-eu-abcd1234/?location
+s3	GET	/pv-vault-abcd1234/?acl
 s3	GET	/pv-vault-abcd1234/?cors
 s3	GET	/pv-vault-abcd1234/?encryption
 s3	GET	/pv-vault-abcd1234/?lifecycle

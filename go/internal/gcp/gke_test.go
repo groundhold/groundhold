@@ -170,6 +170,7 @@ type fakeGKE struct {
 	masterVersion         string
 	enablePrivateEndpoint bool
 	manEnabled            bool
+	manCidrs              []string // masterAuthorizedNetworks cidrBlocks
 	dbEncState            string
 
 	createBody string
@@ -194,15 +195,25 @@ func newFakeGKE(name, loc string) *fakeGKE {
 
 func (f *fakeGKE) writeCluster(w http.ResponseWriter) {
 	doc := map[string]any{
-		"name":                           f.name,
-		"status":                         f.status,
-		"location":                       f.loc,
-		"currentMasterVersion":           f.masterVersion,
-		"resourceLabels":                 f.labels,
-		"privateClusterConfig":           map[string]any{"enablePrivateEndpoint": f.enablePrivateEndpoint},
-		"masterAuthorizedNetworksConfig": map[string]any{"enabled": f.manEnabled},
-		"databaseEncryption":             map[string]any{"state": f.dbEncState},
-		"nodePools":                      []any{map[string]any{"name": f.name + "-np", "status": f.npStatus}},
+		"name":                 f.name,
+		"status":               f.status,
+		"location":             f.loc,
+		"currentMasterVersion": f.masterVersion,
+		"resourceLabels":       f.labels,
+		"privateClusterConfig": map[string]any{"enablePrivateEndpoint": f.enablePrivateEndpoint},
+		"masterAuthorizedNetworksConfig": func() map[string]any {
+			man := map[string]any{"enabled": f.manEnabled}
+			if len(f.manCidrs) > 0 {
+				blocks := make([]any, 0, len(f.manCidrs))
+				for _, c := range f.manCidrs {
+					blocks = append(blocks, map[string]any{"cidrBlock": c})
+				}
+				man["cidrBlocks"] = blocks
+			}
+			return man
+		}(),
+		"databaseEncryption": map[string]any{"state": f.dbEncState},
+		"nodePools":          []any{map[string]any{"name": f.name + "-np", "status": f.npStatus}},
 	}
 	b, _ := json.Marshal(doc)
 	_, _ = w.Write(b)

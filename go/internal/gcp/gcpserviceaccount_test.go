@@ -66,6 +66,8 @@ func gsaServer(t *testing.T, capLabel, displayName string) *httptest.Server {
 			case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/serviceAccounts"):
 				_, _ = w.Write([]byte(`{"name":"projects/acme-prod/serviceAccounts/x","email":"x@acme-prod.iam.gserviceaccount.com",` +
 					`"displayName":"` + displayName + `","description":"` + marker + `"}`))
+			case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/keys"):
+				_, _ = w.Write([]byte(`{"keys":[]}`)) // keyless: no user-managed key
 			case r.Method == "GET":
 				_, _ = w.Write([]byte(`{"name":"projects/acme-prod/serviceAccounts/x","email":"x@acme-prod.iam.gserviceaccount.com",` +
 					`"displayName":"` + displayName + `","description":"` + marker + `"}`))
@@ -109,6 +111,85 @@ func TestCreateObserveDeleteGServiceAccount(t *testing.T) {
 	}
 	if del := d.deleteGServiceAccount("runner", "prod", res.ProviderID); del.Status != "succeeded" {
 		t.Fatalf("delete: %+v", del)
+	}
+}
+
+// gsaKeysServer serves the SA doc plus a keys.list response the caller supplies.
+func gsaKeysServer(keysStatus int, keysBody string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/keys") {
+			if keysStatus != 0 && keysStatus != 200 {
+				w.WriteHeader(keysStatus)
+			}
+			_, _ = w.Write([]byte(keysBody))
+			return
+		}
+		_, _ = w.Write([]byte(`{"email":"runner@acme-prod.iam.gserviceaccount.com","displayName":"R",` +
+			`"description":"groundhold:capability=runner;environment=prod"}`))
+	}))
+}
+
+// THE MUTANT-DEFECT TEST: a discovered/adopted SA carrying a USER_MANAGED key must read
+// key.exportable=true (measured) — the downloadable long-lived secret this control
+// forbids. The old code hardcoded false and read a key-bearing account as keyless: a
+// false-green on discover/posture and a hard `equals false` that could not see the key.
+// SYSTEM_MANAGED keys (on every account) must NOT count.
+func TestObserveGSA_UserManagedKeyIsExportable(t *testing.T) {
+	srv := gsaKeysServer(200, `{"keys":[{"keyType":"SYSTEM_MANAGED"},{"keyType":"USER_MANAGED"}]}`)
+	defer srv.Close()
+	d := gsaDriver(t, srv)
+	obs, _, err := d.observeGServiceAccount("runner", gsaProviderID("acme-prod", "runner-prod-x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]any{}
+	for _, o := range obs {
+		got[o.Path] = o.Value
+	}
+	if got["key.exportable"] != true {
+		t.Fatalf("a USER_MANAGED key must read key.exportable=true (measured), got %v", got["key.exportable"])
+	}
+}
+
+// SYSTEM_MANAGED-only keys are keyless: key.exportable=false (measured).
+func TestObserveGSA_SystemManagedOnlyIsKeyless(t *testing.T) {
+	srv := gsaKeysServer(200, `{"keys":[{"keyType":"SYSTEM_MANAGED"}]}`)
+	defer srv.Close()
+	d := gsaDriver(t, srv)
+	obs, _, err := d.observeGServiceAccount("runner", gsaProviderID("acme-prod", "runner-prod-x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range obs {
+		if o.Path == "key.exportable" && o.Value != false {
+			t.Fatalf("SYSTEM_MANAGED-only must read keyless (false), got %v", o.Value)
+		}
+	}
+}
+
+// An unreadable key list WITHHOLDS key.exportable — never fabricate keyless (the security
+// floor then blocks a hard constraint as unknown rather than passing it vacuously).
+func TestObserveGSA_UnreadableKeysWithholds(t *testing.T) {
+	srv := gsaKeysServer(403, `{"error":{"code":403,"message":"denied"}}`)
+	defer srv.Close()
+	d := gsaDriver(t, srv)
+	obs, diags, err := d.observeGServiceAccount("runner", gsaProviderID("acme-prod", "runner-prod-x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range obs {
+		if o.Path == "key.exportable" {
+			t.Fatalf("an unreadable key list must WITHHOLD key.exportable, got %v", o.Value)
+		}
+	}
+	found := false
+	for _, dg := range diags {
+		if strings.Contains(dg, "key.exportable not observed") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a withheld key.exportable must diag why, got %v", diags)
 	}
 }
 

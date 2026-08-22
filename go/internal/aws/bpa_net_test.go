@@ -61,6 +61,10 @@ func bpaServer(t *testing.T, isPublic bool, bucketBPA, accountBPA string, accoun
 				v = "true"
 			}
 			_, _ = w.Write([]byte("<PolicyStatus><IsPublic>" + v + "</IsPublic></PolicyStatus>"))
+		case q == "acl":
+			// these fixtures exercise the POLICY+BPA legs; the ACL leg reads a
+			// private (owner-only) ACL so the OR-combine turns on the policy verdict.
+			_, _ = w.Write([]byte(s3PrivateACL))
 		default:
 			// every other observe read (versioning, object-lock, lifecycle,
 			// encryption, replication, tagging, buckets.get): benign not-found so

@@ -107,8 +107,9 @@ type eksCluster struct {
 	Status             string `json:"status"`
 	Version            string `json:"version"`
 	ResourcesVpcConfig struct {
-		EndpointPublicAccess  bool `json:"endpointPublicAccess"`
-		EndpointPrivateAccess bool `json:"endpointPrivateAccess"`
+		EndpointPublicAccess  bool     `json:"endpointPublicAccess"`
+		EndpointPrivateAccess bool     `json:"endpointPrivateAccess"`
+		PublicAccessCidrs     []string `json:"publicAccessCidrs"`
 	} `json:"resourcesVpcConfig"`
 	EncryptionConfig []struct {
 		Resources []string `json:"resources"`
@@ -143,6 +144,22 @@ func (d *Driver) describeEKSCluster(region, name string) (eksCluster, bool, erro
 	return out.Cluster, true, nil
 }
 
+// eksPublicCidrsOpen reports whether the public API endpoint is reachable from the
+// whole internet. "mixed" requires a DEMONSTRATED restriction, so an empty/absent
+// publicAccessCidrs (no evidence of a restriction; EKS otherwise always populates it
+// and defaults to 0.0.0.0/0) counts as open — the safe direction for a security path.
+func eksPublicCidrsOpen(cidrs []string) bool {
+	if len(cidrs) == 0 {
+		return true
+	}
+	for _, c := range cidrs {
+		if isOpenCIDR(strings.TrimSpace(c)) {
+			return true
+		}
+	}
+	return false
+}
+
 // observeEKS reverse-maps a cluster to capability.cluster.kubernetes. It emits
 // only what one DescribeCluster proves; availability.class is a node-group
 // attribute observed in slice 2 (a diagnostic names the honest omission).
@@ -163,8 +180,18 @@ func (d *Driver) observeEKS(capability, providerID string) ([]provider.Observati
 		}, []string{"cluster not found — bound resource is gone (will re-create)"}, nil
 	}
 
+	// network.apiExposure: "mixed" (public endpoint present but RESTRICTED, plus a
+	// private endpoint) is a false-green if the public endpoint's publicAccessCidrs
+	// authorizes the whole internet — and 0.0.0.0/0 is EKS's DEFAULT, so a typical
+	// both-endpoints cluster is wide open while reading "mixed". When the public
+	// endpoint is open to /0, the API server is reachable by anyone regardless of a
+	// coexisting private endpoint, so the honest value is "public" (D1182).
 	var exposure string
-	switch pub, priv := c.ResourcesVpcConfig.EndpointPublicAccess, c.ResourcesVpcConfig.EndpointPrivateAccess; {
+	pub, priv := c.ResourcesVpcConfig.EndpointPublicAccess, c.ResourcesVpcConfig.EndpointPrivateAccess
+	publicWideOpen := pub && eksPublicCidrsOpen(c.ResourcesVpcConfig.PublicAccessCidrs)
+	switch {
+	case publicWideOpen:
+		exposure = "public"
 	case pub && priv:
 		exposure = "mixed"
 	case pub:

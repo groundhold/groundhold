@@ -203,7 +203,11 @@ func (d *Driver) createS3(account, environment, capability string,
 	}
 	// ---- lifecycle expiration (retention.maximum, optional) ----
 	if plan.Lifecycle != nil {
-		if r := d.s3Step(plan.Region, bucket, *plan.Lifecycle, pid, "lifecycle"); r != nil {
+		if plan.Lifecycle.Method == "DELETE" {
+			if r := d.s3DeleteLifecycleStep(plan.Region, bucket, pid); r != nil {
+				return *r
+			}
+		} else if r := d.s3Step(plan.Region, bucket, *plan.Lifecycle, pid, "lifecycle"); r != nil {
 			return *r
 		}
 	}
@@ -464,25 +468,91 @@ func (d *Driver) observeS3(capability, providerID string) ([]provider.Observatio
 	if st, body, err := d.s3Do("GET", region, bucket, "/?lifecycle", ""); err == nil && st == http.StatusOK {
 		var lc struct {
 			Rules []struct {
-				Status     string `xml:"Status"`
+				Status string `xml:"Status"`
+				Prefix string `xml:"Prefix"` // legacy top-level prefix
+				Filter struct {
+					Prefix string    `xml:"Prefix"`
+					And    *struct{} `xml:"And"`
+					Tag    *struct{} `xml:"Tag"`
+				} `xml:"Filter"`
 				Expiration struct {
-					Days *int `xml:"Days"`
+					Days *int    `xml:"Days"`
+					Date *string `xml:"Date"`
 				} `xml:"Expiration"`
 			} `xml:"Rule"`
 		}
 		if xml.Unmarshal(body, &lc) != nil {
 			diags = append(diags, "retention.maximum not observed: GetBucketLifecycle unparseable")
 		} else {
+			bucketWideDays := 0 // 0 = none
+			type prefRule struct {
+				prefix string
+				days   int
+			}
+			var prefixRules []prefRule
 			for _, r := range lc.Rules {
-				if r.Status == "Enabled" && r.Expiration.Days != nil {
-					obs = append(obs, provider.Observation{Path: "retention.maximum",
-						Value: fmt.Sprintf("%dd", *r.Expiration.Days), Derivation: "measured"})
-					break
+				// FAIL-CLOSED: a rule counts toward the per-prefix EFFECT only when it is
+				// Enabled and expires current objects in whole DAYS. Disabled, a Date
+				// expiration, or a tag/And filter is EXCLUDED — such a rule does not do
+				// what a per-prefix days ceiling looks like, so counting it would be a
+				// false-green; excluding it makes a declared element read as missing (RED).
+				if r.Status != "Enabled" || r.Expiration.Days == nil {
+					continue
+				}
+				if r.Filter.And != nil || r.Filter.Tag != nil {
+					diags = append(diags, "retention.maximumByPrefix: a lifecycle rule with a tag/And "+
+						"filter is narrower than a prefix and is excluded (its effect is not per-prefix)")
+					continue
+				}
+				prefix := r.Filter.Prefix
+				if prefix == "" {
+					prefix = r.Prefix // legacy top-level
+				}
+				if prefix == "" {
+					if bucketWideDays == 0 || *r.Expiration.Days < bucketWideDays {
+						bucketWideDays = *r.Expiration.Days
+					}
+					continue
+				}
+				prefixRules = append(prefixRules, prefRule{prefix: prefix, days: *r.Expiration.Days})
+			}
+			if bucketWideDays > 0 {
+				obs = append(obs, provider.Observation{Path: "retention.maximum",
+					Value: fmt.Sprintf("%dd", bucketWideDays), Derivation: "measured"})
+			}
+			// D1177: emit the EFFECTIVE per-prefix retention, not the raw rule days. S3
+			// applies the EARLIEST matching expiration, so an object at prefix P actually
+			// expires at the MINIMUM over every rule whose prefix is a prefix of P — the
+			// bucket-wide rule AND any shorter overlapping prefix rule. Emitting the raw
+			// rule would read green while a shorter bucket-wide/overlapping rule kills the
+			// object first (the precedence false-green the consult's skeptic named).
+			seen := map[string]bool{}
+			prefixElems := []any{}
+			for _, rule := range prefixRules {
+				eff := rule.days
+				if bucketWideDays > 0 && bucketWideDays < eff {
+					eff = bucketWideDays
+				}
+				for _, other := range prefixRules {
+					if strings.HasPrefix(rule.prefix, other.prefix) && other.days < eff {
+						eff = other.days
+					}
+				}
+				elem := fmt.Sprintf("%s=%dd", rule.prefix, eff)
+				if !seen[elem] {
+					seen[elem] = true
+					prefixElems = append(prefixElems, elem)
 				}
 			}
+			sort.Slice(prefixElems, func(i, j int) bool { return prefixElems[i].(string) < prefixElems[j].(string) })
+			obs = append(obs, provider.Observation{Path: "retention.maximumByPrefix",
+				Value: prefixElems, Derivation: "measured"})
 		}
 	} else if err == nil && (st == http.StatusNotFound || awsErrCode(body) == "NoSuchLifecycleConfiguration") {
-		// no lifecycle configured — retention.maximum simply absent, not an error
+		// no lifecycle configured — retention.maximum absent; retention.maximumByPrefix is a
+		// MEASURED empty set (never unknown), so a blind bucket reads [] and equals blocks it.
+		obs = append(obs, provider.Observation{Path: "retention.maximumByPrefix",
+			Value: []any{}, Derivation: "measured"})
 	} else {
 		diags = append(diags, "retention.maximum not observed: "+s3ReadWhy("GetBucketLifecycle", st, body, err))
 	}
@@ -629,14 +699,69 @@ func (d *Driver) observeS3(capability, providerID string) ([]provider.Observatio
 	} else {
 		diags = append(diags, "cors.allowedOrigins not observed: "+s3ReadWhy("GetBucketCors", st, body, err))
 	}
-	// publicExposure: policy-status IsPublic is AWS's verdict on the BUCKET POLICY
-	// document's publicness — it folds in Block Public Access at NEITHER the bucket
-	// nor the account level (D240). So a public policy under an effective
-	// RestrictPublicBuckets is effectively private: when IsPublic=true we resolve
-	// the effective BPA and downgrade to false ONLY on positive enforcement
-	// evidence (bucket or account), keeping the conservative public verdict when
-	// the BPA is unreadable (never-fabricate — a false negative is the dangerous
-	// direction). A missing policy (404 / NoSuchBucketPolicy) means not public.
+	// network.publicExposure = policy-public OR acl-public — the AWS meaning of a
+	// PUBLIC bucket (a public bucket policy, OR a bucket ACL granting AllUsers /
+	// AuthenticatedUsers). Two independent legs: a MEASURED false is emitted ONLY
+	// when BOTH legs read definitively non-public; ONE confirmed-public leg is
+	// enough for true; a leg left unreadable without the other proving public
+	// WITHHOLDS the observation (diag says why) rather than fabricating "private" —
+	// a false negative here is the dangerous direction. D240 folded effective Block
+	// Public Access into the policy leg; the ACL leg closes the blind spot that
+	// GetBucketPolicyStatus (a POLICY verdict) never saw a public ACL.
+	polKnown, polPublic, polDetail := d.s3PolicyExposureLeg(region, bucket)
+	if polDetail != "" {
+		diags = append(diags, polDetail)
+	}
+	if polKnown && polPublic {
+		obs = append(obs, provider.Observation{Path: "network.publicExposure",
+			Value: true, Derivation: "measured"}) // worst-case honest — no ACL read needed
+		return obs, diags, nil
+	}
+	aclKnown, aclPublic, aclDetail := d.s3BucketAclExposureLeg(region, bucket)
+	if aclDetail != "" {
+		diags = append(diags, aclDetail)
+	}
+	switch {
+	case aclKnown && aclPublic:
+		obs = append(obs, provider.Observation{Path: "network.publicExposure",
+			Value: true, Derivation: "measured"})
+	case polKnown && aclKnown:
+		// both legs definitively non-public — the ONLY path to a measured false
+		obs = append(obs, provider.Observation{Path: "network.publicExposure",
+			Value: false, Derivation: "measured"})
+		diags = append(diags, "network.publicExposure=false covers the bucket policy and bucket "+
+			"ACL only; per-object ACLs and S3 Access Point policies are not enumerable at bucket "+
+			"scope — an individually-public object or a public access point would not be seen. "+
+			"Enforce IgnorePublicAcls (neutralizes public object ACLs) and run the anonymous-GET "+
+			"outcome probe to close the residual.")
+	default:
+		diags = append(diags, "network.publicExposure withheld: neither leg proved public and at "+
+			"least one leg's read did not complete (its cause is named in the leg diag above) — a "+
+			"non-public verdict needs BOTH the policy and the ACL definitively read (never fabricate "+
+			"private)")
+	}
+	return obs, diags, nil
+}
+
+// public-group ACL URIs (S3 predefined groups). A grant to either is public per
+// AWS's meaning-of-public; the LogDelivery group (.../s3/LogDelivery) is a service
+// group and is NOT public, so we match the two global URIs EXACTLY — never a
+// substring (an https:// typo or a contains() check would silently miss and
+// false-green).
+const (
+	s3GroupAllUsers           = "http://acs.amazonaws.com/groups/global/AllUsers"
+	s3GroupAuthenticatedUsers = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers"
+)
+
+// s3PolicyExposureLeg reads GetBucketPolicyStatus and folds effective
+// RestrictPublicBuckets (D240) WITHOUT emitting. Returns (known, public, detail):
+// known=false means the status was unreadable (detail says why). When the policy is
+// public but an effective RestrictPublicBuckets masks it, the leg reports known=true
+// public=false with a detail that the masked policy is a latent exposure — the
+// caller then STILL consults the ACL leg, because a masked policy does not make the
+// bucket non-public if a public ACL is present (the secondary false-green the
+// single masked-emits-false branch used to hide).
+func (d *Driver) s3PolicyExposureLeg(region, bucket string) (known, public bool, detail string) {
 	st, body, perr := d.s3Do("GET", region, bucket, "/?policyStatus", "")
 	switch {
 	case perr == nil && st == http.StatusOK:
@@ -645,36 +770,66 @@ func (d *Driver) observeS3(capability, providerID string) ([]provider.Observatio
 		}
 		switch {
 		case xml.Unmarshal(body, &ps) != nil:
-			diags = append(diags, "network.publicExposure not observed: GetBucketPolicyStatus unparseable")
+			return false, false, "network.publicExposure: GetBucketPolicyStatus unparseable"
 		case ps.IsPublic == "true":
-			// D240: fold in the effective Block Public Access (lazy — only now that
-			// the policy reads public).
-			if restricted, bpaErr := d.effectiveRestrictPublicBuckets(region, bucket); restricted {
-				obs = append(obs, provider.Observation{Path: "network.publicExposure",
-					Value: false, Derivation: "measured"})
-				diags = append(diags, "network.publicExposure: the bucket policy is public but "+
-					"RestrictPublicBuckets is effectively enforced (bucket or account BPA) — the policy "+
-					"is masked and would expose the bucket if BPA is lifted; remove it")
-			} else {
-				if bpaErr != nil {
-					diags = append(diags, "network.publicExposure: effective RestrictPublicBuckets "+
-						"gave no answer ("+bpaErr.Error()+") — reporting the public policy status "+
-						"conservatively (account BPA may in fact restrict it; cross-account?)")
-				}
-				obs = append(obs, provider.Observation{Path: "network.publicExposure",
-					Value: true, Derivation: "measured"})
+			restricted, bpaErr := d.effectiveRestrictPublicBuckets(region, bucket)
+			if restricted {
+				return true, false, "network.publicExposure: the bucket policy is public but " +
+					"RestrictPublicBuckets is effectively enforced (bucket or account BPA) — the policy " +
+					"is masked and would expose the bucket if BPA is lifted; remove it"
 			}
+			if bpaErr != nil {
+				return true, true, "network.publicExposure: effective RestrictPublicBuckets gave no " +
+					"answer (" + bpaErr.Error() + ") — reporting the public policy status conservatively"
+			}
+			return true, true, ""
 		default:
-			obs = append(obs, provider.Observation{Path: "network.publicExposure",
-				Value: false, Derivation: "measured"})
+			return true, false, "" // IsPublic=false — policy leg definitively non-public
 		}
 	case perr == nil && (st == http.StatusNotFound || awsErrCode(body) == "NoSuchBucketPolicy"):
-		obs = append(obs, provider.Observation{Path: "network.publicExposure",
-			Value: false, Derivation: "measured"})
+		return true, false, "" // no policy → policy leg definitively non-public
 	default:
-		diags = append(diags, "network.publicExposure not observed: "+s3ReadWhy("GetBucketPolicyStatus", st, body, perr))
+		return false, false, "network.publicExposure (policy leg) not observed: " +
+			s3ReadWhy("GetBucketPolicyStatus", st, body, perr)
 	}
-	return obs, diags, nil
+}
+
+// s3BucketAclExposureLeg reads GetBucketAcl (GET /?acl). GetBucketAcl returns the
+// EFFECTIVE ACL — with IgnorePublicAcls enforced, S3 returns the permissions it is
+// actually enforcing, not the stored public grant (AWS S3 API doc, GetBucketAcl) —
+// so this leg needs no separate BPA fold. public=true iff any grant names AllUsers
+// or AuthenticatedUsers, at ANY permission: a public WRITE/WRITE_ACP is an exposure
+// too (WRITE_ACP is a read path one self-granted ACL away), and the attribute is the
+// AWS meaning-of-public, not read alone. known=false only when the ACL was unreadable
+// (never fabricate a non-public ACL from a failed read).
+func (d *Driver) s3BucketAclExposureLeg(region, bucket string) (known, public bool, detail string) {
+	st, body, err := d.s3Do("GET", region, bucket, "/?acl", "")
+	if err != nil || st != http.StatusOK {
+		return false, false, "network.publicExposure (ACL leg) not observed: " +
+			s3ReadWhy("GetBucketAcl", st, body, err)
+	}
+	var acl struct {
+		Grants []struct {
+			URI        string `xml:"Grantee>URI"`
+			Permission string `xml:"Permission"`
+		} `xml:"AccessControlList>Grant"`
+	}
+	if xml.Unmarshal(body, &acl) != nil {
+		return false, false, "network.publicExposure: GetBucketAcl unparseable"
+	}
+	var pub []string
+	for _, g := range acl.Grants {
+		if g.URI == s3GroupAllUsers || g.URI == s3GroupAuthenticatedUsers {
+			short := g.URI[strings.LastIndex(g.URI, "/")+1:]
+			pub = append(pub, short+":"+g.Permission)
+		}
+	}
+	if len(pub) == 0 {
+		return true, false, "" // no public-group grant — ACL leg definitively non-public
+	}
+	sort.Strings(pub)
+	return true, true, "network.publicExposure: the bucket ACL grants public access — " +
+		strings.Join(pub, ", ") + " (remove the AllUsers/AuthenticatedUsers grant)"
 }
 
 // classifyS3Change (D46): PURE — can this capability.storage.object transition
@@ -700,7 +855,9 @@ func classifyS3Change(path string, desired any, impl map[string]any) (string, st
 			"cannot be honored)"
 	case "versioning.enabled":
 		return "mutable", ""
-	case "retention.maximum":
+	case "retention.maximum", "retention.maximumByPrefix":
+		// both ride the SAME single LifecycleConfiguration document (bucket-wide +
+		// per-prefix rules), re-PUT in place — never a replacement.
 		return "mutable", ""
 	case "network.publicExposure":
 		return "mutable", ""
@@ -783,12 +940,19 @@ func (d *Driver) updateS3(capability, environment, providerID string,
 			if r := d.s3PatchStep(region, bucket, "PUT", "/?versioning", body, providerID, "versioning"); r != nil {
 				return *r
 			}
-		case "retention.maximum":
+		case "retention.maximum", "retention.maximumByPrefix":
+			// both rebuild the SAME single lifecycle document (bucket-wide + per-prefix);
+			// re-PUT it, or DELETE when it is now empty. A change to both in one converge
+			// re-PUTs the identical body twice, which is idempotent.
 			if plan.Lifecycle == nil {
 				return provider.CreateResult{Status: "failed",
-					Reason: "retention.maximum change carries no honorable lifecycle rule"}
+					Reason: "retention lifecycle change carries no honorable rule"}
 			}
-			if r := d.s3PatchStep(region, bucket, "PUT", "/?lifecycle", plan.Lifecycle.Body, providerID, "lifecycle"); r != nil {
+			if plan.Lifecycle.Method == "DELETE" {
+				if r := d.s3DeleteLifecycleStep(region, bucket, providerID); r != nil {
+					return *r
+				}
+			} else if r := d.s3PatchStep(region, bucket, "PUT", "/?lifecycle", plan.Lifecycle.Body, providerID, "lifecycle"); r != nil {
 				return *r
 			}
 		case "encryption.customerManagedKeys":
@@ -914,6 +1078,32 @@ func (d *Driver) s3DeletePolicyStep(region, bucket, pid string) *provider.Create
 
 // s3DeleteReplicationStep removes the bucket's replication config (CRR off). A
 // missing config (404 / ReplicationConfigurationNotFoundError) is already-off.
+// s3DeleteLifecycleStep removes the bucket lifecycle config (declared
+// retention.maximumByPrefix: [] with no bucket-wide rule). NoSuchLifecycleConfiguration
+// is already-absent success — the delete-tolerant twin of the replication removal.
+func (d *Driver) s3DeleteLifecycleStep(region, bucket, pid string) *provider.CreateResult {
+	st, resp, err := d.s3Do("DELETE", region, bucket, "/?lifecycle", "")
+	if err != nil {
+		r := provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: "lifecycle removal outcome unknown — reconcile"}
+		return &r
+	}
+	if st == http.StatusNotFound || awsErrCode(resp) == "NoSuchLifecycleConfiguration" {
+		return nil // already absent
+	}
+	if st >= 500 {
+		r := provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("lifecycle removal HTTP %d (server error) — reconcile", st)}
+		return &r
+	}
+	if st < 200 || st >= 300 {
+		r := provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("lifecycle removal failed: HTTP %d (%s)", st, awsErrCode(resp))}
+		return &r
+	}
+	return nil
+}
+
 // s3DeleteCorsStep removes the bucket CORS config (declared cors.allowedOrigins: []).
 // NoSuchCORSConfiguration is already-absent success — the delete-tolerant twin of the
 // replication removal.
