@@ -120,7 +120,12 @@ attributes:
     kind: bool
     description: Whether any public/anonymous producer or consumer path exists.
     mappings:
-      aws.sqs: no Principal:"*" in the queue resource policy
+      aws.sqs: >
+        a Principal:"*" Allow in the queue resource policy that is NOT scoped by a
+        who-restricting condition (aws:SourceOwner/SourceAccount/SourceArn/PrincipalOrgID/
+        etc.) — a non-scoping condition (a date, aws:SecureTransport) leaves it public,
+        a fixed account/org/source scope makes it private (a wildcard value on a scoping
+        key is a residual an anonymous-access probe witnesses)
       gcp.pubsub-queue: no allUsers/allAuthenticatedUsers IAM binding
       azure.servicebusqueue: >
         the namespace's publicNetworkAccess — Enabled is exposed, Disabled is not.

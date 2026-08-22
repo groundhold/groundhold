@@ -298,6 +298,11 @@ func TestIsSecurityPath(t *testing.T) {
 		"sso.enforced", "mfa.required", "assertions.signed",
 		"pkce.required", "client.authentication", "redirects.exactMatch",
 		"redirects.wildcardsAllowed", "token.asymmetricSigning", "grants.implicit",
+		// D1190. Siblings inside a block the keyword lint had floored only in part:
+		// `access.privileged` and `grants.implicit` above matched a keyword, these did
+		// not. Pinned beside them on purpose — the pairing is the finding.
+		"grant.principal", "grant.role", "access.scope",
+		"grants.clientCredentials", "grants.authorizationCode",
 		"refreshToken.rotation", "sourceProvenance", "network.apiExposure",
 		"authentication.dkim", "retention.lockMode",
 		// D1075 (found by the keyword lint):
@@ -761,5 +766,79 @@ constraints:
 	if got := verdictFor(t, "provider-api", "measured"); got != "satisfied" {
 		t.Errorf("measured at the provider-api bar = %q, want satisfied — the fix must "+
 			"not demote real readings", got)
+	}
+}
+
+// D1190. The same proof as TestAuditSecurityPathRejectsDeclaredIntent, aimed at the
+// paths that were NOT floored — and it is written as a table with a CONTROL, because
+// the finding is not "one path was missing" but "the lint floored part of a block and
+// left its siblings".
+//
+// `access.privileged` is the control: it was already floored, because the keyword regex
+// contains "privileg". `grant.principal` and `grant.role` live in the same capability
+// and matched nothing, so until this slice an audit witnessed "this grant is not
+// privileged" and accepted "the principal is a named user, not allUsers" on the
+// candidate's own word. That is the D1179 public-access shape one attribute over,
+// reached without anyone doing anything wrong.
+func TestAuditFloorsGrantIdentityNotJustPrivilege(t *testing.T) {
+	for _, tc := range []struct {
+		path, note string
+	}{
+		{"access.privileged", "the CONTROL — floored before this slice (regex: privileg)"},
+		{"grant.principal", "allUsers vs a named principal — the same shape as D1179"},
+		{"grant.role", "owner vs viewer — the least-privilege crown"},
+		{"access.scope", "how wide the grant reaches"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			td := t.TempDir()
+			cpath := filepath.Join(td, "c.yaml")
+			doc := `
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta: { id: sec, environment: test, version: 1 }
+capabilities:
+  - id: g
+    type: capability.authorization.grant
+constraints:
+  hard:
+    - id: c-grant
+      subject: g
+      path: ` + tc.path + `
+      op: equals
+      value: false
+      verify: { method: static }
+`
+			if err := os.WriteFile(cpath, []byte(doc), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := contract.LoadContract(cpath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The adopt-fill: the driver observed nothing for this path, so the
+			// candidate's own claim was recorded as intent.
+			led := ledger.New()
+			seedObs(led, "g", map[string]ledger.ObsRecord{
+				tc.path: {Value: false, ObservedAt: "2026-07-15T12:00:00Z",
+					TTLSeconds: 86400, Derivation: "declared", Source: "candidate-declared"},
+			})
+			res, err := Run(c, led, filepath.Join(td, "l.jsonl"),
+				"2026-07-15T12:05:00Z", false, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res.Verdicts) != 1 {
+				t.Fatalf("expected one verdict, got %+v", res.Verdicts)
+			}
+			if v := res.Verdicts[0].Verdict; v != "unknown" && v != "unverifiable" {
+				t.Fatalf("%s (%s): declared intent SATISFIED a hard security constraint — "+
+					"the audit certified a control nobody measured; got %q",
+					tc.path, tc.note, v)
+			}
+			if res.Status != "violations-found" {
+				t.Fatalf("%s: a hard security control backed only by intent must BLOCK, "+
+					"got status=%q", tc.path, res.Status)
+			}
+		})
 	}
 }

@@ -312,6 +312,18 @@ func (d *Driver) observeOpenSearchServerless(capability, providerID string) ([]p
 		diags = append(diags, "network.publicExposure not observed: "+perr.Error()+" — probe/reconcile")
 	} else {
 		obs = append(obs, provider.Observation{Path: "network.publicExposure", Value: public, Derivation: "measured"})
+		if !public {
+			// D1187: this reads only the network policy at the OWNED name. AOSS applies
+			// EVERY network policy whose resource pattern matches the collection, so an
+			// adopted collection made public by a differently-named policy would not be
+			// seen here — a residual this bucket-scope read cannot close (enumerating and
+			// pattern-matching all network policies is the ultimate check; the anonymous
+			// endpoint probe is the outcome witness). For a groundhold-created collection
+			// the owned policy is the sole authority, so this is exact.
+			diags = append(diags, "network.publicExposure=false reflects the OWNED network policy only; "+
+				"AOSS honors every network policy matching the collection, so a differently-named policy "+
+				"could still allow public access — confirm with an endpoint probe on an adopted collection")
+		}
 	}
 	return obs, diags, nil
 }

@@ -361,8 +361,18 @@ func (d *Driver) createLoadBalancer(region, environment, capability string,
 		return provider.CreateResult{ProviderID: pid, Status: "unknown",
 			Reason: fmt.Sprintf("CreateLoadBalancer HTTP %d (server error — may have landed): %s", st, mutDetail(body))}
 	default:
-		return provider.CreateResult{Status: "failed",
-			Reason: fmt.Sprintf("CreateLoadBalancer HTTP %d (%s): %s", st, rdsErrCode(body), mutDetail(body))}
+		// D1191: the target group (step 1) ALREADY landed under our name, so even a
+		// TERMINAL CreateLoadBalancer 4xx leaves the composite PARTIAL — an orphaned
+		// target group a reconcile/delete must resolve. This is the SAME discipline
+		// createListener states one step later ("never a bare failed that hides the
+		// standing [resource]"): a bare "failed" clears the pending intent (apply.go
+		// D180) and abandons the orphan with nothing pointing at it, making the delete
+		// path's "reconciled manually" unreachable. Carry the pid as unknown so the
+		// orphan is recorded (apply.go:1170 keeps targetProviderId), never silently leaked.
+		return provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("CreateLoadBalancer HTTP %d (%s): %s — a target group already landed "+
+				"under this name and is now orphaned; reconcile or delete to remove it",
+				st, rdsErrCode(body), mutDetail(body))}
 	}
 	var created struct {
 		Arn   string `xml:"CreateLoadBalancerResult>LoadBalancers>member>LoadBalancerArn"`

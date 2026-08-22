@@ -50,7 +50,12 @@ attributes:
     kind: bool
     description: Whether any public/anonymous publish path exists.
     mappings:
-      aws.sns: no Principal:"*" in the topic resource policy
+      aws.sns: >
+        a Principal:"*" Allow in the topic resource policy that is NOT scoped by a
+        who-restricting condition (aws:SourceOwner/SourceAccount/SourceArn/PrincipalOrgID/
+        etc.) — a non-scoping condition (a date, aws:SecureTransport) leaves it public,
+        a fixed account/org/source scope makes it private (a wildcard value on a scoping
+        key is a residual an anonymous-publish probe witnesses)
       gcp.pubsub-topic: no allUsers/allAuthenticatedUsers IAM binding
       azure.servicebustopic: >
         the namespace's publicNetworkAccess — Enabled is exposed, Disabled is not.

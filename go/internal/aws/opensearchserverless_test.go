@@ -116,6 +116,42 @@ func TestBuildOpenSearchServerlessRefusals(t *testing.T) {
 	}
 }
 
+// D1187: a non-public verdict must DISCLOSE that it read only the owned-name network
+// policy — AOSS honors every matching policy, so an adopted collection made public by a
+// differently-named policy is a residual this read cannot see.
+func TestObserveOpenSearchServerlessPrivateDisclosesResidual(t *testing.T) {
+	f := &aossFake{public: false}
+	srv := f.handler(t)
+	defer srv.Close()
+	d := aossDriver(t, srv)
+	res := d.createOpenSearchServerless("eu-central-1", "000000000000", "prod", "catalog", aossAttrs(), aossImpl(), 1)
+	if res.Status != "succeeded" {
+		t.Fatalf("create: %+v", res)
+	}
+	obs, diags, err := d.observeOpenSearchServerless("catalog", res.ProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pub any
+	for _, o := range obs {
+		if o.Path == "network.publicExposure" {
+			pub = o.Value
+		}
+	}
+	if pub != false {
+		t.Fatalf("a non-public owned policy must read publicExposure=false, got %v", pub)
+	}
+	found := false
+	for _, dg := range diags {
+		if strings.Contains(dg, "OWNED network policy only") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a false verdict must disclose the owned-policy-only residual, diags=%v", diags)
+	}
+}
+
 func TestClassifyOpenSearchServerlessChange(t *testing.T) {
 	if c, _ := classifyOpenSearchServerlessChange("location.region"); c != "immutable" {
 		t.Errorf("location.region must be immutable (replacement), got %q", c)

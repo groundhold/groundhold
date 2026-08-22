@@ -216,6 +216,7 @@ type fakeELB struct {
 
 	// injection
 	listenerStatus int  // if non-zero, CreateListener returns this HTTP status (failure)
+	lbStatus       int  // if non-zero, CreateLoadBalancer returns this HTTP status (failure)
 	keepLB         bool // async test (D980): DeleteLoadBalancer accepted but LB stays present
 
 	order []string
@@ -265,6 +266,11 @@ func (f *fakeELB) handler(t *testing.T, rec *capture) *httptest.Server {
 				`</member></TargetGroups></CreateTargetGroupResult></CreateTargetGroupResponse>`))
 		case "CreateLoadBalancer":
 			f.order = append(f.order, act)
+			if f.lbStatus != 0 { // terminal/ambiguous CreateLoadBalancer failure (TG already landed)
+				w.WriteHeader(f.lbStatus)
+				_, _ = w.Write([]byte(`<ErrorResponse><Error><Code>ValidationError</Code></Error></ErrorResponse>`))
+				return
+			}
 			f.lbCreated = true
 			_, _ = w.Write([]byte(`<CreateLoadBalancerResponse><CreateLoadBalancerResult><LoadBalancers><member>` +
 				`<LoadBalancerArn>` + f.lbArn() + `</LoadBalancerArn><LoadBalancerName>` + f.name + `</LoadBalancerName>` +
@@ -548,6 +554,33 @@ func TestLoadBalancerCreate_ListenerFailsIsUnknown(t *testing.T) {
 	}
 	if !f.lbCreated {
 		t.Fatal("the load balancer should have landed before the listener failure")
+	}
+}
+
+// D1191: a TERMINAL CreateLoadBalancer failure comes AFTER the target group landed
+// (step 1), so the composite is PARTIAL — an orphaned target group. It must read
+// unknown WITH the pid (never a bare "failed" that clears the pending intent and hides
+// the orphan), the same discipline createListener states one step later.
+func TestLoadBalancerCreate_TerminalLBFailureCarriesPidForOrphanTG(t *testing.T) {
+	f := newFakeELB()
+	f.lbStatus = http.StatusBadRequest // CreateLoadBalancer rejects terminally, after the TG landed
+	srv := f.handler(t, nil)
+	defer srv.Close()
+	d := lbProvDriver(t, srv)
+	attrs, impl := httpsLBCandidate()
+
+	res := d.Create("loadbalancer", lbCap, "prod", attrs, impl, "k", 1)
+	if !f.tgCreated {
+		t.Fatal("the target group should have landed before the CreateLoadBalancer failure")
+	}
+	if res.Status != "unknown" {
+		t.Fatalf("a terminal CreateLoadBalancer failure after the TG landed must be unknown, got %q (%s)", res.Status, res.Reason)
+	}
+	if res.ProviderID != elbv2ProviderID("eu-central-1", lbTestName) {
+		t.Fatalf("unknown must carry the providerId so reconcile can remove the orphaned target group, got %q", res.ProviderID)
+	}
+	if !strings.Contains(res.Reason, "orphan") {
+		t.Fatalf("the reason must name the orphaned target group, got %q", res.Reason)
 	}
 }
 

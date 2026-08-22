@@ -338,10 +338,10 @@ func (d *Driver) observeSQS(capability, providerID string) ([]provider.Observati
 	return obs, diags, nil
 }
 
-// sqsPolicyPublic reports whether a queue policy grants anonymous access. Public
-// iff any Allow statement has a wildcard Principal and NO condition (a
-// conditioned wildcard is not an unconditional public path). Reuses the SNS
-// principal/wildcard parser (the policy JSON shape is identical).
+// sqsPolicyPublic reports whether a queue policy grants anonymous access. Public iff
+// any Allow statement has a wildcard Principal AND no condition that RESTRICTS WHO may
+// act (D1189). Reuses the SNS principal/wildcard parser and the who-scoping condition
+// check (the policy JSON shape is identical).
 func sqsPolicyPublic(policy string) (public, parseable bool) {
 	var p struct {
 		Statement []struct {
@@ -354,15 +354,13 @@ func sqsPolicyPublic(policy string) (public, parseable bool) {
 		return false, false
 	}
 	for _, s := range p.Statement {
-		if s.Effect != "Allow" {
+		if s.Effect != "Allow" || !principalWildcard(s.Principal) {
 			continue
 		}
-		if cond := strings.TrimSpace(string(s.Condition)); cond != "" && cond != "null" && cond != "{}" {
-			continue
+		if conditionScopesPrincipal(s.Condition) {
+			continue // Principal:* but scoped to a specific account/org/source — not anonymous public
 		}
-		if principalWildcard(s.Principal) {
-			return true, true
-		}
+		return true, true
 	}
 	return false, true
 }
