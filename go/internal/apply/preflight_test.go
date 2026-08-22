@@ -335,3 +335,76 @@ func TestApplyRefusesAssumedHardBasisWhenArmed(t *testing.T) {
 			res2.Status, res2.Reasons)
 	}
 }
+
+// emptyRequiredSet makes `requiredUnion` come back EMPTY by pointing the plan's
+// read-set at a provider `PermissionsFor` has no case for. That is a stand-in for the
+// likelier production route — a SERVICE added to a driver without its `PermissionsFor`
+// case, which falls through the same switch to `return nil` — and it is the trigger,
+// not the defect: the defect is what the executor does when the set is empty.
+//
+// It edits the PLAN rather than the provider object on purpose. The first version of
+// this test overrode the provider's `Name()` and proved nothing, because
+// `requiredUnion` reads the name from `reads.provider` in the sealed plan and never
+// asks the object. Both mutants below survived it. That is the empty-probe failure
+// this record keeps warning about, caught here by mutating rather than by luck.
+func emptyRequiredSet(t *testing.T, plan map[string]any) {
+	t.Helper()
+	body, _ := plan["plan"].(map[string]any)
+	reads, _ := body["reads"].(map[string]any)
+	if reads == nil {
+		t.Fatal("the compiled plan has no reads block — this helper is editing nothing")
+	}
+	prov, _ := reads["provider"].(map[string]any)
+	if prov == nil {
+		prov = map[string]any{}
+		reads["provider"] = prov
+	}
+	prov["name"] = "a-provider-with-no-declared-permissions"
+
+	// The union has TWO sources (requiredUnion): the executor's own derivation from
+	// `PermissionsFor`, and the list the compiler SEALED into each action (D75). A
+	// service with no permission case yields nothing from either — the compiler asks
+	// the same function — so a faithful fixture clears both. Clearing only the first
+	// left the sealed list behind and the union non-empty, which is why the earlier
+	// draft of this helper proved nothing.
+	acts, _ := body["actions"].([]any)
+	if len(acts) == 0 {
+		t.Fatal("the compiled plan has no actions — this helper is editing nothing")
+	}
+	for _, it := range acts {
+		a, _ := it.(map[string]any)
+		delete(a, "requiredPermissions")
+	}
+}
+
+// D1175. "Nothing was checked" must not read as "everything passed".
+func TestAnEmptyRequiredSetSkipsLoudly(t *testing.T) {
+	c, cand, plan := setupPlan(t)
+	emptyRequiredSet(t, plan)
+	res := Apply(c, cand, nil, plan, freshLedger(t), &provider.Fake{}, pfAt, false)
+	if res.Status != "applied" {
+		t.Fatalf("status=%s code=%s reasons=%v", res.Status, res.Code, res.Reasons)
+	}
+	if res.Preflight == nil {
+		t.Fatal("the preflight left NO record at all. A run that verified nothing is " +
+			"indistinguishable from one that verified everything, which is the whole " +
+			"reason `skipped` is a published status beside `passed`.")
+	}
+	if res.Preflight.Status != "skipped" {
+		t.Fatalf("expected skipped, got %+v", res.Preflight)
+	}
+}
+
+// The flag's promise. `--require-preflight` means the operator demanded certainty; an
+// empty required set gives none, so returning success is the gate-that-cannot-fail
+// shape — ask what it would print with the permission map emptied, and the answer must
+// not be what it prints now.
+func TestRequirePreflightRefusesOnAnEmptyRequiredSet(t *testing.T) {
+	c, cand, plan := setupPlan(t)
+	emptyRequiredSet(t, plan)
+	res := Apply(c, cand, nil, plan, freshLedger(t), &provider.Fake{}, pfAt, true)
+	if res.Code != perr.PreflightInconclusive || res.Exit != 2 {
+		t.Fatalf("expected preflight-inconclusive/2, got %s/%d (%v)",
+			res.Code, res.Exit, res.Reasons)
+	}
+}
