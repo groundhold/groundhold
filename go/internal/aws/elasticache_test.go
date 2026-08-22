@@ -452,7 +452,9 @@ func TestAdoptsExistingElastiCache(t *testing.T) {
 		MissingControl: []certifynet.ControlCase{
 			{Path: "encryption.atRest", WantStatus: "failed", WantMutations: 1,
 				Server: ecacheAdoptSrv(false, true, "arn:aws:kms:eu-central-1:000000000000:key/abc", "CUSTOMER")},
-			{Path: "encryption.inTransit", WantStatus: "failed", WantMutations: 1,
+			// D1220: in-transit is UpdateWired (the two-step TLS migration), so a group missing
+			// enforced TLS BINDS (unknown) and converge reconciles it — not the old failed.
+			{Path: "encryption.inTransit", WantStatus: "unknown", WantMutations: 1,
 				Server: ecacheAdoptSrv(true, false, "arn:aws:kms:eu-central-1:000000000000:key/abc", "CUSTOMER")},
 			{Path: "encryption.customerManagedKeys", WantStatus: "failed", WantMutations: 1,
 				Server: ecacheAdoptSrv(true, true, "arn:aws:kms:eu-central-1:000000000000:key/abc", "AWS")}, // AWS-managed key → not customer
@@ -460,4 +462,170 @@ func TestAdoptsExistingElastiCache(t *testing.T) {
 		MoreSecure: ecacheAdoptSrv(true, true, "arn:aws:kms:eu-central-1:000000000000:key/abc", "CUSTOMER"),
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
+
+// D1219: encryption.inTransit must reflect ENFORCEMENT, not the bare TransitEncryptionEnabled
+// flag. A group in TransitEncryptionMode=preferred has the flag true but still accepts plaintext,
+// so the old read reported inTransit=true while the group spoke plaintext — a false green.
+func TestObserveElastiCacheInTransitMode(t *testing.T) {
+	rgWithMode := func(mode string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			form, _ := url.ParseQuery(string(body))
+			switch form.Get("Action") {
+			case "DescribeReplicationGroups":
+				_, _ = w.Write([]byte(`<DescribeReplicationGroupsResponse><DescribeReplicationGroupsResult>` +
+					`<ReplicationGroups><ReplicationGroup><Status>available</Status>` +
+					`<AtRestEncryptionEnabled>true</AtRestEncryptionEnabled>` +
+					`<TransitEncryptionEnabled>true</TransitEncryptionEnabled>` +
+					`<TransitEncryptionMode>` + mode + `</TransitEncryptionMode>` +
+					`<AutomaticFailover>enabled</AutomaticFailover><MultiAZ>enabled</MultiAZ>` +
+					`</ReplicationGroup></ReplicationGroups>` +
+					`</DescribeReplicationGroupsResult></DescribeReplicationGroupsResponse>`))
+			default:
+				w.WriteHeader(400)
+			}
+		}))
+	}
+	pid := "ecredis:eu-central-1:000000000000:pv-sessions-prod-abcd1234"
+
+	t.Run("preferred still accepts plaintext -> inTransit false + diag", func(t *testing.T) {
+		srv := rgWithMode("preferred")
+		defer srv.Close()
+		d := ecDriver(t, srv)
+		obs, diags, err := d.observeElastiCache("sessions", pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var it any
+		for _, o := range obs {
+			if o.Path == "encryption.inTransit" {
+				it = o.Value
+			}
+		}
+		if it != false {
+			t.Fatalf("preferred mode must read inTransit=false (plaintext still allowed), got %v", it)
+		}
+		joined := strings.Join(diags, " | ")
+		if !strings.Contains(joined, "preferred") {
+			t.Fatalf("a preferred-mode group must carry a diag explaining TLS is not enforced, got %q", joined)
+		}
+	})
+
+	t.Run("required enforces TLS -> inTransit true", func(t *testing.T) {
+		srv := rgWithMode("required")
+		defer srv.Close()
+		d := ecDriver(t, srv)
+		obs, _, err := d.observeElastiCache("sessions", pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var it any
+		for _, o := range obs {
+			if o.Path == "encryption.inTransit" {
+				it = o.Value
+			}
+		}
+		if it != true {
+			t.Fatalf("required mode must read inTransit=true (enforced), got %v", it)
+		}
+	})
+}
+
+// D1220: updateElastiCache enforces encryption.inTransit in place via the two-step, no-downtime
+// migration — ModifyReplicationGroup to `preferred` (both encrypted and plaintext) then `required`
+// (enforced), each polled to applied. succeeded only once the group is `required`. Foreign refused.
+func TestUpdateElastiCacheInTransit(t *testing.T) {
+	type modify struct{ enabled, mode string }
+	// stateful fake: starts with TLS off; the two modifies walk it enabled+preferred -> required.
+	enabled, mode := "false", ""
+	var seen []modify
+	rg := func() string {
+		return `<DescribeReplicationGroupsResponse><DescribeReplicationGroupsResult><ReplicationGroups>` +
+			`<ReplicationGroup><Status>available</Status><AtRestEncryptionEnabled>true</AtRestEncryptionEnabled>` +
+			`<TransitEncryptionEnabled>` + enabled + `</TransitEncryptionEnabled>` +
+			`<TransitEncryptionMode>` + mode + `</TransitEncryptionMode>` +
+			`<AutomaticFailover>enabled</AutomaticFailover><MultiAZ>enabled</MultiAZ>` +
+			`</ReplicationGroup></ReplicationGroups></DescribeReplicationGroupsResult></DescribeReplicationGroupsResponse>`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		form, _ := url.ParseQuery(string(body))
+		switch form.Get("Action") {
+		case "DescribeReplicationGroups":
+			_, _ = w.Write([]byte(rg()))
+		case "ListTagsForResource":
+			_, _ = w.Write([]byte(`<ListTagsForResourceResponse><ListTagsForResourceResult><TagList>` +
+				`<Tag><Key>groundhold-capability</Key><Value>sessions</Value></Tag>` +
+				`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag>` +
+				`</TagList></ListTagsForResourceResult></ListTagsForResourceResponse>`))
+		case "ModifyReplicationGroup":
+			m := modify{enabled: form.Get("TransitEncryptionEnabled"), mode: form.Get("TransitEncryptionMode")}
+			seen = append(seen, m)
+			if m.enabled == "true" {
+				enabled = "true"
+			}
+			if m.mode != "" {
+				mode = m.mode // the migration applies; the next Describe reflects it
+			}
+			_, _ = w.Write([]byte(`<ModifyReplicationGroupResponse></ModifyReplicationGroupResponse>`))
+		default:
+			w.WriteHeader(400)
+		}
+	}))
+	defer srv.Close()
+	d := ecDriver(t, srv)
+	pid := "ecredis:eu-central-1:000000000000:pv-sessions-prod-abcd1234"
+	res := d.updateElastiCache("sessions", "prod", pid,
+		map[string]any{"encryption.inTransit": true}, []string{"encryption.inTransit"})
+	if res.Status != "succeeded" {
+		t.Fatalf("update: %+v", res)
+	}
+	// two phases: enable+preferred, then required.
+	if len(seen) != 2 ||
+		seen[0].enabled != "true" || seen[0].mode != "preferred" ||
+		seen[1].mode != "required" {
+		t.Fatalf("must migrate preferred then required, got %+v", seen)
+	}
+}
+
+func TestUpdateElastiCacheDisableRefused(t *testing.T) {
+	// a group with TLS enforced (required); the contract wants it OFF — refused as a weakening.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		form, _ := url.ParseQuery(string(body))
+		switch form.Get("Action") {
+		case "DescribeReplicationGroups":
+			_, _ = w.Write([]byte(`<DescribeReplicationGroupsResponse><DescribeReplicationGroupsResult><ReplicationGroups>` +
+				`<ReplicationGroup><Status>available</Status><TransitEncryptionEnabled>true</TransitEncryptionEnabled>` +
+				`<TransitEncryptionMode>required</TransitEncryptionMode></ReplicationGroup>` +
+				`</ReplicationGroups></DescribeReplicationGroupsResult></DescribeReplicationGroupsResponse>`))
+		case "ListTagsForResource":
+			_, _ = w.Write([]byte(`<ListTagsForResourceResponse><ListTagsForResourceResult><TagList>` +
+				`<Tag><Key>groundhold-capability</Key><Value>sessions</Value></Tag>` +
+				`<Tag><Key>groundhold-environment</Key><Value>prod</Value></Tag>` +
+				`</TagList></ListTagsForResourceResult></ListTagsForResourceResponse>`))
+		default:
+			t.Errorf("disable must not %s", form.Get("Action"))
+			w.WriteHeader(400)
+		}
+	}))
+	defer srv.Close()
+	d := ecDriver(t, srv)
+	res := d.updateElastiCache("sessions", "prod", "ecredis:eu-central-1:000000000000:pv-sessions-prod-abcd1234",
+		map[string]any{"encryption.inTransit": false}, []string{"encryption.inTransit"})
+	if res.Status != "failed" || !strings.Contains(res.Reason, "weakening") {
+		t.Fatalf("disabling TLS must be refused as a weakening, got %+v", res)
+	}
+}
+
+func TestClassifyElastiCacheChange(t *testing.T) {
+	if got, _ := classifyElastiCacheChange("encryption.inTransit"); got != "mutable" {
+		t.Fatalf("encryption.inTransit must be mutable, got %q", got)
+	}
+	for _, p := range []string{"encryption.atRest", "location.region", "durability.class"} {
+		if got, _ := classifyElastiCacheChange(p); got != "immutable" {
+			t.Fatalf("%s must be immutable, got %q", p, got)
+		}
+	}
 }

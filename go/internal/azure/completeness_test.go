@@ -63,8 +63,8 @@ func serviceCases(t *testing.T, src, method string) map[string]bool {
 // bound resource of one of these still errors; wiring ClassifyChange removes it.
 var azureClassifyAllowlist = map[string]bool{
 	"apim": true, "azkafka": true, "azurecdn": true, "azurefiles": true,
-	"changefeed": true, "containerapps": true, "containerappsjob": true, "cosmos": true,
-	"customroledef": true, "dnszone": true, "eventhubs": true,
+	"changefeed": true, "containerapps": true, "containerappsjob": true,
+	"customroledef": true, "dnszone": true,
 	"backupvault":  true, // retention/lock/CMK/region are baked at create — a change is a replacement (D215 default)
 	"frontdoorwaf": true, "keyvault": true, "keyvaultkey": true, "managedidentity": true,
 	"metricalert": true, "portaldash": true, "roleassignment": true,

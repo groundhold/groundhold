@@ -22,13 +22,14 @@ import (
 const dynamoTarget = "DynamoDB_20120810"
 
 // ddbAdoptControls are the controls DynamoDB sets INLINE in CreateTable, so on a
-// 409-adopt they never applied to the pre-existing table (D1062). Customer-managed
-// key encryption is immutable at create — a table without it cannot be fixed in
-// place, so its absence FAILS the adopt; deletion protection is mutable with a wired
-// in-place update (updateDynamoDB), so its absence is unknown+bound and converge
-// patches it. PITR is NOT here: the create re-asserts it on both paths already.
+// 409-adopt they never applied to the pre-existing table (D1062). D1217 corrected the
+// customer-managed-key claim: it was called "immutable at create", but UpdateTable's
+// SSESpecification changes the SSE key type on a LIVE table (verified against the API), so
+// like deletion protection it is UpdateWired — an adopted table missing the customer key is
+// unknown+bound and converge patches it, not refused. PITR is NOT here: the create
+// re-asserts it on both paths already.
 var ddbAdoptControls = []adoptcheck.Control{
-	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, UpdateWired: true},
 	{Path: "deletion.protection", Direction: adoptcheck.SecureTrue, UpdateWired: true},
 }
 
@@ -392,7 +393,8 @@ func (d *Driver) updateDynamoDB(capability, environment, providerID string,
 		return provider.CreateResult{Status: "failed", Reason: berr.Error()}
 	}
 	plan.Table = table
-	changedPITR, changedDelProt := false, false
+	changedPITR, changedDelProt, changedCMK := false, false, false
+	var desiredCMK bool
 	for _, path := range changes {
 		switch path {
 		case "backup.pointInTimeRecovery":
@@ -413,6 +415,22 @@ func (d *Driver) updateDynamoDB(capability, environment, providerID string,
 				return *r
 			}
 			changedDelProt = true
+		case "encryption.customerManagedKeys":
+			// D1217: change the SSE key type in place. Enabling a customer key needs the key
+			// (BuildDynamoDB already refuses customerManagedKeys=true without impl.kms_key_id,
+			// so plan.KmsKeyId is set here); disabling reverts to the AWS-owned key.
+			desiredCMK, _ = attrs["encryption.customerManagedKeys"].(bool)
+			sse := map[string]any{"Enabled": desiredCMK}
+			if desiredCMK {
+				sse = map[string]any{"Enabled": true, "SSEType": "KMS", "KMSMasterKeyId": plan.KmsKeyId}
+			}
+			st, resp, e := d.dynamoCall(region, "UpdateTable", jsonBody(map[string]any{
+				"TableName": table, "SSESpecification": sse,
+			}))
+			if r := dynamoPatchOutcome(st, resp, e, providerID, "UpdateTable(SSE)"); r != nil {
+				return *r
+			}
+			changedCMK = true
 		default:
 			// classifyDynamoDBChange routes everything else to replacement; a path here
 			// would be a wiring bug, not a silent no-op.
@@ -428,7 +446,7 @@ func (d *Driver) updateDynamoDB(capability, environment, providerID string,
 	// applied. Poll to the APPLIED state — table ACTIVE and each changed control at its
 	// target — exactly as createDynamoDB polls to ACTIVE and the RDS/Aurora updaters poll
 	// to available+empty-pending (D953).
-	if changedPITR || changedDelProt {
+	if changedPITR || changedDelProt || changedCMK {
 		deadline := d.Now().Add(d.PollTimeout)
 		for {
 			desc, found, rerr := d.describeTable(region, table)
@@ -440,6 +458,12 @@ func (d *Driver) updateDynamoDB(capability, environment, providerID string,
 				if en, ok := d.pitrEnabled(region, table); !ok || en != plan.PITR {
 					applied = false
 				}
+			}
+			// D1217/D953: the SSE key change is async too — poll until the table's SSE type
+			// reflects the target (KMS for a customer key, else the AWS-owned default), never
+			// succeeded-on-accept while the re-encryption is still applying.
+			if applied && changedCMK && (desc.SSEDescription.SSEType == "KMS") != desiredCMK {
+				applied = false
 			}
 			if applied {
 				break

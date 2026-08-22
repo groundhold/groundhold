@@ -431,8 +431,38 @@ func (d *Driver) observeBlob(capability, providerID string) ([]provider.Observat
 	lcObs, lcDiags := d.observeBlobLifecycle(rg, account, container)
 	obs = append(obs, lcObs...)
 	diags = append(diags, lcDiags...)
-	diags = append(diags, "versioning observed on the account/blobServices child — reconcile for full detail")
+	// versioning.enabled: the blobServices/default child. D471/D1218 — the create WRITES
+	// isVersioningEnabled but observe only ever emitted a placeholder diag, so a
+	// versioning.enabled constraint read `unverifiable` on an account the tool had built to
+	// satisfy it. Read it back (the S3 twin has always read versioning), measured or a diag.
+	if v, _, readable := d.blobServicesProps(rg, account); readable {
+		obs = append(obs, provider.Observation{Path: "versioning.enabled", Value: v, Derivation: "measured"})
+	} else {
+		diags = append(diags, "versioning.enabled not observed: the blobServices/default child could not be read")
+	}
 	return obs, diags, nil
+}
+
+// blobServicesProps reads the account's blobServices/default child: isVersioningEnabled (the
+// versioning.enabled attribute) and whether the change feed is on (preserved by an in-place
+// versioning update so a PUT does not disturb it). readable=false is "could not tell".
+func (d *Driver) blobServicesProps(rg, account string) (versioning, changeFeed, readable bool) {
+	var doc blobServicesDoc
+	found, rerr := d.armGetInto("blobServices.get", rg, d.acctPath(account)+"/blobServices/default",
+		storageAPIVersion, &doc)
+	if rerr != nil || !found {
+		return false, false, false
+	}
+	return doc.Properties.IsVersioningEnabled, doc.Properties.ChangeFeed.Enabled, true
+}
+
+type blobServicesDoc struct {
+	Properties struct {
+		IsVersioningEnabled bool `json:"isVersioningEnabled"`
+		ChangeFeed          struct {
+			Enabled bool `json:"enabled"`
+		} `json:"changeFeed"`
+	} `json:"properties"`
 }
 
 // observeBlobImmutability MEASURES the container's immutability policy: the
@@ -680,6 +710,11 @@ func classifyBlobChange(path string) (string, string) {
 		// gap; updateBlob now closes it.
 		return "mutable", "network.publicExposure is patched in place: allowBlobPublicAccess on " +
 			"the account and the container's publicAccess"
+	case "versioning.enabled":
+		// D1218: versioning is a blobServices/default property (isVersioningEnabled) that Azure
+		// toggles online, so a versioning drift is a PUT of that child — never a replacement.
+		return "mutable", "versioning.enabled is set in place on the blobServices/default child " +
+			"(isVersioningEnabled), preserving the change feed"
 	default:
 		return "unsupported", "no azure blob in-place mapping for " + path
 	}
@@ -900,6 +935,28 @@ func (d *Driver) updateBlob(capability, environment, providerID string,
 				if r := terminalOr(sst, sresp, se, providerID, "startAccountMigration"); r != nil {
 					return *r
 				}
+			}
+		case "versioning.enabled":
+			// D1218: set isVersioningEnabled on the blobServices/default child. A PUT of that
+			// child is a full set, so read the current change feed and echo it back — the
+			// versioning toggle must not silently disturb the change feed the create may have
+			// enabled (the object-replication presupposition).
+			enabled, ok := attrs["versioning.enabled"].(bool)
+			if !ok {
+				return provider.CreateResult{Status: "failed", Reason: "versioning.enabled must be a bool"}
+			}
+			_, changeFeed, readable := d.blobServicesProps(rg, account)
+			if !readable {
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: "blobServices/default pre-update read gave no answer — reconcile"}
+			}
+			bsURL, _ := d.armURL(rg, d.acctPath(account)+"/blobServices/default", storageAPIVersion)
+			bsBody, _ := json.Marshal(map[string]any{"properties": map[string]any{
+				"isVersioningEnabled": enabled,
+				"changeFeed":          map[string]any{"enabled": changeFeed},
+			}})
+			if r := d.putSetting(bsURL, bsBody, providerID, "blobServices versioning"); r != nil {
+				return *r
 			}
 		default:
 			// classifyBlobChange gates this (unsupported/immutable), so a reviewed plan

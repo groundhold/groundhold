@@ -405,3 +405,96 @@ func TestCosmosMultiRegionResidencyWithheld(t *testing.T) {
 		t.Fatalf("a multi-region account must diagnose its replica set: %v", diags)
 	}
 }
+
+// D1216: updateCosmos migrates backup.pointInTimeRecovery on in place — a PATCH of the account's
+// backupPolicy to Continuous, then a POLL to the applied state (the migration is async, so PITR
+// is not on until backupPolicy.type reports Continuous). The direction is the design: enabling is
+// a one-way migration; DISabling is refused (Azure cannot revert Continuous to Periodic).
+func TestUpdateCosmosPITR(t *testing.T) {
+	pid := cosmosProviderID(testSub, "rg1", cosmosAccountName("prod", "sessions", 1))
+
+	t.Run("enable: Periodic -> Continuous migration, poll to applied", func(t *testing.T) {
+		var patched bool
+		mode := "Periodic"
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case "GET":
+				_, _ = w.Write([]byte(`{"location":"eastus",` +
+					`"tags":{"groundhold-capability":"sessions","groundhold-environment":"prod"},` +
+					`"properties":{"provisioningState":"Succeeded","backupPolicy":{"type":"` + mode + `"}}}`))
+			case "PATCH":
+				body, _ := io.ReadAll(r.Body)
+				var b struct {
+					Properties struct {
+						BackupPolicy struct {
+							Type string `json:"type"`
+						} `json:"backupPolicy"`
+					} `json:"properties"`
+				}
+				_ = json.Unmarshal(body, &b)
+				if b.Properties.BackupPolicy.Type == "Continuous" {
+					patched = true
+					mode = "Continuous" // the migration completes; the next GET sees it applied
+				}
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded"}}`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+		defer srv.Close()
+		d := cosmosDriver(t, srv)
+		res := d.updateCosmos("sessions", "prod", pid,
+			map[string]any{"backup.pointInTimeRecovery": true}, []string{"backup.pointInTimeRecovery"})
+		if res.Status != "succeeded" {
+			t.Fatalf("update: %+v", res)
+		}
+		if !patched {
+			t.Fatalf("must PATCH backupPolicy.type=Continuous")
+		}
+	})
+
+	t.Run("disable on a Continuous account is refused (one-way), no write", func(t *testing.T) {
+		wrote := false
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "PATCH" {
+				wrote = true
+			}
+			_, _ = w.Write([]byte(`{"location":"eastus",` +
+				`"tags":{"groundhold-capability":"sessions","groundhold-environment":"prod"},` +
+				`"properties":{"provisioningState":"Succeeded","backupPolicy":{"type":"Continuous"}}}`))
+		}))
+		defer srv.Close()
+		d := cosmosDriver(t, srv)
+		res := d.updateCosmos("sessions", "prod", pid,
+			map[string]any{"backup.pointInTimeRecovery": false}, []string{"backup.pointInTimeRecovery"})
+		if res.Status != "failed" || !strings.Contains(res.Reason, "ONE-WAY") {
+			t.Fatalf("disabling PITR on a Continuous account must be refused as one-way, got %+v", res)
+		}
+		if wrote {
+			t.Fatalf("a refused one-way revert must issue NO PATCH")
+		}
+	})
+
+	t.Run("foreign account refused, no write", func(t *testing.T) {
+		srv := cosmosServer(t, "someone-else", "Periodic", "")
+		defer srv.Close()
+		d := cosmosDriver(t, srv)
+		res := d.updateCosmos("sessions", "prod", pid,
+			map[string]any{"backup.pointInTimeRecovery": true}, []string{"backup.pointInTimeRecovery"})
+		if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
+			t.Fatalf("a foreign account must be refused, got %+v", res)
+		}
+	})
+}
+
+func TestClassifyCosmosChange(t *testing.T) {
+	if got, _ := classifyCosmosChange("backup.pointInTimeRecovery"); got != "mutable" {
+		t.Fatalf("backup.pointInTimeRecovery must be mutable (in-place migration), got %q", got)
+	}
+	for _, p := range []string{"location.region", "availability.class", "encryption.customerManagedKeys"} {
+		if got, _ := classifyCosmosChange(p); got != "immutable" {
+			t.Fatalf("%s must be immutable (replacement), got %q", p, got)
+		}
+	}
+}

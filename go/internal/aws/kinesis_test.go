@@ -334,3 +334,107 @@ func TestAdoptsExistingKinesis(t *testing.T) {
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }
+
+// D1211: updateKinesis changes retention.window in place — Increase or Decrease chosen against
+// the stream's CURRENT window, never a replacement. Ownership re-checked by tags; foreign refused.
+func TestUpdateKinesisRetention(t *testing.T) {
+	type call struct {
+		action string
+		hours  int
+	}
+	newSrv := func(capLabel string, current int, seen *[]call) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch kinesisTarget2(r) {
+			case "DescribeStreamSummary":
+				_, _ = w.Write([]byte(`{"StreamDescriptionSummary":{"StreamStatus":"ACTIVE",` +
+					`"RetentionPeriodHours":` + itoaK(current) + `}}`))
+			case "ListTagsForStream":
+				_, _ = w.Write([]byte(`{"Tags":[{"Key":"groundhold-capability","Value":"` + capLabel +
+					`"},{"Key":"groundhold-environment","Value":"prod"}]}`))
+			case "IncreaseStreamRetentionPeriod", "DecreaseStreamRetentionPeriod":
+				body, _ := io.ReadAll(r.Body)
+				var b struct {
+					RetentionPeriodHours int `json:"RetentionPeriodHours"`
+				}
+				_ = json.Unmarshal(body, &b)
+				*seen = append(*seen, call{action: kinesisTarget2(r), hours: b.RetentionPeriodHours})
+				w.WriteHeader(200)
+			default:
+				t.Errorf("unexpected %q", kinesisTarget2(r))
+				w.WriteHeader(400)
+			}
+		}))
+	}
+	pid := kinesisProviderID("eu-central-1", "000000000000", KinesisStreamName("prod", "events", 1))
+
+	t.Run("increase (24h -> 168h)", func(t *testing.T) {
+		var seen []call
+		srv := newSrv("events", 24, &seen)
+		defer srv.Close()
+		d := kinesisDriver(t, srv)
+		res := d.updateKinesis("events", "prod", pid,
+			map[string]any{"retention.window": "168h"}, []string{"retention.window"})
+		if res.Status != "succeeded" {
+			t.Fatalf("update: %+v", res)
+		}
+		if len(seen) != 1 || seen[0].action != "IncreaseStreamRetentionPeriod" || seen[0].hours != 168 {
+			t.Fatalf("must Increase to 168, got %+v", seen)
+		}
+	})
+
+	t.Run("decrease (168h -> 48h)", func(t *testing.T) {
+		var seen []call
+		srv := newSrv("events", 168, &seen)
+		defer srv.Close()
+		d := kinesisDriver(t, srv)
+		res := d.updateKinesis("events", "prod", pid,
+			map[string]any{"retention.window": "48h"}, []string{"retention.window"})
+		if res.Status != "succeeded" {
+			t.Fatalf("update: %+v", res)
+		}
+		if len(seen) != 1 || seen[0].action != "DecreaseStreamRetentionPeriod" || seen[0].hours != 48 {
+			t.Fatalf("must Decrease to 48, got %+v", seen)
+		}
+	})
+
+	t.Run("no-op (equal) issues no call", func(t *testing.T) {
+		var seen []call
+		srv := newSrv("events", 168, &seen)
+		defer srv.Close()
+		d := kinesisDriver(t, srv)
+		res := d.updateKinesis("events", "prod", pid,
+			map[string]any{"retention.window": "168h"}, []string{"retention.window"})
+		if res.Status != "succeeded" {
+			t.Fatalf("update: %+v", res)
+		}
+		if len(seen) != 0 {
+			t.Fatalf("equal retention must issue NO call, got %+v", seen)
+		}
+	})
+
+	t.Run("foreign stream refused, no call", func(t *testing.T) {
+		var seen []call
+		srv := newSrv("someone-else", 24, &seen)
+		defer srv.Close()
+		d := kinesisDriver(t, srv)
+		res := d.updateKinesis("events", "prod", pid,
+			map[string]any{"retention.window": "168h"}, []string{"retention.window"})
+		if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
+			t.Fatalf("a foreign stream must be refused, got %+v", res)
+		}
+		if len(seen) != 0 {
+			t.Fatalf("a refused update must issue NO call, got %+v", seen)
+		}
+	})
+}
+
+func TestClassifyKinesisChange(t *testing.T) {
+	if got, _ := classifyKinesisChange("retention.window"); got != "mutable" {
+		t.Fatalf("retention.window must be mutable (in-place), got %q", got)
+	}
+	for _, p := range []string{"location.region", "encryption.customerManagedKeys", "availability.class"} {
+		if got, _ := classifyKinesisChange(p); got != "immutable" {
+			t.Fatalf("%s must be immutable (replacement), got %q", p, got)
+		}
+	}
+}

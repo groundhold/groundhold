@@ -22,6 +22,8 @@ func (d *Driver) ClassifyChange(service, path string, current, desired any,
 	switch service {
 	case "cloudsql":
 		return classifyCloudSQLChange(path, desired, impl)
+	case "firestore":
+		return classifyFirestoreChange(path)
 	case "gcs":
 		return classifyGCSChange(path)
 	case "clouddnsrecord":
@@ -379,6 +381,9 @@ func (d *Driver) update(service, capability, environment, providerID string,
 	}
 	if service == "gcs" {
 		return d.updateGCS(capability, environment, providerID, attrs, changes)
+	}
+	if service == "firestore" {
+		return d.updateFirestore(capability, environment, providerID, attrs, changes)
 	}
 	if service == "clouddnsrecord" {
 		return d.updateCloudDNSRecord(capability, environment, providerID, attrs, changes)

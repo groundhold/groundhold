@@ -21,6 +21,8 @@ var updateForeignGatedAz = map[string]string{
 	"flexpostgres":      "TestRefusesForeignUpdateAzFlexServer", // D1205: publicExposure remediation
 	"rediscache":        "TestRefusesForeignUpdateAzRedis",      // D1206: publicExposure remediation (twin of flexpostgres)
 	"aisearch":          "TestRefusesForeignUpdateAzAISearch",   // D1207: publicExposure remediation (twin of flexpostgres)
+	"eventhubs":         "TestRefusesForeignUpdateAzEventHubs",  // D1212: retention.window in place
+	"cosmos":            "TestRefusesForeignUpdateAzCosmos",     // D1216: PITR backup migration in place
 	"dnsrecord":         "TestRefusesForeignUpdateAzDNSRecord",  // parent zone is the boundary
 	"acsemail":          "TestRefusesForeignUpdateAzACSEmail",
 	"activitylog":       "TestRefusesForeignUpdateAzActivityLog",

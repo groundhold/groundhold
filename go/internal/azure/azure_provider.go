@@ -623,6 +623,10 @@ func (d *Driver) ClassifyChange(service, path string, current, desired any,
 		return classifyRedisAzureChange(path)
 	case "aisearch":
 		return classifyAISearchChange(path)
+	case "eventhubs":
+		return classifyEventHubsChange(path)
+	case "cosmos":
+		return classifyCosmosChange(path)
 	case "servicebusqueue":
 		return classifyServiceBusQueueChange(path)
 	case "loadbalancer":
@@ -694,6 +698,10 @@ func (d *Driver) update(service, capability, environment, providerID string,
 		return d.updateRedisAzure(capability, environment, providerID, attrs, changes)
 	case "aisearch":
 		return d.updateAISearch(capability, environment, providerID, attrs, changes)
+	case "eventhubs":
+		return d.updateEventHubs(capability, environment, providerID, attrs, changes)
+	case "cosmos":
+		return d.updateCosmos(capability, environment, providerID, attrs, changes)
 	case "aks":
 		return d.updateAKS(capability, environment, providerID, attrs, impl, changes)
 	case "aks-addon":

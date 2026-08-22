@@ -330,7 +330,11 @@ func mskRESTRole(req *http.Request, _ []byte) certifynet.Role {
 
 // mskAdoptSrv builds a 409-adopt fixture: our cluster already standing, with the
 // customer key set however the case needs (D1062).
-func mskAdoptSrv(cmek bool, keyManager string) func() *httptest.Server {
+func mskAdoptSrv(cmek bool, keyManager string, clientBroker ...string) func() *httptest.Server {
+	broker := "TLS"
+	if len(clientBroker) > 0 && clientBroker[0] != "" {
+		broker = clientBroker[0]
+	}
 	return func() *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if strings.HasSuffix(r.Header.Get("X-Amz-Target"), ".DescribeKey") {
@@ -355,7 +359,7 @@ func mskAdoptSrv(cmek bool, keyManager string) func() *httptest.Server {
 					`","clusterName":"` + reqName + `","state":"ACTIVE",` +
 					`"tags":{"groundhold-capability":"events","groundhold-environment":"prod"},` +
 					`"provisioned":{"currentBrokerSoftwareInfo":{"kafkaVersion":"3.6.0"},` +
-					`"encryptionInfo":{"encryptionInTransit":{"clientBroker":"TLS"},` +
+					`"encryptionInfo":{"encryptionInTransit":{"clientBroker":"` + broker + `"},` +
 					`"encryptionAtRest":{` + enc + `}}}}]}`))
 			default:
 				w.WriteHeader(404)
@@ -390,12 +394,103 @@ func TestAdoptsExistingMSK(t *testing.T) {
 		},
 		AllowedMutations: 1, // the refused create
 		// D1062: the customer key is fixed at create — its absence fails the adopt.
+		// D1214: in-transit (clientBroker) is UpdateSecurity-mutable — its absence BINDS
+		// (unknown) and converge reconciles, not a replacement refusal.
 		AdoptControls: mskAdoptControls,
 		MissingControl: []certifynet.ControlCase{
-			{Path: "encryption.customerManagedKeys", Server: mskAdoptSrv(false, ""),
+			{Path: "encryption.customerManagedKeys", Server: mskAdoptSrv(false, "", "TLS"),
 				WantStatus: "failed", WantMutations: 1}, // no customer key → immutable miss
+			{Path: "encryption.inTransit", Server: mskAdoptSrv(true, "CUSTOMER", "TLS_PLAINTEXT"),
+				WantStatus: "unknown", WantMutations: 1}, // plaintext-capable → bound + reconciled
 		},
 		MoreSecure: mskAdoptSrv(true, "CUSTOMER"),
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
+
+// D1214: updateMSK enforces encryption.inTransit in place — UpdateSecurity sets clientBroker=TLS,
+// then POLLS to the APPLIED state (D953) before reporting succeeded, so a security-closing change
+// is never reported done while the cluster still serves plaintext. Ownership re-checked by tags;
+// foreign refused. UpdateSecurity carries the current version + never weakens inCluster.
+func TestUpdateMSKInTransit(t *testing.T) {
+	type patch struct {
+		clientBroker   string
+		inCluster      bool
+		currentVersion string
+	}
+	newSrv := func(capLabel, startBroker string, seen *[]patch) *httptest.Server {
+		broker := startBroker
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && strings.Contains(r.URL.Path, "/api/v2/clusters"):
+				reqName := r.URL.Query().Get("clusterNameFilter")
+				_, _ = w.Write([]byte(`{"clusterInfoList":[{"clusterArn":"` + arn + `","clusterName":"` + reqName +
+					`","state":"ACTIVE","currentVersion":"K3","tags":{"groundhold-capability":"` + capLabel +
+					`","groundhold-environment":"prod"},"provisioned":{"encryptionInfo":{"encryptionInTransit":{` +
+					`"clientBroker":"` + broker + `","inCluster":true}}}}]}`))
+			case r.Method == "PATCH" && strings.HasSuffix(r.URL.EscapedPath(), "/security"):
+				body, _ := io.ReadAll(r.Body)
+				var b struct {
+					CurrentVersion string `json:"currentVersion"`
+					EncryptionInfo struct {
+						EncryptionInTransit struct {
+							ClientBroker string `json:"clientBroker"`
+							InCluster    bool   `json:"inCluster"`
+						} `json:"encryptionInTransit"`
+					} `json:"encryptionInfo"`
+				}
+				_ = json.Unmarshal(body, &b)
+				*seen = append(*seen, patch{clientBroker: b.EncryptionInfo.EncryptionInTransit.ClientBroker,
+					inCluster: b.EncryptionInfo.EncryptionInTransit.InCluster, currentVersion: b.CurrentVersion})
+				broker = b.EncryptionInfo.EncryptionInTransit.ClientBroker // applied by the next read
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{"clusterArn":"` + arn + `","clusterOperationArn":"op"}`))
+			default:
+				t.Errorf("unexpected %s %s", r.Method, r.URL.EscapedPath())
+				w.WriteHeader(404)
+			}
+		}))
+	}
+	pid := mskProviderID("eu-central-1", "000000000000", MSKClusterName("prod", "bus", 1))
+
+	t.Run("enforce TLS on a TLS_PLAINTEXT cluster, poll to applied", func(t *testing.T) {
+		var seen []patch
+		srv := newSrv("bus", "TLS_PLAINTEXT", &seen)
+		defer srv.Close()
+		d := mskDriver(t, srv)
+		res := d.updateMSK("bus", "prod", pid,
+			map[string]any{"encryption.inTransit": true}, []string{"encryption.inTransit"})
+		if res.Status != "succeeded" {
+			t.Fatalf("update: %+v", res)
+		}
+		if len(seen) != 1 || seen[0].clientBroker != "TLS" || !seen[0].inCluster || seen[0].currentVersion != "K3" {
+			t.Fatalf("must UpdateSecurity clientBroker=TLS, inCluster=true, currentVersion=K3, got %+v", seen)
+		}
+	})
+
+	t.Run("foreign cluster refused, no UpdateSecurity", func(t *testing.T) {
+		var seen []patch
+		srv := newSrv("someone-else", "TLS_PLAINTEXT", &seen)
+		defer srv.Close()
+		d := mskDriver(t, srv)
+		res := d.updateMSK("bus", "prod", pid,
+			map[string]any{"encryption.inTransit": true}, []string{"encryption.inTransit"})
+		if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
+			t.Fatalf("a foreign cluster must be refused, got %+v", res)
+		}
+		if len(seen) != 0 {
+			t.Fatalf("a refused update must issue NO UpdateSecurity, got %+v", seen)
+		}
+	})
+}
+
+func TestClassifyMSKChange(t *testing.T) {
+	if got, _ := classifyMSKChange("encryption.inTransit"); got != "mutable" {
+		t.Fatalf("encryption.inTransit must be mutable (in-place), got %q", got)
+	}
+	for _, p := range []string{"encryption.customerManagedKeys", "location.region", "engine.protocol"} {
+		if got, _ := classifyMSKChange(p); got != "immutable" {
+			t.Fatalf("%s must be immutable (replacement), got %q", p, got)
+		}
+	}
 }

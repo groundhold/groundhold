@@ -60,6 +60,7 @@ type replicationGroup struct {
 	Status                   string `xml:"Status"`
 	AtRestEncryptionEnabled  bool   `xml:"AtRestEncryptionEnabled"`
 	TransitEncryptionEnabled bool   `xml:"TransitEncryptionEnabled"`
+	TransitEncryptionMode    string `xml:"TransitEncryptionMode"` // preferred (plaintext still allowed) | required (enforced)
 	AutomaticFailover        string `xml:"AutomaticFailover"`
 	MultiAZ                  string `xml:"MultiAZ"`
 	KmsKeyID                 string `xml:"KmsKeyId"`
@@ -130,13 +131,14 @@ func (d *Driver) ecacheTags(region, account, id string) (map[string]string, erro
 
 // ecacheAdoptControls are the controls ElastiCache sets INLINE in the create body,
 // so on a 409-adopt they never applied to the pre-existing replication group (D1062).
-// At-rest and in-transit encryption and the customer key are fixed at create (a drift
-// is a replacement — classifyElastiCache treats them as immutable/unsupported), so a
-// missing one FAILS the adopt. availability.class (MultiAZ/AutomaticFailover) is a
-// resilience control read carefully (D955) — a follow-up, not wired here yet.
+// At-rest encryption and the customer key ARE fixed at create (a drift is a replacement),
+// so a missing one FAILS the adopt. In-transit was thought create-fixed too — but D1220
+// wired the two-step ModifyReplicationGroup TLS migration, so it is UpdateWired: an adopted
+// group missing enforced TLS is bound-and-reconciled, not refused. availability.class
+// (MultiAZ/AutomaticFailover) is a resilience control read carefully (D955) — not wired here.
 var ecacheAdoptControls = []adoptcheck.Control{
 	{Path: "encryption.atRest", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
-	{Path: "encryption.inTransit", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "encryption.inTransit", Direction: adoptcheck.SecureTrue, UpdateWired: true},
 	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
 }
 
@@ -251,9 +253,21 @@ func (d *Driver) observeElastiCache(capability, providerID string) ([]provider.O
 		// a replication group is VPC-only — no public endpoint is assignable.
 		{Path: "network.publicExposure", Value: false, Derivation: "measured"},
 		{Path: "encryption.atRest", Value: rg.AtRestEncryptionEnabled, Derivation: "measured"},
-		{Path: "encryption.inTransit", Value: rg.TransitEncryptionEnabled, Derivation: "measured"},
 	}
 	var diags []string
+	// D1219: encryption.inTransit is NOT just TransitEncryptionEnabled. AWS added a two-mode
+	// migration: `preferred` means TransitEncryptionEnabled=true BUT the brokers still accept
+	// PLAINTEXT connections ("allow both encrypted and unencrypted"), and only `required`
+	// enforces TLS. Reading the bare boolean reported inTransit=true for a preferred-mode group
+	// that still speaks plaintext — a false green. Enforced only when required (an empty mode on
+	// an enabled group is a pre-migration cluster, enforced by construction); preferred is NOT.
+	enforced := rg.TransitEncryptionEnabled && rg.TransitEncryptionMode != "preferred"
+	obs = append(obs, provider.Observation{Path: "encryption.inTransit", Value: enforced, Derivation: "measured"})
+	if rg.TransitEncryptionEnabled && rg.TransitEncryptionMode == "preferred" {
+		diags = append(diags, "encryption.inTransit is false despite TransitEncryptionEnabled=true: the "+
+			"group is in TransitEncryptionMode=preferred, which still accepts plaintext connections — TLS is "+
+			"not enforced until the mode is `required`")
+	}
 	// D800: an encrypted replication group always reports a KMS key — the account-default
 	// aws/elasticache one when the customer brought none — so "a key id is present" is not
 	// "the customer brought a key". Trace it to KMS (DescribeKey -> KeyManager), the way
@@ -446,4 +460,138 @@ func (d *Driver) describeCacheSubnetGroupSubnets(region, name string) (ids []str
 		return nil, false, readBody(op, st)
 	}
 	return out.IDs, true, nil
+}
+
+// classifyElastiCacheChange decides whether a drift on a replication group is reconciled in place
+// or replaced. Before D1220 elasticache had NO ClassifyChange, so every drift fell to the AWS
+// default of "immutable" = replacement — and replacing a cache destroys its data and rotates its
+// endpoint. That verdict was being applied to encryption.inTransit, which AWS enforces online via
+// a two-step ModifyReplicationGroup migration. D1220: enabling is `mutable`; disabling is refused
+// at apply (a weakening whose multi-step reverse is delicate — refusing beats a risky partial change).
+func classifyElastiCacheChange(path string) (string, string) {
+	switch path {
+	case "encryption.inTransit":
+		return "mutable", "encryption.inTransit is enforced in place via the two-step ModifyReplication" +
+			"Group migration (TransitEncryptionMode preferred then required); no replacement"
+	default:
+		return "immutable", fmt.Sprintf(
+			"ElastiCache has no in-place update path for %q — reconciling a drift is a replacement", path)
+	}
+}
+
+// ecacheModifyAndPoll issues one ModifyReplicationGroup and POLLS to the applied state before
+// returning nil (keep going). ApplyImmediately so the change starts now; the poll waits for the
+// group back to `available` at the target (D953) — a group is UPDATING between phases and the API
+// rejects a second modify until it settles, so each phase must land before the next.
+func (d *Driver) ecacheModifyAndPoll(region, id, pid string, params map[string]string,
+	applied func(replicationGroup) bool) *provider.CreateResult {
+	form := map[string]string{"Action": "ModifyReplicationGroup", "Version": elastiCacheVersion,
+		"ReplicationGroupId": id, "ApplyImmediately": "true"}
+	for k, v := range params {
+		form[k] = v
+	}
+	st, resp, err := d.ecachePost(region, encodeForm(form))
+	switch {
+	case err != nil:
+		return &provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("ModifyReplicationGroup outcome unknown (may have landed): %v", err)}
+	case st == http.StatusOK:
+		// accepted — poll below
+	case st >= 500:
+		return &provider.CreateResult{ProviderID: pid, Status: "unknown",
+			Reason: fmt.Sprintf("ModifyReplicationGroup HTTP %d (server error — may have landed) — reconcile", st)}
+	default:
+		if r := provider.MutationResult(st, rdsErrCode(resp), nil, pid, "ModifyReplicationGroup"); r != nil {
+			return r
+		}
+		return &provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("ModifyReplicationGroup HTTP %d: %s", st, rdsErrCode(resp))}
+	}
+	deadline := d.Now().Add(d.PollTimeout)
+	for {
+		rg, found, rerr := d.describeRG(region, id)
+		if rerr == nil && found && applied(rg) {
+			return nil
+		}
+		if d.Now().After(deadline) {
+			return &provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: "replication group still applying the TLS migration at poll timeout — reconcile via DescribeReplicationGroups"}
+		}
+		time.Sleep(d.PollInterval)
+	}
+}
+
+// updateElastiCache enforces encryption.inTransit in place (D1220): the two-step, no-downtime TLS
+// migration. Enabling on a group that has it off is `preferred` (both encrypted and plaintext
+// accepted) and then `required` (TLS enforced); a group already `preferred` only needs the second
+// step. Ownership is re-checked by tags; each phase polls to applied so succeeded is reported only
+// once the group is `required` — plaintext refused — never while it still accepts plaintext.
+func (d *Driver) updateElastiCache(capability, environment, providerID string,
+	attrs map[string]any, changes []string) provider.CreateResult {
+	region, account, id, err := splitECacheProviderID(providerID)
+	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if err := d.sameAccount(account); err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	rg, found, rerr := d.describeRG(region, id)
+	if rerr != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update read gave no answer — reconcile: " + rerr.Error()}
+	}
+	if !found {
+		return provider.CreateResult{Status: "failed", Reason: "replication group no longer exists — cannot update"}
+	}
+	tags, terr := d.ecacheTags(region, account, id)
+	if terr != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update tag read gave no answer — reconcile: " + terr.Error()}
+	}
+	if !groundholdTagsMatch(tags, capability, environment) {
+		return provider.CreateResult{Status: "failed",
+			Reason: "replication group tags do not match — refusing to update a resource that is not ours"}
+	}
+
+	for _, path := range changes {
+		switch path {
+		case "encryption.inTransit":
+			desired, ok := attrs["encryption.inTransit"].(bool)
+			if !ok {
+				return provider.CreateResult{Status: "failed", Reason: "encryption.inTransit must be a bool"}
+			}
+			enforced := rg.TransitEncryptionEnabled && rg.TransitEncryptionMode != "preferred"
+			if desired == enforced {
+				continue // already at the requested enforcement
+			}
+			if !desired {
+				return provider.CreateResult{Status: "failed",
+					Reason: "encryption.inTransit=false cannot be honored in place: disabling in-transit " +
+						"encryption on ElastiCache is a weakening whose multi-step downgrade is delicate — " +
+						"refusing rather than a risky partial change"}
+			}
+			// Enable + enforce. Step 1 (only if not yet enabled): enable with mode=preferred, so
+			// clients migrate with no downtime. Step 2: mode=required — plaintext refused.
+			if !rg.TransitEncryptionEnabled {
+				if r := d.ecacheModifyAndPoll(region, id, providerID,
+					map[string]string{"TransitEncryptionEnabled": "true", "TransitEncryptionMode": "preferred"},
+					func(g replicationGroup) bool {
+						return g.Status == "available" && g.TransitEncryptionEnabled && g.TransitEncryptionMode == "preferred"
+					}); r != nil {
+					return *r
+				}
+			}
+			if r := d.ecacheModifyAndPoll(region, id, providerID,
+				map[string]string{"TransitEncryptionMode": "required"},
+				func(g replicationGroup) bool {
+					return g.Status == "available" && g.TransitEncryptionMode == "required"
+				}); r != nil {
+				return *r
+			}
+		default:
+			return provider.CreateResult{Status: "failed",
+				Reason: "no elasticache in-place mapping for " + path}
+		}
+	}
+	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
 }

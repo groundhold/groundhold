@@ -153,6 +153,7 @@ GET	Microsoft.ServiceBus/namespaces/{}/topics
 GET	Microsoft.Storage/storageAccounts
 GET	Microsoft.Storage/storageAccounts/{}
 GET	Microsoft.Storage/storageAccounts/{}/accountMigrations/{}
+GET	Microsoft.Storage/storageAccounts/{}/blobServices/{}
 GET	Microsoft.Storage/storageAccounts/{}/blobServices/{}/containers
 GET	Microsoft.Storage/storageAccounts/{}/blobServices/{}/containers/{}
 GET	Microsoft.Storage/storageAccounts/{}/blobServices/{}/containers/{}/immutabilityPolicies/{}

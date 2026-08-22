@@ -368,12 +368,15 @@ func TestAdoptsExistingOpenSearch(t *testing.T) {
 			return pr.Create("opensearch", "search", "prod", osAttrs(), osImpl(), "search", 1)
 		},
 		AllowedMutations: 1, // the refused create
-		// D1062: at-rest/in-transit encryption and the customer key are fixed at create.
+		// D1062: at-rest encryption and the customer key are fixed at create (missing → failed);
+		// D1213: in-transit (EnforceHTTPS) is UpdateDomainConfig-mutable (missing → bound-reconcile).
 		AdoptControls: osAdoptControls,
 		MissingControl: []certifynet.ControlCase{
 			{Path: "encryption.atRest", WantStatus: "failed", WantMutations: 1,
 				Server: osAdoptSrv(false, true, "arn:aws:kms:eu-central-1:000000000000:key/abc", "CUSTOMER")},
-			{Path: "encryption.inTransit", WantStatus: "failed", WantMutations: 1,
+			// D1213: EnforceHTTPS is UpdateDomainConfig-mutable, so a domain adopted without it
+			// is BOUND (unknown) and converge reconciles it — not refused like the create-fixed pair.
+			{Path: "encryption.inTransit", WantStatus: "unknown", WantMutations: 1,
 				Server: osAdoptSrv(true, false, "arn:aws:kms:eu-central-1:000000000000:key/abc", "CUSTOMER")},
 			{Path: "encryption.customerManagedKeys", WantStatus: "failed", WantMutations: 1,
 				Server: osAdoptSrv(true, true, "arn:aws:kms:eu-central-1:000000000000:key/abc", "AWS")}, // AWS-managed → not customer
@@ -381,4 +384,86 @@ func TestAdoptsExistingOpenSearch(t *testing.T) {
 		MoreSecure: osAdoptSrv(true, true, "arn:aws:kms:eu-central-1:000000000000:key/abc", "CUSTOMER"),
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
+
+// D1213: updateOpenSearch enforces encryption.inTransit in place — UpdateDomainConfig sets
+// EnforceHTTPS, then POLLS to the APPLIED state (D953) before reporting succeeded, so a
+// security-closing change is never reported done while the domain still serves plaintext.
+// Ownership re-checked by tags; foreign refused.
+func TestUpdateOpenSearchInTransit(t *testing.T) {
+	newSrv := func(capLabel string, startEnforced bool, seenEnforce *[]bool) *httptest.Server {
+		enforced := startEnforced
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "GET" && strings.Contains(r.URL.Path, "/tags"):
+				_, _ = w.Write([]byte(`{"TagList":[{"Key":"groundhold-capability","Value":"` + capLabel +
+					`"},{"Key":"groundhold-environment","Value":"prod"}]}`))
+			case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/config"):
+				body, _ := io.ReadAll(r.Body)
+				var b struct {
+					DomainEndpointOptions struct {
+						EnforceHTTPS bool `json:"EnforceHTTPS"`
+					} `json:"DomainEndpointOptions"`
+				}
+				_ = json.Unmarshal(body, &b)
+				if seenEnforce != nil {
+					*seenEnforce = append(*seenEnforce, b.DomainEndpointOptions.EnforceHTTPS)
+				}
+				enforced = b.DomainEndpointOptions.EnforceHTTPS // applied by the next DescribeDomain
+				_, _ = w.Write([]byte(`{"DomainConfig":{}}`))
+			case r.Method == "GET" && strings.Contains(r.URL.Path, "/domain/"):
+				eh := "false"
+				if enforced {
+					eh = "true"
+				}
+				_, _ = w.Write([]byte(`{"DomainStatus":{"DomainName":"d","Processing":false,"Created":true,` +
+					`"DomainEndpointOptions":{"EnforceHTTPS":` + eh + `}}}`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	}
+	pid := openSearchProviderID("eu-central-1", "000000000000", OpenSearchDomainName("prod", "catalog", 1))
+
+	t.Run("enforce HTTPS on a plaintext domain, poll to applied", func(t *testing.T) {
+		var seen []bool
+		srv := newSrv("catalog", false, &seen)
+		defer srv.Close()
+		d := osDriver(t, srv)
+		res := d.updateOpenSearch("catalog", "prod", pid,
+			map[string]any{"encryption.inTransit": true}, []string{"encryption.inTransit"})
+		if res.Status != "succeeded" {
+			t.Fatalf("update: %+v", res)
+		}
+		if len(seen) != 1 || seen[0] != true {
+			t.Fatalf("must UpdateDomainConfig EnforceHTTPS=true, got %+v", seen)
+		}
+	})
+
+	t.Run("foreign domain refused, no UpdateDomainConfig", func(t *testing.T) {
+		var seen []bool
+		srv := newSrv("someone-else", false, &seen)
+		defer srv.Close()
+		d := osDriver(t, srv)
+		res := d.updateOpenSearch("catalog", "prod", pid,
+			map[string]any{"encryption.inTransit": true}, []string{"encryption.inTransit"})
+		if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
+			t.Fatalf("a foreign domain must be refused, got %+v", res)
+		}
+		if len(seen) != 0 {
+			t.Fatalf("a refused update must issue NO UpdateDomainConfig, got %+v", seen)
+		}
+	})
+}
+
+func TestClassifyOpenSearchChange(t *testing.T) {
+	if got, _ := classifyOpenSearchChange("encryption.inTransit"); got != "mutable" {
+		t.Fatalf("encryption.inTransit must be mutable (in-place), got %q", got)
+	}
+	// VPC placement (publicExposure) is genuinely create-fixed — it must stay a replacement.
+	for _, p := range []string{"network.publicExposure", "encryption.atRest", "location.region"} {
+		if got, _ := classifyOpenSearchChange(p); got != "immutable" {
+			t.Fatalf("%s must be immutable (replacement), got %q", p, got)
+		}
+	}
 }

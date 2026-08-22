@@ -655,8 +655,9 @@ func TestClassifyBlobChange(t *testing.T) {
 		// exist, so replacing a stateful account was never what it needed.
 		"replication.enabled":           "unsupported",
 		"replication.destinationRegion": "unsupported",
-		"versioning.enabled":            "unsupported",
-		"cost.monthly":                  "unsupported",
+		// D1218: versioning is a blobServices/default child Azure toggles online.
+		"versioning.enabled": "mutable",
+		"cost.monthly":       "unsupported",
 		// D1200: anonymous-access remediation is patched in place (updateBlob).
 		"network.publicExposure": "mutable",
 	}
@@ -848,4 +849,85 @@ func TestDeleteBlobWORMLockedBlocked(t *testing.T) {
 	if res.Status != "failed" || !strings.Contains(res.Reason, "WORM-locked") {
 		t.Fatalf("a WORM-locked account delete must be a clear failed, got %+v", res)
 	}
+}
+
+// D1218: versioning.enabled is now OBSERVED (read back from blobServices/default, closing the
+// D471 write-but-never-read gap) and REMEDIATED in place (a PUT of that child that preserves the
+// change feed) — never a replacement.
+func TestBlobVersioning(t *testing.T) {
+	t.Run("observe reads versioning.enabled from blobServices/default", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path := strings.SplitN(r.URL.Path, "?", 2)[0]
+			switch {
+			case strings.HasSuffix(path, "/blobServices/default"):
+				_, _ = w.Write([]byte(`{"properties":{"isVersioningEnabled":true,"changeFeed":{"enabled":true}}}`))
+			case strings.HasSuffix(path, "/acct"):
+				_, _ = w.Write([]byte(`{"location":"eastus","sku":{"name":"Standard_ZRS"},` +
+					`"tags":{"groundhold-capability":"assets","groundhold-environment":"prod"},` +
+					`"properties":{"provisioningState":"Succeeded","allowBlobPublicAccess":false}}`))
+			default:
+				w.WriteHeader(404) // immutability/replication/lifecycle absent
+			}
+		}))
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		pid := blobProviderID(d.Subscription, "rg1", "acct", "assets")
+		obs, _, err := d.observeBlob("assets", pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got any
+		for _, o := range obs {
+			if o.Path == "versioning.enabled" {
+				got = o.Value
+			}
+		}
+		if got != true {
+			t.Fatalf("versioning.enabled must be observed as true, got %v", got)
+		}
+	})
+
+	t.Run("update sets isVersioningEnabled in place, preserving the change feed", func(t *testing.T) {
+		type put struct {
+			versioning bool
+			changeFeed bool
+		}
+		var seen []put
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path := strings.SplitN(r.URL.Path, "?", 2)[0]
+			switch {
+			case r.Method == "GET" && strings.HasSuffix(path, "/blobServices/default"):
+				_, _ = w.Write([]byte(`{"properties":{"isVersioningEnabled":false,"changeFeed":{"enabled":true}}}`))
+			case r.Method == "PUT" && strings.HasSuffix(path, "/blobServices/default"):
+				body, _ := io.ReadAll(r.Body)
+				var b struct {
+					Properties struct {
+						IsVersioningEnabled bool `json:"isVersioningEnabled"`
+						ChangeFeed          struct {
+							Enabled bool `json:"enabled"`
+						} `json:"changeFeed"`
+					} `json:"properties"`
+				}
+				_ = json.Unmarshal(body, &b)
+				seen = append(seen, put{versioning: b.Properties.IsVersioningEnabled, changeFeed: b.Properties.ChangeFeed.Enabled})
+				w.WriteHeader(200)
+			case r.Method == "GET":
+				_, _ = w.Write([]byte(`{"location":"eastus","sku":{"name":"Standard_ZRS"},` +
+					`"tags":{"groundhold-capability":"assets","groundhold-environment":"prod"},` +
+					`"properties":{"provisioningState":"Succeeded"}}`))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		pid := blobProviderID(d.Subscription, "rg1", "acct", "assets")
+		res := d.updateBlob("assets", "prod", pid, map[string]any{"versioning.enabled": true}, []string{"versioning.enabled"})
+		if res.Status != "succeeded" {
+			t.Fatalf("update: %+v", res)
+		}
+		if len(seen) != 1 || !seen[0].versioning || !seen[0].changeFeed {
+			t.Fatalf("must PUT isVersioningEnabled=true preserving changeFeed=true, got %+v", seen)
+		}
+	})
 }

@@ -109,6 +109,11 @@ func classifyDynamoDBChange(path string) (string, string) {
 		return "mutable", "PITR toggled in place via UpdateContinuousBackups (no replacement)"
 	case "deletion.protection":
 		return "mutable", "deletion protection toggled in place via UpdateTable (no replacement)"
+	case "encryption.customerManagedKeys":
+		// D1217: the SSE key type is changed in place via UpdateTable SSESpecification (verified
+		// against the API), so a table can adopt a customer-managed key without being replaced.
+		// The adopt-controls comment used to call this create-fixed — it is not.
+		return "mutable", "the SSE key type is changed in place via UpdateTable SSESpecification (no replacement)"
 	case "location.region":
 		return "immutable", "a DynamoDB table's region is fixed at creation — a change is a replacement"
 	default:

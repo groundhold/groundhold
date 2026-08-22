@@ -138,7 +138,7 @@ func dynamoDriver(t *testing.T, srv *httptest.Server) *Driver {
 // region + schema are a replacement (immutable). Before this, dynamodb had no explicit
 // classification, so disabling PITR read as a destructive stateful replacement.
 func TestClassifyDynamoDBChange(t *testing.T) {
-	for _, p := range []string{"backup.pointInTimeRecovery", "deletion.protection"} {
+	for _, p := range []string{"backup.pointInTimeRecovery", "deletion.protection", "encryption.customerManagedKeys"} {
 		if k, _ := classifyDynamoDBChange(p); k != "mutable" {
 			t.Errorf("%s should be mutable (in-place patch), got %q", p, k)
 		}
@@ -500,13 +500,13 @@ func TestAdoptsExistingDynamoDB(t *testing.T) {
 			return pr.Create("dynamodb", "sessions", "prod", dynamoAttrs(), dynamoImpl(), "sessions", 1)
 		},
 		AllowedMutations: 3, // the refused create + backup/protection convergence
-		// D1062: the control-completeness half. The candidate declares CMEK (immutable)
-		// and deletion protection is mutable+wired; each must block an adopt that lacks
-		// it, and a MORE-secure resource must still adopt clean.
+		// D1062/D1217: the control-completeness half. CMEK and deletion protection are BOTH
+		// mutable+wired (D1217 corrected CMEK), so each missing control binds unknown and
+		// converge patches it; a MORE-secure resource must still adopt clean.
 		AdoptControls: ddbAdoptControls,
 		MissingControl: []certifynet.ControlCase{
 			{Path: "encryption.customerManagedKeys", Server: dynamoAdoptSrv(false, true),
-				WantStatus: "failed", WantMutations: 1}, // no SSE-KMS → immutable miss
+				WantStatus: "unknown", WantMutations: 1}, // no SSE-KMS → mutable miss, bound (D1217)
 			{Path: "deletion.protection", Server: dynamoAdoptSrv(true, false),
 				WantStatus: "unknown", WantMutations: 1, // CMEK ok, protection off → mutable miss
 				Create: func(pr provider.Provider) provider.CreateResult {
@@ -564,11 +564,12 @@ func dynamoAdoptSrv(hasKMS, delProt bool) func() *httptest.Server {
 	}
 }
 
-// TestAdoptDynamoDBRefusesUnlandedImmutableControl (D1062): a 409-adopted table with
-// NO customer-managed key while the candidate declares one must FAIL — CMEK is
-// immutable at create, so the table cannot be fixed in place and binding it would
-// hide that a replacement is required (the shared adopt-check's immutable→failed rule).
-func TestAdoptDynamoDBRefusesUnlandedImmutableControl(t *testing.T) {
+// TestAdoptDynamoDBBindsUnlandedCMKControl (D1062/D1217): a 409-adopted table with NO
+// customer-managed key while the candidate declares one now BINDS (unknown,
+// adopt-pending-reconcile) rather than failing — D1217 corrected the claim that CMEK is
+// immutable at create (UpdateTable's SSESpecification changes it on a live table), so it is
+// UpdateWired and converge reconciles it, exactly as deletion protection does.
+func TestAdoptDynamoDBBindsUnlandedCMKControl(t *testing.T) {
 	target := func(r *http.Request) string {
 		full := r.Header.Get("X-Amz-Target")
 		return full[strings.LastIndex(full, ".")+1:]
@@ -593,11 +594,11 @@ func TestAdoptDynamoDBRefusesUnlandedImmutableControl(t *testing.T) {
 	d := dynamoDriver(t, srv)
 	a := dynamoAttrs() // declares customerManagedKeys: true
 	res := d.createDynamoDB("eu-central-1", "000000000000", "prod", "sessions", a, dynamoImpl(), 1)
-	if res.Status != "failed" || !strings.Contains(res.Reason, "encryption.customerManagedKeys") {
-		t.Fatalf("adopting a table missing an immutable declared control must FAIL naming it, got %+v", res)
+	if res.Status != "unknown" || !strings.Contains(res.Reason, "encryption.customerManagedKeys") {
+		t.Fatalf("adopting a table missing the now-mutable CMEK control must BIND (unknown) naming it, got %+v", res)
 	}
-	if res.ProviderID != "" {
-		t.Fatalf("an immutable-missing adopt must not bind an unusable resource, got pid %q", res.ProviderID)
+	if res.ProviderID == "" {
+		t.Fatalf("a mutable-missing adopt must BIND the resource (converge reconciles), got no pid")
 	}
 }
 
@@ -721,5 +722,47 @@ func TestRefusesForeignUpdateDynamoDB(t *testing.T) {
 	res := d.updateDynamoDB("sessions", "prod", pid, dynamoAttrs(), dynamoImpl(), []string{"deletion.protection"})
 	if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
 		t.Fatalf("foreign table update must refuse, got %+v", res)
+	}
+}
+
+// D1217: updateDynamoDB enables a customer-managed SSE key in place — UpdateTable with an
+// SSESpecification (SSEType=KMS + the impl key), then POLLS to the applied state (the re-encrypt
+// is async, so CMEK is not on until the table reports SSEType=KMS). No replacement.
+func TestDynamoDBUpdateCMK(t *testing.T) {
+	var sseBody string
+	hasKMS := false // starts AWS-owned; the UpdateTable SSE flips it, and DescribeTable reflects it
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		switch tg := r.Header.Get("X-Amz-Target"); {
+		case strings.HasSuffix(tg, "DescribeTable"):
+			sse := ""
+			if hasKMS {
+				sse = `,"SSEDescription":{"Status":"ENABLED","SSEType":"KMS","KMSMasterKeyArn":"arn:aws:kms:eu-central-1:000000000000:key/abc"}`
+			}
+			_, _ = w.Write([]byte(`{"Table":{"TableStatus":"ACTIVE","TableArn":"arn:aws:dynamodb:eu-central-1:000000000000:table/t","DeletionProtectionEnabled":false` + sse + `}}`))
+		case strings.HasSuffix(tg, "ListTagsOfResource"):
+			_, _ = w.Write([]byte(`{"Tags":[{"Key":"groundhold-capability","Value":"sessions"},{"Key":"groundhold-environment","Value":"prod"}]}`))
+		case strings.HasSuffix(tg, "UpdateTable"):
+			sseBody = string(b)
+			if strings.Contains(sseBody, `"SSEType":"KMS"`) {
+				hasKMS = true // the re-encryption completes; the next Describe sees KMS
+			}
+			_, _ = w.Write([]byte(`{"TableDescription":{"TableStatus":"ACTIVE"}}`))
+		default:
+			w.WriteHeader(400)
+		}
+	}))
+	defer srv.Close()
+	d := dynamoDriver(t, srv)
+	pid := dynamoProviderID("eu-central-1", "000000000000", "sessions")
+
+	a := dynamoAttrs() // declares customerManagedKeys: true, and dynamoImpl carries kms_key_id
+	res := d.updateDynamoDB("sessions", "prod", pid, a, dynamoImpl(),
+		[]string{"encryption.customerManagedKeys"})
+	if res.Status != "succeeded" {
+		t.Fatalf("CMK update: %+v", res)
+	}
+	if !strings.Contains(sseBody, `"SSEType":"KMS"`) || !strings.Contains(sseBody, `"Enabled":true`) {
+		t.Fatalf("enabling CMK must send UpdateTable SSESpecification Enabled:true SSEType:KMS, got %s", sseBody)
 	}
 }

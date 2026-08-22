@@ -70,10 +70,10 @@ func serviceCases(t *testing.T, src, method string) map[string]bool {
 var classifyChangeAllowlist = map[string]bool{
 	"apigateway": true, "backupvault": true, "changefeed": true, "cloudfront": true,
 	"cloudwatch": true, "cloudwatchdash": true, "custompolicy": true, "cwlogfilter": true,
-	"ecs": true, "efs": true, "elasticache": true,
-	"iam": true, "kinesis": true, "kms": true, "msk": true,
+	"ecs": true, "efs": true,
+	"iam": true, "kms": true,
 	// lambda now wires ClassifyChange (timeout.maximum + network.publicExposure patch in place)
-	"opensearch": true, "rolepolicy": true, "route53": true,
+	"rolepolicy": true, "route53": true,
 	"route53health": true, // route53record now wires ClassifyChange (dns.target repoints in place)
 	"vpc":           true, "vpngateway": true, "waf": true,
 }

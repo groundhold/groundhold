@@ -304,3 +304,97 @@ func (d *Driver) deleteFirestore(capability, environment, providerID string) pro
 	}
 	return res
 }
+
+// classifyFirestoreChange decides whether a drift on a Firestore database is reconciled in place
+// or replaced. Before D1215 firestore had NO ClassifyChange, so every drift fell to the GCP
+// default of "immutable" = replacement — and replacing a database destroys every document in it.
+// That verdict was being applied to backup.pointInTimeRecovery, which is a writable, REVERSIBLE
+// database setting (pointInTimeRecoveryEnablement, verified against the Database resource — not
+// output-only), so a database missing PITR was being "fixed" by destroying it.
+//
+// D1215: backup.pointInTimeRecovery is `mutable` (both directions — Firestore PITR enables AND
+// disables in place, unlike a Cosmos backup-mode migration). Everything else stays a replacement.
+func classifyFirestoreChange(path string) (string, string) {
+	switch path {
+	case "backup.pointInTimeRecovery":
+		return "mutable", "backup.pointInTimeRecovery is patched in place: the database's " +
+			"pointInTimeRecoveryEnablement (a reversible setting), so PITR is turned on or off " +
+			"without replacing the database (and destroying its documents)"
+	default:
+		return "immutable", fmt.Sprintf(
+			"Firestore has no in-place update path for %q — reconciling a drift is a replacement", path)
+	}
+}
+
+// updateFirestore turns backup.pointInTimeRecovery on or off in place (D1215): a databases.patch
+// of pointInTimeRecoveryEnablement, then the LRO poll to done before reporting succeeded (the
+// patch is async — the applied state is what the operation completing certifies). Ownership is
+// the deterministic database id (Firestore carries no tags), checked BEFORE any read so a foreign
+// name is a categorical refusal. Four-valued on the patch.
+func (d *Driver) updateFirestore(capability, environment, providerID string,
+	attrs map[string]any, changes []string) provider.CreateResult {
+	project, dbID, err := splitFirestoreProviderID(providerID)
+	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if err := d.sameProject(project); err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if !firestoreOwned(project, environment, capability, dbID) {
+		return provider.CreateResult{Status: "failed",
+			Reason: "database id is not one this capability/environment would create — refusing to patch a resource that is not ours"}
+	}
+	if _, found, rerr := d.getFirestore(project, dbID); rerr != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update read gave no answer — reconcile: " + rerr.Error()}
+	} else if !found {
+		return provider.CreateResult{Status: "failed", Reason: "database no longer exists — cannot update"}
+	}
+
+	for _, path := range changes {
+		switch path {
+		case "backup.pointInTimeRecovery":
+			pitr, ok := attrs["backup.pointInTimeRecovery"].(bool)
+			if !ok {
+				return provider.CreateResult{Status: "failed", Reason: "backup.pointInTimeRecovery must be a bool"}
+			}
+			enablement := "POINT_IN_TIME_RECOVERY_DISABLED"
+			if pitr {
+				enablement = "POINT_IN_TIME_RECOVERY_ENABLED"
+			}
+			url := d.firestoreDBURL(project, dbID) + "?updateMask=pointInTimeRecoveryEnablement"
+			st, resp, cerr := d.call("PATCH", url, map[string]any{"pointInTimeRecoveryEnablement": enablement})
+			switch {
+			case cerr != nil:
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: fmt.Sprintf("patch outcome unknown (may have landed): %v", cerr)}
+			case st == http.StatusOK:
+				// LRO started — poll below
+			case st >= 500:
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: fmt.Sprintf("patch HTTP %d (server error — may have landed) — reconcile", st)}
+			default:
+				if r := provider.MutationResult(st, gcpErrCode(resp), nil, providerID, "patch"); r != nil {
+					return *r
+				}
+				return provider.CreateResult{Status: "failed",
+					Reason: fmt.Sprintf("patch HTTP %d: %s", st, mutDetail(resp))}
+			}
+			var op struct {
+				Name string `json:"name"`
+			}
+			if json.Unmarshal(resp, &op) != nil || op.Name == "" {
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: "patch response carried no operation — reconcile"}
+			}
+			res := d.pollFirestoreOperation(op.Name)
+			if res.Status != "succeeded" {
+				return res
+			}
+		default:
+			return provider.CreateResult{Status: "failed",
+				Reason: "no firestore in-place mapping for " + path}
+		}
+	}
+	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+}

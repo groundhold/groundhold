@@ -77,7 +77,7 @@ var gcpClassifyAllowlist = map[string]bool{
 	"clouddns":       true, // a managed zone is create/replace, no in-place mutable path
 	"cloudfunctions": true, "cloudfunctions-fn": true, "cloudkms": true, "cloudrun": true,
 	"cloudrunjobs": true, "cloudscheduler": true, "customrole": true, "dashboard": true,
-	"filestore": true, "firestore": true, "iambinding": true, "logmetric": true,
+	"filestore": true, "iambinding": true, "logmetric": true,
 	"managedkafka": true, "memorystore": true, "monitoring": true, "serviceaccount": true,
 	"uptime": true, "vpc": true, "vpngateway": true,
 }

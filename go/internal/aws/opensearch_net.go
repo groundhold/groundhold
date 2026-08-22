@@ -154,13 +154,15 @@ func (d *Driver) openSearchTags(region, account, domain string) (map[string]stri
 }
 
 // osAdoptControls are the controls OpenSearch sets INLINE in the create body, so on a
-// 409-adopt they never applied to the pre-existing domain (D1062). At-rest and
-// in-transit encryption (EnforceHTTPS) and the customer key are fixed at create, so a
-// missing one FAILS the adopt. VPC placement (network.publicExposure) is also fixed at
-// create but the default candidate declares public — a follow-up, not wired here.
+// 409-adopt they never applied to the pre-existing domain (D1062). At-rest encryption and
+// the customer key ARE fixed at create, so a missing one FAILS the adopt. in-transit
+// (EnforceHTTPS) is NOT — D1213 verified it is an UpdateDomainConfig field — so it is
+// UpdateWired: an adopted domain missing HTTPS is bound-and-reconciled, not refused. VPC
+// placement (network.publicExposure) is also fixed at create but the default candidate
+// declares public — a follow-up, not wired here.
 var osAdoptControls = []adoptcheck.Control{
 	{Path: "encryption.atRest", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
-	{Path: "encryption.inTransit", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "encryption.inTransit", Direction: adoptcheck.SecureTrue, UpdateWired: true},
 	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
 }
 
@@ -343,4 +345,111 @@ func (d *Driver) deleteOpenSearch(capability, environment, providerID string) pr
 		}
 		time.Sleep(d.PollInterval)
 	}
+}
+
+// classifyOpenSearchChange decides whether a drift on an OpenSearch domain is reconciled in
+// place or replaced. Before D1213 opensearch had NO ClassifyChange, so every drift fell to the
+// AWS driver default of "immutable" = replacement — and replacing a domain destroys every index
+// in it. That verdict was being applied to encryption.inTransit, which is EnforceHTTPS: a domain
+// serving plaintext that a contract wants HTTPS-only was being "fixed" by destroying it.
+//
+// D1213: EnforceHTTPS is an UpdateDomainConfig field (verified against the API; the driver's old
+// comment lumping it with the create-fixed at-rest key was wrong), so encryption.inTransit is
+// `mutable`. network.publicExposure stays `immutable` — that IS VPC placement, genuinely fixed at
+// domain creation — as does everything else (honest replacement).
+func classifyOpenSearchChange(path string) (string, string) {
+	switch path {
+	case "encryption.inTransit":
+		return "mutable", "encryption.inTransit is changed in place: EnforceHTTPS via " +
+			"UpdateDomainConfig, so a domain serving plaintext is made HTTPS-only without replacing " +
+			"it (and destroying its indices)"
+	default:
+		return "immutable", fmt.Sprintf(
+			"OpenSearch has no in-place update path for %q — reconciling a drift is a replacement", path)
+	}
+}
+
+// updateOpenSearch enforces encryption.inTransit in place (D1213): UpdateDomainConfig sets
+// DomainEndpointOptions.EnforceHTTPS (with the strong TLS floor the create uses), then POLLS to
+// the APPLIED state before reporting succeeded. The poll is the honesty (D953): UpdateDomainConfig
+// is async — the 2xx only ACCEPTS the change and the domain enters Processing while it is still
+// serving on the OLD setting, so reporting succeeded on accept would call a plaintext domain
+// HTTPS-only while it still speaks plaintext. Ownership is re-checked by tags; four-valued.
+func (d *Driver) updateOpenSearch(capability, environment, providerID string,
+	attrs map[string]any, changes []string) provider.CreateResult {
+	region, account, domain, err := splitOpenSearchProviderID(providerID)
+	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if err := d.sameAccount(account); err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	_, found, rerr := d.describeDomain(region, domain)
+	if rerr != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update read gave no answer — reconcile: " + rerr.Error()}
+	}
+	if !found {
+		return provider.CreateResult{Status: "failed", Reason: "domain no longer exists — cannot update"}
+	}
+	tags, terr := d.openSearchTags(region, account, domain)
+	if terr != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update tag read gave no answer — reconcile: " + terr.Error()}
+	}
+	if !groundholdTagsMatch(tags, capability, environment) {
+		return provider.CreateResult{Status: "failed",
+			Reason: "domain tags do not match — refusing to update a resource that is not ours"}
+	}
+
+	for _, path := range changes {
+		switch path {
+		case "encryption.inTransit":
+			enforce, ok := attrs["encryption.inTransit"].(bool)
+			if !ok {
+				return provider.CreateResult{Status: "failed", Reason: "encryption.inTransit must be a bool"}
+			}
+			body, _ := json.Marshal(map[string]any{
+				"DomainName": domain,
+				"DomainEndpointOptions": map[string]any{
+					"EnforceHTTPS":      enforce,
+					"TLSSecurityPolicy": "Policy-Min-TLS-1-2-2019-07",
+				}})
+			st, resp, cerr := d.openSearchDo("POST", region, openSearchPath+"/domain/"+domain+"/config", body)
+			switch {
+			case cerr != nil:
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: fmt.Sprintf("UpdateDomainConfig outcome unknown (may have landed): %v", cerr)}
+			case st == http.StatusOK || st == http.StatusCreated:
+				// accepted — poll to applied below
+			case st >= 500:
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: fmt.Sprintf("UpdateDomainConfig HTTP %d (server error — may have landed): %s", st, mutDetail(resp))}
+			default:
+				if r := provider.MutationResult(st, osErr(resp), nil, providerID, "UpdateDomainConfig"); r != nil {
+					return *r
+				}
+				return provider.CreateResult{Status: "failed",
+					Reason: fmt.Sprintf("UpdateDomainConfig HTTP %d: %s", st, osErr(resp))}
+			}
+			// D953: poll to the APPLIED setting — a security-closing change reported succeeded
+			// on accept would be a false green while the domain still serves the old setting.
+			deadline := d.Now().Add(d.PollTimeout)
+			for {
+				dom, ok, drerr := d.describeDomain(region, domain)
+				if drerr == nil && ok && !dom.Processing && dom.DomainEndpointOptions.EnforceHTTPS == enforce {
+					break
+				}
+				if d.Now().After(deadline) {
+					return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+						Reason: "domain still applying the config change at poll timeout — reconcile via DescribeDomain"}
+				}
+				time.Sleep(d.PollInterval)
+			}
+		default:
+			return provider.CreateResult{Status: "failed",
+				Reason: "no opensearch in-place mapping for " + path}
+		}
+	}
+	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
 }
