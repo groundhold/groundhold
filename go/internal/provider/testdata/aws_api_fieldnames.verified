@@ -225,6 +225,7 @@ collectionDetails
 collectionEndpoint
 collectionSummaries
 currentBrokerSoftwareInfo
+currentVersion
 dataVolumeKMSKeyId
 deployments
 desiredCount
@@ -241,6 +242,7 @@ filterPattern
 id
 imageScanningConfiguration
 imageTagMutability
+inCluster
 inferenceProfileArn
 inferenceProfileId
 inferenceProfileName

@@ -33,6 +33,7 @@ backupRetentionDays
 baseBlob
 capacity
 category
+changeFeed
 clientId
 clusterResourceId
 cname
@@ -100,6 +101,7 @@ ipConfigurations
 ipv4Address
 ipv6Address
 isEnabled
+isVersioningEnabled
 isZoneRedundant
 issuer
 kafkaEnabled
@@ -149,6 +151,7 @@ notifications
 objectType
 operator
 osDisk
+partitionCount
 parts
 permissions
 policy

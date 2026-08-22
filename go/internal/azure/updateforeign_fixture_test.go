@@ -181,6 +181,45 @@ func TestRefusesForeignUpdateAzAISearch(t *testing.T) {
 		changes: []string{"network.publicExposure"}})
 }
 
+// TestRefusesForeignUpdateAzEventHubs (D1212): retention.window PUTs the hub, but ownership is
+// the NAMESPACE's tags — a foreign namespace is refused before the hub is read or written.
+func TestRefusesForeignUpdateAzEventHubs(t *testing.T) {
+	runAzForeignUpdate(t, azUpdateCase{svc: "eventhubs", cap: "capability.streaming.pipe",
+		server: func(t *testing.T) *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					t.Errorf("update must not %s a foreign-tagged namespace", r.Method)
+				}
+				_, _ = w.Write([]byte(`{"location":"eastus","sku":{"name":"Premium"},` +
+					`"tags":{"groundhold-capability":"someone-else","groundhold-environment":"prod"},` +
+					`"properties":{"provisioningState":"Succeeded"}}`))
+			}))
+		},
+		pid: eventHubsProviderID(testSub, "rg1", eventHubsNamespaceName("prod", "events", 1),
+			azResourceName("pv-hub", "prod", "events", 1)),
+		attrs:   map[string]any{"retention.window": "168h"},
+		changes: []string{"retention.window"}})
+}
+
+// TestRefusesForeignUpdateAzCosmos (D1216): the PITR backup migration PATCHes the account, whose
+// tags are the ownership boundary — a foreign account is refused before any migration is started.
+func TestRefusesForeignUpdateAzCosmos(t *testing.T) {
+	runAzForeignUpdate(t, azUpdateCase{svc: "cosmos", cap: "capability.database.nosql",
+		server: func(t *testing.T) *httptest.Server {
+			return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					t.Errorf("update must not %s a foreign-tagged cosmos account", r.Method)
+				}
+				_, _ = w.Write([]byte(`{"location":"eastus",` +
+					`"tags":{"groundhold-capability":"someone-else","groundhold-environment":"prod"},` +
+					`"properties":{"provisioningState":"Succeeded","backupPolicy":{"type":"Periodic"}}}`))
+			}))
+		},
+		pid:     cosmosProviderID(testSub, "rg1", cosmosAccountName("prod", "sessions", 1)),
+		attrs:   map[string]any{"backup.pointInTimeRecovery": true},
+		changes: []string{"backup.pointInTimeRecovery"}})
+}
+
 // TestRefusesForeignUpdateAzDNSRecord: the repoint. The evidence is the parent ZONE's
 // tags — the same boundary AWS and GCP drew independently (D408/D420/D449).
 func TestRefusesForeignUpdateAzDNSRecord(t *testing.T) {

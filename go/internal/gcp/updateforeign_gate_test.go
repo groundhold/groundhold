@@ -25,6 +25,7 @@ var updateForeignGatedGCP = map[string]string{
 	"backupplan":     "TestRefusesForeignUpdateBackupPlanGCP",
 	"billingbudget":  "TestRefusesForeignUpdateBillingBudget",
 	"auditlogs":      "TestRefusesForeignUpdateAuditSink",
+	"firestore":      "TestRefusesForeignUpdateFirestore", // D1215: PITR in place; ownership is the deterministic id
 }
 
 // updateForeignNotApplicableGCP: reviewed, with evidence a test re-derives (D404).

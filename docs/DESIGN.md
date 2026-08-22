@@ -39921,3 +39921,263 @@ same ownership check and four-valued discipline as the publicExposure arm.
 With D1209/D1210 the TLS knob joins publicExposure in the in-place set on both the Redis and
 Postgres drivers: every online security control these stateful resources expose is now remediated
 by a patch, never by a replacement that destroys the data.
+
+## D1211 — changing a stream's retention in place, not by replacing it
+
+The retention leg of the same class. kinesis observes `retention.window` from the stream's
+`RetentionPeriodHours`, had no `ClassifyChange`, and so fell to the AWS default — `immutable` =
+replacement. Replacing a stream drops every record buffered in it (up to a year of data) and
+breaks every consumer, to change a number `Increase`/`DecreaseStreamRetentionPeriod` changes
+online.
+
+`classifyKinesisChange` now returns `mutable` for `retention.window`, and `updateKinesis` reads
+the stream's CURRENT window and issues `IncreaseStreamRetentionPeriod` (target higher) or
+`DecreaseStreamRetentionPeriod` (target lower) — equal is a no-op, never a call AWS would reject
+as no change. Ownership is re-checked by tags (a gone stream is a clean failure distinct from a
+foreign one); four-valued on the write. New route (Decrease) and permission
+(kinesis:DecreaseStreamRetentionPeriod + ListTagsForStream on the update arm, dropping the
+StartStreamEncryption the never-wired update case had over-declared). The other Kinesis knobs
+stay `immutable` until each has a proven online path.
+
+### Where the retention sweep stopped
+retention.days (cwlogs / loganalytics / logbucket) and recovery.rpo (rds / aurora) were already
+`mutable`; DynamoDB's backup.pointInTimeRecovery is already `mutable` via UpdateContinuousBackups.
+kinesis's retention.window was the open one. Event Hubs' retention.window (messageRetentionInDays,
+patchable) is the same shape on Azure and remains for a later slice; Cosmos / Firestore
+point-in-time recovery is a one-way backup-mode migration whose direction needs its own design.
+
+## D1212 — changing an Event Hubs retention window in place, the Azure twin of D1211
+
+The retention gap's Azure counterpart. eventhubs observes `retention.window` from the hub's
+`messageRetentionInDays`, had no `ClassifyChange`, and so fell to the driver default — `immutable`
+= replacement. Replacing the namespace drops every event buffered in it and breaks every producer
+and consumer, to change a retention number Azure changes online.
+
+`messageRetentionInDays` is writable on the hub (2024-01-01 swagger; the hub supports PUT
+CreateOrUpdate, no PATCH). `classifyEventHubsChange` returns `mutable` for `retention.window`, and
+`updateEventHubs` PUTs the hub with the new `messageRetentionInDays` — reading the hub first to
+PRESERVE its `partitionCount` (writable in the schema but increase-only in practice; echoing the
+current value keeps the PUT from disturbing it). Ownership is the NAMESPACE's tags (the hub
+carries none), re-checked before any write; four-valued via putSetting. No new route (the hub PUT
+already exists) or permission (the update case already declared namespaces/eventhubs/write).
+
+This closes the retention leg on both streaming services: Kinesis (D1211, Increase/Decrease) and
+Event Hubs (D1212, PUT with preserved partitions). Cosmos / Firestore point-in-time recovery — a
+one-way backup-mode migration — remains the one retention-shaped knob whose direction needs its
+own design before it can be called mutable.
+
+## D1213 — enforcing HTTPS on an OpenSearch domain in place, and correcting an assumption
+
+opensearch observes `encryption.inTransit` from `DomainEndpointOptions.EnforceHTTPS`, had no
+`ClassifyChange`, and so fell to the AWS default — `immutable` = replacement. Replacing a domain
+destroys every index in it; the plan for "make this plaintext domain HTTPS-only" was "drop it and
+re-index". And the driver's own comment ASSERTED this was necessary: it lumped in-transit
+encryption with the create-fixed at-rest key as "fixed at create".
+
+The assumption was wrong, and this slice is as much about correcting it as adding the path.
+`EnforceHTTPS` is a field of `UpdateDomainConfig` (verified against the AWS API reference —
+`DomainEndpointOptions.{EnforceHTTPS,TLSSecurityPolicy}` are accepted on an existing domain), so
+in-transit encryption is changed online. What IS create-fixed is `network.publicExposure` — that
+maps to VPC placement, genuinely immutable — so classify makes ONLY `encryption.inTransit` mutable
+and leaves publicExposure (and everything else) a replacement.
+
+Two honesty points shape the design:
+
+1. **Poll to applied, never succeeded-on-accept (D953).** UpdateDomainConfig is async: the 2xx
+   only accepts the change and the domain enters `Processing` while still serving the OLD setting.
+   Enforcing HTTPS is a security-CLOSING change, so reporting succeeded on accept would call a
+   plaintext domain HTTPS-only while it still speaks plaintext — the exact false-green this repo
+   exists to prevent. `updateOpenSearch` polls `DescribeDomain` to `!Processing && EnforceHTTPS ==
+   desired` before succeeded; still applying at timeout is `unknown` (reconcile).
+
+2. **The adopt-control follows.** `osAdoptControls` had `encryption.inTransit` as
+   `ImmutableAtCreate: true` — which, via the adopt-check (D1067), FAILED any adopt of a domain
+   missing HTTPS ("a replacement may be required"). Now that the update is wired, it becomes
+   `UpdateWired: true`: the same adopt is BOUND (`unknown`, adopt-pending-reconcile) and converge
+   reconciles it. The `UpdateWired` flag existed for exactly this — the campaign that built it
+   anticipated the updates landing one at a time.
+
+The account boundary is guarded (`sameAccount` before any read — an ARN names the account, and
+cross-account access is ordinary); the update permission (`es:UpdateDomainConfig`) was already
+declared. New route (POST the domain's `/config`). This is the first opensearch in-place path,
+and it is scoped to the one knob the API actually changes online.
+
+## D1214 — enforcing TLS on an MSK cluster in place, correcting a second assumption
+
+The MSK twin of the OpenSearch fix (D1213), and it corrects the same kind of wrong assumption.
+msk observes `encryption.inTransit` from the cluster's `clientBroker` encryption
+(`clientBroker == "TLS"`), had no `ClassifyChange`, and so fell to the AWS default — `immutable` =
+replacement. Replacing a Kafka cluster destroys its topics and data; the plan for "make this
+plaintext-capable cluster TLS-only" was "drop it and lose the log". And the adopt-controls comment
+ASSERTED in-transit "is always TLS-enforced on MSK ... so it is not an adopt control" — true of the
+clusters WE create (the create hardcodes `clientBroker: TLS`), false of an ADOPTED cluster, which
+can carry `TLS_PLAINTEXT` or `PLAINTEXT` and which observe correctly reads as `inTransit=false`.
+
+`clientBroker` is a field of `UpdateSecurity` (verified against the MSK API — the PATCH
+`/v1/clusters/{arn}/security` accepts `encryptionInfo.encryptionInTransit.clientBroker` with a
+required `currentVersion`), so it changes online. `classifyMSKChange` makes ONLY
+`encryption.inTransit` mutable; `updateMSK` reads the cluster (ListClustersV2 returns tags + the
+current version), UpdateSecurity-s `clientBroker` to `TLS`/`PLAINTEXT`, and — because this is an
+async, security-CLOSING change — POLLS to `State=ACTIVE && clientBroker==desired` before succeeded
+(D953: never report a plaintext cluster TLS-only while it still speaks plaintext). Two directional
+guards: the `currentVersion` is the optimistic-concurrency token UpdateSecurity requires, and
+enforcing TLS holds `inCluster` (broker-to-broker) ON so the remediation can never weaken it.
+
+The adopt-control follows, exactly as OpenSearch's did: `encryption.inTransit` joins
+`mskAdoptControls` as `UpdateWired: true`, so an adopted plaintext-capable cluster is BOUND
+(`unknown`, adopt-pending-reconcile) and converge reconciles it, rather than the old silent gap
+(it was not an adopt control at all) followed by a replacement. `sameAccount` guards the boundary;
+the update permission moved from the aspirational `kafka:UpdateClusterConfiguration` the never-wired
+case had declared to the `kafka:UpdateSecurity` it actually calls; new route (PATCH the cluster's
+`/security`). At-rest encryption stays a create-fixed replacement — the API forbids changing it.
+
+## D1215 — turning Firestore PITR on in place, and the reversibility that makes it simple
+
+The first half of the deferred backup/PITR case. firestore observes `backup.pointInTimeRecovery`
+from the database's `pointInTimeRecoveryEnablement`, had no `ClassifyChange`, and so fell to the
+GCP default — `immutable` = replacement. Replacing a Firestore database destroys every document
+in it; the plan for "turn PITR on" was "drop the database".
+
+What makes Firestore the SIMPLE half of the Cosmos/Firestore pair is reversibility. The
+`pointInTimeRecoveryEnablement` field is writable (verified against the Database resource — not
+output-only) and toggles BOTH ways: enable AND disable, via `databases.patch` with an
+`updateMask`. There is no one-way migration to reason about (that is Cosmos, the other half), so
+`classifyFirestoreChange` makes `backup.pointInTimeRecovery` plainly `mutable` and everything else
+a replacement. `updateFirestore` patches the field and polls the returned LRO to done before
+succeeded — the applied state is what the operation completing certifies.
+
+Two ownership notes specific to GCP. Firestore databases carry NO tags, so ownership is the
+DETERMINISTIC database id: `firestoreOwned` checks the id against the names this
+capability/environment would mint, and the check runs BEFORE any read, so a foreign name is a
+categorical refusal reached from the id alone (the `fromID` shape). And the project boundary is
+guarded (`sameProject` — a capability/environment label pair is identical in every project we
+manage, so without it a providerId naming another project would pass the ownership check). The
+update permission (`datastore.databases.update` + get + operations.get) was already declared.
+
+## D1216 — migrating Cosmos to continuous backup in place, and refusing the direction Azure can't
+
+The second, HARDER half of the PITR pair, and the reason it was deferred behind a direction
+design. cosmos observes `backup.pointInTimeRecovery` from the account's backup mode
+(`backupPolicy.type == "Continuous"`), had no `ClassifyChange`, and so fell to the Azure default —
+`immutable` = replacement. Replacing a Cosmos account destroys every database in it; the plan for
+"turn PITR on" was "drop the account".
+
+Unlike Firestore (D1215, freely reversible), Cosmos backup mode is a ONE-WAY migration. Microsoft
+states it plainly: "Migration from periodic to continuous mode is one-way and isn't reversible.
+Once you migrate from periodic mode to continuous mode, you can't switch back." So the direction is
+the design, and it is the D1202 locked-retention shape: `classifyCosmosChange` returns `mutable`
+(enabling PITR IS an in-place account migration, not a replacement), and `updateCosmos` sorts by
+direction —
+
+- **Periodic → Continuous** (enable): a PATCH of the account's `backupPolicy` to
+  `{type: Continuous, continuousModeProperties: {tier: Continuous7Days}}`, the supported migration.
+- **Continuous → Periodic** (disable): REFUSED at apply — Azure cannot revert it, so acting would
+  mean replacing the account and destroying its data. Refusing (the safe direction) beats a
+  data-losing replacement the operator did not ask for.
+- **already at the requested mode**: a no-op, never a redundant write.
+
+The migration is async and the poll is the honesty: the account reports `migrationState=InProgress`
+with `backupPolicy.type` still `Periodic` until it completes, so `updateCosmos` PATCHes and then
+polls `databaseAccounts.get` to `type == "Continuous"` before reporting succeeded — PITR is not on
+until the backup is actually continuous. Ownership by tags; the update permission
+(`databaseAccounts/write`) and the PATCH route already existed. This closes the PITR pair: Firestore
+(reversible, plain mutable) and Cosmos (one-way, mutable-with-the-reverse-refused).
+
+## D1217 — a DynamoDB customer key changed in place, and a THIRD wrong immutability claim
+
+A different capability from the exposure/TLS/retention/PITR knobs: the customer-managed encryption
+KEY. And the third "correcting an assumption" slice — after OpenSearch (D1213) and MSK (D1214), an
+audit of the `ImmutableAtCreate: true` adopt-controls across every driver turned up a third false
+claim. dynamodb's control comment called `encryption.customerManagedKeys` "immutable at create", so
+a table without a customer key (or with the wrong one) was reconciled by REPLACEMENT — and
+replacing a DynamoDB table destroys every item in it, to change a KEY the API changes online.
+
+Verified against the API: `UpdateTable` accepts an `SSESpecification` ("The new server-side
+encryption settings for the specified table") and changes the SSE key TYPE on a live table — the
+claim was wrong. `classifyDynamoDBChange` now returns `mutable` for
+`encryption.customerManagedKeys`; `updateDynamoDB` issues `UpdateTable` with the SSESpecification
+(enable = `{Enabled, SSEType: KMS, KMSMasterKeyId: <impl key>}`, the same key source the create
+uses; disable reverts to the AWS-owned key). The SSE re-encryption is async, so it joins the
+existing D953 poll — the update reports succeeded only once `DescribeTable` shows the table back at
+`ACTIVE` with its SSE type at the target, never on the accept while the re-encryption is still
+running.
+
+The adopt-control follows the same correction as its two predecessors: `encryption.customerManagedKeys`
+moves from `ImmutableAtCreate: true` to `UpdateWired: true`, so an adopted table missing the customer
+key is BOUND (`unknown`, adopt-pending-reconcile) and converge reconciles it rather than the old
+`failed` (a replacement). Two adopt tests that pinned the old immutable→failed behavior were updated
+to the new bind-and-reconcile; dynamodb now has no immutable adopt controls (the immutable→failed
+rule stays covered by RDS/Aurora/OpenSearch/ElastiCache, whose at-rest keys ARE create-fixed). The
+UpdateTable route and the update permission already existed. **The audit's finding, stated plainly:
+of the create-fixed encryption claims across the drivers, three named a knob the provider changes
+online (OpenSearch/MSK in-transit, DynamoDB CMEK); the rest — at-rest keys, Memorystore transit,
+load-balancer scheme — were checked and are honestly immutable.**
+
+## D1218 — the attribute the tool built but could not see: blob versioning
+
+A different capability from the security knobs — and a defect in a different VERB. Azure Blob
+versioning was WRITTEN by the create (`isVersioningEnabled` on the blobServices/default child) but
+never READ back: observe emitted a placeholder diagnostic ("versioning observed on the
+account/blobServices child — reconcile for full detail") and no `versioning.enabled` observation.
+So a `versioning.enabled` constraint read `unverifiable` on an account the tool had itself built to
+satisfy it — the D471 class (an attribute realised on one cloud and invisible on the other; its S3
+twin has always read versioning back), which D762 measured across 26 services.
+
+D1218 closes it on both sides. Observe now reads `blobServices/default` and emits
+`versioning.enabled` measured (or a diagnostic naming the failed read, never a fabricated value).
+And because that same child is one Azure toggles online, `classifyBlobChange` makes
+`versioning.enabled` `mutable` and `updateBlob` sets it with a PUT of the child — reading the
+current change feed first and echoing it back, so toggling versioning cannot silently disturb the
+change feed the create may have enabled as an object-replication presupposition. This also fixes a
+miss in the blob in-place set (D1200-D1204 did publicExposure/retention/durability but left
+versioning a replacement). New GET route for the blobServices child; the update permission gained
+`blobServices/read` + `blobServices/write` (it only declared the containers sub-path before).
+
+## D1219 — the false green in ElastiCache TLS: enabled is not enforced
+
+A different verb again — an OBSERVE false green, the cardinal sin, not a remediation. elasticache
+read `encryption.inTransit` straight off `TransitEncryptionEnabled`, a boolean. But AWS added a
+no-downtime TLS migration with two modes: `preferred` sets `TransitEncryptionEnabled=true` while
+the brokers STILL ACCEPT PLAINTEXT ("allow both encrypted and unencrypted connections"), and only
+`required` enforces TLS. So a replication group mid-migration — or one deliberately left in
+`preferred` for a dual-client window — read `inTransit=true` while it still spoke plaintext. The
+tool reported a TLS-encrypted cache that was not.
+
+D1219 reads `TransitEncryptionMode` and derives enforcement, not the flag: `inTransit` is true only
+when `TransitEncryptionEnabled && mode != "preferred"` (an empty mode on an enabled group is a
+pre-migration cluster, enforced by construction; `preferred` is explicitly not). A group caught in
+`preferred` now reads `inTransit=false` WITH a diagnostic naming the mode and that TLS is not
+enforced until `required` — so a hard `encryption.inTransit: true` constraint blocks (the safe
+direction) instead of passing over a cache that accepts plaintext.
+
+Found by asking the same question MSK's clientBroker answered (TLS/TLS_PLAINTEXT/PLAINTEXT, D1214)
+of every managed cache: is "encryption enabled" the same as "plaintext refused"? For ElastiCache in
+`preferred` mode it is not. The in-place remediation (the two-step preferred->required migration
+ModifyReplicationGroup supports) is the natural follow-up; this slice fixes the read first, because
+a false green about enforcement is worse than an unremediated one.
+
+## D1220 — enforcing ElastiCache TLS in place, the delicate two-step migration
+
+The remediation half of D1219 (which fixed the READ). elasticache had no ClassifyChange, so an
+encryption.inTransit drift fell to the AWS default — `immutable` = replacement, and replacing a
+cache destroys its data and rotates its endpoint. But AWS enforces TLS on a live group with a
+NO-DOWNTIME two-step migration, so this is `mutable` — with the direction and the phases as the
+design.
+
+`updateElastiCache` reads the current state and does exactly the steps that remain:
+`ModifyReplicationGroup` to `TransitEncryptionEnabled=true, TransitEncryptionMode=preferred` (both
+encrypted and plaintext accepted, so clients migrate with no downtime), then a second modify to
+`TransitEncryptionMode=required` (plaintext refused). A group already `preferred` skips the first
+step; one already enforced is a no-op. **Each phase polls to `available` before the next** — the
+API rejects a second modify while the group is UPDATING — and succeeded is reported ONLY once the
+group is `required`, so the D1219 false green cannot reappear from the write side (never "done"
+while the group still accepts plaintext). Disabling TLS (`inTransit=false`) is REFUSED at apply: it
+is a weakening whose multi-step reverse is delicate, and refusing beats a risky partial change
+(the D1202/D1216 direction-dependent shape).
+
+The adopt-control follows the now-familiar correction: `encryption.inTransit` moves from
+`ImmutableAtCreate` to `UpdateWired`, so an adopted group missing enforced TLS is bound and
+reconciled, not refused; the adopt test's inTransit case moved from failed to unknown+bound. At-rest
+encryption and the customer key stay create-fixed. `sameAccount` guards the boundary; the update
+permission (`DescribeReplicationGroups` + `ModifyReplicationGroup`) was already declared, and the
+migration uses the query action the driver already speaks — no new route.

@@ -128,6 +128,42 @@ func TestRefusesForeignUpdateAurora(t *testing.T) {
 			auroraAttrs(), auroraImpl(), []string{"recovery.rpo"})})
 }
 
+// TestRefusesForeignUpdateKinesis (D1211): the retention.window change reads the stream then
+// its tags — a foreign stream is refused before any Increase/Decrease reaches the wire.
+func TestRefusesForeignUpdateKinesis(t *testing.T) {
+	runForeignUpdate(t, foreignCase{svc: "kinesis", cap: "events",
+		server:   func(t *testing.T) *httptest.Server { return kinesisServer(t, "someone-else", 24, false) },
+		base:     func(d *Driver, u string) { d.KinesisBaseURL = u },
+		classify: kinesisRole,
+		update: upd("kinesis", "events",
+			kinesisProviderID("eu-central-1", "000000000000", KinesisStreamName("prod", "events", 1)),
+			map[string]any{"retention.window": "168h"}, nil, []string{"retention.window"})})
+}
+
+// TestRefusesForeignUpdateMSK (D1214): the clientBroker change reads the cluster (tags returned
+// inline by ListClustersV2) — a foreign cluster is refused before any UpdateSecurity reaches the wire.
+func TestRefusesForeignUpdateMSK(t *testing.T) {
+	runForeignUpdate(t, foreignCase{svc: "msk", cap: "bus",
+		server:   func(t *testing.T) *httptest.Server { return mskServer(t, "someone-else", "3.5.1", false) },
+		base:     func(d *Driver, u string) { d.MSKBaseURL = u },
+		classify: mskRESTRole,
+		update: upd("msk", "bus",
+			mskProviderID("eu-central-1", "000000000000", MSKClusterName("prod", "bus", 1)),
+			map[string]any{"encryption.inTransit": true}, nil, []string{"encryption.inTransit"})})
+}
+
+// TestRefusesForeignUpdateOpenSearch (D1213): the EnforceHTTPS change reads the domain then its
+// tags — a foreign domain is refused before any UpdateDomainConfig reaches the wire.
+func TestRefusesForeignUpdateOpenSearch(t *testing.T) {
+	runForeignUpdate(t, foreignCase{svc: "opensearch", cap: "catalog",
+		server:   func(t *testing.T) *httptest.Server { return osServer(t, "someone-else", false, false) },
+		base:     func(d *Driver, u string) { d.OpenSearchBaseURL = u },
+		classify: osRESTRole,
+		update: upd("opensearch", "catalog",
+			openSearchProviderID("eu-central-1", "000000000000", OpenSearchDomainName("prod", "catalog", 1)),
+			map[string]any{"encryption.inTransit": true}, nil, []string{"encryption.inTransit"})})
+}
+
 func TestRefusesForeignUpdateEKS(t *testing.T) {
 	runForeignUpdate(t, foreignCase{svc: "eks", cap: "cluster",
 		server: func(t *testing.T) *httptest.Server {
@@ -294,4 +330,17 @@ func TestRefusesForeignUpdateSESInbound(t *testing.T) {
 		update: upd("ses-inbound", "email",
 			sesInboundProviderID(sesInbRegion, "finance-inbound-rules", "invoice-router"),
 			attrs, impl, []string{"delivery.sink"})})
+}
+
+// TestRefusesForeignUpdateElastiCache (D1220): the TLS migration modifies the replication group,
+// whose tags are the ownership boundary — a foreign group is refused before any ModifyReplicationGroup.
+func TestRefusesForeignUpdateElastiCache(t *testing.T) {
+	runForeignUpdate(t, foreignCase{svc: "elasticache", cap: "sessions",
+		server: func(t *testing.T) *httptest.Server {
+			return ecServer(t, "someone-else", "false", "false", "disabled", "")
+		},
+		base:     func(d *Driver, u string) { d.ElastiCacheBaseURL = u },
+		classify: rdsQueryRole,
+		update: upd("elasticache", "sessions", "ecredis:eu-central-1:000000000000:pv-sessions-prod-abcd1234",
+			map[string]any{"encryption.inTransit": true}, nil, []string{"encryption.inTransit"})})
 }

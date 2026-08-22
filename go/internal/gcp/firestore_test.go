@@ -273,3 +273,69 @@ func TestResidencyMultiRegionDiag(t *testing.T) {
 		}
 	}
 }
+
+// D1215: updateFirestore turns backup.pointInTimeRecovery on in place — a databases.patch of
+// pointInTimeRecoveryEnablement, then the LRO poll to done. Ownership is the deterministic id
+// (no tags); a foreign name is refused. Firestore PITR is reversible, so classify is mutable.
+func TestUpdateFirestorePITR(t *testing.T) {
+	var seenEnablement, seenMask string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "PATCH":
+			seenMask = r.URL.Query().Get("updateMask")
+			body, _ := io.ReadAll(r.Body)
+			var b struct {
+				PointInTimeRecoveryEnablement string `json:"pointInTimeRecoveryEnablement"`
+			}
+			_ = json.Unmarshal(body, &b)
+			seenEnablement = b.PointInTimeRecoveryEnablement
+			_, _ = w.Write([]byte(`{"name":"projects/acme-prod/operations/op1"}`))
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/operations/"):
+			_, _ = w.Write([]byte(`{"done":true}`))
+		case r.Method == "GET":
+			_, _ = w.Write([]byte(`{"name":"projects/acme-prod/databases/x","type":"FIRESTORE_NATIVE",` +
+				`"pointInTimeRecoveryEnablement":"POINT_IN_TIME_RECOVERY_DISABLED"}`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	d := firestoreDriver(t, srv)
+	pid := firestoreProviderID("acme-prod", FirestoreDatabaseID("acme-prod", "prod", "sessions", 1))
+	res := d.updateFirestore("sessions", "prod", pid,
+		map[string]any{"backup.pointInTimeRecovery": true}, []string{"backup.pointInTimeRecovery"})
+	if res.Status != "succeeded" {
+		t.Fatalf("update: %+v", res)
+	}
+	if seenEnablement != "POINT_IN_TIME_RECOVERY_ENABLED" {
+		t.Fatalf("must PATCH pointInTimeRecoveryEnablement=ENABLED, got %q", seenEnablement)
+	}
+	if seenMask != "pointInTimeRecoveryEnablement" {
+		t.Fatalf("must set updateMask=pointInTimeRecoveryEnablement, got %q", seenMask)
+	}
+}
+
+func TestUpdateFirestoreForeignNameRefused(t *testing.T) {
+	srv := firestoreServer(t, "us-central1", false, false, "")
+	defer srv.Close()
+	d := firestoreDriver(t, srv)
+	// a database id our scheme would never mint → refused from the id alone, no write.
+	pid := firestoreProviderID("acme-prod", "someone-elses-db")
+	res := d.updateFirestore("sessions", "prod", pid,
+		map[string]any{"backup.pointInTimeRecovery": true}, []string{"backup.pointInTimeRecovery"})
+	if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
+		t.Fatalf("a foreign database id must be refused, got %+v", res)
+	}
+}
+
+func TestClassifyFirestoreChange(t *testing.T) {
+	if got, _ := classifyFirestoreChange("backup.pointInTimeRecovery"); got != "mutable" {
+		t.Fatalf("backup.pointInTimeRecovery must be mutable (in-place), got %q", got)
+	}
+	for _, p := range []string{"location.region", "encryption.customerManagedKeys", "engine.protocol"} {
+		if got, _ := classifyFirestoreChange(p); got != "immutable" {
+			t.Fatalf("%s must be immutable (replacement), got %q", p, got)
+		}
+	}
+}

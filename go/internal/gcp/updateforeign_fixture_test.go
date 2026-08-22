@@ -64,6 +64,18 @@ func TestRefusesForeignUpdateGCS(t *testing.T) {
 		changes: []string{"versioning.enabled"}})
 }
 
+// TestRefusesForeignUpdateFirestore (D1215): Firestore carries no tags, so ownership is the
+// deterministic database id — a name this capability/environment would never mint is refused
+// from the id ALONE, before any read (fromID).
+func TestRefusesForeignUpdateFirestore(t *testing.T) {
+	runForeignUpdateGCP(t, gcpUpdateCase{svc: "firestore", cap: "sessions", fromID: true,
+		server:  func(t *testing.T) *httptest.Server { return firestoreServer(t, "us-central1", false, false, "") },
+		base:    func(d *Driver, u string) { d.FirestoreBaseURL = u },
+		pid:     firestoreProviderID("acme-prod", "someone-elses-db"),
+		attrs:   map[string]any{"backup.pointInTimeRecovery": true},
+		changes: []string{"backup.pointInTimeRecovery"}})
+}
+
 func TestRefusesForeignUpdatePubSubTopic(t *testing.T) {
 	runForeignUpdateGCP(t, gcpUpdateCase{svc: "pubsub-topic", cap: "events",
 		server:  func(t *testing.T) *httptest.Server { return pubsubServer(t, ourTopicJSON("someone-else"), 0, 0) },

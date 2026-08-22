@@ -528,6 +528,7 @@ FirestoreBaseURL	GET	/projects/acme-prod/databases/db-x
 FirestoreBaseURL	GET	/projects/acme-prod/databases/sessions-prod-de796df6
 FirestoreBaseURL	GET	/projects/acme-prod/operations/op1
 FirestoreBaseURL	GET	/projects/acme-prod/operations/opdel
+FirestoreBaseURL	PATCH	/projects/acme-prod/databases/sessions-prod-de796df6
 FirestoreBaseURL	POST	/projects/acme-prod/databases
 GcsBaseURL	DELETE	/b/the-bucket
 GcsBaseURL	GET	/b/assets-prod-b63259c6

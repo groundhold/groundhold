@@ -300,3 +300,97 @@ func (d *Driver) deleteKinesis(capability, environment, providerID string) provi
 		time.Sleep(d.PollInterval)
 	}
 }
+
+// classifyKinesisChange decides whether a drift on a Kinesis stream is reconciled in place or
+// replaced. Before D1211 kinesis had NO ClassifyChange, so every drift fell to the AWS driver
+// default of "immutable" = replacement. That verdict was being applied to retention.window —
+// and replacing a stream drops the records buffered in it and breaks every consumer, to change
+// a number AWS changes online. D1211: the retention window is Increase/DecreaseStreamRetention
+// Period, so it is `mutable`; everything else stays "immutable" (honest replacement).
+func classifyKinesisChange(path string) (string, string) {
+	switch path {
+	case "retention.window":
+		return "mutable", "retention.window is changed in place via Increase/Decrease" +
+			"StreamRetentionPeriod — never by replacing the stream (which drops its buffered records)"
+	default:
+		return "immutable", fmt.Sprintf(
+			"Kinesis has no in-place update path for %q — reconciling a drift is a replacement", path)
+	}
+}
+
+// updateKinesis changes the retention window in place (D1211): Increase or Decrease depending on
+// the direction, chosen against the stream's CURRENT retention. Ownership is re-checked by tags
+// first (never touch a stream that is not ours), and a gone stream is a clean failure distinct
+// from a foreign one. Four-valued: an ambiguous call keeps the deterministic providerID.
+func (d *Driver) updateKinesis(capability, environment, providerID string,
+	attrs map[string]any, changes []string) provider.CreateResult {
+	region, _, stream, err := splitKinesisProviderID(providerID)
+	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	summary, found, rerr := d.describeStream(region, stream)
+	if rerr != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update read gave no answer — reconcile: " + rerr.Error()}
+	}
+	if !found {
+		return provider.CreateResult{Status: "failed", Reason: "stream no longer exists — cannot update"}
+	}
+	tags, terr := d.kinesisTags(region, stream)
+	if terr != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update tag read gave no answer — reconcile: " + terr.Error()}
+	}
+	if !groundholdTagsMatch(tags, capability, environment) {
+		return provider.CreateResult{Status: "failed",
+			Reason: "stream tags do not match — refusing to update a resource that is not ours"}
+	}
+
+	for _, path := range changes {
+		switch path {
+		case "retention.window":
+			hours, herr := durationHours(attrs["retention.window"])
+			if herr != nil {
+				return provider.CreateResult{Status: "failed", Reason: "retention.window: " + herr.Error()}
+			}
+			if hours < 24 || hours > 8760 {
+				return provider.CreateResult{Status: "failed",
+					Reason: fmt.Sprintf("retention.window %dh is outside the Kinesis range (24h..8760h)", hours)}
+			}
+			// Increase and Decrease are distinct API calls; pick against the stream's current
+			// window. Equal is a no-op — never issue a call AWS would reject as no change.
+			action := ""
+			switch {
+			case hours > summary.RetentionPeriodHours:
+				action = "IncreaseStreamRetentionPeriod"
+			case hours < summary.RetentionPeriodHours:
+				action = "DecreaseStreamRetentionPeriod"
+			}
+			if action == "" {
+				continue
+			}
+			st, resp, cerr := d.kinesisCall(region, action, jsonBody(map[string]any{
+				"StreamName": stream, "RetentionPeriodHours": hours}))
+			switch {
+			case cerr != nil:
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: fmt.Sprintf("%s outcome unknown (may have landed): %v", action, cerr)}
+			case st == http.StatusOK:
+				// applied
+			case st >= 500:
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: fmt.Sprintf("%s HTTP %d (server error — may have landed) — reconcile", action, st)}
+			default:
+				if r := provider.MutationResult(st, ecsErr(resp), nil, providerID, action); r != nil {
+					return *r
+				}
+				return provider.CreateResult{Status: "failed",
+					Reason: fmt.Sprintf("%s HTTP %d: %s", action, st, ecsErr(resp))}
+			}
+		default:
+			return provider.CreateResult{Status: "failed",
+				Reason: "no kinesis in-place mapping for " + path}
+		}
+	}
+	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+}

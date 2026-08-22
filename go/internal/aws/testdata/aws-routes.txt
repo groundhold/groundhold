@@ -187,6 +187,7 @@ elasticache	POST	/?Op=DescribeCacheSubnetGroups
 elasticache	POST	/?Op=DescribeReplicationGroups
 elasticache	POST	/?Op=DescribeServerlessCaches
 elasticache	POST	/?Op=ListTagsForResource
+elasticache	POST	/?Op=ModifyReplicationGroup
 elasticfilesystem	DELETE	/2015-02-01/file-systems/fs-0123456789abcdef0
 elasticfilesystem	GET	/2015-02-01/file-systems
 elasticfilesystem	GET	/2015-02-01/resource-tags/fs-0123456789abcdef0
@@ -211,6 +212,7 @@ es	GET	/2021-01-01/opensearch/domain/pv-catalog-prod-1
 es	GET	/2021-01-01/opensearch/domain/search-prod-ncierrct
 es	GET	/2021-01-01/tags/
 es	POST	/2021-01-01/opensearch/domain
+es	POST	/2021-01-01/opensearch/domain/catalog-prod-kfzktzaw/config
 events	POST	/?Op=DeleteRule
 events	POST	/?Op=DescribeRule
 events	POST	/?Op=ListTargetsByRule
@@ -237,9 +239,11 @@ iam	POST	/?Op=ListRoles
 iam	POST	/?Op=SimulatePrincipalPolicy
 kafka	DELETE	/v1/clusters/arn%3Aaws%3Akafka%3Aeu-central-1%3A000000000000%3Acluster%2Fpv-c%2Fuuid-1
 kafka	GET	/api/v2/clusters
+kafka	PATCH	/v1/clusters/arn%3Aaws%3Akafka%3Aeu-central-1%3A000000000000%3Acluster%2Fpv-c%2Fuuid-1/security
 kafka	POST	/api/v2/clusters
 kinesis	POST	/?Op=AddTagsToStream
 kinesis	POST	/?Op=CreateStream
+kinesis	POST	/?Op=DecreaseStreamRetentionPeriod
 kinesis	POST	/?Op=DeleteStream
 kinesis	POST	/?Op=DescribeStreamSummary
 kinesis	POST	/?Op=IncreaseStreamRetentionPeriod

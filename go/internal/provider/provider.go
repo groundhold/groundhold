@@ -2037,8 +2037,10 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 				}
 				return sortedDedup(perms)
 			case "update":
-				return sortedDedup([]string{"kinesis:DescribeStreamSummary",
-					"kinesis:IncreaseStreamRetentionPeriod", "kinesis:StartStreamEncryption"})
+				// D1211: retention.window in place — Increase or Decrease against the current
+				// window, with the ownership pre-read (DescribeStreamSummary + ListTagsForStream).
+				return sortedDedup([]string{"kinesis:DescribeStreamSummary", "kinesis:ListTagsForStream",
+					"kinesis:IncreaseStreamRetentionPeriod", "kinesis:DecreaseStreamRetentionPeriod"})
 			case "delete":
 				return sortedDedup([]string{"kinesis:DeleteStream",
 					"kinesis:DescribeStreamSummary", "kinesis:ListTagsForStream"})
@@ -2054,8 +2056,9 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 					"kafka:DescribeClusterV2", "kafka:TagResource",
 					"ec2:CreateNetworkInterface", "ec2:DescribeSubnets", "ec2:DescribeSecurityGroups"})
 			case "update":
-				return sortedDedup([]string{"kafka:ListClustersV2", "kafka:DescribeClusterV2",
-					"kafka:UpdateClusterConfiguration"})
+				// D1214: encryption.inTransit in place — UpdateSecurity, with the ownership
+				// pre-read (ListClustersV2 returns tags + version) and the applied-state poll.
+				return sortedDedup([]string{"kafka:ListClustersV2", "kafka:UpdateSecurity"})
 			case "delete":
 				return sortedDedup([]string{"kafka:DeleteCluster", "kafka:ListClustersV2",
 					"kafka:DescribeClusterV2"})
@@ -2346,6 +2349,9 @@ func PermissionsFor(providerName, service, operation string, attrs map[string]an
 				return sortedDedup([]string{
 					"Microsoft.Storage/storageAccounts/read",
 					"Microsoft.Storage/storageAccounts/write",
+					// D1218: versioning.enabled is set on the blobServices/default child.
+					"Microsoft.Storage/storageAccounts/blobServices/read",
+					"Microsoft.Storage/storageAccounts/blobServices/write",
 					"Microsoft.Storage/storageAccounts/blobServices/containers/read",
 					"Microsoft.Storage/storageAccounts/blobServices/containers/write",
 					"Microsoft.Storage/storageAccounts/blobServices/containers/immutabilityPolicies/read",

@@ -309,3 +309,88 @@ func TestMetamorphicEventHubsRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+// D1212: updateEventHubs changes retention.window in place — a PUT of the hub with the new
+// messageRetentionInDays, PRESERVING the partition count it read, so the retention policy
+// changes WITHOUT replacing the namespace (which drops its buffered events). Ownership is the
+// namespace's tags; foreign refused.
+func TestUpdateEventHubsRetention(t *testing.T) {
+	type put struct {
+		retention  int
+		partitions int
+	}
+	newSrv := func(capLabel string, curPartitions int, seen *[]put) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			isHub := strings.Contains(r.URL.Path, "/eventhubs/")
+			switch r.Method {
+			case "GET":
+				if isHub {
+					_, _ = w.Write([]byte(`{"properties":{"messageRetentionInDays":1,"partitionCount":` + ehItoa(curPartitions) + `}}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"location":"eastus","sku":{"name":"Premium"},` +
+					`"tags":{"groundhold-capability":"` + capLabel + `","groundhold-environment":"prod"},` +
+					`"properties":{"provisioningState":"Succeeded"}}`))
+			case "PUT":
+				if isHub {
+					body, _ := io.ReadAll(r.Body)
+					var d struct {
+						Properties struct {
+							MessageRetentionInDays int `json:"messageRetentionInDays"`
+							PartitionCount         int `json:"partitionCount"`
+						} `json:"properties"`
+					}
+					_ = json.Unmarshal(body, &d)
+					*seen = append(*seen, put{retention: d.Properties.MessageRetentionInDays, partitions: d.Properties.PartitionCount})
+				}
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded"}}`))
+			default:
+				t.Errorf("unexpected %s", r.Method)
+				w.WriteHeader(404)
+			}
+		}))
+	}
+	pid := eventHubsProviderID(testSub, "rg1", eventHubsNamespaceName("prod", "events", 1), azResourceName("pv-hub", "prod", "events", 1))
+
+	t.Run("change retention (168h -> 7 days), partition count preserved", func(t *testing.T) {
+		var seen []put
+		srv := newSrv("events", 4, &seen)
+		defer srv.Close()
+		d := ehDriver(t, srv)
+		res := d.updateEventHubs("events", "prod", pid,
+			map[string]any{"retention.window": "168h"}, []string{"retention.window"})
+		if res.Status != "succeeded" {
+			t.Fatalf("update: %+v", res)
+		}
+		if len(seen) != 1 || seen[0].retention != 7 || seen[0].partitions != 4 {
+			t.Fatalf("must PUT messageRetentionInDays=7 preserving partitionCount=4, got %+v", seen)
+		}
+	})
+
+	t.Run("foreign namespace refused, no PUT", func(t *testing.T) {
+		var seen []put
+		srv := newSrv("someone-else", 4, &seen)
+		defer srv.Close()
+		d := ehDriver(t, srv)
+		res := d.updateEventHubs("events", "prod", pid,
+			map[string]any{"retention.window": "168h"}, []string{"retention.window"})
+		if res.Status != "failed" || !strings.Contains(res.Reason, "not ours") {
+			t.Fatalf("a foreign namespace must be refused, got %+v", res)
+		}
+		if len(seen) != 0 {
+			t.Fatalf("a refused update must issue NO PUT, got %+v", seen)
+		}
+	})
+}
+
+func TestClassifyEventHubsChange(t *testing.T) {
+	if got, _ := classifyEventHubsChange("retention.window"); got != "mutable" {
+		t.Fatalf("retention.window must be mutable (in-place), got %q", got)
+	}
+	for _, p := range []string{"location.region", "availability.class", "encryption.customerManagedKeys"} {
+		if got, _ := classifyEventHubsChange(p); got != "immutable" {
+			t.Fatalf("%s must be immutable (replacement), got %q", p, got)
+		}
+	}
+}

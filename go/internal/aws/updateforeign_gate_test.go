@@ -44,6 +44,10 @@ var updateForeignGated = map[string]string{
 	"dynamodb":             "TestRefusesForeignUpdateDynamoDB",           // D1004
 	"eventbridgescheduler": "TestRefusesForeignUpdateEBS",                // D1004
 	"redshiftserverless":   "TestRefusesForeignUpdateRedshiftServerless", // D1208: publicExposure remediation (AWS twin)
+	"kinesis":              "TestRefusesForeignUpdateKinesis",            // D1211: retention.window in place
+	"opensearch":           "TestRefusesForeignUpdateOpenSearch",         // D1213: EnforceHTTPS in place
+	"elasticache":          "TestRefusesForeignUpdateElastiCache",        // D1220: TLS migration in place
+	"msk":                  "TestRefusesForeignUpdateMSK",                // D1214: clientBroker TLS in place
 }
 
 // updateForeignNotApplicable: reviewed, with evidence a test re-derives (D404).

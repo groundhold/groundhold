@@ -71,17 +71,19 @@ func (d *Driver) mskDo(method, region, path string, body []byte) (int, []byte, e
 // our name (so a live cluster read as absent) and State/tags/encryption read blank,
 // the same golden-hidden defect as apigateway (D878), here in the read direction.
 type mskCluster struct {
-	ClusterArn  string            `json:"clusterArn"`
-	ClusterName string            `json:"clusterName"`
-	State       string            `json:"state"`
-	Tags        map[string]string `json:"tags"`
-	Provisioned struct {
+	ClusterArn     string            `json:"clusterArn"`
+	ClusterName    string            `json:"clusterName"`
+	State          string            `json:"state"`
+	CurrentVersion string            `json:"currentVersion"` // UpdateSecurity's optimistic-concurrency token
+	Tags           map[string]string `json:"tags"`
+	Provisioned    struct {
 		CurrentBrokerSoftwareInfo struct {
 			KafkaVersion string `json:"kafkaVersion"`
 		} `json:"currentBrokerSoftwareInfo"`
 		EncryptionInfo struct {
 			EncryptionInTransit struct {
 				ClientBroker string `json:"clientBroker"`
+				InCluster    bool   `json:"inCluster"`
 			} `json:"encryptionInTransit"`
 			EncryptionAtRest struct {
 				DataVolumeKMSKeyId string `json:"dataVolumeKMSKeyId"`
@@ -120,12 +122,15 @@ func (d *Driver) getMSKByName(region, name string) (mskCluster, bool, error) {
 	return mskCluster{}, false, nil
 }
 
-// mskAdoptControls: MSK sets the customer key INLINE in CreateClusterV2, so on a
-// 409-adopt it never applied to the pre-existing cluster (D1062). At-rest encryption
-// with a customer key is fixed at create, so a miss FAILS. In-transit encryption is
-// always TLS-enforced on MSK (the audit's moot case), so it is not an adopt control.
+// mskAdoptControls: MSK sets these INLINE in CreateClusterV2, so on a 409-adopt they never
+// applied to the pre-existing cluster (D1062). At-rest encryption with a customer key is fixed
+// at create, so a miss FAILS. In-transit was ASSUMED always-TLS and left off — but the create
+// only sets clientBroker=TLS on OUR clusters; an ADOPTED cluster can carry TLS_PLAINTEXT or
+// PLAINTEXT, which observe reads as inTransit=false. D1214: it is an UpdateSecurity field, so it
+// is UpdateWired — an adopted plaintext-capable cluster is bound-and-reconciled, not refused.
 var mskAdoptControls = []adoptcheck.Control{
 	{Path: "encryption.customerManagedKeys", Direction: adoptcheck.SecureTrue, ImmutableAtCreate: true},
+	{Path: "encryption.inTransit", Direction: adoptcheck.SecureTrue, UpdateWired: true},
 }
 
 func (d *Driver) createMSK(region, account, environment, capability string,
@@ -337,4 +342,116 @@ func (d *Driver) deleteMSK(capability, environment, providerID string) provider.
 		}
 		time.Sleep(d.PollInterval)
 	}
+}
+
+// classifyMSKChange decides whether a drift on an MSK cluster is reconciled in place or
+// replaced. Before D1214 msk had NO ClassifyChange, so every drift fell to the AWS default of
+// "immutable" = replacement — and replacing a Kafka cluster destroys its topics and data. That
+// verdict was being applied to encryption.inTransit (clientBroker), which UpdateSecurity changes
+// online: a cluster serving plaintext that a contract wants TLS-only was being "fixed" by
+// destroying it. D1214: encryption.inTransit is `mutable`; everything else stays a replacement.
+func classifyMSKChange(path string) (string, string) {
+	switch path {
+	case "encryption.inTransit":
+		return "mutable", "encryption.inTransit is changed in place: clientBroker via " +
+			"UpdateSecurity, so a plaintext-capable cluster is made TLS-only without replacing it " +
+			"(and destroying its topics)"
+	default:
+		return "immutable", fmt.Sprintf(
+			"MSK has no in-place update path for %q — reconciling a drift is a replacement", path)
+	}
+}
+
+// updateMSK enforces encryption.inTransit in place (D1214): UpdateSecurity sets the cluster's
+// clientBroker encryption, then POLLS to the APPLIED state before reporting succeeded. The poll
+// is the honesty (D953): UpdateSecurity is async — the 2xx only ACCEPTS the change (a cluster
+// operation) and the cluster enters UPDATING while it is still serving on the OLD setting, so
+// reporting succeeded on accept would call a plaintext cluster TLS-only while it still speaks
+// plaintext. UpdateSecurity needs the CURRENT version (optimistic concurrency); enforcing TLS
+// also holds inCluster on (never weakens broker-to-broker). Ownership re-checked by tags.
+func (d *Driver) updateMSK(capability, environment, providerID string,
+	attrs map[string]any, changes []string) provider.CreateResult {
+	region, account, cluster, err := splitMSKProviderID(providerID)
+	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if err := d.sameAccount(account); err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	c, found, rerr := d.getMSKByName(region, cluster)
+	if rerr != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update read gave no answer — reconcile: " + rerr.Error()}
+	}
+	if !found {
+		return provider.CreateResult{Status: "failed", Reason: "cluster no longer exists — cannot update"}
+	}
+	if !groundholdTagsMatch(c.Tags, capability, environment) {
+		return provider.CreateResult{Status: "failed",
+			Reason: "cluster tags do not match — refusing to update a resource that is not ours"}
+	}
+
+	for _, path := range changes {
+		switch path {
+		case "encryption.inTransit":
+			enforce, ok := attrs["encryption.inTransit"].(bool)
+			if !ok {
+				return provider.CreateResult{Status: "failed", Reason: "encryption.inTransit must be a bool"}
+			}
+			clientBroker := "PLAINTEXT"
+			if enforce {
+				clientBroker = "TLS"
+			}
+			// Enforcing TLS never weakens broker-to-broker (inCluster); otherwise preserve it.
+			inCluster := c.Provisioned.EncryptionInfo.EncryptionInTransit.InCluster
+			if enforce {
+				inCluster = true
+			}
+			if c.CurrentVersion == "" {
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: "cluster current version not read — reconcile (UpdateSecurity needs it)"}
+			}
+			body, _ := json.Marshal(map[string]any{
+				"currentVersion": c.CurrentVersion,
+				"encryptionInfo": map[string]any{
+					"encryptionInTransit": map[string]any{"clientBroker": clientBroker, "inCluster": inCluster},
+				}})
+			st, resp, cerr := d.mskDo("PATCH", region, "/v1/clusters/"+rfc3986(c.ClusterArn)+"/security", body)
+			switch {
+			case cerr != nil:
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: fmt.Sprintf("UpdateSecurity outcome unknown (may have landed): %v", cerr)}
+			case st == http.StatusOK || st == http.StatusAccepted:
+				// accepted — poll to applied below
+			case st >= 500:
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: fmt.Sprintf("UpdateSecurity HTTP %d (server error — may have landed): %s", st, mutDetail(resp))}
+			default:
+				if r := provider.MutationResult(st, mskErr(resp), nil, providerID, "UpdateSecurity"); r != nil {
+					return *r
+				}
+				return provider.CreateResult{Status: "failed",
+					Reason: fmt.Sprintf("UpdateSecurity HTTP %d: %s", st, mskErr(resp))}
+			}
+			// D953: poll to the APPLIED clientBroker — a security-closing change reported
+			// succeeded on accept would be a false green while the cluster still serves plaintext.
+			deadline := d.Now().Add(d.PollTimeout)
+			for {
+				cur, ok, drerr := d.getMSKByName(region, cluster)
+				if drerr == nil && ok && cur.State == "ACTIVE" &&
+					cur.Provisioned.EncryptionInfo.EncryptionInTransit.ClientBroker == clientBroker {
+					break
+				}
+				if d.Now().After(deadline) {
+					return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+						Reason: "cluster still applying the security update at poll timeout — reconcile via ListClustersV2"}
+				}
+				time.Sleep(d.PollInterval)
+			}
+		default:
+			return provider.CreateResult{Status: "failed",
+				Reason: "no msk in-place mapping for " + path}
+		}
+	}
+	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
 }

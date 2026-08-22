@@ -82,6 +82,7 @@ type ehNamespaceDoc struct {
 type ehHubDoc struct {
 	Properties struct {
 		MessageRetentionInDays int `json:"messageRetentionInDays"`
+		PartitionCount         int `json:"partitionCount"`
 	} `json:"properties"`
 }
 
@@ -170,4 +171,105 @@ func (d *Driver) deleteEventHubs(capability, environment, providerID string) pro
 	// data-bearing namespace still live. The helper polls to a confirmed 404, unknown
 	// on timeout.
 	return *d.deleteAndConfirm(nsURL, providerID, "event hubs namespace")
+}
+
+// classifyEventHubsChange decides whether a drift on an Event Hubs composite is reconciled in
+// place or replaced. Before D1212 eventhubs had NO ClassifyChange, so every drift fell to the
+// driver default of "immutable" = replacement. That verdict was being applied to
+// retention.window — and replacing the namespace drops every event buffered in it and breaks
+// every producer/consumer, to change a number Azure changes online. D1212: messageRetentionInDays
+// is writable on the hub (a PUT), so retention.window is `mutable`; everything else stays
+// "immutable" (honest replacement). The Azure counterpart of the Kinesis retention fix (D1211).
+func classifyEventHubsChange(path string) (string, string) {
+	switch path {
+	case "retention.window":
+		return "mutable", "retention.window is changed in place: messageRetentionInDays on the " +
+			"hub (a PUT that preserves the partition count), so the retention policy changes without " +
+			"replacing the namespace (which drops its buffered events)"
+	default:
+		return "immutable", fmt.Sprintf(
+			"Event Hubs has no in-place update path for %q — reconciling a drift is a replacement", path)
+	}
+}
+
+// updateEventHubs changes retention.window in place (D1212): a PUT of the hub with the new
+// messageRetentionInDays, PRESERVING the partition count it read (partitionCount is writable in
+// the schema but increase-only in practice — echoing the current value keeps the PUT from
+// disturbing it). Ownership is the NAMESPACE's tags (the hub carries none), re-checked before any
+// write. Four-valued via putSetting: an ambiguous PUT keeps the deterministic providerID.
+func (d *Driver) updateEventHubs(capability, environment, providerID string,
+	attrs map[string]any, changes []string) provider.CreateResult {
+	sub, rg, ns, hub, err := splitEventHubsProviderID(providerID)
+	if err != nil {
+		return provider.CreateResult{Status: "failed", Reason: err.Error()}
+	}
+	if sub != d.Subscription && d.Subscription != "" {
+		return provider.CreateResult{Status: "failed",
+			Reason: fmt.Sprintf("providerId subscription %q is not the driver's", sub)}
+	}
+	nsURL, _ := d.armURL(rg, d.ehNamespacePath(ns), eventHubsAPIVersion)
+	st, resp, e := d.doARM("GET", nsURL, nil)
+	if e != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update read gave no answer — reconcile: " + azReadWhy(st, resp, e)}
+	}
+	if st == http.StatusNotFound {
+		return provider.CreateResult{Status: "failed", Reason: "namespace no longer exists — cannot update"}
+	}
+	if st != http.StatusOK {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: fmt.Sprintf("pre-update read HTTP %d — reconcile", st)}
+	}
+	var nsDoc ehNamespaceDoc
+	if json.Unmarshal(resp, &nsDoc) != nil {
+		return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+			Reason: "pre-update read answered HTTP 200 with an unparseable body — reconcile"}
+	}
+	if nsDoc.Tags["groundhold-capability"] != sanitizeAzTag(capability) ||
+		nsDoc.Tags["groundhold-environment"] != sanitizeAzTag(environment) {
+		return provider.CreateResult{Status: "failed",
+			Reason: "namespace tags do not match — refusing to patch a resource that is not ours"}
+	}
+
+	hubURL, _ := d.armURL(rg, d.ehNamespacePath(ns)+"/eventhubs/"+hub, eventHubsAPIVersion)
+	for _, path := range changes {
+		switch path {
+		case "retention.window":
+			days, derr := daysFromHours(attrs["retention.window"])
+			if derr != nil {
+				return provider.CreateResult{Status: "failed", Reason: "retention.window: " + derr.Error()}
+			}
+			// Read the hub to preserve its partition count (create-fixed; a PUT that omitted
+			// it could reset it). A hub that 404s is a clean failure, not a silent create.
+			hst, hresp, he := d.doARM("GET", hubURL, nil)
+			if he != nil {
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: "hub pre-update read gave no answer — reconcile: " + azReadWhy(hst, hresp, he)}
+			}
+			if hst == http.StatusNotFound {
+				return provider.CreateResult{Status: "failed", Reason: "event hub no longer exists — cannot update"}
+			}
+			if hst != http.StatusOK {
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: fmt.Sprintf("hub pre-update read HTTP %d — reconcile", hst)}
+			}
+			var hd ehHubDoc
+			if json.Unmarshal(hresp, &hd) != nil {
+				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+					Reason: "hub pre-update read answered HTTP 200 with an unparseable body — reconcile"}
+			}
+			props := map[string]any{"messageRetentionInDays": days}
+			if hd.Properties.PartitionCount > 0 {
+				props["partitionCount"] = hd.Properties.PartitionCount
+			}
+			body, _ := json.Marshal(map[string]any{"properties": props})
+			if r := d.putSetting(hubURL, body, providerID, "event hub messageRetentionInDays"); r != nil {
+				return *r
+			}
+		default:
+			return provider.CreateResult{Status: "failed",
+				Reason: "no azure eventhubs in-place mapping for " + path}
+		}
+	}
+	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
 }
