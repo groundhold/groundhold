@@ -257,17 +257,12 @@ func (d *Driver) sweepNamespaces() ([]provider.Discovered, []string, error) {
 	var diags []string
 	for _, it := range doc.Items {
 		obs := []provider.Observation{{Path: "service.managed", Value: true, Derivation: "measured"}}
-		if lvl := it.Metadata.Labels[podSecurityEnforceLabel]; lvl != "" && validPodSecurity[lvl] {
-			// D1060 parity: the enforce LABEL is read, but the standard is only ENFORCED if
-			// the API server runs the PodSecurity admission plugin, which a static list cannot
-			// witness. The verify lens emits this config-intent for exactly this reason (a
-			// `measured restricted` over a cluster with admission OFF reads securely-restricted
-			// while privileged pods are admitted — the dangerous direction). Discovery must not
-			// claim more confidence than verify: config-intent, not measured.
-			obs = append(obs, provider.Observation{Path: "security.podSecurity", Value: lvl, Derivation: "config-intent"})
-			diags = append(diags, "security.podSecurity for "+it.Metadata.Name+" is CONFIG-INTENT: read from the "+
-				"enforce label; enforcement depends on the PodSecurity admission plugin being enabled — a static read cannot witness it")
-		}
+		// D1185: the SAME reverse-map the verify lens uses, so discovery cannot drift from
+		// it (it did — the sweep's own copy emitted `measured` where the lens says
+		// config-intent). One source for the derivation, the caveat, and the enum check.
+		psObs, psDiags := namespacePodSecurityObs(it.Metadata.Name, it.Metadata.Labels[podSecurityEnforceLabel])
+		obs = append(obs, psObs...)
+		diags = append(diags, psDiags...)
 		out = append(out, provider.Discovered{
 			ProviderID:   nsProviderID(it.Metadata.Name),
 			ResourceType: "capability.cluster.namespace",

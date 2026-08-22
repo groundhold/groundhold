@@ -231,6 +231,17 @@ func TestSQSPublicPolicyIsAnonymous(t *testing.T) {
 	if pub, _ := sqsPolicyPublic(owner); pub {
 		t.Fatal("an owner-only policy must not read as public")
 	}
+	// D1189: a wildcard principal with a non-who-scoping condition (date) is PUBLIC —
+	// the old "any condition => not public" rule false-greened it.
+	nonScoped := `{"Statement":[{"Effect":"Allow","Principal":"*","Action":"sqs:SendMessage","Condition":{"DateGreaterThan":{"aws:CurrentTime":"2020-01-01T00:00:00Z"}}}]}`
+	if pub, ok := sqsPolicyPublic(nonScoped); !ok || !pub {
+		t.Fatalf("a wildcard principal with a non-scoping condition must read PUBLIC, got public=%v parseable=%v", pub, ok)
+	}
+	// a who-scoping condition (aws:SourceAccount) keeps it non-public
+	scoped := `{"Statement":[{"Effect":"Allow","Principal":"*","Action":"sqs:SendMessage","Condition":{"StringEquals":{"aws:SourceAccount":"000000000000"}}}]}`
+	if pub, _ := sqsPolicyPublic(scoped); pub {
+		t.Error("aws:SourceAccount scopes who may act — must not read public")
+	}
 }
 
 func TestSplitSQSProviderID(t *testing.T) {

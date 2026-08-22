@@ -432,6 +432,29 @@ var securityNamespaces = []string{
 	// controls whose names dodged every keyword, so the regex was widened to reach them.
 	"key.exportable",      // identity.serviceaccount: a DOWNLOADABLE long-lived private key
 	"audience.restricted", // identity.oauth-client: tokens carry an audience restriction
+	// D1190: the keyword lint floored SOME members of a security block and not their
+	// siblings, because it matches names and not concepts. Both cases are inside one
+	// capability, which is what makes them worth listing rather than just adding:
+	//
+	//   authorization.grant   `access.privileged` was floored (the regex has "privileg")
+	//                         while WHO the grant is for and WHICH role it carries were
+	//                         not. So an audit witnessed "this grant is not privileged"
+	//                         and took "the principal is a named user, not allUsers" on
+	//                         the candidate's own word — the D1179 public-access shape,
+	//                         one attribute over.
+	//   identity.oauth-client `grants.implicit` was floored (the regex has "implicit
+	//                         grant") and its two siblings in the same block were not.
+	//
+	// Listed as exact paths rather than a `grant.` prefix on purpose: a prefix would
+	// floor a future sibling by default, which is the safer direction, but it would also
+	// decide for whoever adds it. These five are each a posture in the floor's own terms
+	// — one value is secure, the other dangerous — and a sixth deserves the same reading
+	// rather than inheriting one.
+	"grant.principal",          // authorization.grant: allUsers vs a named principal
+	"grant.role",               // authorization.grant: owner vs viewer (least privilege)
+	"access.scope",             // authorization.grant: how wide the grant reaches
+	"grants.clientCredentials", // identity.oauth-client: machine-to-machine grant enabled
+	"grants.authorizationCode", // identity.oauth-client: the code grant enabled
 }
 
 // isSecurityPath reports whether a constraint path names a security control that must be

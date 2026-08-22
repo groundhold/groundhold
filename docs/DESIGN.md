@@ -39216,3 +39216,178 @@ the check), while an HTTP:80 that forwards — the actual cleartext exposure —
 false. This is the same ALL-not-ANY shape as D1182's authorized-CIDR set: a security
 property over a SET holds only when every member holds, and reading the optimistic member
 is the hole.
+
+## D1187 — disclosing the residual an AOSS public read cannot see, in proportion to it
+
+The OpenSearch Serverless `network.publicExposure` reads the network policy at the name
+groundhold OWNS (`aossNetPolicyName`). AOSS, though, applies EVERY network policy whose
+resource pattern matches a collection, so an adopted collection made public by a
+differently-named policy would read `false` — a re-derive-by-name blind spot, the class
+that keeps recurring here.
+
+What kept this LOW rather than a headline: the exploitable path is narrow. For a
+groundhold-created collection the owned policy is the sole authority, so the read is exact.
+For an adopted collection with no policy at the owned name, `GetSecurityPolicy` 404s and
+the read WITHHOLDS — the security floor then blocks a hard `equals false`, not passes it.
+The false-green needs a collection that carries a policy at groundhold's exact derived
+name that is NOT public, alongside a separate public one — a naming coincidence a real
+adoption does not produce.
+
+The full fix — `ListSecurityPolicies`, `GetSecurityPolicy` per policy, and resource-pattern
+matching each against the collection — is a new API call, two gates, and an N+1 sweep, for
+a residual this rare. The proportion this record tries to keep says: disclose, don't
+over-build. So a `false` verdict now carries a diagnostic naming exactly what it did not
+read (the non-owned policies) and the outcome probe that closes it, and the vocab mapping
+records the owned-name scope. The honesty is in saying what the read cannot see, sized to
+how often it matters — the full enumeration is the door left open, not the thing built
+today.
+
+## D1188 — the forcing function for D1185 is one source, not a gate
+
+D1185 fixed the discovery sweep's podSecurity derivation to match the verify lens, but
+left it a SECOND copy of the reverse-map — corrected to agree, free to drift again. The
+recurring instinct after two same-shaped bugs is "build a lint." So the question was asked
+properly: is a discover-vs-verify derivation-parity gate buildable without being vacuous?
+
+The audit said no. Every AWS, Azure, and GCP discovery path delegates to its `observe*`
+function — 0 independent observation literals — so those paths CANNOT diverge from verify;
+they are the same code. The load-balancer discovery calls the very `reverseMapLoadBalancer`
+verify calls. Only the k8s driver builds its own observations in the sweep (5 literals),
+and of those the role and grant paths already call the SAME shared reverse-maps the lenses
+call (`flattenRules`, `reverseGrant`) — structurally consistent. Namespace was the lone
+exception, and D1185 was exactly the drift a separate copy invites. A gate over this would
+either pass trivially (everything already shares) or need an allowlist for every legitimate
+cross-driver derivation difference (`encryption.inTransit` is measured on a load balancer,
+platform-invariant on a serverless collection — both honest) — the vacuous-gate shape this
+record refuses to build.
+
+So the forcing function is the one the role and grant paths already use: a single reverse-
+map both callers share. `namespacePodSecurityObs` now holds the derivation, the caveat, and
+the enum check once; the lens and the sweep both call it. The two cannot disagree because
+there is no second copy to disagree. That is the general lesson worth more than a gate: when
+two code paths must agree on how a fact is known, the robust fix is to give them one source,
+not a test that notices when the two copies drift apart.
+
+## D1189 — "any condition" read a public topic as private
+
+SNS and SQS have no `GetBucketPolicyStatus` twin — no API that returns AWS's own verdict
+on whether a resource policy is public — so each driver hand-rolls it from the policy
+JSON. Both decided a statement was public only if it had a wildcard `Principal` AND NO
+condition, skipping any conditioned statement as "not an unconditional public path." The
+comment called that "the SAFE direction: it under-claims public, never over-claims" — and
+had the safety backwards. `network.publicExposure` is asserted `equals false`, so
+UNDER-claiming public is the dangerous direction: a public topic read as private passes
+the constraint. A wildcard-principal Allow whose condition does not restrict WHO —
+`DateGreaterThan`, `aws:SecureTransport`, an unknown key — is public per AWS's own
+meaning-of-public, and read as private here: a false-green over an anonymously usable
+topic or queue.
+
+The fix approximates the meaning-of-public the way AWS documents it: a conditioned
+wildcard-principal statement is public UNLESS the condition references a who-scoping key
+(`aws:SourceOwner`, `aws:SourceAccount`, `aws:SourceArn`, `aws:SourceVpc`, `aws:SourceVpce`,
+`aws:PrincipalOrgID`, …). Only those restrict the anonymous principal to a specific
+account/org/source; anything else leaves it public. This keeps the legitimate,
+common pattern — `Principal:"*"` scoped by `aws:SourceOwner` to the account — reading
+private (so it does not false-RED and train users to ignore the check), while the
+non-scoping conditions flip to public. A wildcard VALUE on a scoping key
+(`aws:SourceVpc: vpc-*`, which AWS still counts public) is the residual left to the
+anonymous-access probe, disclosed in the vocab mapping.
+
+The shape is the mirror of D1180: there a policy read UNDER-detected a public grant by
+matching the action too narrowly; here it under-detects by treating every condition as a
+restriction. Both are the same lesson — approximating a provider's public-access verdict
+must err toward reporting public, because the constraint the value feeds asks for its
+absence.
+
+## D1190 — the floor covered part of a security block and not its siblings
+
+`securityNamespaces` decides which constraint paths must be WITNESSED rather than
+satisfied by the candidate's own declared word. Two capabilities were floored in part:
+
+	capability.authorization.grant     `access.privileged`  FLOORED — the lint's regex
+	                                                        contains "privileg"
+	                                   `grant.principal`    not floored
+	                                   `grant.role`         not floored
+	                                   `access.scope`       not floored
+
+	capability.identity.oauth-client   `grants.implicit`    FLOORED — the regex contains
+	                                                        "implicit grant"
+	                                   `grants.clientCredentials`  not floored
+	                                   `grants.authorizationCode`  not floored
+
+So an audit witnessed *this grant is not privileged* and accepted *the principal is a
+named user, not allUsers* on the candidate's word. That is the D1179 public-access shape
+one attribute over: a grant to `allUsers` is public access, and `owner` versus `viewer`
+is the least-privilege crown. The consequence is stated at audit.go's own comment — an
+unfloored path keeps the static bar, where declared intent SATISFIES a hard constraint,
+"certifying a control the resource may lack".
+
+Neither omission was ever reviewed. The lint's regex matches none of the five names, and
+its reviewed-non-security waiver list holds exactly one entry for
+`authorization.grant` — `cost.monthly`. They were not judged and set aside; they were
+never seen.
+
+The five are floored, and the behavioural proof is a table with a CONTROL rather than a
+list of new assertions: `access.privileged` sits in it because it was floored BEFORE
+this slice. Unfloor the new five and three subtests fail while the control keeps
+passing — which is what distinguishes "the fixture proves the floor" from "the fixture
+is broken". Two of the five (the OAuth grant types) have no observer at all, so a hard
+constraint on them now BLOCKS rather than passing on intent; that is the fail-closed
+answer and it follows the precedent already in the list, since `grants.implicit` is
+equally unobserved and was floored anyway.
+
+**This is the third time keyword matching missed a control** — D1075 found a dozen the
+hand-enumeration missed, D1076 widened the regex after two dodged it, and this is a
+partial-block miss inside capabilities the lint had already touched. The regex is not
+widened a fourth time. A mechanism that needs manual widening every time it is tested is
+answering a different question than the one being asked: it asks whether a NAME looks
+dangerous, and the question is whether an ATTRIBUTE is a posture. That is the argument
+D1181 records for exhaustive classification, and this entry is the evidence for it —
+which is worth more than another regex clause, because it turns a proposal into a
+measurement someone can weigh.
+
+## D1191 — a terminal LB failure reported clean, and abandoned the target group it left
+
+The false-green sweep moved to the WRITE side: an outcome reported cleaner than it was.
+The ELB composite creates a target group (step 1), then the load balancer (step 2), then
+the listener (step 3). `createListener` states the discipline plainly — once the load
+balancer is up, EVERY failure (transport, 5xx, or a 4xx) is `unknown` WITH the pid,
+"never a bare failed that hides the standing [resource]." But `createLoadBalancer`'s own
+terminal branch, one step earlier, returned a bare `failed` on a 4xx — after the target
+group had already landed under our deterministic name.
+
+In the four-valued discipline that is diverge-toward-good-news on the write side. The
+orchestrator clears the pending intent on `failed` (apply.go, D180) and keeps it only for
+`unknown`, recording the pid for reconcile when the outcome is non-retryable
+(apply.go:1170). So a bare `failed` told the operator "clean failure, nothing landed"
+while a billable target group sat orphaned under our name — and it made the delete path's
+own documented promise ("the cost is a leaked target group in the rare LB-gone partial,
+reconciled manually") unreachable, because nothing pointed at the leak to reconcile.
+
+The fix carries the pid as `unknown`, with a reason that names the orphaned target group,
+matching the discipline createListener already spelled out and the createTargetGroup
+comment already assumed ("unknown WITH the pid so a reconcile can clean the orphaned
+target group"). The lesson is the observe sweep's, moved to apply: a partial composite is
+`unknown` with its handle, never a `failed` that reads clean — the safe direction on a
+write is the one that keeps the receipt pointing at what may have landed.
+## D1192 — a vocabulary named a service by AWS's shorthand, not by the token the driver serves
+
+The vocab-token ratchet went from 11 to 12, and the count may only fall.
+`capability.search.index` had gained a mapping keyed `aws.aoss` — the AWS shorthand for
+OpenSearch Serverless — while the driver's own `ServiceCapabilities()` serves that
+capability under `opensearch` and `opensearch-serverless`. So the mapping documented a
+provider token nothing answers to.
+
+The fix is a rename, and the reason it is a rename rather than a judgement call is worth
+separating from the other red the branch carried today. Earlier, three provider FIELD
+names were unconfirmed against AWS's and Google's published models, and those were left
+alone: confirming a field name is a claim about someone else's API, and it belongs to
+whoever read that API. A service TOKEN is not that. It is a name this repository chose
+for its own driver, so the authority is inside the tree and can be asked directly —
+which is D317's rule exactly. Asked, it answered `opensearch-serverless`, and the
+vocabulary now says so in both copies (`spec/vocab` and the embedded mirror, which a
+parity gate holds equal).
+
+What the ratchet did here is what a ratchet is for. Nobody would have noticed a
+shorthand in a documentation line; the count noticed, because the only thing it permits
+is going down.

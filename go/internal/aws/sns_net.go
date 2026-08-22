@@ -337,10 +337,9 @@ func (d *Driver) observeSNS(capability, providerID string) ([]provider.Observati
 }
 
 // snsPolicyPublic reports whether a topic policy grants anonymous publish. It is
-// public iff any Allow statement has a wildcard Principal and NO condition (a
-// conditioned wildcard is not an unconditional public path). Returns
-// parseable=false on a malformed policy so the caller surfaces a diagnostic
-// rather than a default-safe verdict.
+// public iff any Allow statement has a wildcard Principal AND no condition that
+// RESTRICTS WHO may act (D1189). Returns parseable=false on a malformed policy so the
+// caller surfaces a diagnostic rather than a default-safe verdict.
 func snsPolicyPublic(policy string) (public, parseable bool) {
 	var p struct {
 		Statement []struct {
@@ -353,17 +352,54 @@ func snsPolicyPublic(policy string) (public, parseable bool) {
 		return false, false
 	}
 	for _, s := range p.Statement {
-		if s.Effect != "Allow" {
+		if s.Effect != "Allow" || !principalWildcard(s.Principal) {
 			continue
 		}
-		if cond := strings.TrimSpace(string(s.Condition)); cond != "" && cond != "null" && cond != "{}" {
-			continue // a conditioned wildcard is not an unconditional public path
+		if conditionScopesPrincipal(s.Condition) {
+			continue // Principal:* but scoped to a specific account/org/source — not anonymous public
 		}
-		if principalWildcard(s.Principal) {
-			return true, true
-		}
+		return true, true
 	}
 	return false, true
+}
+
+// scopingConditionKeys are the IAM condition keys that restrict WHO may act — the ones
+// AWS's "meaning of public" treats as making an otherwise-anonymous (Principal:"*")
+// statement non-public when pinned to a fixed value.
+var scopingConditionKeys = map[string]bool{
+	"aws:sourceowner": true, "aws:sourceaccount": true, "aws:sourcearn": true,
+	"aws:sourcevpc": true, "aws:sourcevpce": true, "aws:principalorgid": true,
+	"aws:principalorgpaths": true, "aws:principalaccount": true, "aws:principalarn": true,
+	"aws:userid": true, "aws:username": true,
+}
+
+// conditionScopesPrincipal reports whether a policy Condition restricts WHO may act to a
+// specific account, org, or source. The old code treated ANY condition as scoping and
+// skipped the statement — so a wildcard-principal Allow carrying a condition that does
+// NOT restrict who (a date, aws:SecureTransport, an unknown key) read as NOT public,
+// though AWS considers it public: a false-green over an anonymously-usable topic/queue,
+// the dangerous direction on the attribute that exists to catch it (D1189). Now only a
+// condition referencing a who-scoping key counts as a restriction; anything else leaves
+// the wildcard-principal statement public. A wildcard VALUE on a scoping key
+// (aws:SourceVpc: vpc-*) is public per AWS but remains an unhandled residual — the
+// endpoint probe is the outcome witness. An unparseable condition is not assumed to
+// restrict (stays public — the safe direction here).
+func conditionScopesPrincipal(raw json.RawMessage) bool {
+	if cond := strings.TrimSpace(string(raw)); cond == "" || cond == "null" || cond == "{}" {
+		return false // no condition at all — nothing restricts who
+	}
+	var byOp map[string]map[string]json.RawMessage
+	if json.Unmarshal(raw, &byOp) != nil {
+		return false // unparseable — do not assume it restricts
+	}
+	for _, keys := range byOp {
+		for k := range keys {
+			if scopingConditionKeys[strings.ToLower(k)] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // principalWildcard matches "*" and {"AWS":"*"} / {"AWS":["*"]} — the forms an

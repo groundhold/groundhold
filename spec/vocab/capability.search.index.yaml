@@ -42,6 +42,12 @@ attributes:
     description: Whether the search endpoint is reachable over the public internet
     mappings:
       aws.opensearch: no VPCOptions (public endpoint) vs VPC placement (private)
+      aws.opensearch-serverless: >
+        AllowFromPublic on the network security policy. Read at the OWNED policy name —
+        exact for a groundhold-created collection, whose owned policy is the sole
+        authority; for an adopted collection AOSS honors every matching policy, so a
+        false verdict carries a diagnostic that a differently-named policy could still
+        open it (the endpoint probe is the outcome witness)
       azure.aisearch: publicNetworkAccess = enabled | disabled
     note: >
       static verification proves configuration intent; an anonymous-reach probe

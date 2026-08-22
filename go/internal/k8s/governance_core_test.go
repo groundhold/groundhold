@@ -101,6 +101,29 @@ func TestEnumerateNamespaces(t *testing.T) {
 	}
 }
 
+// namespacePodSecurityObs is the SINGLE reverse-map both the verify lens and the
+// discovery sweep call (D1185) — so the derivation cannot drift between paths. It is
+// always config-intent (enforcement is unwitnessed by a static read), an unset label is
+// a diag not an observation, and an unknown level is not represented.
+func TestNamespacePodSecurityObsSingleSource(t *testing.T) {
+	obs, diags := namespacePodSecurityObs("payments", "restricted")
+	if len(obs) != 1 || obs[0].Path != "security.podSecurity" || obs[0].Value != "restricted" {
+		t.Fatalf("expected one security.podSecurity=restricted observation, got %+v", obs)
+	}
+	if obs[0].Derivation != "config-intent" {
+		t.Fatalf("derivation = %q, want config-intent (a measured label false-greens an admission-off cluster)", obs[0].Derivation)
+	}
+	if len(diags) != 1 || !strings.Contains(diags[0], "payments") || !strings.Contains(diags[0], "CONFIG-INTENT") {
+		t.Fatalf("expected a named config-intent caveat, got %v", diags)
+	}
+	if o, _ := namespacePodSecurityObs("", ""); o != nil {
+		t.Fatalf("an unset enforce label must emit no observation, got %+v", o)
+	}
+	if o, _ := namespacePodSecurityObs("", "wideopen"); o != nil {
+		t.Fatalf("an unknown level must not be represented, got %+v", o)
+	}
+}
+
 // D1060 parity in the DISCOVERY sweep: reading the enforce label proves INTENT, not
 // enforcement (the PodSecurity admission plugin may be off), so the discovered
 // observation must be config-intent — the same verdict the verify lens reaches. A

@@ -110,10 +110,34 @@ func TestSNSPolicyPrivateNotPublic(t *testing.T) {
 	if !ok || pub {
 		t.Fatalf("an owner-only policy must not be public, got public=%v parseable=%v", pub, ok)
 	}
-	// a conditioned wildcard is NOT an unconditional public path
+	// a wildcard principal SCOPED to a specific account (aws:SourceOwner) is not public
 	cond := `{"Statement":[{"Effect":"Allow","Principal":"*","Action":"sns:Publish","Condition":{"StringEquals":{"aws:SourceOwner":"000000000000"}}}]}`
 	if pub, _ := snsPolicyPublic(cond); pub {
-		t.Fatal("a conditioned wildcard must not read as public")
+		t.Fatal("a wildcard principal scoped to a fixed account owner must not read as public")
+	}
+}
+
+// D1189 mutant-defect: a wildcard-principal Allow whose condition does NOT restrict WHO
+// (a date, aws:SecureTransport, an unknown key) is PUBLIC per AWS — the old "any
+// condition => not public" rule read it private, a false-green over an anonymously
+// usable topic.
+func TestSNSNonScopingConditionIsPublic(t *testing.T) {
+	cases := map[string]string{
+		"date-condition":       `{"StringEquals":{},"DateGreaterThan":{"aws:CurrentTime":"2020-01-01T00:00:00Z"}}`,
+		"secure-transport":     `{"Bool":{"aws:SecureTransport":"true"}}`,
+		"unknown-key":          `{"StringLike":{"aws:UserAgent":"*"}}`,
+		"vpc-among-nonscoping": `{"Bool":{"aws:SecureTransport":"true"}}`,
+	}
+	for name, cond := range cases {
+		pol := `{"Statement":[{"Effect":"Allow","Principal":"*","Action":"sns:Subscribe","Condition":` + cond + `}]}`
+		if pub, ok := snsPolicyPublic(pol); !ok || !pub {
+			t.Errorf("%s: a wildcard principal with a non-who-scoping condition must read PUBLIC, got public=%v parseable=%v", name, pub, ok)
+		}
+	}
+	// a who-scoping key (aws:PrincipalOrgID) keeps it non-public
+	scoped := `{"Statement":[{"Effect":"Allow","Principal":"*","Action":"sns:Subscribe","Condition":{"StringEquals":{"aws:PrincipalOrgID":"o-abc123"}}}]}`
+	if pub, _ := snsPolicyPublic(scoped); pub {
+		t.Error("aws:PrincipalOrgID scopes who may act — must not read public")
 	}
 }
 
