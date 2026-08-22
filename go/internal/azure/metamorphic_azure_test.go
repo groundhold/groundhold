@@ -461,37 +461,61 @@ func TestMetamorphicVNetRoundTrip(t *testing.T) {
 // ---- Blob (storage.object) ----
 func metamorphicBlobServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	var sku, public string
+	var sku string
+	var allowPublic bool             // account allowBlobPublicAccess (D1198)
+	var containerPublicAccess string // container publicAccess (None/Blob/Container)
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
-			isChild := strings.Contains(r.URL.Path, "/blobServices/")
+			path := strings.SplitN(r.URL.Path, "?", 2)[0]
+			isImmutability := strings.Contains(path, "/immutabilityPolicies/")
+			isContainer := strings.Contains(path, "/containers/") && !isImmutability
+			isAccount := !strings.Contains(path, "/blobServices/")
 			switch r.Method {
 			case "PUT":
 				body, _ := io.ReadAll(r.Body)
-				if !isChild { // the storage account PUT
+				if isAccount { // the storage account PUT
 					var doc struct {
 						Sku        struct{ Name string } `json:"sku"`
 						Properties struct {
-							PublicNetworkAccess string `json:"publicNetworkAccess"`
+							AllowBlobPublicAccess *bool `json:"allowBlobPublicAccess"`
 						} `json:"properties"`
 					}
 					_ = json.Unmarshal(body, &doc)
 					sku = doc.Sku.Name
-					public = doc.Properties.PublicNetworkAccess // "Enabled" / "Disabled" (D989)
+					if doc.Properties.AllowBlobPublicAccess != nil {
+						allowPublic = *doc.Properties.AllowBlobPublicAccess
+					}
+				} else if isContainer { // the container PUT carries publicAccess
+					var doc struct {
+						Properties struct {
+							PublicAccess string `json:"publicAccess"`
+						} `json:"properties"`
+					}
+					_ = json.Unmarshal(body, &doc)
+					containerPublicAccess = doc.Properties.PublicAccess
 				}
 				w.WriteHeader(200)
 				_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Succeeded"}}`))
 			case "GET":
-				b, _ := json.Marshal(map[string]any{
-					"location": "eastus",
-					"tags":     map[string]any{"groundhold-capability": "assets", "groundhold-environment": "prod"},
-					"sku":      map[string]any{"name": sku},
-					"properties": map[string]any{
-						"provisioningState":   "Succeeded",
-						"publicNetworkAccess": public,
-					},
-				})
-				_, _ = w.Write(b)
+				switch {
+				case isImmutability:
+					w.WriteHeader(404) // no WORM policy
+				case isContainer:
+					b, _ := json.Marshal(map[string]any{
+						"properties": map[string]any{"publicAccess": containerPublicAccess}})
+					_, _ = w.Write(b)
+				default: // storage account (anonymous access gated by allowBlobPublicAccess)
+					b, _ := json.Marshal(map[string]any{
+						"location": "eastus",
+						"tags":     map[string]any{"groundhold-capability": "assets", "groundhold-environment": "prod"},
+						"sku":      map[string]any{"name": sku},
+						"properties": map[string]any{
+							"provisioningState":     "Succeeded",
+							"allowBlobPublicAccess": allowPublic,
+						},
+					})
+					_, _ = w.Write(b)
+				}
 			default:
 				w.WriteHeader(404)
 			}
