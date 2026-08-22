@@ -214,10 +214,35 @@ type agwDoc struct {
 			} `json:"properties"`
 		} `json:"frontendIPConfigurations"`
 		HTTPListeners []struct {
+			Name       string `json:"name"`
 			Properties struct {
 				Protocol string `json:"protocol"`
 			} `json:"properties"`
 		} `json:"httpListeners"`
+		// D1195: the routing rules are read so a plaintext listener that ONLY
+		// redirects to HTTPS is not counted against the gateway. Without them the
+		// only honest rule would be "every listener must be Https", which reports
+		// NOT-encrypted over the ordinary and correct shape of an :80 listener whose
+		// single job is to send the caller to :443.
+		RequestRoutingRules []struct {
+			Properties struct {
+				HTTPListener struct {
+					ID string `json:"id"`
+				} `json:"httpListener"`
+				RedirectConfiguration *struct {
+					ID string `json:"id"`
+				} `json:"redirectConfiguration"`
+			} `json:"properties"`
+		} `json:"requestRoutingRules"`
+		RedirectConfigurations []struct {
+			Name       string `json:"name"`
+			Properties struct {
+				TargetListener *struct {
+					ID string `json:"id"`
+				} `json:"targetListener"`
+				TargetURL string `json:"targetUrl"`
+			} `json:"properties"`
+		} `json:"redirectConfigurations"`
 	} `json:"properties"`
 }
 
@@ -239,6 +264,80 @@ func reverseMapLoadBalancer(doc lbDoc) []provider.Observation {
 	}
 }
 
+// agwAllListenersEncrypted reports whether EVERY listener on the gateway is a TLS
+// front door, or a plaintext listener whose ONLY routing rule redirects to HTTPS —
+// i.e. there is no cleartext data path into the backend.
+//
+// D1195. The rule was "ANY listener speaks Https", so a gateway with an Http:80
+// listener forwarding cleartext AND an Https:443 listener reported
+// encryption.inTransit=true. That is a floored security posture (the `encryption.`
+// namespace), which means the audit certifies it as WITNESSED — so the false-green
+// was not merely a wrong field, it was a wrong field the audit was built to trust.
+//
+// This is the same defect D1186 fixed for the AWS load balancer and D1193 for the
+// CDN's cache behaviors, and it is the same fix: ask every element and let the
+// weakest one answer. It survived in this driver because that sweep changed only the
+// files where the bug was found. The question that turns one fix into three is "was
+// this applied to the siblings" — GCP was checked too and is clean BY CONSTRUCTION,
+// because there a forwarding rule IS the capability, so a :80 rule and a :443 rule
+// are two capabilities and each is measured on its own.
+//
+// An EMPTY listener set is not encrypted: there is no TLS front door to speak of.
+func agwAllListenersEncrypted(doc agwDoc) bool {
+	if len(doc.Properties.HTTPListeners) == 0 {
+		return false
+	}
+	// redirect targets, by the listener id their rule points at
+	redirectsToTLS := map[string]bool{}
+	byName := map[string]string{} // redirectConfiguration name -> target listener id/url
+	tlsListener := map[string]bool{}
+	for _, l := range doc.Properties.HTTPListeners {
+		if strings.EqualFold(l.Properties.Protocol, "Https") {
+			tlsListener[strings.ToLower(l.Name)] = true
+		}
+	}
+	for _, rc := range doc.Properties.RedirectConfigurations {
+		target := rc.Properties.TargetURL
+		if rc.Properties.TargetListener != nil {
+			target = rc.Properties.TargetListener.ID
+		}
+		byName[strings.ToLower(rc.Name)] = target
+	}
+	for _, r := range doc.Properties.RequestRoutingRules {
+		if r.Properties.RedirectConfiguration == nil {
+			continue
+		}
+		target := byName[strings.ToLower(armLeaf(r.Properties.RedirectConfiguration.ID))]
+		// A redirect counts only when it lands on TLS: a listener this gateway
+		// serves over Https, or an absolute https:// URL. A redirect to another
+		// plaintext listener is not a TLS front door.
+		ok := strings.HasPrefix(strings.ToLower(target), "https://")
+		if !ok && tlsListener[strings.ToLower(armLeaf(target))] {
+			ok = true
+		}
+		if ok {
+			redirectsToTLS[strings.ToLower(armLeaf(r.Properties.HTTPListener.ID))] = true
+		}
+	}
+	for _, l := range doc.Properties.HTTPListeners {
+		name := strings.ToLower(l.Name)
+		if tlsListener[name] || redirectsToTLS[name] {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// armLeaf is the last segment of an ARM resource id ("/.../httpListeners/l1" -> "l1").
+// A bare name passes through unchanged, so callers may hand it either shape.
+func armLeaf(id string) string {
+	if i := strings.LastIndex(id, "/"); i >= 0 {
+		return id[i+1:]
+	}
+	return id
+}
+
 // reverseMapAppGateway maps an L7 applicationGateway: exposure from the public
 // frontend, inTransit MEASURED from an HTTPS listener (this is where TLS lives).
 func reverseMapAppGateway(doc agwDoc) []provider.Observation {
@@ -248,12 +347,7 @@ func reverseMapAppGateway(doc agwDoc) []provider.Observation {
 			public = true
 		}
 	}
-	https := false
-	for _, l := range doc.Properties.HTTPListeners {
-		if strings.EqualFold(l.Properties.Protocol, "Https") {
-			https = true
-		}
-	}
+	https := agwAllListenersEncrypted(doc)
 	return []provider.Observation{
 		{Path: "network.publicExposure", Value: public, Derivation: "measured"},
 		{Path: "encryption.inTransit", Value: https, Derivation: "measured"},

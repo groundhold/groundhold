@@ -39473,3 +39473,81 @@ four. The accurate figures now: 41 list entries covering 45 of 145 paths, 100 un
 and zero entries that match nothing. The conclusion D1181 drew from the wrong middle number
 — roughly a hundred paths to decide — happens to be right, which is not the same as having
 measured it.
+
+## D1195 — the fourth instance of one quantifier, in the driver the sweeps did not touch
+
+The Azure Application Gateway derived `encryption.inTransit` like this:
+
+	https := false
+	for _, l := range doc.Properties.HTTPListeners {
+		if strings.EqualFold(l.Properties.Protocol, "Https") { https = true }
+	}
+
+Any listener speaking Https made the whole gateway encrypted. A gateway with an Http:80
+listener forwarding cleartext to the backend and an Https:443 listener beside it — an
+ordinary shape — reported `encryption.inTransit=true`. And `encryption.` is a floored
+namespace, so the audit treats that value as WITNESSED rather than taken on the
+candidate's word: the false-green was not merely a wrong field, it was a wrong field the
+floor was built to trust.
+
+**This is the fourth instance of one defect in a single day, and the pattern is worth
+more than the fix.** D1186 removed the same rule from the AWS load balancer ("ANY
+listener speaks TLS"). D1189 removed it from SNS/SQS policy evaluation ("ANY condition
+scopes the policy"). D1193 removed it from the CDN's cache behaviors ("the DEFAULT
+behavior decides"). Each is an existential quantifier where a universal is required, and
+in each the tool reported a posture the estate did not have.
+
+It survived here for a mechanical reason: those slices changed only the files where the
+bug was found. The question that turns one fix into four is **"was this applied to the
+siblings"** — asked of the same attribute in the other drivers, not of the same file.
+GCP was asked too and is clean BY CONSTRUCTION rather than by care: there a forwarding
+rule IS the capability, so a :80 rule and a :443 rule are two capabilities and each is
+measured on its own. That is worth recording, because "clean" and "cannot be dirty" are
+different assurances and only one of them survives a refactor.
+
+The fix is D1186's shape, ported faithfully rather than strictly. Every listener must be
+a TLS front door, OR a plaintext listener whose routing rule ONLY redirects to HTTPS —
+which required reading `requestRoutingRules` and `redirectConfigurations`, both already
+in the document this driver fetches. The strict alternative ("every listener must be
+Https") was rejected on purpose: it reports NOT-encrypted over the ordinary and correct
+shape of an :80 listener whose single job is to send the caller to :443, and two clouds
+answering differently for one attribute is its own defect. A redirect that lands on
+another plaintext listener does not count — a redirect is only a TLS front door if it
+lands on TLS.
+
+An empty listener set is not encrypted. There is no TLS front door to speak of, and
+absence is not a measurement of security.
+
+## D1196 — the receipt named the commit the run FINISHED on
+
+`sync-public.sh` refuses to publish without `.mutation-pass`, and refuses if that
+receipt names another commit: *"a receipt from an earlier commit says nothing about the
+one being published."* That guard is real, and it is one-sided. The meter wrote the
+receipt with a fresh `git rev-parse HEAD` after its last mutant, so the commit it named
+was whatever HEAD had become — not the one the mutants ran against.
+
+The failure is not exotic. A run takes about seventeen minutes and two sessions push
+this branch, so a commit landing inside that window is the ordinary case. When it does,
+the early mutants measured the old tree and the later ones the new, and the receipt
+attested the whole as gated. `sync-public.sh` cannot see it: its check catches a receipt
+that is too OLD, and this is the mirror image — a receipt too NEW to have been measured.
+
+Found by making the mistake. I committed a coordination note while my own meter was
+running, expecting the sync to refuse afterwards because the receipt would name the
+older commit. It named the newer one and would have published cleanly. The note was
+documentation, so nothing was mis-attested; had it been code, a commit no mutant ever
+touched would have carried a passing receipt into a public release.
+
+The fix is to capture the commit BEFORE the first mutant, write THAT into the receipt,
+and refuse to write one at all when HEAD moved underneath the run — because at that
+point neither commit is honest: the old one no longer describes the tree that was
+measured second, and the new one was never measured first.
+
+**The gate over the fix needed a second attempt, for the reason this record keeps
+finding elsewhere.** The first check looked for the refusal's wording, and a mutant that
+replaced the condition with `if false` sailed through it — the sentence stays in the file
+while the guard stops guarding. It now pins the COMPARISON. Pin what decides, not what
+is printed.
+
+The check is structural and says so: exercising it for real would mean landing a commit
+in the middle of a seventeen-minute run.
