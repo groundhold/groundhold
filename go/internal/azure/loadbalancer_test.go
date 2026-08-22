@@ -453,3 +453,67 @@ func TestClassifyLoadBalancerChange(t *testing.T) {
 		}
 	}
 }
+
+// D1195. `encryption.inTransit` was true when ANY listener spoke Https, so a gateway
+// with an Http:80 listener forwarding cleartext and an Https:443 listener beside it
+// measured as encrypted. The middle case is the defect; the others are the controls
+// that keep this fixture from passing by blocking everything.
+func TestAppGatewayInTransitNeedsEveryListenerEncrypted(t *testing.T) {
+	inTransit := func(t *testing.T, body string) bool {
+		t.Helper()
+		var doc agwDoc
+		if err := json.Unmarshal([]byte(body), &doc); err != nil {
+			t.Fatalf("fixture does not parse: %v", err)
+		}
+		for _, o := range reverseMapAppGateway(doc) {
+			if o.Path == "encryption.inTransit" {
+				v, _ := o.Value.(bool)
+				return v
+			}
+		}
+		t.Fatal("no encryption.inTransit observation at all — the fixture is measuring nothing")
+		return false
+	}
+
+	const self = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/applicationGateways/g"
+	for _, tc := range []struct {
+		name, body string
+		want       bool
+		why        string
+	}{
+		{"only https", `{"properties":{"httpListeners":[
+			{"name":"l443","properties":{"protocol":"Https"}}]}}`, true,
+			"the control: one TLS front door and nothing else is encrypted"},
+
+		{"http beside https", `{"properties":{"httpListeners":[
+			{"name":"l443","properties":{"protocol":"Https"}},
+			{"name":"l80","properties":{"protocol":"Http"}}]}}`, false,
+			"THE DEFECT: a cleartext front door beside a TLS one is not encrypted"},
+
+		{"http redirects to the https listener", `{"properties":{"httpListeners":[
+			{"name":"l443","properties":{"protocol":"Https"}},
+			{"name":"l80","properties":{"protocol":"Http"}}],
+			"redirectConfigurations":[{"name":"r1","properties":{"targetListener":{"id":"` + self + `/httpListeners/l443"}}}],
+			"requestRoutingRules":[{"properties":{"httpListener":{"id":"` + self + `/httpListeners/l80"},
+				"redirectConfiguration":{"id":"` + self + `/redirectConfigurations/r1"}}}]}}`, true,
+			"a plaintext listener whose only job is to send the caller to TLS is not a data path"},
+
+		{"http redirects to another plaintext listener", `{"properties":{"httpListeners":[
+			{"name":"l443","properties":{"protocol":"Https"}},
+			{"name":"l80","properties":{"protocol":"Http"}},
+			{"name":"l8080","properties":{"protocol":"Http"}}],
+			"redirectConfigurations":[{"name":"r1","properties":{"targetListener":{"id":"` + self + `/httpListeners/l8080"}}}],
+			"requestRoutingRules":[{"properties":{"httpListener":{"id":"` + self + `/httpListeners/l80"},
+				"redirectConfiguration":{"id":"` + self + `/redirectConfigurations/r1"}}}]}}`, false,
+			"a redirect that lands on cleartext is not a TLS front door"},
+
+		{"no listeners at all", `{"properties":{"httpListeners":[]}}`, false,
+			"nothing to speak TLS: absence is not encryption"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := inTransit(t, tc.body); got != tc.want {
+				t.Errorf("encryption.inTransit = %v, want %v — %s", got, tc.want, tc.why)
+			}
+		})
+	}
+}

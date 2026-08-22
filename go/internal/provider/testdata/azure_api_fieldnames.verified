@@ -84,6 +84,7 @@ frontendIPConfigurations
 fullyQualifiedDomainName
 highAvailability
 hostName
+httpListener
 httpListeners
 httpsRedirect
 id
@@ -162,9 +163,12 @@ publicIPAddressConfiguration
 publicNetworkAccess
 query
 queueName
+redirectConfiguration
+redirectConfigurations
 redisVersion
 repeatingTimeIntervals
 replicaCount
+requestRoutingRules
 requiresDuplicateDetection
 requiresSession
 resourceId
@@ -195,6 +199,8 @@ subnets
 subscriptionId
 supportedProtocols
 tags
+targetListener
+targetUrl
 template
 threshold
 thresholdType

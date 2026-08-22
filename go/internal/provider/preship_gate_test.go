@@ -161,6 +161,33 @@ func TestTheVacuityFloorsExist(t *testing.T) {
 		t.Error("MIN_MUTANTS is not a two-digit-or-larger count")
 	}
 
+	// D1196: the receipt must name the commit the run STARTED on, and the run must
+	// refuse to write one at all if HEAD moved underneath it. Writing
+	// `rev-parse HEAD` at the end attests whatever landed during the run — including
+	// a commit no mutant ever touched. `sync-public.sh` cannot catch that: its check
+	// refuses a receipt from an EARLIER commit, and this is the mirror image.
+	//
+	// Structural, and named as such: exercising it would mean landing a commit in the
+	// middle of a seventeen-minute run. What it holds is that the guard exists and
+	// that the receipt is not written from a fresh `rev-parse`.
+	if !strings.Contains(string(meter), "START_HEAD") {
+		t.Error("the meter does not capture the commit it started on, so its receipt " +
+			"names whatever HEAD is when it finishes — attesting work it never measured")
+	}
+	if regexp.MustCompile(`rev-parse HEAD > \S*\.mutation-pass`).Match(meter) {
+		t.Error("the receipt is written from a fresh `rev-parse HEAD` — that is the " +
+			"end-of-run commit, not the one the mutants ran against")
+	}
+	// The COMPARISON, not the message. The first draft of this check looked for the
+	// refusal's wording and a mutant that replaced the condition with `if false`
+	// survived it — the sentence stays in the file while the guard stops guarding.
+	// Rule: pin the thing that decides, not the thing that is printed.
+	if !strings.Contains(string(meter), `"$END_HEAD" != "$START_HEAD"`) {
+		t.Error("nothing COMPARES the end-of-run commit with the one the run started " +
+			"on, so a tree that moved mid-run still produces a receipt " +
+			"sync-public.sh accepts")
+	}
+
 	rel, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "release.yml"))
 	if err != nil {
 		t.Fatal(err)
