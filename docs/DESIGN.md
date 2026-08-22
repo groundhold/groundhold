@@ -38689,3 +38689,35 @@ it cannot be, the claim waits.
 The reference implements none of these blocks semantically — it has no reference
 resolution and no fold — and closes their keys anyway. Key closure needs no semantics,
 so a rule about the shape of a document can be dual even where its meaning is not.
+
+## D1173 — a negative grep is not proof of absence
+
+**This entry is a correction to D1171, and the thing being corrected is mine.** That entry claimed, in its own words, that
+"nothing had ever loaded the example — no test, no script, no harness touched
+`spec/examples/plans/orders-production.plan.yaml`", and called that the reason the
+three drifts survived. The claim is false, and it was published — in the record and in
+the pull request that carried it to the mirror.
+
+`examples/check.sh` has globbed `*.plan.yaml`, run `forecast` over every shipped plan,
+and checked that the `contractHash` and `candidateHash` each one pins REPRODUCE under
+`groundhold hash` — since before D1171 was written. The block is right there, above the
+one D1157 added. So the example was loaded on every `make check`, and its pinned
+identities were verified against the artefacts they name.
+
+How the false claim was reached is the part worth keeping. The evidence for it was a
+grep for the FILENAME across the tree, which found the file mentioned nowhere outside
+its own directory. A glob does not contain the filename it matches. So a negative grep
+was taken as proof of absence — the same shape as an empty probe reading as a clean
+one, which this record has warned about before, inverted: the probe was not empty, it
+was aimed at the wrong thing.
+
+What is true, and is the accurate diagnosis, is narrower: the example loaded, and
+LOADING ADMITTED ANY KEY, so `pricingCatalog` and `provider.region` rode along
+unexamined for as long as they existed. The defect D1171 fixed was real and the
+closure was the right fix; the story about why it survived was wrong. Loading is not
+scrutiny, and a harness that proves a document parses proves nothing about whether
+anyone reads what is in it.
+
+`TestTheShippedExamplePlanLoads` is therefore not filling a void — `check.sh` already
+covered this. It is a cheaper copy that runs under `go test`, and the comment inside it
+has been corrected to say so rather than to repeat the claim.

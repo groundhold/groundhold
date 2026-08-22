@@ -119,9 +119,19 @@ func TestTheOperationSetAgreesAcrossEveryCopy(t *testing.T) {
 	}
 }
 
-// TestTheShippedExamplePlanLoads is why the three drifts above survived: NOTHING ever
-// ran the example this project publishes through the loader it is an example of. It
-// carried two dead keys and was the document a reader copies.
+// TestTheShippedExamplePlanLoads keeps the example this project publishes runnable
+// from `go test`.
+//
+// CORRECTED (D1173): the first version of this comment said nothing had ever run the
+// example through its own loader. That was false, and it was published. `examples/
+// check.sh` has globbed `*.plan.yaml` and run `forecast` over each one — plus checked
+// that the hashes it pins reproduce — since before D1171. The claim came from grepping
+// for the FILENAME, which a glob does not contain: a negative grep taken as proof of
+// absence.
+//
+// What was true is narrower and is the actual reason the drifts survived: the example
+// LOADED, and loading admitted any key, so `pricingCatalog` and `provider.region` rode
+// along unexamined. Loading is not scrutiny.
 func TestTheShippedExamplePlanLoads(t *testing.T) {
 	path := filepath.Join(repoRootFromTest(t), "spec", "examples", "plans",
 		"orders-production.plan.yaml")
