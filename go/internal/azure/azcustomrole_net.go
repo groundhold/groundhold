@@ -87,6 +87,13 @@ type azureCustomRoleDoc struct {
 		Permissions []struct {
 			Actions    []string `json:"actions"`
 			NotActions []string `json:"notActions"`
+			// D1197: an Azure role carries its DATA-plane grants in a separate list.
+			// These were not parsed at all, so a role whose only writes live here —
+			// the ordinary shape of every built-in data role, "Storage Blob Data
+			// Contributor" among them — presented an empty or read-only action set
+			// and measured access.mutating=FALSE while it could write blobs.
+			DataActions    []string `json:"dataActions"`
+			NotDataActions []string `json:"notDataActions"`
 		} `json:"permissions"`
 	} `json:"properties"`
 }
@@ -121,10 +128,10 @@ func (d *Driver) observeAzureCustomRole(capability, providerID string) ([]provid
 	var diags []string
 	if narrowed {
 		diags = append(diags, "role.permissions lists the granted actions only: the role "+
-			"also carries notActions, which NARROW what those actions reach. They are not "+
-			"subtracted here — ignoring a narrowing over-reports privilege, which is the "+
-			"safe side of a security attribute, but the reported set is a ceiling rather "+
-			"than an exact grant")
+			"also carries notActions or notDataActions, which NARROW what those actions "+
+			"reach. They are not subtracted here — ignoring a narrowing over-reports "+
+			"privilege, which is the safe side of a security attribute, but the reported "+
+			"set is a ceiling rather than an exact grant")
 	}
 	return []provider.Observation{
 		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.

@@ -43,6 +43,7 @@ containers
 criteria
 currentKubernetesVersion
 currentSpend
+dataActions
 dataEncryption
 dataLocation
 datasourceTypes
@@ -140,6 +141,7 @@ networkProfile
 networkSecurityGroup
 nextLink
 notActions
+notDataActions
 notifications
 objectType
 operator

@@ -104,13 +104,22 @@ func azActionMutating(a string) bool {
 func azRoleActions(doc azureCustomRoleDoc) (actions []string, narrowed bool) {
 	seen := map[string]bool{}
 	for _, p := range doc.Properties.Permissions {
-		if len(p.NotActions) > 0 {
+		if len(p.NotActions) > 0 || len(p.NotDataActions) > 0 {
 			narrowed = true
 		}
-		for _, a := range p.Actions {
-			if !seen[a] {
-				seen[a] = true
-				actions = append(actions, a)
+		// D1197: dataActions belong in the SAME set. They were skipped, so a role
+		// granting only data-plane writes reported an empty action list — and
+		// `access.mutating`, a floored path the audit treats as witnessed, came back
+		// false over a role that can write. The classifier already handles their
+		// shape (a `.../blobs/write` action is not a `/read`); they simply never
+		// reached it. Unioning can only ENLARGE the set, so the change moves
+		// `mutating`/`privileged` toward true — the safe direction for both.
+		for _, list := range [][]string{p.Actions, p.DataActions} {
+			for _, a := range list {
+				if !seen[a] {
+					seen[a] = true
+					actions = append(actions, a)
+				}
 			}
 		}
 	}
