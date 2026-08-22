@@ -455,6 +455,36 @@ var securityNamespaces = []string{
 	"access.scope",             // authorization.grant: how wide the grant reaches
 	"grants.clientCredentials", // identity.oauth-client: machine-to-machine grant enabled
 	"grants.authorizationCode", // identity.oauth-client: the code grant enabled
+	// D1194: the same query that found D1190, asked of every capability rather than
+	// the one that raised it — where does the floor cover part of a family and not the
+	// rest? Seven more, each a sibling of something already floored, and none of them
+	// on the reviewed-non-security waiver list, so none had been judged.
+	//
+	// The clearest is `trust.principals` — "WHO may assume this identity, and UNDER
+	// WHAT CONDITION" — which is `grant.principal` (D1190) one capability over.
+	//
+	// One candidate is deliberately NOT here: `egress.restricted`. Its own description
+	// calls it "DESTINATION DISCIPLINE (orthogonal to egress.internet)", naming the
+	// floored sibling it stands beside, so on the family test it belongs. Flooring it
+	// broke two tests that use it as their example of a NON-security static constraint
+	// — one pinning that `config-intent` still satisfies a static bar, the other that
+	// `platform-invariant` is honest provenance and not extra trust. Those fixtures
+	// encode a decision: for a path whose enforcement IS the provider's configuration,
+	// a config-intent reading may be the control itself rather than a weaker claim
+	// about it. Flooring it says config-intent is never enough there, which is a
+	// semantic call about egress evidence and not a gap to close while sweeping. It is
+	// recorded in the entry and left to the owner, not resolved by editing the tests
+	// that stand in the way — those tests are the argument, not the obstacle.
+	"trust.principals",    // identity.serviceaccount: who may assume it, on what condition
+	"security.scanOnPush", // registry.image: vulnerability scan at push (supply chain)
+	"flowLogs.enabled",    // network.private: network flow logging for audit
+	"cors.allowedOrigins", // storage.object: the browser origins granted cross-origin
+	"scopes.granted",      // identity.oauth-client: the scopes this client may request
+	"secret.maxAge",       // identity.oauth-client: enforced client-secret age bound
+	// The last two have NO observer in any driver, so a hard constraint on them now
+	// BLOCKS instead of passing on the candidate's word. Said out loud rather than
+	// slipped in: that is the fail-closed answer and it is the precedent this list
+	// already set with `grants.implicit`, which is equally unobserved and floored.
 }
 
 // isSecurityPath reports whether a constraint path names a security control that must be

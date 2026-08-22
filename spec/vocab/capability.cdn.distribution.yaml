@@ -53,7 +53,12 @@ attributes:
       CLASSIC CDN it is REFUSED (a redirect needs a Standard-profile delivery rule,
       out of this single-endpoint slice) — refused rather than silently downgraded.
     mappings:
-      aws.cloudfront: DefaultCacheBehavior.ViewerProtocolPolicy
+      aws.cloudfront: >
+        the WEAKEST ViewerProtocolPolicy across the DefaultCacheBehavior AND every
+        additional (per-path) cache behavior — a viewer hitting the laxest path gets the
+        least protection, so a default `https-only` beside an `/api/*` behavior set to
+        `allow-all` is `allow-all`, not `https-only` (reading the default alone was a
+        false-green over a partly-plaintext distribution)
       azure.azurecdn: endpoint isHttpAllowed / isHttpsAllowed (redirect refused on classic)
 
   service.managed:
@@ -73,6 +78,9 @@ attributes:
 #     behavior (opaque impl), not residency.
 #   - cache behaviors, path patterns, TTLs, header/cookie forwarding, custom error
 #     pages, price class, WAF association: all OPAQUE config under `implementation:`,
-#     never a vocabulary attribute (invariant #4).
+#     never a vocabulary attribute (invariant #4). EXCEPTION: a cache behavior's
+#     ViewerProtocolPolicy is a TLS SECURITY posture, not opaque routing, so it feeds
+#     viewer.protocol (the weakest across all behaviors, D1193) — the path pattern/TTL/
+#     forwarding around it stays noise.
 #   - the TLS certificate the edge presents is a SEPARATE capability
 #     (capability.certificate.tls, D117), referenced by implementation, not inlined.

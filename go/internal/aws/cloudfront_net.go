@@ -93,6 +93,13 @@ type cfDistribution struct {
 		DefaultCacheBehavior struct {
 			ViewerProtocolPolicy string `xml:"ViewerProtocolPolicy"`
 		} `xml:"DefaultCacheBehavior"`
+		CacheBehaviors struct {
+			Items struct {
+				CacheBehavior []struct {
+					ViewerProtocolPolicy string `xml:"ViewerProtocolPolicy"`
+				} `xml:"CacheBehavior"`
+			} `xml:"Items"`
+		} `xml:"CacheBehaviors"`
 	} `xml:"DistributionConfig"`
 }
 
@@ -296,6 +303,31 @@ func viewerToVocab(p string) string {
 	return p
 }
 
+// viewerProtocolRank orders the TLS posture strongest→weakest.
+var viewerProtocolRank = map[string]int{"https-only": 2, "redirect-to-https": 1, "allow-all": 0}
+
+// weakestViewerProtocol returns the LEAST-strict policy among a distribution's cache
+// behaviors. A viewer hitting the laxest behavior gets the least protection, so the
+// distribution's honest TLS posture is the weakest across the default AND every
+// additional (per-path) cache behavior — not the default alone (D1193, the CloudFront
+// twin of the ELB all-listeners fix D1186: a default `https-only` beside an `/api/*`
+// behavior set to `allow-all` served plaintext there while reading fully secure). An
+// unrecognized policy is treated as weakest (unknown protection) so a hard
+// `equals https-only` does not pass over it. "" when nothing is readable.
+func weakestViewerProtocol(policies []string) string {
+	weakest, rank := "", 99
+	for _, p := range policies {
+		r, ok := viewerProtocolRank[p]
+		if !ok {
+			r = -1 // unrecognized: unknown protection, conservatively the weakest
+		}
+		if r < rank {
+			rank, weakest = r, p
+		}
+	}
+	return weakest
+}
+
 func (d *Driver) observeCloudFront(capability, providerID string) ([]provider.Observation, []string, error) {
 	_, distID, err := splitCFProviderID(providerID)
 	if err != nil {
@@ -317,8 +349,20 @@ func (d *Driver) observeCloudFront(capability, providerID string) ([]provider.Ob
 		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
+	// viewer.protocol is the WEAKEST posture across the default AND every additional
+	// cache behavior (D1193) — a viewer on the laxest path gets the least protection, so
+	// reading the default alone read a partly-plaintext distribution as fully secure.
+	policies := []string{}
 	if v := doc.DistributionConfig.DefaultCacheBehavior.ViewerProtocolPolicy; v != "" {
-		obs = append(obs, provider.Observation{Path: "viewer.protocol", Value: viewerToVocab(v), Derivation: "measured"})
+		policies = append(policies, v)
+	}
+	for _, cb := range doc.DistributionConfig.CacheBehaviors.Items.CacheBehavior {
+		if cb.ViewerProtocolPolicy != "" {
+			policies = append(policies, cb.ViewerProtocolPolicy)
+		}
+	}
+	if weakest := weakestViewerProtocol(policies); weakest != "" {
+		obs = append(obs, provider.Observation{Path: "viewer.protocol", Value: viewerToVocab(weakest), Derivation: "measured"})
 	}
 	if items := doc.DistributionConfig.Origins.Items.Origin; len(items) > 0 && items[0].DomainName != "" {
 		obs = append(obs, provider.Observation{Path: "origin.domain", Value: items[0].DomainName, Derivation: "measured"})

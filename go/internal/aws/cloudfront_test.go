@@ -316,6 +316,47 @@ func cfDriver(t *testing.T, srv *httptest.Server) *Driver {
 	return d
 }
 
+// D1193: viewer.protocol is the WEAKEST posture across ALL cache behaviors. A default
+// of https-only beside an additional (/api/*) behavior set to allow-all serves plaintext
+// on that path — reading the default alone read it fully secure (a false-green). Observe
+// must emit allow-all (the weakest).
+func TestObserveCloudFront_WeakestAcrossCacheBehaviors(t *testing.T) {
+	dist := `<Distribution><Id>E1234567890ABC</Id><ARN>` + cfTestARN + `</ARN><Status>Deployed</Status>` +
+		`<DomainName>d111111abcdef8.cloudfront.net</DomainName>` +
+		`<DistributionConfig><Enabled>true</Enabled>` +
+		`<Origins><Items><Origin><DomainName>origin.example.com</DomainName></Origin></Items></Origins>` +
+		`<DefaultCacheBehavior><ViewerProtocolPolicy>https-only</ViewerProtocolPolicy></DefaultCacheBehavior>` +
+		`<CacheBehaviors><Items>` +
+		`<CacheBehavior><PathPattern>/static/*</PathPattern><ViewerProtocolPolicy>redirect-to-https</ViewerProtocolPolicy></CacheBehavior>` +
+		`<CacheBehavior><PathPattern>/api/*</PathPattern><ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy></CacheBehavior>` +
+		`</Items></CacheBehaviors>` +
+		`</DistributionConfig></Distribution>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && strings.Contains(r.URL.Path, "/distribution/") {
+			w.Header().Set("ETag", "etag-1")
+			_, _ = w.Write([]byte(dist))
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer srv.Close()
+	d := cfDriver(t, srv)
+
+	obs, _, err := d.observeCloudFront("edge", cfProviderID("000000000000", "E1234567890ABC"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got any
+	for _, o := range obs {
+		if o.Path == "viewer.protocol" {
+			got = o.Value
+		}
+	}
+	if got != "allow-all" {
+		t.Fatalf("viewer.protocol = %v, want allow-all (the weakest across the default and the /api/* behavior)", got)
+	}
+}
+
 func TestCreateObserveDeleteCloudFront(t *testing.T) {
 	// disabled so the delete precondition passes.
 	srv := cfServer(t, "edge", "origin.example.com", "https-only", false)

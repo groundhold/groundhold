@@ -39391,3 +39391,85 @@ parity gate holds equal).
 What the ratchet did here is what a ratchet is for. Nobody would have noticed a
 shorthand in a documentation line; the count noticed, because the only thing it permits
 is going down.
+
+## D1193 — a CDN secure on its default path, plaintext on `/api/*`
+
+`viewer.protocol` is the TLS posture a CDN edge enforces on viewer connections —
+`https-only`, `redirect-to-https`, or `allow-all` (serves plaintext). The CloudFront
+observe read it from `DefaultCacheBehavior.ViewerProtocolPolicy` alone. A distribution,
+though, carries the default behavior AND additional per-path cache behaviors, each with
+its OWN ViewerProtocolPolicy. A default of `https-only` beside an `/api/*` behavior set to
+`allow-all` serves plaintext on that path while reading fully secure — a hard
+`viewer.protocol equals https-only` green over a partly-cleartext edge.
+
+The vocab even documented the default-only scope and filed cache behaviors under opaque
+implementation — but a cache behavior's ViewerProtocolPolicy is not opaque routing, it is
+a TLS security posture, and the attribute's own description ("the posture the edge
+enforces") is the whole edge, not one path. So this is the same shape as the ELB
+all-listeners fix (D1186) and the S3/SNS public reads: a posture over a SET of paths is
+only as strong as its weakest member.
+
+Observe now reads the ViewerProtocolPolicy of the default AND every additional cache
+behavior and emits the WEAKEST (`allow-all` < `redirect-to-https` < `https-only`; an
+unrecognized value is treated as weakest, unknown protection). The path patterns, TTLs,
+and forwarding around each policy stay implementation noise — only the one security field
+is lifted. The vocab mapping and the opaque-list note now say so. The lesson holds across
+observe: when a control is configured per-member, the honest value is the least-protected
+member, because that is the exposure a real request finds.
+
+## D1194 — the same question asked of every capability, and the one path it should not answer
+
+D1190 found that the security floor covered part of a block and not its siblings, in the
+capability that happened to raise it. This asks that question everywhere: for each
+vocabulary, which attributes are floored and which of the rest belong to the same family
+as one that is?
+
+Seven candidates, none on the reviewed-non-security waiver list — so none had been
+judged and set aside; none had been seen. Six are floored here:
+
+	trust.principals      identity.serviceaccount   "WHO may assume this identity, and
+	                                                UNDER WHAT CONDITION" — D1190's
+	                                                `grant.principal`, one capability over
+	security.scanOnPush   registry.image            vulnerability scan at push, beside the
+	                                                floored `immutable.tags`
+	flowLogs.enabled      network.private           network flow logging for audit
+	cors.allowedOrigins   storage.object            the browser origins granted cross-origin
+	                                                access, beside floored publicExposure
+	scopes.granted        identity.oauth-client     which scopes the client may request
+	secret.maxAge         identity.oauth-client     enforced client-secret age bound
+
+The last two have no observer in any driver, so a hard constraint on them now BLOCKS
+rather than passing on the candidate's word. That follows the precedent already in the
+list — `grants.implicit` is equally unobserved and floored — and it is stated rather
+than slipped in, because a refusal a contract author did not expect is a cost even when
+it is the correct one.
+
+**The seventh is the part worth reading.** `egress.restricted` has the strongest claim of
+all of them on the family test: its own vocabulary description calls it "DESTINATION
+DISCIPLINE (orthogonal to egress.internet)", naming the floored sibling it stands beside.
+Flooring it broke two existing tests — one pinning that `config-intent` still satisfies a
+static-bar constraint, the other that `platform-invariant` is honest provenance and not
+extra trust — both of which use exactly that path as their example of a NON-security
+static constraint.
+
+Those tests are the argument, not the obstacle. They encode a decision: for a path whose
+enforcement IS the provider's configuration, a config-intent reading may be the control
+itself rather than a weaker claim about it. Flooring it declares that config-intent is
+never sufficient there, which is a semantic call about what counts as evidence for egress
+— not a gap to close while sweeping. So it is left out, recorded here, and left to the
+owner. Editing the two tests until they stopped objecting would have produced a green
+suite and a worse answer.
+
+The behavioural table carries a control of its own kind: `location.region`, an ordinary
+attribute of the same capabilities, must still be SATISFIED by a declared value. Without
+it the test could pass because the audit had begun blocking everything — a broken fixture
+wearing a green tick, which is the failure D1190's control was built to expose. Mutating
+one floored path fails only its own subtest; the control and the rest keep passing.
+
+**A correction to D1181's numbers, measured properly this time.** That entry said the
+floor "already classifies 31" of 145 attribute paths. 31 was the number of ENTRIES in the
+list, not the number of PATHS they cover — one prefix entry such as `encryption.` covers
+four. The accurate figures now: 41 list entries covering 45 of 145 paths, 100 unclassified,
+and zero entries that match nothing. The conclusion D1181 drew from the wrong middle number
+— roughly a hundred paths to decide — happens to be right, which is not the same as having
+measured it.
