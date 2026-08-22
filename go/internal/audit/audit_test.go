@@ -303,6 +303,10 @@ func TestIsSecurityPath(t *testing.T) {
 		// not. Pinned beside them on purpose — the pairing is the finding.
 		"grant.principal", "grant.role", "access.scope",
 		"grants.clientCredentials", "grants.authorizationCode",
+		// D1194: the same question asked of every capability, not just the one that
+		// raised it. Each is a sibling of something already above.
+		"trust.principals", "security.scanOnPush", "flowLogs.enabled",
+		"cors.allowedOrigins", "scopes.granted", "secret.maxAge",
 		"refreshToken.rotation", "sourceProvenance", "network.apiExposure",
 		"authentication.dkim", "retention.lockMode",
 		// D1075 (found by the keyword lint):
@@ -838,6 +842,83 @@ constraints:
 			if res.Status != "violations-found" {
 				t.Fatalf("%s: a hard security control backed only by intent must BLOCK, "+
 					"got status=%q", tc.path, res.Status)
+			}
+		})
+	}
+}
+
+// D1194. The behavioural half, and a CONTROL that is not floored at all.
+//
+// `location.region` is in the table on purpose: it is a real attribute of the same
+// capabilities and it is NOT a security posture, so it must keep being SATISFIED by a
+// declared value. Without it this test could pass because the audit had started
+// blocking everything, which is a broken fixture wearing a green tick — and that is the
+// failure D1190's own table was built to make visible.
+func TestAuditFloorsTheSecondWaveButNotOrdinaryAttributes(t *testing.T) {
+	for _, tc := range []struct{ capType, path, want string }{
+		{"capability.identity.serviceaccount", "trust.principals", "blocked"},
+		{"capability.registry.image", "security.scanOnPush", "blocked"},
+		{"capability.network.private", "flowLogs.enabled", "blocked"},
+		{"capability.storage.object", "cors.allowedOrigins", "blocked"},
+		// the control: an ordinary attribute must still pass on a declared value
+		{"capability.registry.image", "location.region", "satisfied"},
+	} {
+		t.Run(tc.path+"/"+tc.want, func(t *testing.T) {
+			td := t.TempDir()
+			cpath := filepath.Join(td, "c.yaml")
+			val := "false"
+			if tc.path == "location.region" {
+				val = "eu-central-1"
+			}
+			doc := `
+apiVersion: contract/v0.1
+kind: InfrastructureContract
+meta: { id: sec, environment: test, version: 1 }
+capabilities:
+  - id: r
+    type: ` + tc.capType + `
+constraints:
+  hard:
+    - id: c-x
+      subject: r
+      path: ` + tc.path + `
+      op: equals
+      value: ` + val + `
+      verify: { method: static }
+`
+			if err := os.WriteFile(cpath, []byte(doc), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := contract.LoadContract(cpath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var v any = false
+			if tc.path == "location.region" {
+				v = "eu-central-1"
+			}
+			led := ledger.New()
+			seedObs(led, "r", map[string]ledger.ObsRecord{
+				tc.path: {Value: v, ObservedAt: "2026-07-15T12:00:00Z",
+					TTLSeconds: 86400, Derivation: "declared", Source: "candidate-declared"},
+			})
+			res, err := Run(c, led, filepath.Join(td, "l.jsonl"),
+				"2026-07-15T12:05:00Z", false, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res.Verdicts) != 1 {
+				t.Fatalf("expected one verdict, got %+v", res.Verdicts)
+			}
+			got := res.Verdicts[0].Verdict
+			if tc.want == "blocked" && got != "unknown" && got != "unverifiable" {
+				t.Fatalf("%s: declared intent SATISFIED a hard security constraint — the "+
+					"audit certified a control nobody measured; got %q", tc.path, got)
+			}
+			if tc.want == "satisfied" && got != "satisfied" {
+				t.Fatalf("%s is the CONTROL — an ordinary attribute, not a posture. It "+
+					"must still be satisfied by a declared value, or this test is "+
+					"measuring an audit that blocks everything; got %q", tc.path, got)
 			}
 		})
 	}
