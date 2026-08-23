@@ -262,3 +262,44 @@ func mergeCB(base, over map[string]any) map[string]any {
 	}
 	return out
 }
+
+// D1234. Azure was the ONLY one of the three budget drivers that already diagnosed an
+// unmapped period instead of dropping it silently — the convention the vocabulary
+// publishes for this attribute. It had no test saying so, which is how a correct
+// behaviour becomes an accidental one: nothing would have failed if the else-branch
+// were deleted. This is that witness, added while fixing the two clouds that lacked
+// the behaviour at all.
+func TestUnmappedTimeGrainIsDiagnosedNotDropped(t *testing.T) {
+	const name = "gh-unmapped"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"name":"` + name + `"}`))
+			return
+		}
+		// a timeGrain Azure could add, and one groundhold does not map
+		_, _ = w.Write([]byte(`{"name":"` + name + `","properties":{"category":"Cost",` +
+			`"timeGrain":"Weekly","amount":100,"timePeriod":{"startDate":"2026-07-01T00:00:00Z"}}}`))
+	}))
+	defer srv.Close()
+	d := consBudgetDriver(t, srv)
+	obs, diags, err := d.observeConsumptionBudget("spend-guard",
+		consBudgetProviderID(testSub, "", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range obs {
+		if o.Path == "budget.period" {
+			t.Fatalf("an unmapped timeGrain must not be coerced into the enum, got %v", o.Value)
+		}
+	}
+	var named bool
+	for _, dg := range diags {
+		if strings.Contains(dg, "budget.period not mapped") && strings.Contains(dg, "Weekly") {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("the diagnostic must name the value it could not map, got %v", diags)
+	}
+}

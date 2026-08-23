@@ -39,7 +39,25 @@ var bareUnreadableBaseline = map[string]int{
 // bareUnreadable matches an expression that says "unreadable" while carrying
 // neither an HTTP status nor a constructed read error — the shape that leaves
 // an operator with no way to tell a throttle from a permission gap.
-var bareUnreadable = regexp.MustCompile(`"[^"]*unreadable[^"]*"`)
+//
+// D1236: it used to be `"[^"]*unreadable[^"]*"`, which is quote-NAIVE — `[^"]*`
+// happily spans the gap BETWEEN two literals, so
+//
+//	"a message: " + strings.Join(unreadable, "; ") + " more"
+//
+// matched, on an identifier that is not in any string at all. The gate counted a
+// variable name as a published word. It now extracts each literal and tests them
+// one at a time, which is what it always meant.
+var goStringLiteral = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+
+func saysBareUnreadable(line string) bool {
+	for _, lit := range goStringLiteral.FindAllString(line, -1) {
+		if strings.Contains(lit, "unreadable") {
+			return true
+		}
+	}
+	return false
+}
 
 // The gate measures CODE, not commentary: a comment that describes the debt (or
 // the design that ended it) is documentation, and counting it would either
@@ -67,7 +85,7 @@ func TestBareUnreadableDoesNotGrow(t *testing.T) {
 			}
 			scanned++
 			for _, line := range strings.Split(string(raw), "\n") {
-				if !bareUnreadable.MatchString(line) || isComment(line) {
+				if !saysBareUnreadable(line) || isComment(line) {
 					continue
 				}
 				// a line that names the status, or builds a typed read error,
@@ -99,6 +117,32 @@ func TestBareUnreadableDoesNotGrow(t *testing.T) {
 		case count < budget:
 			t.Logf("%s: down to %d (budget %d) — lower the baseline in this file to lock it in",
 				cloud, count, budget)
+		}
+	}
+}
+
+// D1236. Loosening a gate's matcher is the moment to prove it still catches what it
+// was built for. The old regex was quote-naive and counted an IDENTIFIER between two
+// string literals; the fix must not also stop seeing the real thing.
+//
+// Constructed rather than sampled: the tree currently holds zero bare-unreadable
+// diagnostics (that is the point of the baseline), so a passing run demonstrates
+// nothing about the matcher. These cases do not exist in the tree and must not.
+func TestSaysBareUnreadableSeesTheStringAndNotTheIdentifier(t *testing.T) {
+	for line, want := range map[string]bool{
+		// the real defect: the word ships to an operator inside a message
+		`diags = append(diags, "the bucket policy is unreadable")`: true,
+		`return fmt.Errorf("unreadable body")`:                     true,
+		`d := "x" + "unreadable" + "y"`:                            true,
+		// the false positive that prompted the fix: an identifier BETWEEN literals
+		`diags = append(diags, "metrics not observed: "+join(unreadable, "; ")+" more")`: false,
+		`for _, u := range unreadable {`:                                                 false,
+		`var unreadable []string`:                                                        false,
+		// an escaped quote must not end the literal early and hide the word
+		`x := "he said \"unreadable\" once"`: true,
+	} {
+		if got := saysBareUnreadable(line); got != want {
+			t.Errorf("saysBareUnreadable(%q) = %v, want %v", line, got, want)
 		}
 	}
 }

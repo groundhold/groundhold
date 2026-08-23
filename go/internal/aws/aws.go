@@ -29,8 +29,19 @@ type Driver struct {
 	// truncation belongs to the sweep, not to the struct that happened to see it.
 	trunc *truncRecord
 
-	Region       string
-	Account      string // acting identity's account id; resolved via STS, cached
+	Region  string
+	Account string // acting identity's account id; resolved via STS, cached
+	// acctIPA caches the ACCOUNT-level IgnorePublicAcls for the run (D1229). It is a
+	// POINTER for the same reason trunc is: a scoped copy of the driver must share the
+	// answer rather than re-ask. An account that enforces it closes the public-object-ACL
+	// residual for every bucket in one call, which is what makes reading it affordable
+	// at estate scale; without the cache this would be a request per bucket.
+	acctIPA *cachedFlag
+	// policyDocs memoizes IAM policy documents for ONE observe sweep (D1231). Per
+	// sweep, not per process: a long-lived driver (MCP server, console BFF) would
+	// otherwise serve one instant's document under another instant's clock, against
+	// the --at thesis this runtime rests on.
+	policyDocs   map[string]cachedActions
 	HTTP         *http.Client
 	Now          func() time.Time
 	PollInterval time.Duration

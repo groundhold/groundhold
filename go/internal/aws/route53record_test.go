@@ -222,3 +222,44 @@ func TestAdoptsExistingRoute53Record(t *testing.T) {
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }
+
+// D1237, the AWS witness. `dns.target` is one string and a Route 53 record set holds a
+// LIST of values — the vocabulary discloses that ("ResourceRecords[0].Value — the FIRST
+// value only") where an implementer reads it, not where an operator does.
+func TestRoute53MultiValueRecordIsDisclosed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<ListResourceRecordSetsResponse><ResourceRecordSets><ResourceRecordSet>` +
+			`<Name>www.example.com.</Name><Type>A</Type><TTL>300</TTL>` +
+			`<ResourceRecords>` +
+			`<ResourceRecord><Value>10.0.0.5</Value></ResourceRecord>` +
+			`<ResourceRecord><Value>203.0.113.9</Value></ResourceRecord>` +
+			`</ResourceRecords>` +
+			`</ResourceRecordSet></ResourceRecordSets></ListResourceRecordSetsResponse>`))
+	}))
+	defer srv.Close()
+	d := r53Driver(t, srv)
+	obs, diags, err := d.observeRoute53Record(r53RecordCap,
+		r53RecordProviderID("Z123456789ABC", "A", "www.example.com."))
+	if err != nil {
+		t.Fatalf("observe: %v", err)
+	}
+	var target any
+	for _, o := range obs {
+		if o.Path == "dns.target" {
+			target = o.Value
+		}
+	}
+	if target != "10.0.0.5" {
+		t.Fatalf("the first value is what the spec reports, got %v", target)
+	}
+	var told bool
+	for _, dg := range diags {
+		if strings.Contains(dg, "FIRST of 2 values") {
+			told = true
+		}
+	}
+	if !told {
+		t.Fatalf("the operator must be told the record holds more than the attribute can "+
+			"carry, got %v", diags)
+	}
+}

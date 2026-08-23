@@ -382,7 +382,19 @@ func (d *Driver) deleteASM(capability, environment, providerID string) provider.
 		return provider.CreateResult{Status: "failed",
 			Reason: fmt.Sprintf("delete HTTP %d: %s", st, ecsErr(resp))}
 	}
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// D1241: this success is WEAKER than the word. The request above asks for a 7-day
+	// recovery window, and AWS's own model says the secret is restorable during it and
+	// deleted permanently only at its end. The function's comment said so; the RESULT
+	// did not, so a retire reported "succeeded" and an operator reading it had no way
+	// to know the secret still exists and is recoverable.
+	//
+	// The codebase already discloses exactly this for its twins — AWS KMS's pending
+	// window, GCP's custom-role undelete window, Azure's key-vault soft delete. This
+	// one was the outlier.
+	return provider.CreateResult{ProviderID: providerID, Status: "succeeded",
+		Reason: "secret deleted with a 7-day recovery window — it is RESTORABLE until then " +
+			"and only permanently deleted at the window's end; purging early is a separate, " +
+			"deliberate act (ForceDeleteWithoutRecovery) not taken here"}
 }
 
 // classifyASMChange (D46): PURE — can this capability.secret transition be

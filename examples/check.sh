@@ -120,11 +120,48 @@ case "$out" in
   *)                                 report "converge laptop (proves no-op)" yes no ;;
 esac
 
+# D1246: the ONBOARDING PROOF, exactly as spec/onboarding.md and the
+# onboard-existing skill now describe it. Both used to say a converge straight
+# after `adopt` "must report converged without executing anything", and that a
+# planned change means the draft is wrong — which sent an operator back to
+# redraft over a CLAIM no redraft can remove. Takeover is two acts; this pins
+# both, and pins that the middle step is a refusal rather than a green.
+ONB="$(mktemp -d)"
+# D1256: NOT "$LIFE" — it is created 30 lines below, and naming it here made every
+# exit in that window report `LIFE: unbound variable` instead of the real cause. That
+# is what hid the failure this line was added beside. `$ONB` now travels through the
+# later traps too, which the first cut dropped, leaking the directory.
+trap 'rm -rf "$LEDGER" "$ONB"' EXIT
+"$CLI" discover --provider fake --at "$AT" --json > "$ONB/d.json" 2>/dev/null || true
+rc=0
+GROUNDHOLD="$CLI" scripts/adopt-candidate.sh --discovery "$ONB/d.json"   --resource fake:existing-db --contract legacy --capability db   --ledger "$ONB/l.ndjson" --at "$AT" >/dev/null 2>&1 || rc=$?
+report "onboarding: adopt-candidate.sh adopts a discovered resource" 0 "$rc"
+rc=0
+out="$("$CLI" converge "$ONB/legacy.contract.yaml" "$ONB/legacy.candidate.yaml" \
+  --ledger "$ONB/l.ndjson" --provider fake --at "$AT" 2>&1)" || rc=$?
+report "onboarding: converge after adopt plans a claim (not converged)" 2 "$rc"
+case "$out" in
+  *"claim a-claim-db"*) report "onboarding: the planned action IS the claim" yes yes ;;
+  *)                    report "onboarding: the planned action IS the claim" yes no ;;
+esac
+rc=0
+"$CLI" converge "$ONB/legacy.contract.yaml" "$ONB/legacy.candidate.yaml" \
+  --ledger "$ONB/l.ndjson" --provider fake --at "$AT" --yes >/dev/null 2>&1 || rc=$?
+report "onboarding: converge --yes executes the claim" 0 "$rc"
+rc=0
+out="$("$CLI" converge "$ONB/legacy.contract.yaml" "$ONB/legacy.candidate.yaml" \
+  --ledger "$ONB/l.ndjson" --provider fake --at "$AT" 2>&1)" || rc=$?
+report "onboarding: the no-op proof passes only AFTER the claim" 0 "$rc"
+case "$out" in
+  *"already matches the candidate"*) report "onboarding: proof is a true no-op" yes yes ;;
+  *)                                 report "onboarding: proof is a true no-op" yes no ;;
+esac
+
 # The README's create → delete lifecycle, against ONE ledger, in order. The delete
 # is the interesting half: --yes must NOT be enough to destroy anything, and the
 # delete target must be pinned from the recorded binding rather than guessed.
 LIFE="$(mktemp -d)"
-trap 'rm -rf "$LEDGER" "$LIFE"' EXIT
+trap 'rm -rf "$LEDGER" "$ONB" "$LIFE"' EXIT
 rc=0
 "$CLI" converge examples/lifecycle/1-create.contract.yaml examples/lifecycle/1-create.candidate.yaml \
   --ledger "$LIFE/orders.jsonl" --provider fake --at "$AT" --yes >/dev/null 2>&1 || rc=$?
@@ -246,7 +283,7 @@ report "newcomer path: second converge is a no-op" CONVERGED "$second"
 # nothing would run. The path the skill actually publishes, the one that ends in an
 # adopted binding, was never executed by anything.
 ADOPT="$(mktemp -d)"
-trap 'rm -rf "$LEDGER" "$LIFE" "$NEW" "$ADOPT"' EXIT
+trap 'rm -rf "$LEDGER" "$ONB" "$LIFE" "$NEW" "$ADOPT"' EXIT
 "$CLI" discover --provider fake --at "$AT" > "$ADOPT/discovery.json" 2>/dev/null || true
 res="$(grep -oE '"providerId": *"[^"]+"' "$ADOPT/discovery.json" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
 report "discover --provider fake offers a resource to adopt" yes "$([ -n "$res" ] && echo yes || echo no)"
@@ -279,7 +316,7 @@ report "adopt-candidate binds the resource in the ledger" yes "$bound"
 # GENUINE refusal (a well-formed request the tool declines, exit 2) and read what it
 # actually carries.
 REF="$(mktemp -d)"
-trap 'rm -rf "$LEDGER" "$LIFE" "$NEW" "$ADOPT" "$REF"' EXIT
+trap 'rm -rf "$LEDGER" "$ONB" "$LIFE" "$NEW" "$ADOPT" "$REF"' EXIT
 rc=0
 "$CLI" verify examples/lifecycle/2-refused.contract.yaml \
                examples/lifecycle/2-refused.candidate.yaml --json > "$REF/refusal.json" 2>/dev/null || rc=$?
@@ -310,7 +347,7 @@ fi
 # the promise is measured per verb: same invocation, with and without the flag, and the
 # output must differ.
 EX="$(mktemp -d)"
-trap 'rm -rf "$LEDGER" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX"' EXIT
+trap 'rm -rf "$LEDGER" "$ONB" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX"' EXIT
 explains() {
   name="$1"; shift
   "$CLI" "$@" --ledger "$EX/$name-a.jsonl" --json          > "$EX/$name.plain" 2>/dev/null || true
@@ -356,7 +393,7 @@ fi
 # nobody follows. Only the three paths are substituted, because the reader's repository
 # is where the originals live.
 CI="$(mktemp -d)"
-trap 'rm -rf "$LEDGER" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX" "$CI"' EXIT
+trap 'rm -rf "$LEDGER" "$ONB" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX" "$CI"' EXIT
 
 python3 - "$CI/routing.sh" <<'PYEOF' || true
 import re, sys
@@ -414,7 +451,7 @@ fi
 # several places in the compiler, and any one of them returning before it emits leaves
 # an agent routing on stdout with nothing to route on.
 PL="$(mktemp -d)"
-trap 'rm -rf "$LEDGER" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX" "$CI" "$PL"' EXIT
+trap 'rm -rf "$LEDGER" "$ONB" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX" "$CI" "$PL"' EXIT
 
 # Count top-level JSON documents on stdout: 0 means the promise is broken by silence,
 # 2+ by chatter, -1 by malformed output.
@@ -490,7 +527,7 @@ report "the success document carries a top-level plan key" yes "$has_plan"
 # measurement was recorded. Silence is not implemented by the word table; it is each
 # verb declining to banner, which is exactly the kind of per-site decision that drifts.
 SIL="$(mktemp -d)"
-trap 'rm -rf "$LEDGER" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX" "$CI" "$PL" "$SIL"' EXIT
+trap 'rm -rf "$LEDGER" "$ONB" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX" "$CI" "$PL" "$SIL"' EXIT
 "$CLI" converge examples/laptop/laptop.contract.yaml examples/laptop/laptop.candidate.yaml \
   --ledger "$SIL/l.jsonl" --provider fake --at "$AT" --yes >/dev/null 2>&1 || true
 
@@ -518,7 +555,7 @@ report "verify still banners PROVEN" PROVEN "$proven"
 # that refused with 1 or 2 instead would read as a bad invocation rather than a tampered
 # proof, and a receiver could reasonably retry it.
 CAP="$(mktemp -d)"
-trap 'rm -rf "$LEDGER" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX" "$CI" "$PL" "$SIL" "$CAP"' EXIT
+trap 'rm -rf "$LEDGER" "$ONB" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX" "$CI" "$PL" "$SIL" "$CAP"' EXIT
 CNOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 "$CLI" converge examples/laptop/laptop.contract.yaml examples/laptop/laptop.candidate.yaml \
   --ledger "$CAP/l.jsonl" --provider fake --at "$CNOW" --yes >/dev/null 2>&1 || true
@@ -594,7 +631,7 @@ corrupt "6 anchor pinning another head" "$CAP/clean.json" --check "$CAP/badancho
 # `additionalProperties` IS a schema (the open maps: bindings, heads, outcomes) its
 # values are now validated, which is the same rule read properly rather than skipped.
 SCH="$(mktemp -d)"
-trap 'rm -rf "$LEDGER" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX" "$CI" "$PL" "$SIL" "$CAP" "$SCH"' EXIT
+trap 'rm -rf "$LEDGER" "$ONB" "$LIFE" "$NEW" "$ADOPT" "$REF" "$EX" "$CI" "$PL" "$SIL" "$CAP" "$SCH"' EXIT
 SNOW="$(date -u +%FT%TZ)"
 
 "$CLI" verify examples/laptop/laptop.contract.yaml examples/laptop/laptop.candidate.yaml \

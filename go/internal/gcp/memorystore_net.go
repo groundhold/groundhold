@@ -221,8 +221,13 @@ func (d *Driver) observeMemorystore(capability, providerID string) ([]provider.O
 		// Memorystore for Redis is always VPC-private — no public IP is assignable.
 		{Path: "network.publicExposure", Value: false, Derivation: "measured"},
 	}
+	var protoDiag string
 	if v := redisProtocolFor(doc.RedisVersion); v != "" {
 		obs = append(obs, provider.Observation{Path: "engine.protocol", Value: v, Derivation: "measured"})
+	} else if rv := doc.RedisVersion; rv != "" {
+		// D1235, the GCP twin.
+		protoDiag = "engine.protocol not observed: redisVersion " + rv +
+			" has no equivalent in the vocabulary's engine set"
 	}
 	obs = append(obs, provider.Observation{Path: "encryption.inTransit",
 		Value: doc.TransitEncryptionMode == "SERVER_AUTHENTICATION", Derivation: "measured"})
@@ -236,7 +241,11 @@ func (d *Driver) observeMemorystore(capability, providerID string) ([]provider.O
 	case "STANDARD_HA":
 		obs = append(obs, provider.Observation{Path: "availability.class", Value: "regional", Derivation: "measured"})
 	}
-	return obs, nil, nil
+	var diags []string
+	if protoDiag != "" {
+		diags = append(diags, protoDiag)
+	}
+	return obs, diags, nil
 }
 
 // redisProtocolFor reverse-maps the Memorystore enum to engine.protocol.

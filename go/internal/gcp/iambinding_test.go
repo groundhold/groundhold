@@ -69,6 +69,12 @@ func TestBuildIAMBindingRefusals(t *testing.T) {
 
 // crmPolicyServer is a STATEFUL fake project IAM policy: setIamPolicy records the
 // written policy, getIamPolicy reflects it. seed pre-populates the policy.
+// gcpRoleFixturePerms lets a test choose the includedPermissions roles.get serves;
+// empty = a narrow read-only set (no escalation match). gcpRoleFixtureHits counts
+// fetches so the per-sweep cache is asserted by observation.
+var gcpRoleFixturePerms string
+var gcpRoleFixtureHits int
+
 func crmPolicyServer(t *testing.T, seed string) *httptest.Server {
 	t.Helper()
 	pol := seed
@@ -78,6 +84,17 @@ func crmPolicyServer(t *testing.T, seed string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			switch {
+			case strings.Contains(r.URL.Path, "/roles/"):
+				// D1231: observe reads the role DEFINITION when the id does not settle
+				// privilege. Without this the driver reached the REAL iam.googleapis.com
+				// from a unit test — a hermeticity break the 401 in the diagnostic made
+				// visible. authzDriver now pins IAMBaseURL here too.
+				gcpRoleFixtureHits++
+				perms := gcpRoleFixturePerms
+				if perms == "" {
+					perms = `"storage.objects.get","storage.objects.list"`
+				}
+				_, _ = w.Write([]byte(`{"includedPermissions":[` + perms + `]}`))
 			case strings.HasSuffix(r.URL.Path, ":getIamPolicy"):
 				_, _ = w.Write([]byte(pol))
 			case strings.HasSuffix(r.URL.Path, ":setIamPolicy"):
@@ -99,6 +116,7 @@ func authzDriver(t *testing.T, srv *httptest.Server) *Driver {
 	t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
 	d := NewDriver("acme-prod")
 	d.CRMBaseURL = srv.URL
+	d.IAMBaseURL = srv.URL // hermetic: roles.get must not reach the real IAM API
 	return d
 }
 

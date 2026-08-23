@@ -66,6 +66,14 @@ func TestBuildRolePolicyAttachmentRefusals(t *testing.T) {
 
 // rolePolicyServer is a STATEFUL fake: AttachRolePolicy records the arn,
 // ListAttachedRolePolicies reflects it, DetachRolePolicy clears it.
+// rolePolicyFixtureDoc lets one test choose the policy document this fixture serves.
+// Empty = the default narrow read-only document.
+var rolePolicyFixtureDoc string
+
+// rolePolicyGetPolicyHits counts GetPolicy fetches so the per-sweep cache can be
+// asserted by observation rather than by reading the cache field.
+var rolePolicyGetPolicyHits int
+
 func rolePolicyServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	attached := ""
@@ -89,6 +97,21 @@ func rolePolicyServer(t *testing.T) *httptest.Server {
 				}
 				_, _ = w.Write([]byte(`<ListAttachedRolePoliciesResponse><ListAttachedRolePoliciesResult>` +
 					`<AttachedPolicies>` + m + `</AttachedPolicies></ListAttachedRolePoliciesResult></ListAttachedRolePoliciesResponse>`))
+			case "GetPolicy":
+				rolePolicyGetPolicyHits++
+				// D1231: observe now READS the document when the name does not settle
+				// privilege, so this fixture has to answer for it. The default document
+				// grants one narrow read action — no escalation match — which is the
+				// case that must WITHHOLD rather than claim least privilege.
+				_, _ = w.Write([]byte(`<GetPolicyResponse><GetPolicyResult><Policy>` +
+					`<DefaultVersionId>v1</DefaultVersionId></Policy></GetPolicyResult></GetPolicyResponse>`))
+			case "GetPolicyVersion":
+				doc := rolePolicyFixtureDoc
+				if doc == "" {
+					doc = `{"Statement":[{"Effect":"Allow","Action":["s3:GetObject"],"Resource":"*"}]}`
+				}
+				_, _ = w.Write([]byte(`<GetPolicyVersionResponse><GetPolicyVersionResult><PolicyVersion>` +
+					`<Document>` + url.QueryEscape(doc) + `</Document></PolicyVersion></GetPolicyVersionResult></GetPolicyVersionResponse>`))
 			case "DetachRolePolicy":
 				attached = ""
 				_, _ = w.Write([]byte(`<DetachRolePolicyResponse></DetachRolePolicyResponse>`))
@@ -249,4 +272,11 @@ func TestAdoptsExistingRolePolicy(t *testing.T) {
 		AllowedMutations: 1, // the idempotent AttachRolePolicy
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
+}
+
+// grantPrivilegeFromDocumentForTest exposes the document classification to gates in
+// the shape they assert on: (privileged, known, error-if-unreadable).
+func (d *Driver) grantPrivilegeFromDocumentForTest(arn string) (bool, bool, error) {
+	priv, known, _ := d.grantPrivilegeFromDocument(arn)
+	return priv, known, nil
 }

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func flexAttrs() map[string]any {
@@ -366,18 +367,28 @@ func TestUpdateFlexServerPublicExposure(t *testing.T) {
 		subnet string
 		dns    string
 	}
-	newSrv := func(tagCap, subnet string, seen *[]patch) *httptest.Server {
-		net := `"publicNetworkAccess":"Enabled"`
+	// Stateful async fake (D1222): a flexible-server update is long-running — the PATCH
+	// accepts and the server enters Updating at the OLD access, reaching the new one only
+	// back at Ready. settle=false is the stuck case that must read unknown.
+	newSrv := func(tagCap, subnet string, settle bool, seen *[]patch) *httptest.Server {
+		access, state, pending, lag := "Enabled", "Ready", "", 0
+		netExtra := ""
 		if subnet != "" {
-			net += `,"delegatedSubnetResourceId":"` + subnet + `"` +
+			netExtra = `,"delegatedSubnetResourceId":"` + subnet + `"` +
 				`,"privateDnsZoneArmResourceId":"` + subnet + "-zone" + `"`
 		}
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
 			case "GET":
+				if lag > 0 {
+					lag--
+					if lag == 0 && settle {
+						access, state = pending, "Ready"
+					}
+				}
 				_, _ = w.Write([]byte(`{"location":"eastus",` +
 					`"tags":{"groundhold-capability":"` + tagCap + `","groundhold-environment":"prod"},` +
-					`"properties":{"state":"Ready","network":{` + net + `}}}`))
+					`"properties":{"state":"` + state + `","network":{"publicNetworkAccess":"` + access + `"` + netExtra + `}}}`))
 			case "PATCH":
 				body, _ := io.ReadAll(r.Body)
 				var d struct {
@@ -393,6 +404,7 @@ func TestUpdateFlexServerPublicExposure(t *testing.T) {
 				*seen = append(*seen, patch{access: d.Properties.Network.PublicNetworkAccess,
 					subnet: d.Properties.Network.DelegatedSubnetResourceID,
 					dns:    d.Properties.Network.PrivateDNSZoneArmResourceID})
+				pending, state, lag = d.Properties.Network.PublicNetworkAccess, "Updating", 2
 				w.WriteHeader(200)
 				_, _ = w.Write([]byte(`{"properties":{"state":"Updating"}}`))
 			default:
@@ -402,9 +414,9 @@ func TestUpdateFlexServerPublicExposure(t *testing.T) {
 		}))
 	}
 
-	t.Run("remediate public->private (PATCH publicNetworkAccess=Disabled)", func(t *testing.T) {
+	t.Run("remediate public->private (PATCH publicNetworkAccess=Disabled, polled to applied)", func(t *testing.T) {
 		var seen []patch
-		srv := newSrv("db", "", &seen)
+		srv := newSrv("db", "", true, &seen)
 		defer srv.Close()
 		d := vnetTestDriver(t, srv)
 		pid := flexProviderID(d.Subscription, "rg1", "orders-db")
@@ -421,7 +433,7 @@ func TestUpdateFlexServerPublicExposure(t *testing.T) {
 	t.Run("VNet subnet preserved in the PATCH", func(t *testing.T) {
 		var seen []patch
 		subnet := "/subscriptions/s/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vn/subnets/db"
-		srv := newSrv("db", subnet, &seen)
+		srv := newSrv("db", subnet, true, &seen)
 		defer srv.Close()
 		d := vnetTestDriver(t, srv)
 		pid := flexProviderID(d.Subscription, "rg1", "orders-db")
@@ -435,9 +447,26 @@ func TestUpdateFlexServerPublicExposure(t *testing.T) {
 		}
 	})
 
+	// The D1222 guard: a server that accepts the PATCH but never leaves Updating must read
+	// unknown, not succeeded. Remove the poll and this goes red (a public database reported
+	// private on accept while it still answers on the public path).
+	t.Run("stuck Updating times out to unknown", func(t *testing.T) {
+		var seen []patch
+		srv := newSrv("db", "", false, &seen)
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		d.PollTimeout = 5 * time.Millisecond
+		pid := flexProviderID(d.Subscription, "rg1", "orders-db")
+		res := d.updateFlexServer("db", "prod", pid,
+			map[string]any{"network.publicExposure": false}, []string{"network.publicExposure"})
+		if res.Status != "unknown" || !strings.Contains(res.Reason, "not observed applied") {
+			t.Fatalf("a server stuck Updating must be unknown, not succeeded: %+v", res)
+		}
+	})
+
 	t.Run("foreign server refused, no write", func(t *testing.T) {
 		var seen []patch
-		srv := newSrv("someone-else", "", &seen)
+		srv := newSrv("someone-else", "", true, &seen)
 		defer srv.Close()
 		d := vnetTestDriver(t, srv)
 		pid := flexProviderID(d.Subscription, "rg1", "orders-db")
@@ -471,39 +500,73 @@ func TestClassifyFlexServerChange(t *testing.T) {
 // require_secure_transport configuration, so a server accepting plaintext is made TLS-only
 // WITHOUT replacing the database.
 func TestUpdateFlexServerInTransit(t *testing.T) {
-	var seenValue []string // require_secure_transport value seen on the config PATCH
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		isConfig := strings.Contains(r.URL.Path, "/configurations/require_secure_transport")
-		switch {
-		case r.Method == "GET":
-			_, _ = w.Write([]byte(`{"location":"eastus",` +
-				`"tags":{"groundhold-capability":"db","groundhold-environment":"prod"},` +
-				`"properties":{"state":"Ready","network":{"publicNetworkAccess":"Disabled"}}}`))
-		case r.Method == "PATCH" && isConfig:
-			body, _ := io.ReadAll(r.Body)
-			var d struct {
-				Properties struct {
-					Value string `json:"value"`
-				} `json:"properties"`
+	// Stateful async fake (D1222): the config PATCH accepts while require_secure_transport is
+	// still the OLD value, settling at the target only after the operation completes. The GET
+	// on the config URL returns the parameter (no provisioningState — the poll rides the value);
+	// the GET on the server URL is the ownership pre-read. settle=false is the stuck case.
+	newSrv := func(settle bool, seenValue *[]string) *httptest.Server {
+		value, pending, lag := "off", "", 0
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			isConfig := strings.Contains(r.URL.Path, "/configurations/require_secure_transport")
+			switch {
+			case r.Method == "GET" && isConfig:
+				if lag > 0 {
+					lag--
+					if lag == 0 && settle {
+						value = pending
+					}
+				}
+				_, _ = w.Write([]byte(`{"properties":{"value":"` + value + `"}}`))
+			case r.Method == "GET":
+				_, _ = w.Write([]byte(`{"location":"eastus",` +
+					`"tags":{"groundhold-capability":"db","groundhold-environment":"prod"},` +
+					`"properties":{"state":"Ready","network":{"publicNetworkAccess":"Disabled"}}}`))
+			case r.Method == "PATCH" && isConfig:
+				body, _ := io.ReadAll(r.Body)
+				var d struct {
+					Properties struct {
+						Value string `json:"value"`
+					} `json:"properties"`
+				}
+				_ = json.Unmarshal(body, &d)
+				*seenValue = append(*seenValue, d.Properties.Value)
+				pending, lag = d.Properties.Value, 2
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{"properties":{"value":"` + value + `"}}`))
+			default:
+				t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+				w.WriteHeader(404)
 			}
-			_ = json.Unmarshal(body, &d)
-			seenValue = append(seenValue, d.Properties.Value)
-			w.WriteHeader(200)
-			_, _ = w.Write([]byte(`{"properties":{"value":"on"}}`))
-		default:
-			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(404)
+		}))
+	}
+
+	t.Run("enforce TLS (PATCH require_secure_transport=on, polled to applied)", func(t *testing.T) {
+		var seenValue []string
+		srv := newSrv(true, &seenValue)
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		pid := flexProviderID(d.Subscription, "rg1", "orders-db")
+		res := d.updateFlexServer("db", "prod", pid,
+			map[string]any{"encryption.inTransit": true}, []string{"encryption.inTransit"})
+		if res.Status != "succeeded" {
+			t.Fatalf("update: %+v", res)
 		}
-	}))
-	defer srv.Close()
-	d := vnetTestDriver(t, srv)
-	pid := flexProviderID(d.Subscription, "rg1", "orders-db")
-	res := d.updateFlexServer("db", "prod", pid,
-		map[string]any{"encryption.inTransit": true}, []string{"encryption.inTransit"})
-	if res.Status != "succeeded" {
-		t.Fatalf("update: %+v", res)
-	}
-	if len(seenValue) != 1 || seenValue[0] != "on" {
-		t.Fatalf("must PATCH require_secure_transport value=on, got %+v", seenValue)
-	}
+		if len(seenValue) != 1 || seenValue[0] != "on" {
+			t.Fatalf("must PATCH require_secure_transport value=on, got %+v", seenValue)
+		}
+	})
+
+	t.Run("stuck at old value times out to unknown", func(t *testing.T) {
+		var seenValue []string
+		srv := newSrv(false, &seenValue)
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		d.PollTimeout = 5 * time.Millisecond
+		pid := flexProviderID(d.Subscription, "rg1", "orders-db")
+		res := d.updateFlexServer("db", "prod", pid,
+			map[string]any{"encryption.inTransit": true}, []string{"encryption.inTransit"})
+		if res.Status != "unknown" || !strings.Contains(res.Reason, "not observed applied") {
+			t.Fatalf("a parameter stuck at the old value must be unknown, not succeeded: %+v", res)
+		}
+	})
 }

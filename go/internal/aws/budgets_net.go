@@ -231,13 +231,23 @@ func (d *Driver) observeBudget(capability, providerID string) ([]provider.Observ
 				Derivation: "measured"})
 		}
 	}
+	var diags []string
 	if period := budgetPeriodFromTimeUnit(desc.TimeUnit); period != "" {
 		obs = append(obs, provider.Observation{Path: "budget.period", Value: period, Derivation: "measured"})
+	} else if desc.TimeUnit != "" {
+		// D1234, the AWS twin of the GCP silence. A TimeUnit this mapping does not know
+		// produced NOTHING — no observation and no diagnostic — so a value AWS adds
+		// later reads as "the budget has no period" rather than "we could not map it".
+		// The vocabulary publishes the opposite convention for this attribute ("no
+		// equivalent is named in a diagnostic, never coerced"); Azure honors it and the
+		// other two did not.
+		diags = append(diags, "budget.period not mapped: TimeUnit "+desc.TimeUnit+
+			" has no recurring vocab equivalent")
 	}
 	if threshold, tFound, terr := d.budgetThreshold(account, name); terr == nil && tFound {
 		obs = append(obs, provider.Observation{Path: "alert.threshold", Value: threshold, Derivation: "measured"})
 	}
-	return obs, nil, nil
+	return obs, diags, nil
 }
 
 // deleteBudget: DeleteBudget by name. Ownership is the deterministic name — the

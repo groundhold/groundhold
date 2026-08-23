@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"groundhold/internal/provider"
@@ -140,16 +141,18 @@ func (d *Driver) getRecordSet(project, zone, name, recordType string) (dnsRRSet,
 
 // rrsetTarget reads the first rrdata, unquoting a TXT payload back to the raw target
 // the contract declares.
-func rrsetTarget(s dnsRRSet) string {
+// rrsetTarget returns the record set's FIRST value and how many it has (D1237 — the
+// count is what lets the caller disclose what a single-string attribute cannot hold).
+func rrsetTarget(s dnsRRSet) (string, int) {
 	if len(s.Rrdatas) == 0 {
-		return ""
+		return "", 0
 	}
 	v := s.Rrdatas[0]
 	if s.Type == "TXT" {
 		v = strings.TrimSuffix(strings.TrimPrefix(v, `"`), `"`)
 		v = strings.ReplaceAll(v, `\"`, `"`)
 	}
-	return v
+	return v, len(s.Rrdatas)
 }
 
 func (d *Driver) observeCloudDNSRecord(capability, providerID string) ([]provider.Observation, []string, error) {
@@ -177,12 +180,23 @@ func (d *Driver) observeCloudDNSRecord(capability, providerID string) ([]provide
 		{Path: "dns.type", Value: recordType, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
-	if tgt := rrsetTarget(s); tgt != "" {
+	var diags []string
+	if tgt, n := rrsetTarget(s); tgt != "" {
 		obs = append(obs, provider.Observation{Path: "dns.target", Value: tgt, Derivation: "measured"})
+		if n > 1 {
+			diags = append(diags, "dns.target reports the FIRST of "+strconv.Itoa(n)+
+				" values in this record set — the attribute is a single string and cannot "+
+				"represent the rest, so a constraint on it is satisfied by one target while "+
+				"the name also resolves to the others")
+		}
+	} else {
+		// D1235, the GCP twin.
+		diags = append(diags, "dns.target not observed: no target could be read from this "+
+			"resource record set (an unsupported type, or a shape this driver does not decode)")
 	}
 	// dns.proxied is a Cloudflare edge posture — Cloud DNS has no proxy, so it is
 	// OMITTED (an honest gap), never fabricated as a false.
-	diags := []string{"dns.proxied not observed — a Cloudflare edge concept with no Cloud DNS equivalent"}
+	diags = append(diags, "dns.proxied not observed — a Cloudflare edge concept with no Cloud DNS equivalent")
 	return obs, diags, nil
 }
 

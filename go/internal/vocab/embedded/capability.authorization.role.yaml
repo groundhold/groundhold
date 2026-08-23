@@ -72,7 +72,11 @@ attributes:
       for a set groundhold cannot classify (never guessed).
     mappings:
       gcp.customrole: any *.setIamPolicy / iam.* / resourcemanager.*.setIamPolicy, or a wildcard
-      aws.custompolicy: any iam:* / sts:AssumeRole / a "*" action or "service:*" wildcard
+      aws.custompolicy: >
+        any iam WRITE (the namespace minus its Get*/List*/Simulate* read surface —
+        reading IAM is reconnaissance, not the power to grant) / a credential-minting sts action (AssumeRole, AssumeRoleWith*,
+        GetFederationToken, GetSessionToken) / a "*" action or "service:*" wildcard.
+        Inert STS calls such as sts:GetCallerIdentity are NOT privileged (D1231).
       azure.customroledef: any Microsoft.Authorization/*/write or a "*" action
       k8s.rbac-role / k8s.rbac-clusterrole: a full wildcard (verb, resource and group
         all `*` — cluster-admin-shaped), the verbs bind/escalate/impersonate, or any

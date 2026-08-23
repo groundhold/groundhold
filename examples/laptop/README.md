@@ -19,7 +19,7 @@ Ends in `CONVERGED`. Run the exact same command again and it ends in
 `CONVERGED` having touched nothing:
 
 ```
-  ✓ converged — the world already matches the candidate
+  ✓ converged — the world already matches the candidate on every attribute this run can compare
 ```
 
 That second run is the point. Convergence is proven against what was observed

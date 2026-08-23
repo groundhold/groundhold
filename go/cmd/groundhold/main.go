@@ -172,8 +172,9 @@ Usage:
                    --at <ts>  (read-only; never writes the ledger)
                    (k8s: --region is the namespace, empty = cluster-wide)
   groundhold k8s-skeleton <group>/<version>/<Kind> --capability <cap>
-                   [--kubeconfig <f>] [--context <c>]  (offline mapping
-                   scaffolding: emits the machine half only, authors no
+                   [--kubeconfig <f>] [--context <c>]  (mapping scaffolding:
+                   READS a live cluster's discovery + OpenAPI and writes
+                   nothing to it; emits the machine half only, authors no
                    semantics; use "core" for the core group)
   groundhold pair <provider> --cred-ref <kind>:<value> [--scope <s>] [--verify-ref]
                    [--pairings <f>]
@@ -1704,9 +1705,15 @@ func run(args []string) int {
 		return 0
 	}
 	if cmd == "k8s-skeleton" {
-		// offline scaffolding: crawl a GVK's machine contract (discovery +
-		// OpenAPI) and emit the machine-authoritative half of a mapping. It
-		// writes nothing to the cluster and authors no semantics.
+		// Scaffolding: crawl a GVK's machine contract (discovery + OpenAPI) and
+		// emit the machine-authoritative half of a mapping. It writes nothing to
+		// the cluster and authors no semantics.
+		//
+		// D1251: this used to be described as "offline", which meant "does not
+		// write" to whoever wrote it and "needs no cluster" to whoever reads it.
+		// A reachable API server is REQUIRED — the schema comes from it — so a
+		// reader who took the word at face value found the verb refusing at a
+		// desk with no cluster.
 		parts := strings.Split(pos[1], "/")
 		if len(parts) != 3 {
 			fmt.Fprintln(os.Stderr, "k8s-skeleton: expected <group>/<version>/<Kind> "+
@@ -2418,7 +2425,30 @@ func run(args []string) int {
 			}
 			docs = append(docs, d)
 		}
-		res := survey.Run(c, docs, completeFlag)
+		// D1253: the vocabulary's closed set of capability TYPES, so a hint naming
+		// something that does not exist is reported as unresolvable rather than as
+		// ordinary drift against the contract.
+		//
+		// Read from the EMBEDDED set directly rather than from `vocabs`, and the
+		// reason is a measurement: the first cut used `vocabs`, and the conformance
+		// runner sets GROUNDHOLD_NO_EMBEDDED_VOCAB for the whole suite, so `vocabs`
+		// was empty and the check silently did nothing — the fail-open branch guarding
+		// against an empty set disabled it in exactly the suite meant to pin it.
+		//
+		// Which set is right is not a workaround either way: whether a TYPE exists is a
+		// property of this build, while `--vocab` and that variable govern which
+		// ATTRIBUTE definitions apply to a contract. A custom vocabulary dir can still
+		// add types — those are merged below.
+		knownTypes := map[string]bool{}
+		if emb, eerr := vocab.Embedded(); eerr == nil {
+			for t := range emb {
+				knownTypes[t] = true
+			}
+		}
+		for t := range vocabs {
+			knownTypes[t] = true
+		}
+		res := survey.Run(c, docs, completeFlag, knownTypes)
 		printResult(res, explainFlag)
 		return res.Exit
 
