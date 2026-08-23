@@ -64,8 +64,20 @@ func TestUsageShowsTheProviderFlagWhereItIsRequired(t *testing.T) {
 func TestUsageShowsEveryFlagAVerbRefusesWithout(t *testing.T) {
 	src := readMainSource(t)
 	req := map[string]map[string]bool{}
-	for _, m := range regexp.MustCompile(`"([a-z-]+) requires (?:an explicit )?(--[a-z-]+)`).
-		FindAllStringSubmatch(src, -1) {
+	// Two phrasings, because the subject is derived from prose the author chose. Twenty
+	// refusals say "<verb> requires --flag"; one says "<verb>: --flag is required", and
+	// a gate that reads only the first shape decides its own subject by spelling
+	// (D1252). Its flag was advertised — measured, not assumed — so nothing was wrong;
+	// the reach was just narrower than the sentence above claims.
+	shapes := []*regexp.Regexp{
+		regexp.MustCompile(`"([a-z0-9-]+) requires (?:an explicit )?(--[a-z-]+)`),
+		regexp.MustCompile(`"([a-z0-9-]+): (--[a-z-]+) is required`),
+	}
+	var matches [][]string
+	for _, re := range shapes {
+		matches = append(matches, re.FindAllStringSubmatch(src, -1)...)
+	}
+	for _, m := range matches {
 		if req[m[1]] == nil {
 			req[m[1]] = map[string]bool{}
 		}
@@ -80,7 +92,18 @@ func TestUsageShowsEveryFlagAVerbRefusesWithout(t *testing.T) {
 	for verb, flags := range req {
 		b, ok := blocks[verb]
 		if !ok {
-			continue // not a top-level verb (e.g. a flag that requires another flag)
+			// A flag that requires another flag (`--quarantine requires --fingerprint`)
+			// has no usage line of its own and never should. Anything else with no block
+			// is a VERB this gate cannot see, and skipping it quietly is how the parser's
+			// blindness above survived: the subject vanished and the gate reported clean
+			// over what was left (D1252).
+			if strings.HasPrefix(verb, "--") {
+				continue
+			}
+			t.Errorf("%q refuses without a flag and has no usage block — either the usage "+
+				"line is missing or the parser cannot read it. Both mean this gate is not "+
+				"checking the verb it names.", verb)
+			continue
 		}
 		for f := range flags {
 			if !strings.Contains(b, f) {
@@ -99,7 +122,12 @@ func TestUsageShowsEveryFlagAVerbRefusesWithout(t *testing.T) {
 // folded in. Shared by both gates so a parser fix reaches each of them (D583).
 func usageBlocks(t *testing.T) map[string]string {
 	t.Helper()
-	head := regexp.MustCompile(`(?m)^  groundhold ([a-z-]+)\s`)
+	// D1252: the class was `[a-z-]+` — no digit. On the `k8s-skeleton` line the capture
+	// stopped at `k` and the required `\s` then met `8`, so the LINE did not match and
+	// the verb had no block at all. Both gates below then treated it as absent: one
+	// would have said so, the other skipped it silently. Fifty-two of fifty-three, and
+	// nothing said which one was gone.
+	head := regexp.MustCompile(`(?m)^  groundhold ([a-z0-9-]+)\s`)
 	blocks := map[string]string{}
 	var cur string
 	for _, line := range strings.Split(usage, "\n") {
@@ -135,4 +163,29 @@ func readMainSource(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return string(raw)
+}
+
+// D1252. The parser above is shared by both gates, so its blindness is theirs. A
+// character class cannot be proven by a tree that happens to hold no counter-example,
+// and until `k8s-skeleton` arrived this tree held none — which is why the gap opened
+// unobserved. So the parser is asked directly whether it can see the verb it lost, and
+// how many it finds at all.
+func TestTheUsageParserSeesEveryVerbIncludingOnesWithDigits(t *testing.T) {
+	blocks := usageBlocks(t)
+	if len(blocks) < 50 {
+		t.Fatalf("the usage parser found %d verbs — it is broken, and both gates over it "+
+			"would then report clean about whatever survived", len(blocks))
+	}
+	if _, ok := blocks["k8s-skeleton"]; !ok {
+		var digitless int
+		for v := range blocks {
+			if strings.ContainsAny(v, "0123456789") {
+				digitless++
+			}
+		}
+		t.Errorf("the usage parser cannot see `k8s-skeleton` (%d of %d parsed verbs "+
+			"contain a digit). A verb it cannot see has no usage block, and a gate that "+
+			"skips a missing block checks one fewer thing than it says it does.",
+			digitless, len(blocks))
+	}
 }

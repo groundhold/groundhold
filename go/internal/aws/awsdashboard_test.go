@@ -187,3 +187,73 @@ func TestAdoptsExistingCWDashboard(t *testing.T) {
 	}
 	certifynet.CertifyCreateAdoptsExisting(t, p)
 }
+
+// D1236, the AWS twin of the GCP layout finding. `dashboard.metrics` is a SET the
+// vocabulary intends for `subset-of` ("the dashboard charts only approved metrics"),
+// so under-reporting makes that constraint read SATISFIED over a dashboard charting
+// something unapproved. Two under-reports lived here.
+func awsDashObserve(t *testing.T, body string) (map[string]any, []string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// GetDashboard answers the Query protocol in XML, with the JSON body nested.
+		_, _ = w.Write([]byte(`<GetDashboardResponse><GetDashboardResult><DashboardBody>` +
+			body + `</DashboardBody></GetDashboardResult></GetDashboardResponse>`))
+	}))
+	defer srv.Close()
+	d := cwDashDriver(t, srv)
+	obs, diags, err := d.observeCWDashboard("golden", cwDashProviderID("gh"))
+	if err != nil {
+		t.Fatalf("observe: %v", err)
+	}
+	got := map[string]any{}
+	for _, o := range obs {
+		got[o.Path] = o.Value
+	}
+	return got, diags
+}
+
+// The first under-report: a widget charts a LIST of metrics and only [0] was read.
+func TestEveryMetricSeriesInAWidgetIsCounted(t *testing.T) {
+	body := `{"widgets":[{"type":"metric","properties":{"metrics":[` +
+		`["AWS/EC2","CPUUtilization"],["AWS/EC2","NetworkIn"],["AWS/RDS","FreeStorageSpace"]]}}]}`
+	got, diags := awsDashObserve(t, body)
+	list, present := got["dashboard.metrics"].([]string)
+	if !present {
+		t.Fatalf("the set must be observed, got diags %v", diags)
+	}
+	if len(list) != 3 {
+		t.Fatalf("a widget charting three metrics contributes three, got %v", list)
+	}
+}
+
+// The second: a series the driver cannot name made the set incomplete, silently.
+func TestAnUnnameableMetricSeriesWithholdsTheSet(t *testing.T) {
+	body := `{"widgets":[{"type":"metric","properties":{"metrics":[` +
+		`["AWS/EC2","CPUUtilization"],["AWS/EC2"]]}}]}`
+	got, diags := awsDashObserve(t, body)
+	if v, present := got["dashboard.metrics"]; present {
+		t.Fatalf("one series could not be named, so the SET is incomplete and must be "+
+			"withheld — a partial set satisfies subset-of. Got %v", v)
+	}
+	var named bool
+	for _, d := range diags {
+		if strings.Contains(d, "dashboard.metrics not observed") {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("the withholding must be diagnosed: %v", diags)
+	}
+}
+
+// A text widget charts nothing, so it must not withhold the set.
+func TestNonMetricWidgetsDoNotWithholdTheSet(t *testing.T) {
+	body := `{"widgets":[{"type":"text","properties":{"markdown":"hi"}},` +
+		`{"type":"metric","properties":{"metrics":[["AWS/EC2","CPUUtilization"]]}}]}`
+	got, diags := awsDashObserve(t, body)
+	list, present := got["dashboard.metrics"].([]string)
+	if !present || len(list) != 1 {
+		t.Fatalf("a text widget charts nothing and must not withhold the set, got %v / %v",
+			got["dashboard.metrics"], diags)
+	}
+}

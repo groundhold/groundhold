@@ -36,6 +36,9 @@ never does (D53).
   | `optional` (flagged/pluggable) | `dev-test` (fixtures, local-dev,
   CI-only) | `unknown`. Closed set; anything else is a load error.
 - `capabilityHint` is a vocabulary capability type (`spec/vocab/`).
+  An unresolvable one is NOT a load error — a surveyor may legitimately
+  witness a need the vocabulary has not grown yet — it is reported as
+  `unknown-type` above, never silently folded into ordinary drift.
 - `evidence` is mandatory and cites files — a finding that cannot say
   where it saw something is not a finding.
 - **Multi-repo / microservices**: one survey per repository; a system
@@ -53,6 +56,13 @@ finding:
 
 - `required` with a hint → **covered** when the contract has a
   capability of that type, else **uncovered** — drift.
+- `required` with a hint naming a type the VOCABULARY does not have →
+  **unknown-type** — drift, but a different question. Whether the
+  contract covers a type nobody can resolve is not knowable, and this
+  runtime does not collapse unknown into an answer: `uncovered` would
+  send an operator to reconcile a contract when the survey has a typo.
+  It still blocks (an unresolvable witness is not a pass) and the row
+  names the hint it could not resolve.
 - `required` without a hint, `optional`, `unknown` → **gap**: a
   question for a human, never silent drift.
 - `dev-test` → **ignored** (recorded in the report, weightless).

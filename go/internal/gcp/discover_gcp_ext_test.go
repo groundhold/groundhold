@@ -306,6 +306,14 @@ func TestDiscoverArtifactRegistries(t *testing.T) {
 				w.Write([]byte(`{"format":"DOCKER","dockerConfig":{"immutableTags":true}}`))
 			case strings.HasSuffix(r.URL.Path, "/repositories/images:getIamPolicy"):
 				w.Write([]byte(`{"bindings":[]}`))
+			case strings.HasSuffix(r.URL.Path, "/services/containerscanning.googleapis.com"):
+				// D1233: the AR observer reads the PROJECT's Container Scanning state to
+				// report security.scanOnPush. Before the seam was pinned this request went
+				// to the real serviceusage.googleapis.com, failed there, and the attribute
+				// was withheld — so this fixture exercised only the unreadable branch of a
+				// security-floored attribute. (The emission itself is covered thoroughly in
+				// artifactregistry_test.go; checked rather than assumed before saying so.)
+				w.Write([]byte(`{"state":"ENABLED"}`))
 			default:
 				t.Errorf("unexpected call: %s %s", r.Method, r.URL.Path)
 			}
@@ -313,6 +321,10 @@ func TestDiscoverArtifactRegistries(t *testing.T) {
 	defer srv.Close()
 	d := testDriver(t, srv)
 	d.ARBaseURL = srv.URL
+	// D1233: this driver also reads serviceusage (to see whether container scanning is
+	// enabled), whose seam is a PACKAGE var and so is invisible to a struct-field pin.
+	// Unpinned it went to the real serviceusage.googleapis.com.
+	pinPackageSeams(t, srv.URL)
 
 	// empty region enumerates locations first
 	got, _, err := d.discoverArtifactRegistries("")

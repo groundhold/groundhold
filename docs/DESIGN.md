@@ -40181,3 +40181,1671 @@ reconciled, not refused; the adopt test's inTransit case moved from failed to un
 encryption and the customer key stay create-fixed. `sameAccount` guards the boundary; the update
 permission (`DescribeReplicationGroups` + `ModifyReplicationGroup`) was already declared, and the
 migration uses the query action the driver already speaks — no new route.
+
+## D1221 — the Kinesis retention remediation reported succeeded before it applied (field-found)
+
+Field validation of the D1200–D1220 in-place remediations — create the resource on our own
+account, drive it non-compliant, converge, and read the provider back — did what a unit test built
+on a synchronous fake structurally cannot: it caught a REAL false green in D1211. A live Kinesis
+stream at 24h converged to 48h; `updateKinesis` returned `succeeded`; the provider read back **24h,
+status UPDATING**. `Increase`/`DecreaseStreamRetentionPeriod` returns 200 on ACCEPT — the stream
+enters UPDATING carrying the OLD window and only reaches the new one back at ACTIVE — and
+`updateKinesis` reported succeeded on the 200, tombstoning the change while it was still the old
+value. This is the exact D953 poll-to-applied discipline I wired into the async CLOSING paths
+(opensearch/msk/elasticache/dynamodb) and MISSED on kinesis retention, and it hid because every unit
+fake applied the change synchronously (the 200 and the new state arrived together, so no poll was
+ever needed to pass).
+
+The fix adds the poll the sibling drivers already carry: after a 200, `updateKinesis` polls
+`describeStream` until `StreamStatus=="ACTIVE" && RetentionPeriodHours==target` before succeeding;
+a stream still UPDATING at the poll timeout is `unknown` WITH the handle, never succeeded. The unit
+fake is now STATEFUL and models the async lag (UPDATING at the old window for a beat, then ACTIVE at
+the new one) so the test exercises the poll, and a dedicated case asserts a stream stuck UPDATING is
+`unknown` — the guard that goes red the instant the poll is removed (verified by mutant). No new
+route or permission; the fix is entirely in the update arm's wait.
+
+The lesson generalises past kinesis: the D953 poll-to-applied audit was done driver-by-driver from
+the code, and this one slipped the reading because a synchronous fake makes the missing poll
+invisible. Field validation is the assay that a synchronous fake cannot fake — a security/retention
+CLOSING change that a real provider applies asynchronously is exactly where "succeeded" and "applied"
+come apart, and only a live read distinguishes them.
+
+## D1222 — the Azure in-place remediations reported succeeded before the async operation applied
+
+D1221 fixed the Kinesis instance of accept-not-applied; auditing the sibling clouds for the same
+shape found it SYSTEMIC on Azure. Every ARM mutation funnels through `terminalOr`, which maps any
+2xx to success — including **202 Accepted**, the code Azure returns for a long-running operation
+that has only been ACCEPTED. The resource is still `Updating` at its OLD value; the change applies
+only on the way back to `Succeeded`. The in-place update drivers PATCHed and returned succeeded on
+that 202 without polling — so a public cache reported private, and a plaintext server reported
+TLS-enforced, on accept while still answering on the old path. This is the D953 shape the create
+paths already avoid (they poll `provisioningState`), and it was invisible to the unit tests because
+every fake applied synchronously — the exact blind spot the D1211 field run exposed for Kinesis.
+
+The confirmation is per-operation, not blanket: `Redis_Update` is `x-ms-long-running-operation`
+(200/202), so Azure Redis (`network.publicExposure` D1206, `encryption.inTransit` D1209) false-greened;
+a PostgreSQL flexible-server update is long-running too (`network.publicExposure` D1205, and the
+`require_secure_transport` configuration D1210). By contrast Search `Services_Update` is synchronous
+(200 only), so AI Search (D1207) was already honest — not every PATCH is an LRO, and the fix is
+scoped to the ones that are.
+
+`pollAzureApplied(getURL, applied)` is the remedy: after the mutation it GETs the resource until
+`provisioningState` is terminal AND the caller's knob predicate reads the target — a `Failed`/`Canceled`
+async op is a terminal `failed`, and a resource that never applies by the poll timeout is `unknown`
+WITH the pid (the change may yet land). Checking the knob, not `provisioningState` alone, is
+load-bearing: a resource can still read `Succeeded` from BEFORE the update began, so the knob value
+is what proves the change took. A synchronous 200 satisfies it on the first GET (Search would still
+pass unchanged); an async 202 rides through the `Updating` probes. No new route or permission — the
+poll GETs the same URL the ownership pre-read already reads. Redis and the flexible server carry
+`succeeded`-means-applied now, each with a stateful async fake and a stuck-`Updating`=`unknown` case
+verified by mutant. The rest of the Azure family was then confirmed on the swagger: Event Hubs
+`EventHubs_CreateOrUpdate` and Blob `BlobServices_SetServiceProperties` are both `x-ms-long-running-
+operation: None` (200 only, synchronous) — D1212 and D1218 are honest — and Cosmos already polls its
+one-way migration state (D1216). So the Azure sweep is complete: two genuine false-greens fixed, the
+rest sync or already-polling.
+
+## D1223 — the same accept-not-applied false-green in AWS Redshift Serverless
+
+The cross-cloud sweep the D1221/D1222 finding prompted turned up a third instance, in AWS's own
+shape. `UpdateWorkgroup` returns 200 to ACCEPT the change while the workgroup enters `MODIFYING`
+with `publiclyAccessible` STILL at its old value; `updateRedshiftServerless` (D1208) returned
+succeeded on that 200 — its own comment noted "the workgroup enters MODIFYING and applies the flip"
+and then did nothing with it. So a public warehouse read private on accept while it still answered
+on the public endpoint: the D1221 Kinesis class exactly, in AWS's 200-then-`MODIFYING` form rather
+than Azure's 202. It hid the same way — a synchronous fake returned the applied state immediately, so
+the missing poll was never exercised.
+
+The fix mirrors the create path (which already polls `GetWorkgroup` to `AVAILABLE`): after the 200,
+poll to `AVAILABLE` with `publiclyAccessible` at its target before succeeding — `FAILED` is a terminal
+`failed`, still-`MODIFYING` at the timeout is `unknown` WITH the pid. The test's fake is now stateful
+(`MODIFYING` at the old flag, then `AVAILABLE` at the target) with a stuck-`MODIFYING`=`unknown` case
+verified by mutant. No new route or permission — the poll uses the `GetWorkgroup` the ownership
+pre-read already calls.
+
+This closes the accept-not-applied sweep across all three clouds: three genuine false-greens found
+(Kinesis retention D1221, Azure Redis+flexserver D1222, Redshift Serverless D1223), and the rest of
+the in-place remediation family confirmed to already poll to applied (AWS OpenSearch/MSK/ElastiCache/
+DynamoDB, GCP Firestore, Azure Cosmos) or to be genuinely synchronous (Azure Search/Event Hubs/Blob).
+The recurring lesson: a synchronous unit fake makes a missing poll invisible, so "succeeded" quietly
+means "accepted" until a live read — or an audit the field run provoked — pulls the two apart.
+
+## D1225 — the grant driver reported a role's GUID under an attribute defined as its NAME, and blamed the estate for its own gap
+
+Found in the field, on a real Azure subscription, and it turned out to be a family across all three
+clouds. Two defects share one root: `access.privileged` is withheld for any role outside a curated
+set — which is right — but the code around that withholding asserted things it never checked.
+
+**The false-green.** `grant.role` is defined by the vocabulary as "the NAMED role/policy the grant
+confers ... the grant's semantic identity", with `"Reader"` as the Azure example. The Azure driver
+resolved a role-definition GUID to a name through `azBuiltinRole`, a table of FOUR entries, and fell
+back to emitting the raw GUID for everything else. A GUID there is not a weaker answer — it is a
+different namespace. A hard constraint written in names reads SATISFIED over a grant that IS the
+excluded role, because a GUID matches no name in the list. Measured, not reasoned:
+`not-in: [Owner, Contributor, User Access Administrator, Key Vault Administrator, Role Based Access
+Control Administrator]` against Key Vault Administrator's GUID returned `satisfied: 1`,
+`executable: true`, `blockingReasons: []`. After the fix the same constraint returns `violated`,
+`executable: false`. Azure has ~700 built-in roles, so the four-entry table was the exception path
+for essentially every real grant.
+
+The fix asks ARM. `resolveAzureRoleDefinition` GETs the role definition when the curated table has
+no answer and emits `properties.roleName`. This does not introduce the name/GUID asymmetry, it
+FINISHES it — `azRoleNameForGuid` already preferred the name for the four roles it knew. When the
+definition cannot be read, `grant.role` is now WITHHELD rather than filled with the GUID: the
+fallback WAS the defect, and an absent attribute makes a name constraint `unknown`, which blocks.
+
+**The misattribution.** All three drivers explained the withheld privilege with "a custom role's
+privilege is not guessed" (AWS: "a custom policy's"). Neither the estate nor the API had been asked.
+The subscription's one unclassifiable role was `Defender Agentless VM Scan`, `type: BuiltInRole` — a
+first-party role reported to the operator as their own creation. On GCP the scale is plainer: of 49
+role bindings in a live project, 37 fall outside the curated set and ALL 49 are predefined; not one
+custom role exists, and the tool would have called 37 of them custom.
+
+This matters because the two causes need opposite remedies. A provider-defined role outside our set
+is OUR gap to close and the operator can do nothing about it; a custom role is genuinely theirs to
+explain. Naming the wrong cause sends them to the wrong place — and it is the tool blaming the
+estate for its own incompleteness, which is the honesty failure this project treats as first-class.
+
+Each cloud is asked in the way it can answer: GCP from the role id (`roles/...` is predefined,
+`projects/*/roles/...` and `organizations/*/roles/...` are custom), AWS from the ARN's account
+segment (`arn:<partition>:iam::aws:policy/...` is AWS-managed — the partition is deliberately NOT
+hardcoded, or every GovCloud and China policy would read as customer-managed), Azure from ARM's own
+`type` field, because an Azure role-definition id is a bare GUID either way. Where ARM cannot be
+read, the diagnostic says it could not determine which — the one honest answer left.
+
+The gates assert PROPERTIES rather than wording: an observed `grant.role` is never a bare GUID, a
+diagnostic never calls a role custom when the provider said built-in, and the AWS discriminator is
+exercised across three partitions. Verified in the field after the fix: the same subscription now
+reports `Defender Agentless VM Scan`, still with privilege withheld, and names the gap as ours.
+
+The recurring shape, worth naming: **a check that correctly declines to answer, and then explains
+its silence with a cause it never measured.** The withholding looks like rigour and the sentence
+beside it is a guess. Look for "not observed" messages that name a reason — and ask which call
+established it.
+
+## D1226 — a driver explained a withheld attribute with a fact about the service that the provider's API contradicts
+
+Found by sweeping for the shape D1225 named, one hour after naming it: a check that correctly
+declines to answer, and then explains its silence with a cause it never measured.
+
+The GCP Backup and DR vault observe ended, unconditionally, with
+`encryption.customerManagedKeys not observed: Backup and DR vaults use Google-managed encryption`
+and emitted nothing for that path. Nothing in the function measured it — the line was appended on
+every code path, whatever the vault said.
+
+The claim is also false. `BackupVault.encryptionConfig.kmsKeyName` is in the service's published
+discovery document, described by Google as "The Cloud KMS key name to encrypt backups in this
+backup vault". The service supports customer-managed keys; the driver simply never read the field.
+
+Two consequences, and the second is the sharper one. An operator told that a service has no
+customer-managed encryption may stop looking for a control that exists — the tool's own gap
+presented as the platform's limit, the same misattribution D1225 fixed in the grant drivers. And
+the function contradicted itself: a withheld attribute makes a hard constraint `unknown`, which
+BLOCKS, while the sentence beside it asserted the answer was known. A tool that says "I know this"
+and returns "I cannot say" has one of the two wrong, and here both were.
+
+Now it reads `encryptionConfig.kmsKeyName` and emits `measured`. The direction matters: a key name
+PRESENT yields `true`, the reassuring answer, and it rests on the vault's own statement of its
+configuration rather than on this driver's opinion of the service; ABSENT yields `false`, which is
+the alarming direction and safe to state, the field being optional and its absence meaning unset.
+Google's field doc notes that some workload backups (compute disk) may inherit a source key
+instead — that is a property of individual backups, not of the vault configuration this attribute
+describes, and the comment says so rather than leaving the caveat to be rediscovered.
+
+The fixture is why this survived: the shared vault double omits `encryptionConfig` entirely, so the
+missing read looked like a correct one. The new gates serve both a vault WITH a key and one
+WITHOUT, and assert the property that outlives any wording — nothing may report this attribute as
+unobservable, because it is readable. Three mutants (restore the unconditional claim, invert the
+sense, hardcode `true`) all die.
+
+**The sweep this came from is worth repeating on any "not observed:" message that names a reason.**
+Most of them are honest, because they name what the READ found — a field absent from the response,
+a body that would not parse, an HTTP status. The ones to look at name a property of the WORLD: the
+role is custom, the service has no such feature, the period is a custom one. Ask which call
+established that, and the answer is sometimes no call at all.
+
+## D1227 — the caveat on a measured non-public bucket prescribed a setting the code never read
+
+Found on a real AWS account, ten S3 buckets, all ten measured `network.publicExposure=false`.
+Every one carried the same closing instruction: "Enforce IgnorePublicAcls (neutralizes public
+object ACLs) and run the anonymous-GET outcome probe to close the residual."
+
+Nine of the ten already had IgnorePublicAcls enforced. They were told to go enforce it.
+
+The observe path that emits this never reads the flag — D240 deliberately made the Block Public
+Access reads LAZY, firing only when the policy already reads public, and pinned that with a test
+asserting the account endpoint is never hit otherwise. So the sentence was an instruction resting
+on an unmeasured fact: the D1225 class in a different costume, where the unchecked claim is not
+about a role's nature but about the reader's configuration.
+
+The second cost is the one that shows up in use. A sentence appended to every `false` fits every
+case and therefore distinguishes none. The one bucket whose residual was genuinely open — no BPA
+configuration at all, so a public OBJECT ACL would grant anonymous reads that neither leg can see
+— was indistinguishable from nine buckets where that path is closed. Boilerplate advice is not
+merely noise; it trains the reader to skip the line that eventually matters.
+
+The caveat now states the residual as a CONDITION rather than an action: it names IgnorePublicAcls
+(naming is what makes the residual checkable by the reader), says plainly that this observation did
+not read the flag, keeps both uncovered paths disclosed, and points at the anonymous-GET probe as
+the thing that settles it by measurement instead of inference.
+
+**What this entry deliberately does NOT do, and the numbers for deciding it.** The better answer is
+to read the effective IgnorePublicAcls here and say which residual is actually open for THIS bucket
+— the implementation is straightforward and mirrors `effectiveRestrictPublicBuckets` exactly
+(bucket-level OR account-level, positive evidence only, an unresolved read keeping the full
+caveat). It is not taken here because it reverses a pinned D240 sub-decision in a way that reaches
+every user: one additional request per bucket on every observe, and `s3:GetBucketPublicAccessBlock`
+becoming a de-facto requirement of reading an estate rather than an extra needed only when a policy
+reads public. That trade — a permission and a call-volume increase for advisory precision — is an
+owner's call, and it now has a field measurement behind it rather than intuition: nine to one, in
+the first real account it was pointed at.
+
+The gates pin both halves, because the failure mode of any "make the message weaker" fix is that
+the disclosure leaves with the over-claim. One asserts the caveat does not prescribe a change to a
+setting this path does not read; another asserts both residuals and the probe are still named; a
+third asserts a measured `false` actually carries the disclosure, since a caveat nothing emits is
+worth nothing. A mutant that re-adds the imperative dies — after the first attempt at that mutant
+silently failed to apply, because the doc comment QUOTES the old wording and the grep confirming
+the edit matched the quotation. A marker must be unique, including when the marker is prose.
+
+## D1228 — least privilege was measured from a name the policy's own author chose
+
+`access.privileged` is a security-floored attribute: it is the least-privilege claim an auditor
+reads and the one a hard constraint excludes on. The grant driver derived it from a SUBSTRING OF
+THE NAME — AWS: `AdministratorAccess`/`PowerUserAccess`/`*FullAccess*` privileged, `*ReadOnly*` not;
+GCP: contains `admin` privileged, a `viewer`/`reader` suffix not.
+
+For a policy or role the PROVIDER publishes, that name is a reasonable proxy: AWS chose
+`AmazonEC2ReadOnlyAccess` and it means what it says. For a CUSTOMER-MANAGED policy or a CUSTOM role
+the name is whatever its author typed. `arn:aws:iam::<acct>:policy/CompanyReadOnlyBaseline` matched
+`ReadOnly` and measured `access.privileged=false` over a document that may hold `"Action": "*"`;
+`projects/<p>/roles/companyViewer` did the same on GCP. Witnessed directly rather than argued —
+`classifyAWSPolicy` returns `(privileged=false, known=true)` for that ARN, and the observe emits it
+as `measured`.
+
+The sibling capability had already settled this. `capability.authorization.role` derives
+`access.mutating`/`access.privileged` from the ACTION VERBS in the document, and D797 fixed an
+under-report there — reading only `Statement[0]` — while naming the direction exactly: "an
+under-report of privilege, which is the most dangerous direction this tool has". The same attribute
+was being held to two standards of evidence in one codebase, and the weaker standard governed
+precisely where the name carries no information.
+
+**The fix withholds rather than guesses.** The name heuristic now applies only where the provider
+chose the name — `awsPolicyIsAWSManaged` (the ARN's account segment) and `gcpRoleIsPredefined` (the
+`roles/` prefix), both built in D1225 for the diagnostic and reused here for the substance. A
+customer-managed policy or custom role returns UNKNOWN, so `access.privileged` is not emitted, a
+hard constraint on it is `unknown`, and unknown on a hard constraint blocks. That is a real cost —
+estates with many custom roles will see more blocking — and it is the correct one: the alternative
+is a measured least-privilege claim over an unread document. Azure needed no change; it matches
+exact GUIDs of built-in roles, and a GUID is not a name anyone can choose to collide with.
+
+The diagnostics say why rather than just that, because the reader's next move differs: a
+provider-published policy outside the curated set is groundhold's gap to widen, while a
+customer-managed one cannot be classified from its name at all, by anyone.
+
+**The follow-up this leaves open, with its cost.** The right long-term answer is the sibling's:
+read the document (`GetPolicyVersion` on AWS, `roles.get` on GCP) and derive privilege from the
+actions, emitting `true` on positive evidence and withholding otherwise — never concluding
+"not privileged" from an absence. That is an extra call and an extra permission per grant, the same
+trade D1227 left to the owner, so it is recorded rather than taken. Note the asymmetry that makes
+it worth taking eventually: positive detection can only over-report, which is the safe direction.
+
+Field context, from the account this was found in: 87 grants, 72 unclassifiable, and every one of
+the `privileged=false` verdicts happened to sit on AWS-managed policies — so no live false-green
+was present. That absence is not evidence the code was safe, which is why the witness above is a
+constructed case that MUST fail rather than a survey that happened to pass.
+
+## D1229 — the deferred IgnorePublicAcls read, taken after review corrected the premise
+
+D1227 reworded the caveat on a measured `network.publicExposure=false` and deliberately DEFERRED
+the stronger fix — reading the effective `IgnorePublicAcls` so the caveat could say which residual
+is actually open — on the grounds that it reverses a pinned laziness decision (D240), costs a
+request per bucket, and makes `s3:GetBucketPublicAccessBlock` a de-facto requirement of reading any
+estate. Two independent reviews were asked. Both said take it, and both corrected a PREMISE rather
+than disagreeing about a preference.
+
+**The permission cost was near-notional.** `s3:GetBucketPublicAccessBlock` and
+`s3:GetAccountPublicAccessBlock` are both inside AWS's own `ReadOnlyAccess` and `SecurityAudit` —
+verified against the live policy documents with the wildcard patterns expanded, not assumed. An
+identity that can read an estate at all already holds them, and an unresolved read degrades to the
+previous caveat, so a narrower identity is no worse off than before.
+
+**And for a security-floored attribute the permission is SEMANTICS, not overhead.** The sharpest
+sentence of the review: the better failure is "I cannot verify this" than "I inferred it from
+something cheaper". Requiring the read is what makes the answer a witness.
+
+**The call cost is bounded by inverting the order.** `effectiveRestrictPublicBuckets` tries the
+BUCKET first (it short-circuits without needing an account id). `effectiveIgnorePublicAcls` tries
+the ACCOUNT first and memoizes it for the run: an account that enforces the flag closes the
+public-object-ACL residual for every bucket after ONE request. Only an account that does not
+enforce pays per bucket, and only for buckets that already measured non-public. Both reviews
+proposed this tiering independently, which is a good sign it is the obvious shape rather than a
+clever one.
+
+D240's laziness is NARROWED, not discarded, and the entry says which half survives:
+`RestrictPublicBuckets` is still resolved only when the policy already reads public. That half is
+now asserted on the leg that owns the decision rather than on a whole-observe request count —
+necessarily, because both flags come from the SAME endpoint, so counting hits there cannot tell one
+read from the other. A gate that cannot distinguish its two cases is not a gate.
+
+**A correction rides along, and it is the uncomfortable part.** D1227's caveat said BOTH residuals
+were "not enumerable at bucket scope". That is false for access points: `ListAccessPoints` takes a
+bucket filter and `GetAccessPointPolicyStatus` answers per access point — confirmed against the
+live API, on a real bucket, returning a well-formed empty list rather than an error. The caveat now
+makes the weaker and true claim: they are not READ here. Reading them is a further slice, not this
+one. The lesson is the one this project keeps relearning in a new costume: a limit of the CODE was
+published as a limit of the WORLD, and it took an outside reader to ask.
+
+The caveat is now three-valued, matching the evidence: residual CLOSED on a positively-read
+enforcement, NAMED AS OPEN when the flag reads off (a prescription is legitimate here — it is
+grounded in a read, which is exactly what D1227 objected to when it was not), and treated as OPEN
+with the failure named when the flag does not read at all. Reassurance still requires positive
+evidence; nothing about that moved.
+
+## D1230 — the account-level Block Public Access read never worked, and two layers of safety hid it
+
+D1229 put the account-level `GetAccountPublicAccessBlock` read on the common path for the first
+time. The very next field run surfaced two defects in it, both dating to D240, both invisible for
+the same reason: every failure of this read falls back to the CONSERVATIVE answer, and a read that
+only ever fails in the safe direction produces no symptom at all.
+
+**The endpoint host was wrong.** S3 Control carries the ACCOUNT ID as a DNS PREFIX —
+`<account>.s3-control.<region>.amazonaws.com`. The driver used the bare
+`s3-control.<region>.amazonaws.com`, which does not resolve, in any region. So every account-level
+Block Public Access read since D240 failed with a DNS error against real AWS. Nothing caught it:
+the read is lazy (only fires when a bucket policy already reads public), its failure keeps the
+conservative `public=true`, every unit test overrides `S3ControlBaseURL` for hermeticity so the real
+hostname was never once constructed, and the live endpoint-reality gate asks about PATHS with the
+service's own host — this path is recorded under `s3`, so it was asked at the S3 host and answered
+there. Confirmed by watching what the official AWS CLI actually dials.
+
+The practical consequence was an over-report at scale, not a false-green: an account that enforces
+`RestrictPublicBuckets` account-wide — which AWS has enabled by default for new accounts since 2023
+— would have every public-policy bucket reported PUBLIC when it is effectively private. Safe
+direction, and still wrong: a hard constraint would be violated on a bucket that is not exposed.
+
+**And the error envelope was the wrong shape.** With the host fixed, the read returned a bare 404.
+S3 answers `<Error><Code>` at the root; S3 CONTROL wraps it, `<ErrorResponse><Error><Code>`.
+`awsErrCode` matched only the root form, so an S3 Control error arrived as the empty string — and
+`parsePABFlag` decides whether a 404 is a DEFINITIVE "no configuration set" or an unreadable answer
+BY THAT CODE. An account with no BPA configuration therefore read as unreadable rather than not-set.
+Conservative again; wrong again. The sibling `rdsErrCode` had handled the wrapped form all along,
+one file over. Both shapes are matched now, the direct one winning when both could, so every
+existing S3 call site answers exactly as before.
+
+**What made this findable was a diagnostic doing its job.** The message that surfaced it was
+D1229's own: "IgnorePublicAcls did not read (GetAccountPublicAccessBlock: no answer — dial tcp:
+lookup s3-control.eu-central-1.amazonaws.com: no such host)". It named the read, the operation and
+the failure, so the cause was in the output rather than in a debugger. That is the case FOR making
+a check say what it could not do — the D1225 lesson paying out two days later, in reverse: the code
+was broken and the sentence beside it was true.
+
+**The generalisable shape, and it is uncomfortable.** A fallback that is correct in the safe
+direction is also a place where breakage accumulates undetected, because the safe direction produces
+no complaint. Two independent bugs lived in one read for as long as the read existed. When a code
+path's failure mode is "stay conservative", that is exactly where to go looking, and the question to
+ask is not "is the fallback right" but "has the primary ever once succeeded".
+
+Gated on the SHAPE of the host (checkable without a network), on both error envelopes with the
+live-confirmed body verbatim, on the definitive-versus-unreadable consequence including a 404
+carrying a DIFFERENT code that must stay unreadable, and — behind the live flag — on the premise
+itself: the bare host must not resolve, or this entry's reasoning needs re-checking. Field-verified
+after the fix: the ten-bucket estate now reports nine residuals CLOSED and names the one that is
+genuinely OPEN, which is the answer D1227 set out to give and could not.
+
+## D1231 — privilege is read from the policy document, and two published claims were wrong on the way
+
+D1228 stopped `access.privileged` being derived from a name its own author chose, and withheld
+instead. Withholding is honest but expensive: `unknown` on a hard constraint BLOCKS, and custom
+roles are the norm in mature estates, so a least-privilege contract over a real account became
+unusable. The owner asked for a consult; two independent reviewers said take the document read, and
+both corrected a premise rather than a preference — `iam:GetPolicy`, `iam:GetPolicyVersion` and
+GCP's `roles.get` all ship inside the providers' own read-only/audit roles, so the read costs an
+observing identity nothing it does not already hold.
+
+**The shape.** A policy or role the PROVIDER named and groundhold has curated is still classified
+from that name. Otherwise the DOCUMENT is read — AWS `GetPolicy` → `GetPolicyVersion`, GCP
+`roles.get` — and privilege is emitted `true` on POSITIVE evidence ONLY. No match WITHHOLDS. That
+asymmetry is the entire design: the escalation set is curated, not exhaustive (`ssm:SendCommand`,
+`lambda:UpdateFunctionCode`, `cloudbuild.builds.create` are escalation paths matching nothing in
+it), so concluding `false` from a miss would rebuild the under-report D797 named the most dangerous
+direction this tool has. The diagnostics say so in those words, because a reader who takes silence
+for safety is exactly who this protects.
+
+`Allow` + `NotAction` classifies TRUE. The sibling refuses to ENUMERATE a complement, correctly —
+but refusing to enumerate a set is not a reason to withhold a CLASSIFICATION, and a complement is
+the widest grant there is. The read is cached per SWEEP, not per process: a long-lived driver (the
+MCP server, the console BFF) would otherwise serve one instant's document under another instant's
+clock, against the `--at` thesis. Failures are cached too, or one denied policy produces an
+identical diagnostic per attachment and invites throttling.
+
+This also closes, for free, the population D1225 could only apologise for: provider-named things
+outside the curated set. In a real project that was 37 of 49 GCP bindings; on AWS, 63 of 72.
+
+**Two published claims turned out to be wrong, and both were found by building the gate.**
+
+The classifier fired on `svc == "sts"` WHOLESALE while the published mapping said "sts:AssumeRole".
+That drift was survivable while privilege came from a curated name; it is not now, because the
+classifier decides a MEASURED emission over arbitrary customer documents — and `sts:GetCallerIdentity`,
+the most harmless call in AWS, is in every read-only baseline. A clone of `ReadOnlyAccess` would
+have measured privileged=true. Narrowed to the credential-minting verbs, which is WIDER than the
+vocabulary's literal "sts:AssumeRole" (`AssumeRoleWithSAML`/`WithWebIdentity` and the token-getters
+mint credentials just as surely), so the vocabulary moved to meet the code rather than the code
+shrinking to a claim that was itself too narrow.
+
+And the mapping shorthand "any iam:\*" over-reached the vocabulary's own DEFINITION, which says
+privilege is "the power to grant further access". Reading IAM is not that — `iam:GetRole`,
+`iam:ListPolicies`, `iam:SimulatePrincipalPolicy` are reconnaissance, and they sit in every
+read-only baseline. The definition wins; the mapping is corrected. The exemption is by READ PREFIX
+(`Get`/`List`/`Simulate`) rather than an enumeration of writes, so an iam verb nobody has thought of
+yet is privileged by DEFAULT — the safe direction for a floored attribute, and gated as such.
+
+Both corrections point the same way and it is worth naming: **a false alarm at estate scale erodes
+the alarm**. Over-reporting is the safe direction for a single verdict and a corrosive one for a
+hundred, and this slice moved the attribute from "guessed from a name" to "measured", which is
+exactly when accuracy in the alarming direction starts to matter too.
+
+**What this does NOT do.** It does not convert the sibling's `false` emission to a withholding. That
+sibling emits `access.privileged=false` from a document it authored AND re-reads live — so the
+out-of-band-edit objection fails on its own terms — but the deeper objection stands: `false` there
+means "no action matched my patterns", over the same curated, non-exhaustive set. A review argued
+it is the same latent defect one capability over. That change would move existing satisfied
+verdicts to unknown→BLOCK for every contract asserting least privilege, which is a decision with
+consequences for users, not a night's tidy-up. Recorded here, left for the owner, with the argument
+intact rather than summarised away.
+
+## D1232 — the unit suite was calling real Google, 52 times a run, and the recorder was filing it as normal
+
+Hunting the D1230 class — a path whose failure falls to the conservative branch and therefore never
+complains — turned this up in the place D1230 itself had pointed: a driver's own test fixtures.
+
+`TestListDiscoversExistingInstances` pins FOUR base URLs and then calls `List`, which sweeps EVERY
+discoverer. The twenty-odd services it does not pin sent their requests to the real
+`*.googleapis.com` hosts. Measured, not inferred: 52 requests per run across 20 production hosts.
+
+Every layer that should have caught it was pointing the other way.
+
+The requests fail (no credentials, or no network), and `List` is built to survive a partial sweep,
+so the failure is recorded and the run continues. The assertion downstream counts only what the
+FIXTURE served, so it passes whether the escapes fail or not — the test was exercising an error
+branch while reading like it exercised the happy path. And the route recorder, which DOES detect
+this exact case, wrote each production URL into the checked-in baseline under a `-` marker meaning
+"no override matched". The detection existed; its output was being filed as a legitimate route.
+
+Two harms, and the second is worse than the noise. The suite's result depends on network
+availability and on what an unauthenticated call to a real API returns. And on a machine that holds
+cloud credentials — a maintainer's laptop, a CI runner with a metadata server — a UNIT TEST issues
+authenticated requests against a real project. Nothing about that announces itself.
+
+**Fixed by construction rather than by diligence.** `pinAllBaseURLs` reflects over the Driver and
+points every `*BaseURL` field at the fixture, so a base URL added tomorrow is pinned the day it
+appears. A hand-maintained list is exactly what failed here: it pinned 5 of 26 and nobody noticed
+for as long as that. The helper refuses to run if the reflect walk matches implausibly few fields,
+because a walk that matched nothing would "pin everything" by pinning nothing.
+
+Two things surfaced only because the escapes stopped:
+
+The fixture's default branch failed the test on an "unexpected call". That was right while four
+services were pinned; with all of them pinned, the services the fixture does not model reach it
+legitimately and "nothing here" is their correct answer. It now answers 404 — a local, deterministic
+absence — and logs, so a genuinely wrong route on a MODELLED service stays visible.
+
+And the count moved from 8 to 9. The ninth was a FIXTURE COLLISION, not a discovery: Filestore and
+Memorystore both list at `/projects/{p}/locations/-/instances` and live on different hosts in
+production, so collapsing every service onto one test server let Filestore "find" the Memorystore
+instance. Pointing Filestore at a local host that answers nothing restores what reality has —
+separate hosts — and keeps the run hermetic. Worth naming as a general hazard of one-fixture-many-
+services: a test that pins everything to one server inherits path collisions the real world does not
+have, and they read as findings.
+
+Escapes went 32 recorded routes to 8. The remaining eight are NAMED in the new ratchet rather than
+absorbed into a round number, and they split: six have an override seam the escaping test simply
+does not set; two (`serviceusage`, read through the Artifact Registry driver, and
+`securitycentermanagement`) have NO seam at all and cannot be tested hermetically today. Giving
+those a seam is a production change and a slice of its own.
+
+The gate reads the recorded baselines, which the per-package drift gates already force to match a
+fresh recording on every unfiltered run — so asserting on the file is asserting on what the suite
+does. It is a two-sided ratchet: over the ceiling fails, and UNDER it fails too, because a ceiling
+that trails the work stops being one.
+
+AWS and Azure record zero escapes, so this was a GCP-shaped defect rather than a universal one —
+and the difference is instructive. The AWS fixtures pin every base URL they need because each of
+its 40 services has its own field and its own focused test; the GCP sweep test is the only place
+where one call fans out across every service at once, which is exactly where a partial pin turns
+into twenty escapes.
+
+## D1233 — the last eight escapes, and a correction to D1232's own account of them
+
+D1232 stopped the unit suite calling real Google and left eight escaping routes behind, named in a
+ratchet. This takes them to zero — and the first thing it had to fix was a claim in that entry.
+
+**D1232 said two of the eight had NO override seam and could not be tested hermetically.** That is
+false. `serviceusage` has `suBaseOverride` and `securitycentermanagement` has `sccBaseURLOverride`,
+and so do the other six. The entry drew a conclusion from the absence of a Driver FIELD without
+asking whether the seam lived somewhere else — the same shape as every "absence is not evidence"
+finding in this record, committed while writing up a finding about exactly that. It stood for one
+iteration because nothing checks a DESIGN sentence against the code it describes.
+
+What the eight actually share is that their seam is a PACKAGE-LEVEL var rather than a Driver field
+— a deliberate choice their own comments explain ("the driver's endpoint lives in its own files;
+the Driver struct is not edited"). D1232's fix reflects over the STRUCT, so those eight were
+precisely the population it could not reach. The fix was correct and its limit was invisible,
+because the ratchet reported the survivors as a number rather than as a shape.
+
+**Now both kinds are pinned, and the hand-written half cannot rot.** `pinPackageSeams` sets the
+eight package vars (restoring them on cleanup — a leaked override makes the NEXT test read a torn-
+down fixture and fail in a way that points at the wrong test). A lint reads the package's own
+sources for `var <name>Override string` declarations and fails the build if one exists that the
+pinning list does not set. A new service that adds a seam and forgets the list is caught the day it
+lands, rather than escaping to a real host until somebody re-reads a routes file.
+
+The lint's own trap needed a constructed witness. A seam counts as pinned only when it appears as
+an ADDRESS-OF (`&name,`); a bare-name search would be satisfied by the prose in that very file,
+which names several seams while explaining them — the D1225 shape where a check accepting a WORD
+accepts the paragraph about the word. Every declared seam is currently pinned, so no live case can
+demonstrate the difference, and a mutant weakening the check to a bare name SURVIVED the first
+attempt. The judgement is now a pure function with a witness that constructs the situation: a seam
+mentioned in a comment and absent from the list must still be reported. The same mutant now dies.
+
+**Two smaller things fell out.** The Artifact Registry discovery fixture had never served the
+`serviceusage` read, so `security.scanOnPush` was only ever exercised on its unreadable branch
+there — the emission itself is covered thoroughly in `artifactregistry_test.go`, which was checked
+rather than assumed before saying so. And the GCS metamorphic test reached the real org-policy API
+for `publicAccessPrevention`; pinned now.
+
+**Azure was verified rather than credited.** Its zero escapes could have meant its fixtures have no
+way to escape, which would be a different thing entirely. It declares ONE base URL, every request
+goes through the driver's client, and the only other production hosts in the package are sample and
+derived output STRINGS (`*.vault.azure.net`), not request targets. Genuinely hermetic, and now
+recorded as measured rather than assumed.
+
+The ceiling is 0. It stays as a constant because a ratchet's shape is what stops one creeping back,
+but it is a prohibition now rather than a budget: all three clouds record zero unit-test requests to
+a real cloud host.
+
+## D1234 — a budget period nobody could map vanished, on two of three clouds
+
+`capability.cost.budget` publishes a convention in the attribute's own mapping text: "a timeGrain
+with no equivalent is named in a diagnostic, never coerced". `budget.period` is a CLOSED enum of
+recurring periods, so a provider value outside it cannot be mapped — and must not be guessed at.
+
+Two of the three drivers wrote
+
+```go
+if period := mapIt(raw); period != "" { emit(period) }
+```
+
+with no else. A value the mapping does not know therefore produced NO observation and NO diagnostic.
+To a reader that is indistinguishable from a budget with no period at all — the D513 silence, on the
+attribute whose entire job is to say what the limit recurs over. It needs nothing exotic to happen:
+a provider adding an enum value, or GCP returning `CALENDAR_PERIOD_UNSPECIFIED` literally rather
+than omitting the field. Azure alone honored the convention it is written beside.
+
+**And the one diagnostic GCP did have named a cause it never measured.** `calendarPeriod == ""`
+produced "the budget uses a custom period", read from the absence of ONE field without ever
+decoding the OTHER. Google's own words are that an unset calendarPeriod "is the default if the
+budget is for a custom time period" — which makes it likely, not certain, and leaves a third state
+(neither set) described as a custom period that is not there. The D1225 shape again: a check
+declines to answer, then explains its silence with something nothing established. `customPeriod` is
+in the SAME response body the driver already parses, so reading it costs nothing and turns the
+inference into a measurement that also names the period's start date.
+
+Decoding it had one trap worth recording. The first attempt added a second field carrying the same
+`customPeriod` tag to detect presence — and `encoding/json` resolves a tag conflict by dropping
+BOTH sides, silently. The struct would have decoded neither. It is a pointer now, so absent and
+present-but-empty are distinguishable states rather than the same zero value.
+
+**The gate overclaimed, and a mutant proved it.** The first version read SOURCE, checking that an
+else-branch sits beside the mapping call. `} else if false {` satisfies that — and the mutant which
+removed the AWS diagnostic survived it untouched. Structure is not behaviour. Each cloud now has a
+behavioural witness that serves an unmappable value and asserts the diagnostic NAMES it, and the
+source-level gate says plainly what it is: a completeness check over the SET of clouds, not a proof
+about any member. It also asserts the three witnesses EXIST, because a cloud can otherwise pass the
+structural check with a branch nothing exercises.
+
+Azure got a witness too, though its behaviour was already right. A correct behaviour with no test
+is an accidental one — nothing would have failed if that else-branch were deleted.
+
+The convention gate has a second half that matters more than it looks: it asserts the convention is
+still PUBLISHED in the vocabulary, and fails if the sentence disappears. A gate that outlives the
+decision behind it starts enforcing a rule of its own invention.
+
+Two allowlist entries fell out as a bonus and are deleted: `gcp:calendarPeriod` and
+`gcp:budgetFilter` were both recorded as "decoded but served by no fixture", and the new witnesses
+serve them. That register is debt by design (D756) — an entry whose debt has been paid is a
+permission nobody needs, and it silently covers the next field that lands on the same name.
+
+Field validation was not available: the ADC credential in this environment is refused by the
+Budgets API (403, no quota project), so all five states are witnessed against fixtures rather than
+a live budget. Recorded rather than glossed — the API's published contract carried the reasoning,
+and what the fixtures cannot settle is whether "neither period set" occurs in practice. It no
+longer matters to the code, which is the point of reading the field instead of inferring from it.
+
+## D1235 — the same silence, six more times, and a "mapper" that mapped nothing
+
+D1234 found one mapping that dropped an unmappable provider value without a word. Its shape is
+mechanical enough to search for:
+
+```go
+if x := mapIt(raw); x != "" { obs = append(obs, ...) }
+```
+
+A mapping that says "I do not know this" by returning the empty string, guarded by a test for the
+empty string, with nothing on the other side. Sixteen sites in the drivers emit an observation this
+way; eight had no else. Six were real, on `dns.target` (three clouds), `engine.protocol` (two) and
+`viewer.protocol`. Each now names the value it could not place.
+
+**One of the six was worse than silence.** `viewer.protocol` is a CLOSED enum and it is a CDN's TLS
+posture — whether the edge will serve a viewer over plain HTTP. `weakestViewerProtocol` carefully
+ranks an unrecognised policy as the WEAKEST, which is right for deciding which cache behaviour
+dominates; the emission then threw that judgement away and passed the raw string through
+`viewerToVocab` — a function whose two branches both returned their argument. It converted nothing
+while making the call site read as if a conversion had happened. So a policy value outside the
+vocabulary's three was emitted VERBATIM, as `measured`. A value the vocabulary does not define,
+presented as a measurement, is worse than no value at all.
+
+It is withheld now, and deliberately NOT reported as `allow-all`: ranking an unknown as weakest is
+a comparison decision, while claiming the edge serves plain HTTP is an assertion this read does not
+support. `viewerToVocab` is gone, replaced by `viewerProtocolInEnum`, which is a membership test
+and is named like one.
+
+**Two of the eight were false positives, and finding that out changed the gate.** The first cut
+looked for `provider.Observation` in a six-line window after the guard. Both survivors matched on
+an observation that came AFTER the block, not inside it: GCS's site appends a DIAGNOSTIC (empty
+meaning "nothing to warn about" — a different thing, correctly with no else), and the dashboard's
+appends to a metric LIST. The gate now finds the guard's own block by matching braces. A window is
+a heuristic; the block is the thing.
+
+**The gate is a completeness check over the class, and says so.** D1234's version of this idea
+overclaimed — reading source cannot tell a live branch from a dead one, and `} else if false {`
+satisfies any structural test. That is exactly what happened again here: the mutants that gutted
+the CloudFront and Memorystore branches SURVIVED the source-level gate. Behaviour is witnessed in
+the driver packages — `viewer.protocol` in both directions (out-of-enum withheld, in-enum still
+measured) and `engine.protocol` against a Valkey version the table does not know — and those
+witnesses kill the mutants. What the source gate uniquely does is notice the NINTH site the day it
+is written, across seven provider packages at once.
+
+The dashboard site is real but a different shape and is left for its own slice: an unparseable tile
+filter is skipped, so `dashboard.metrics` comes back SHORT. A "contains X" constraint then fails,
+which is safe, but a `subset-of` constraint reads satisfied over a dashboard charting something the
+allowlist does not name. Recorded rather than swept in with the others, because the damage argument
+is different and deserves its own witness.
+
+## D1236 — a dashboard's metric SET was read from one layout and one widget kind
+
+D1235 left this deliberately, because its damage argument is different from the silent-drop family
+it was found beside. `dashboard.metrics` is a SET, and the vocabulary names its purpose in the
+attribute's own text: a contract constrains it with `subset-of` — "the dashboard charts only
+approved metrics". That makes UNDER-reporting the dangerous direction. Omit a metric and
+`subset-of` reads SATISFIED over a dashboard charting something the allowlist never named; report
+none at all and it still passes, because the empty set is a subset of everything.
+
+**GCP read one of four layouts and one of ~18 widget kinds.** The Monitoring API defines
+`mosaicLayout`, `gridLayout`, `rowLayout` and `columnLayout`; the driver's typed struct decoded the
+first. It defines `xyChart`, `scorecard`, `pieChart`, `timeSeriesTable`, `alertChart`, `treemap`
+and more; the struct decoded one. Measured against the two commonest real shapes, both returned an
+EMPTY set for a dashboard charting a metric:
+
+    gridLayout + xyChart      -> []
+    mosaicLayout + scorecard  -> []
+
+This matters because the driver observes dashboards it did NOT author. Discovery enumerates them
+(D52 brownfield onboarding is the point), and a human-made dashboard is exactly the one that uses a
+grid layout or a scorecard.
+
+**A typed struct is what made it silent.** It decodes the shapes somebody thought of and returns
+zero values for the rest, with no error — so an unhandled layout is indistinguishable from an empty
+one. The walk is generic now: layouts by name from a declared set, widgets by whichever key each
+carries, groups recursed into. Widget kinds are classified into three: readable, INERT (a text box
+charts nothing, so its absence from the set is correct), and everything else — including a kind
+Google adds tomorrow, which lands in "cannot read" by default.
+
+**And a widget it cannot read WITHHOLDS the whole set.** This is the part worth arguing for: a
+partial set is not a smaller truth, it is a different claim. `subset-of` over a partial set is
+precisely the false-green, so shipping "the metrics I happened to parse" would keep the defect
+while looking fixed. `widgetCount` gets the same treatment — it counted the tiles of the one
+decoded layout, so a dashboard in any other reported ZERO widgets, as a measured fact.
+
+**The AWS twin carried the D797 shape.** `Metrics[0]` took the FIRST metric of each widget, and a
+CloudWatch metric widget charts a LIST — so a widget with five contributed one. Same fix: read
+every series, classify non-metric widget types as inert, withhold the set when a series cannot be
+named.
+
+**A gate had to be repaired to accept the fix, and its bug was real.** The bare-"unreadable"
+ratchet matched `"[^"]*unreadable[^"]*"` — quote-naive, so `[^"]*` spans the gap BETWEEN two string
+literals and the pattern matched an IDENTIFIER sitting between them. It was counting a variable
+name as a published word. It now extracts each literal and tests them separately, and because
+loosening a matcher is the moment to prove it still catches what it was built for, the change comes
+with a constructed witness: the real shapes must still match, the identifier-between-literals must
+not, and an escaped quote inside a literal must not end it early. The tree holds zero real
+instances — that is what the baseline is for — so a passing run proved nothing without it.
+
+## D1237 — a disclosed limitation the operator never saw
+
+Sweeping the D1236 class — a decoder that reads one variant of a provider's open-ended shape —
+turned up something with a different character, and worth separating from the defects around it:
+this limitation is DOCUMENTED, accurately, in the vocabulary itself.
+
+`dns.target` is `kind: string`, and its mapping text says so for each cloud: "ResourceRecords[0].Value
+— the FIRST value only; a multi-value record set is not represented (the driver reads one target)".
+The code does exactly what the spec says. Nothing here is a lie.
+
+The gap is WHERE the disclosure lives. A vocabulary file is read by whoever adds an attribute. A
+verdict is read by whoever runs the tool. Measured on a record answering with two addresses, the
+observation was `dns.target: 10.0.0.5`, derivation `measured`, and no diagnostic — so
+`dns.target equals 10.0.0.5` read SATISFIED while the name ALSO resolved to `203.0.113.9`, a host no
+contract approved. Against a vocabulary whose own description of the governed fact is "does the name
+resolve to where it should", a pass that covers one of two answers is the dangerous direction.
+
+**The fix keeps the spec's decision and removes the silence.** The first value is still what is
+emitted — a published spec decision is not one to overturn in a night's work — but the observation
+now carries the count, so a single-target pass cannot be read as a whole-record pass. Deliberately,
+a single-value record carries NO caveat: D1227's lesson is that a sentence appended to every case
+distinguishes none, and here it would fire on the overwhelming majority of records.
+
+All three clouds had the shape (`ResourceRecords[0]`, `rrdatas[0]`, and Azure's per-type
+`ARecords[0]`/`TXTRecords[0]`/`MXRecords[0]`), so all three now disclose. Azure's count is per record
+TYPE, which is why its witness exercises each branch of that switch rather than one.
+
+**Left for the owner, with the measurement rather than a preference.** The stronger fixes both
+change published surface: WITHHOLD `dns.target` on a multi-value set (honest — the attribute cannot
+represent what is there — at the cost of making every round-robin record unverifiable and blocking
+on a hard constraint), or give the vocabulary a set-valued attribute beside it (`dns.targets`),
+which is a spec change with a conformance case behind it. The disclosure shipped here is the part
+that needs no decision.
+
+**One thing noticed and deliberately not fixed**, recorded so it is not re-derived: Route 53's
+delete path reconstructs the record set from that same first value, and Route 53 requires a DELETE
+to match the live set exactly. So deleting an ADOPTED multi-value record fails at the provider
+rather than deleting the wrong thing — the safe direction, with the provider's own message. A record
+this driver created has one target by construction, so the path is unreachable for owned records.
+Worth a targeted fix if it is ever seen in the field; not worth inventing a fixture for now.
+
+## D1238 — a security attribute withheld for a reason that was about something else, and untrue
+
+Sweeping the D1237 class — a limitation stated in a comment that never reaches the operator — found
+one where the comment was also wrong, on an encryption attribute.
+
+The Secret Manager observe answered residency and the customer key on the SAME branch. Only a
+single-replica user-managed secret produced `encryption.customerManagedKeys`; every other shape fell
+to an else that diagnosed the missing REGION and said nothing about the missing key. So a security
+attribute was withheld with a reason that does not cover it — the D1226 shape, where a withholding
+is explained by a cause about something else. Two questions, one branch, and the operator hears
+about the wrong one.
+
+**And the stated reason was false.** The code's own comment said the automatic shape "does NOT read
+CMK", and the doc struct modelled `automatic` as `*struct{}` — an empty object, the shape that says
+"this variant carries nothing". The API defines `Automatic.customerManagedEncryption`, exactly like
+the per-replica field beside it. A secret with automatic replication AND a customer key reported no
+key at all: not withheld, not false — absent, with a diagnostic about its region.
+
+An empty struct is the typed-decoder failure of D1236 in miniature. It is not a neutral
+placeholder; it is an assertion that the variant is empty, and `encoding/json` will honour it
+silently forever.
+
+**The key is now answered for every replication shape, and `true` means EVERY copy.** A secret whose
+replicas are half Google-managed is not a customer-managed secret, so the weakest-across-the-set
+rule this codebase already applies to encryption (D1186's "every listener") applies here too. A
+partly-keyed secret measures `false` AND says which fraction is keyed — `false` alone would hide a
+migration in progress, and the difference between "none" and "three of four" is what an operator
+acts on. D1003's reasoning is kept and widened: a readable "no key" is a MEASURED false rather than
+an absence, so a hard constraint cannot pass vacuously over it. Only the case where NEITHER
+replication shape is present withholds, because then there is no replica whose key could be read —
+and it says that, about the key.
+
+Residency did not move. It is a different question and keeps its own branch: a single user-managed
+replica only, because that is the only shape carrying a single-region guarantee. Separating them is
+most of the fix.
+
+The route this added (`secrets/<name>:getIamPolicy` was already read; the secret GET now carries the
+replication key) was re-confirmed against Google's live endpoint after the change, and unit-test
+egress stayed at zero.
+
+## D1239 — a deliberate pace decision read as a reassuring answer
+
+Continuing the D1237 sweep — limitations stated in a comment that never reach the operator — with a
+triage note first, because a clean result is a result.
+
+**The AWS permission preflight is clean.** Its limitation is real and thoroughly commented ("a pass
+is EVIDENCE, not proof: the simulator cannot see resource-based policy conditions we do not feed
+it, session policies, tag/context conditions evaluated at mutation time, or propagation lag"), and
+it DOES reach the operator — `perrnext` attaches "a preflight pass is evidence, not proof" to the
+remediation, and `perr` carries the same sentence. Checked rather than assumed; nobody needs to
+re-read that file.
+
+**The GCP service-account sweep was not.** D868 decided, deliberately and for a good reason, that
+discovery does not read each account's IAM policy: that is a second call per account and the crawl's
+pace budget (D141) is not spent on a question discovery does not ask. The decision is right. What
+was wrong is that `observeGServiceAccountTrust(..., withTrust=false)` guarded the emission with no
+else, so a DISCOVERED account arrived with `trust.principals` simply absent.
+
+`trust.principals` is on the security floor. Its subject is who may assume this identity — and an
+absent attribute reads exactly like an account nobody may assume, which is the reassuring answer and
+not the one the sweep established. Discovery output feeds posture and the console, where an unread
+account and a trusted-by-nobody account looked identical.
+
+The sweep now says so, in the words that matter: absent here means UNREAD, not nobody, and `observe`
+on the account reads it. The pace decision is untouched — the existing gate asserting the sweep
+makes zero policy calls still passes, and the meter's mutant that flips the sweep to read every
+policy is still caught by it.
+
+Deliberately, the caveat fires ONLY on the sweep. The observe path reads the policy and must not
+carry it: a sentence appended to every case distinguishes none (D1227), and here it would appear on
+every account whose trust WAS measured.
+
+**The class this came from is now thin.** A sweep for the same shape — an observation gated on a
+`with*`/`include*`/`deep` flag with nothing on the other side — found exactly this one site across
+every driver. Recorded so the next pass can skip it.
+
+## D1240 — the preflight told you it was evidence only when it had nothing to be evidence of
+
+Finishing the D1237 sweep. Most of what it turned up was CLEAN, and that is the first half of this
+entry, because a re-checked file is a file the next pass can skip:
+
+- **AOSS network exposure** discloses its residual exactly right — the caveat fires only on
+  `publicExposure=false` (the reassuring direction), names why an adopted collection could still be
+  public under a differently-named policy, and points at the endpoint probe.
+- **The k8s network-policy probe** records a non-connect as a `ProbeFailure` whose Reason says
+  filtered, dropped and down are indistinguishable from one dial.
+- **Azure Log Analytics** emits a MEASURED false for a read-empty cluster key and explains, in
+  place, why that is not the inference D985 warned against.
+- **The AWS VPC "only the first" comment** is about create-failure classification, not a read
+  limitation: a later subnet failing is a PARTIAL composite reported unknown WITH the pid.
+
+**The one that was not clean is the permission preflight, and the shape is almost funny.**
+`PreflightResult` has three statuses. `inconclusive` carries a Reason saying the omission is not a
+denial. `skipped` carries one saying why the check could not run. `passed` carried none.
+
+That is the outcome most in need of qualifying. The doctrine is old, correct, and written in three
+places — both driver file headers say "a pass is EVIDENCE, not proof", and `perr` attaches the same
+sentence to the remediation for a permission DENIAL. A denial. The branch where the operator has
+already been told the answer is no, and does not need to hear that a yes would have been provisional.
+
+`PreflightResult` is JSON and this runtime is machine-first. An agent reading `{"status":"passed"}`
+had nothing telling it that a mid-apply permission failure remains possible — which those same
+headers state plainly, along with the reason it is survivable (the write-ahead receipts). The pass
+now says so, in the artifact where the pass is read.
+
+**The gate is over the SET of statuses**, not the one that was wrong, so a fourth outcome cannot
+arrive mute the same way — it reads the type's own comment for what the set IS.
+
+**Two things went wrong building it, both worth the record.** The first cut anchored on
+`Status string \`json:"status"\`` and matched a DIFFERENT type in the same file — the apply result's
+status (applied|refused|corrupted) — so the gate reported three failures about statuses that are
+not preflight statuses at all. The marker must be unique to its subject; I walked into that while
+writing a gate against exactly that class. It anchors to `type PreflightResult struct {` now.
+
+And the first behavioural test builds its own `PreflightResult` literal, which proves the sentence
+SERIALISES but not that it is the sentence — a mutant replacing "a mid-apply permission failure
+stays possible" with "outcomes may vary" survived it, field present, meaning gone. The source-level
+half now requires the shipped literal to contain the concrete claim, and that mutant dies.
+
+## D1241 — a delete that reported success over a resource that is still there
+
+D1240 generalises to a question worth asking of any result type: which outcome does nobody bother
+to explain? Usually the successful one — success feels self-evident, and it is the answer that gets
+acted on without a second look.
+
+`CreateResult{Status: "succeeded"}` is constructed 613 times in the drivers and carries a `Reason`
+twelve times. The twelve are not an oversight in the other 601: they are exactly the places where
+the success is QUALIFIED — a retire that left a shared cluster standing, an ACM renewal the provider
+manages so no patch was issued, and three deletes that leave the resource RECOVERABLE (AWS KMS's
+pending window, GCP's custom-role undelete window, Azure's key-vault soft delete). Most successes
+mean what they say, and a caveat on all of them would distinguish none (D1227).
+
+**Two deletes in that recoverable family said nothing.** AWS Secrets Manager sends
+`RecoveryWindowInDays: 7` — the provider's own model says the secret is restorable during the
+window and deleted permanently only at its end — and returned a bare success. The Azure SECRET
+vault is created by this driver with `enableSoftDelete: true`, so its delete leaves the vault
+recoverable, and it returned a bare success too — while `key_azure_net.go`, the vault for
+capability.key.encryption, disclosed precisely that on its own delete. Same package, same shape,
+one told the operator.
+
+The reader of "succeeded" on a retire concludes the resource is gone. It is not: it exists, it is
+restorable, and purging it early is a separate deliberate act the driver did not take. Both now say
+so, sourced from the provider's own words rather than from folklore.
+
+**The gate I first wrote for this was vacuous, and its own mutants proved it.** It checked whether
+the FILE contains "recoverable" — and the mutants that stripped the disclosure from both drivers
+SURVIVED, because the comment explaining the fix still contained the word. A check satisfied by the
+prose about a thing is not a check on the thing; that is D1225's marker rule, met again while
+writing a gate about disclosure.
+
+Rebuilt as what source can honestly do: a completeness check over the CLASS. Every site that asks
+for a recovery window, or whose create turns soft-delete on, must have a named BEHAVIOURAL witness —
+and the witnesses do the proving. Removing a disclosure now fails its witness; removing a witness
+fails the class gate.
+
+**It immediately found two more, of a different kind.** AWS KMS and the Azure key vault DISCLOSE
+correctly and had no test saying so. Nothing would have failed if either Reason were deleted — which
+is precisely what had happened to the secret vault next door. A correct behaviour with no witness is
+an accidental one, so both got theirs.
+
+Also gated: the idempotent "already gone" success must stay BARE. Nothing was deleted on that path,
+so there is no window to disclose, and a caveat there would be the every-case noise D1227 warns
+about.
+
+## D1242 — the terminal read stronger than the JSON
+
+Same question as D1240 and D1241, asked of the porcelain: which outcome does nobody qualify?
+`converge` is the verb a person or an agent actually runs, and `converged` is what they route on.
+
+**Two result types came back clean and are recorded so nobody re-checks them.** Every one of the
+thirteen `ProbeMeasurement` constructions carries an `Evidence` line — the field is structural
+rather than a convention, which is why none was forgotten. And the probes that report
+`publicExposure=false` without dialling anything say `Method: "provider-config"` and evidence
+"nothing was dialled", so a config read is never dressed as an outcome; both fields ride into the
+ledger, so a consumer can tell the two apart.
+
+**Converge was not clean, in an unusual direction: the HUMAN line was more honest than the machine
+field.** Three exits report a no-op `converged`. One printed "the world already matches on every
+attribute this run can compare" — the true, scoped claim. The other two printed the unqualified
+"the world already matches the candidate". And none of the three put the qualification in
+`result.Reasons`, which is what an agent reads.
+
+This is not a false green. `witnessReality` already refuses a converged verdict that recorded
+reality does not witness, so hard constraints are guarded. It is the difference between "matches"
+and "matches on what was compared" — and the tool had the honest sentence, at one exit, for the
+reader least likely to act on it programmatically. All three now carry a shared `convergedScope`
+constant in the machine field, and all three banners say it.
+
+**The gate taught me a distinction I would have flattened.** A fourth banner exists —
+"converged — verified against observed reality" — and my first rule demanded the scope of it too.
+It should not: `convergence = "verified"` is set only when the post-apply RE-PLAN found
+NothingToChange against OBSERVED reality, and the branch immediately beside it says "inconclusive
+(observations do not cover every attribute)" when they do not. Verified already means the
+observations covered it and matched. Hedging it would weaken an earned claim and put a sentence on
+every case, which distinguishes none (D1227). The exemption is written into the gate WITH its
+reason, and guarded: if that banner ever disappears, the gate fails rather than letting the
+exemption become a hole.
+
+One more instance of a shape this record keeps meeting: the banner regex stopped at the first
+closing quote, and these lines are built by concatenation — so it read half a sentence and reported
+three false failures. Fixed the same way D1236 fixed its quote-naive matcher. A pattern over Go
+source has to survive the language's habit of splitting strings across lines.
+
+## D1243 — the two-audience sweep came back clean, and that is the finding
+
+D1242 found the terminal reading stronger than the JSON and generalised to a question: for every
+verb, what does the human see, what does the machine see, and is either claim stronger? This is the
+rest of that sweep. Nothing needed changing, which is worth an entry of its own — the next pass
+should not re-walk it, and a negative result recorded is the only kind that survives.
+
+**Only one verb has a human-line surface of its own.** A scan for prose output across every package
+found `converge` (53 sites, closed in D1242) and nothing else above three. Every other verb is
+bannered by ONE central emitter, so the two-audience question for them is a single question about
+`render.Pick`, not a per-verb sweep.
+
+**`verify` PROVEN over assumed values: both audiences are told.** This looked like the sharpest
+candidate — `Rollup` carries only Violated/Unknown/Unverifiable, so the banner cannot see
+provenance, and `PROVEN` is the strongest word in a closed vocabulary. Built the witness rather than
+reasoning: a hard constraint satisfied on `status: assumed`. The human output carries the row's
+`[assumed]` marker, then "1 verdict(s) rest on assumed/inferred values", then `PROVEN`. The JSON
+carries `verdictsOnAssumedValues: 1`. Both channels say it; the count sits on the line directly
+above the banner.
+
+What remains is a spec question, not a defect, and it is left to the owner with its cost:
+`spec/presentation.md` says a verdict standing on inferred/assumed values renders green-but-DIM —
+"satisfied, standing on sand" — and that rule is written for ROWS. Whether the banner word should
+carry the same qualification is a change to a closed vocabulary (D89/D90), which is not a thing to
+decide in a night's work when the count is already printed beside it.
+
+**`audit` PROVEN is earned.** It shares the strongest word, and the obvious worry is that it shares
+the assumed-value exposure too. It does not: `audit` has no `basis`/`assumed` concept anywhere — its
+verdicts come from RECORDED observations, so there is no declared guess to disclose. Checked rather
+than assumed.
+
+**`restore --partial` was already closed, and more thoroughly than the sweep would have asked.**
+D618 found `--partial` exiting zero however much it had failed. The current code exits NON-ZERO on
+any unknown capability, keeps the recovered ledger (that is what `--partial` is for) and REMOVES the
+freshly-cut anchor — because gating the exit code alone protects the consumer who reads it and not
+the two that re-derive "whole history" from the artefact. That is the reasoning this sweep was
+looking for, written down two years of entries ago.
+
+`repair`, `resume` and `adopt` have no prose channel of their own; their JSON is the primary
+artefact and the central banner is a summary of the exit code.
+
+The method note worth keeping: the candidate that looked most damaging was the one where the
+disclosure already existed, and I only learned that by RUNNING the verb rather than reading
+`Pick`'s inputs. Reading the code said "the banner cannot see provenance", which is true and
+irrelevant, because the line above it can.
+
+## D1244 — the repair chain re-walked, and one question it leaves open
+
+A new surface for the sweep: follow the published advice literally, on the corruption path. The
+chain holds, and this records what was run so the next pass can start from the open end rather than
+the beginning.
+
+**Every error code explains itself.** All 35 in `spec/errors.md` answer `groundhold explain`; one
+carries a concrete command (`repair --ledger <file>`), which is the one worth executing.
+
+**The two-step remediation works end to end, measured rather than read.** A corrupt ledger:
+`repair --ledger` exits 5 with `CORRUPTED` and a diagnosis carrying a fingerprint;
+`repair --quarantine --fingerprint <that>` exits 0 with `repaired`, renames the whole original
+aside and restores the valid prefix. A WRONG fingerprint exits 2, `REFUSED confirmation-required`,
+and leaves the file untouched — the consent gate refuses, which is the property worth checking
+rather than assuming.
+
+**The open end is a hazard the tool declares and nothing carries forward.** The quarantine result
+says, unprompted: *quarantined events may have mutated the cloud* and *plans sealed BEFORE this
+repair are void: the restored prefix rewinds decision heads, so CAS alone cannot tell an old plan
+from a fresh one*. That second sentence is a claim about a mechanism, and the mechanism agrees with
+it — `apply`'s `staleReason` compares each capability's PINNED head against the current head and
+nothing else. So a plan sealed at the state the prefix was cut back to still matches, and applies,
+while the quarantined tail may already have moved the cloud.
+
+The disclosure is at repair time; the danger materialises at a later `apply`, possibly for a
+different operator, possibly under automation. Nothing between them carries the warning: repair
+writes no event into the restored ledger (its only `Append` is the in-memory replay used for
+diagnosis), `apply` has no notion of repair or quarantine, and a repaired ledger attests clean.
+
+**Left for the owner, with its shape rather than a preference.** Enforcing this needs a marker that
+outlives the repair — an event in the restored ledger, or an artefact beside it — that `apply` reads
+and refuses plans sealed before. Both touch published surface (the event registry, or the ledger's
+file neighbourhood), which is not a night's decision. It is also possible that the residual is
+acceptable and the disclosure is the whole answer; what is NOT acceptable is leaving the question
+unasked, which is why it is written down here.
+
+**And a correction of my own instrument, twice now in this record.** I measured `repair`'s exit code
+after a pipe and read `tail`'s status — the same mistake the earlier repair walkthrough documents
+having made twice. It looked like exit 0 over a `CORRUPTED` banner, which would have been a serious
+finding. It exits 5. The rule that entry wrote is the right one and I did not apply it: a
+measurement that would be a major finding deserves one more look before it is written down.
+
+## D1245 — the pre-repair plan applies, measured
+
+D1244 left a question rather than an answer: `repair --quarantine` declares that "plans sealed
+BEFORE this repair are void ... CAS alone cannot tell an old plan from a fresh one", and `apply`'s
+staleness check is exactly that CAS. Reading the code said the hazard was reachable. This ran it.
+
+**The witness, end to end on the fake provider:**
+
+    plan   (fresh ledger)          -> SEALED, pins reads.heads = {"db": "genesis"}
+    apply  (that plan)             -> APPLIED, ledger holds 7 events
+    corrupt line 1                 -> repair --ledger: exit 5, validPrefixLines 0
+    repair --quarantine --fingerprint -> repaired, keptLines 0, droppedLines 7
+    apply  (the SAME sealed plan)  -> exit 0, APPLIED
+
+The plan pinned `genesis`; the quarantine rewound the ledger to zero lines, so the current head IS
+genesis again; the CAS matched and the create ran a second time. Seven fresh events were written and
+**nothing warned** — a grep for repair/quarantine/void/stale/warn across both stdout and stderr of
+that second apply returns zero. The ledger now reads as a clean history of one create, with no trace
+that an earlier one happened; that trace is in the quarantined file, off to the side, which nothing
+downstream consults.
+
+**What this does and does not establish.** It confirms the mechanism cannot see the situation, which
+is what the question asked. It does NOT mean a real cloud gets a duplicate resource: since D700 the
+creates READ before writing, so a real driver would find the existing resource and adopt rather than
+duplicate. The measured damage is to the LEDGER's account of what happened — and to the operator's
+belief, since the second run is indistinguishable from a first.
+
+The fake provider is not an incidental detail here. It is the conformance substrate, and it
+re-created without hesitation, which is the behaviour every driver inherits before its own
+read-before-write kicks in.
+
+**Left for the owner, unchanged from D1244 and now with a measurement instead of an argument.**
+Making this fail needs a marker that outlives the repair — an event in the restored ledger, or an
+artefact beside it — that `apply` reads and refuses plans sealed before. That touches the event
+registry or the ledger's file neighbourhood, both published surface. The alternative answer, that
+the disclosure at repair time is sufficient and the residual is accepted, is also available and is
+now a decision made in front of the evidence rather than in its absence.
+
+The transcript above is the whole argument; anyone can re-run it in a scratch directory in under a
+minute, which is the point of writing it down in that shape.
+
+## D1246 — the onboarding proof could not pass, and the spec told you to redraft until it did
+
+A surface nobody had walked: the agent skills in `.claude/skills/`, executed literally against
+today's CLI. The commands and flag shapes all matched — `capsule --verify`, `export --from/--to`,
+`parity [type] --json`, `survey --survey`, `unadopt <contract> <cap>` — and `scripts/adopt-candidate.sh`
+runs the published recipe end to end. That part is a clean result.
+
+Then the recipe was run against a real cloud resource, and the step after it failed.
+
+`spec/onboarding.md` §proof of takeover said, whole:
+
+> `converge` (D51) must report **converged** without executing anything.
+> An adoption without the no-op proof is a binding, not a takeover.
+
+and `.claude/skills/onboard-existing` step 5 added the diagnosis: "If it plans changes instead, the
+draft does not match reality — go back to 2; do NOT apply your way out of a failed proof during
+onboarding."
+
+Measured, first on GCS and then reproduced on the reference provider so it is not a driver quirk:
+
+    adopt-candidate.sh        -> adopted (binds the ledger, never the cloud)
+    converge (no --yes)       -> REFUSED confirmation-required; plan: claim a-claim-db
+    converge --yes            -> CONVERGED (verified against observed reality)
+    converge                  -> CONVERGED (the world already matches)
+
+Takeover is TWO acts. `adopt` deliberately touches nothing in the cloud, so the resource carries no
+authorship stamp, and the first converge plans a `claim` — the operation `apply` documents as "D52
+takeover: stamp authorship on an adopted resource". The proof the spec demands can only pass AFTER
+that claim runs.
+
+So the published rule was unreachable, and its diagnosis actively harmful: it reads a planned claim
+as a bad draft and sends the operator back to redraft. No redraft removes a missing authorship
+stamp, so the loop never terminates — and the skill's next sentence forbids the one action that
+ends it. The generated documents make this sharper still: `adopt-candidate.sh` builds the contract
+and candidate FROM the discovery's own observations, precisely so nothing is hand-authored, and the
+rule would still send you back to fix them.
+
+`claim` does not appear in `spec/onboarding.md` at all — the operation D52 built for this flow is
+absent from the document describing it.
+
+Both are corrected to describe the two acts, with the transcript, and with the distinction that
+matters: an ATTRIBUTE change in a converge really does mean the draft is wrong, and the claim is the
+one exception.
+
+**Gated in `examples/check.sh`**, which already runs the fake-provider lifecycle: six checks pinning
+adopt → claim-planned-and-REFUSED → claim executed → true no-op. A mutant that restores the old
+doctrine (expecting exit 0 immediately after adopt) fails it.
+
+One honesty note about that gate. A second mutant — replacing a `case` pattern with a catch-all —
+SURVIVED, and it would survive against every `case` assertion in that file: the idiom cannot detect
+its own weakening. The exit-code assertions are what carry the weight here, and the first mutant
+proved they do. Recorded rather than dressed up, because a gate described as stronger than it is
+becomes the next entry.
+
+## D1247 — the gate over a closed set was keyed on names the author picks
+
+D1127 published a strong sentence in SECURITY.md and put a gate behind it: exactly these
+packages may issue an outbound request, and a new one is "either a driver — add it here,
+deliberately — or traffic nobody agreed to". The sentence is the right one. The detector
+behind it found senders with
+
+    \.Do\(req | \.Do\(r\b | http\.Get\( | http\.Post\( | client\.Get\( | client\.Do\(
+
+Four of those six alternatives are keyed on an identifier the AUTHOR chose. `.Do(request)`
+matches by luck, because `req` is a prefix of it; `.Do(httpReq)` does not. `client.Get(`
+matches; `hc.Get(` does not. This is the shape already rejected once in this codebase,
+where a classifier read privilege from a policy's NAME: a property under the author's
+control is not a property.
+
+Whether that mattered was answered by looking for something already living in the blind
+spot, and two packages were:
+
+    internal/fixture     Recorder.RoundTrip delegates to http.DefaultTransport (D234)
+    internal/certifynet  countRT wraps http.DefaultTransport, calls inner.RoundTrip
+
+Both reach the network. Neither was named. The gate had been green over both since it was
+written.
+
+**The scope of the claim, measured rather than assumed.** Both are imported ONLY by
+`_test.go` files, so neither ships in the binary. SECURITY.md says "the runtime as a whole
+opens exactly three destinations" — the runtime, not the test tree — so no published
+sentence was false, and this is not a finding about egress an operator received. It is a
+finding about coverage being narrower than wording, which matters precisely because a gate
+standing over a claim is what stops anyone from checking it again. Injecting a Transport
+is also the most natural way to add egress, so the missed shape is the one a new
+destination would most likely arrive through.
+
+The replacement asks the question by what it means rather than by how a call is spelled:
+
+- **What SHIPS** — the sending set is compared against the packages reachable from
+  `cmd/groundhold` by non-test imports, walked with `go/parser`. Shipping and test-only are
+  now different facts with different consequences instead of one undifferentiated scan.
+- **The mechanism, not the idiom** — the shape set gains the transport layer
+  (`http.DefaultTransport`, `http.DefaultClient`, `&http.Client{`, `.RoundTrip(`) and
+  requires the `net/http` import alongside it, which is what keeps `sched.Do(...)` in
+  `internal/crawl` — a pace scheduler that contacts nothing — off the destination list.
+- **A deliberate omission is a NAMED entry, checked both ways** — the two test-only senders
+  are listed with the reason they cannot reach an operator, and the gate fails if one stops
+  sending (a name that means nothing) or starts SHIPPING. That second direction is the one
+  worth having: the exemption was written under a condition, and a condition nobody
+  re-checks is how the thing you excused becomes the thing you shipped.
+
+The D1127 list and this one are now ONE registry read by both gates. Two copies of a
+closed set drift; that is its own recurring class here.
+
+**A second, smaller thing, found by being bitten by it.** The same scan aborted on the
+first `lstat` error, and this project's own mutation meter creates `<file>.mut.orig` beside
+a source and moves it back moments later. Two runs over one tree and the walk trips over a
+file that vanished under it — a red with nothing wrong, which cost a full gate run to
+diagnose. That direction is safe and still expensive: the next red gets re-run rather than
+read.
+
+The naive fix is worse than the defect. Swallowing walk errors turns a scan that skipped
+whole directories into a clean exhaustive set — a false green traded for a false red. So
+only "this entry is gone" is skipped, every other error still stops the scan, and the
+decision is a function with both directions pinned on constructed errors, because the
+concurrency that produces the first case cannot be staged in a unit test.
+
+Five mutants, five killed: dropping the transport shapes, dropping a named exemption,
+counting test imports as shipping, widening `.Do(` until a scheduler reads as a client, and
+swallowing every walk error.
+
+Also worth writing down for whoever kills a gate run: `make check` killed midway ORPHANS
+the mutation meter, which keeps rewriting sources under the next run. On exit it restores
+its backup — killed at the wrong instant it does not, and a mutant stays in your tree.
+Verify with `ps` after any kill, and read `git status` before trusting the next result.
+
+## D1248 — fixing the file the finding was in is not fixing the class
+
+D1246 corrected the published proof of takeover in two places: the spec's §proof of
+takeover and the onboarding skill's step 5. Both had demanded a converged no-op BEFORE
+the `claim` that makes one reachable, and had diagnosed the planned claim as a bad draft.
+
+Five more statements of the same sequence were left standing, and were found by walking
+onto them from an unrelated errand — reading `spec/onboarding.md` §import while probing
+the `hints` verb:
+
+    spec/onboarding.md   the opening sentence ("a converged no-op run proves the takeover")
+    spec/onboarding.md   the migration path (... -> draft -> adopt -> converged no-op proof)
+    README.md            the brownfield paragraph
+    SKILL.md             the frontmatter description an agent reads first
+    SKILL.md             the Never list ("never skip the converged no-op proof")
+
+Every one of them leads a reader to the same wall the entry had just documented. The
+lesson is one this record already carries — repairing the site of a finding does not
+close the class, sweep the siblings — and it was not applied while writing the entry that
+carries it. Worth stating plainly rather than quietly correcting.
+
+All five now name the claim and its order. The ratchet is over the CLAIM rather than over
+the two files, so a sixth statement cannot arrive mute.
+
+**The gate's first cut was vacuous, in the exact way this record keeps describing.** It
+asked whether the file containing the promise also contained the word "claim" anywhere —
+and README passed BEFORE a word of it had been corrected, because it says "an RTO claim
+is not satisfied by configuration" four hundred lines away, about something else. A gate
+answered by unrelated prose is answering a different question.
+
+It is now per STATEMENT with a proximity window: for each place a document promises the
+no-op proof, the claim must be named within reading distance of that sentence, so one
+corrected paragraph does not excuse the next. Four mutants, four killed — README losing
+its correction, the spec intro losing its clause, the skill's Never list losing its
+sentence, and the window shrunk to nothing.
+
+**Recorded from the same errand, as a clean result rather than an absence.** `hints`
+(D53) was run adversarially and its published claims held. A terraform state carrying
+`root_password`, `server_ca_cert` and a `google_sql_user` password, and a pulumi
+checkpoint carrying a root password, a CA cert and a pulumi secret envelope, produced
+output containing none of them — five canary strings, zero crossings. Pulumi INPUTS
+disagreed with outputs on region and engine, and the hint reported the outputs, as
+documented. An unrecognizable document, a non-JSON file and a missing path each exit 1
+with `INVALID` and a named cause. A `connection_name` naming a different project refused
+the hint and printed both identities rather than normalising one away.
+
+One thing to look at later, noted rather than fixed here: when project/region/name are
+incomplete the hint is still emitted with `"providerId": ""` — the human diagnostic says
+the suggestion is unavailable, while the machine field carries an empty string with no
+marker. That is the D1242 asymmetry pointed the other way, and it wants the owner's view
+on whether the field should be omitted (`omitempty`) or the hint withheld entirely.
+
+## D1249 — the gate that closed a class had a phantom in its own register
+
+D1248 replaced a two-file correction with a ratchet over the claim, and listed the
+published surfaces it watched. Within the hour, applying that entry's own advice — sweep
+the siblings — turned it on the gate itself and found one of the seven entries was
+`website/docs/index.md`, a path that has never existed. The site's pages live under
+`website/pages/`.
+
+It was invisible for a specific reason worth naming: the reader skipped files it could
+not open, "in case a checkout lacks one". That tolerance is what let a typo sit in a
+register of published surfaces and watch nothing, while the gate reported success over
+seven names. It is the same fault the neighbouring gate rejects when it demands that an
+exemption which stopped meaning something be dropped rather than left standing.
+
+Two fixes, and the second is the one that matters:
+
+- an unreadable listed surface became a failure rather than a skip, and
+- then the register was **deleted**. The surfaces are now SCANNED — README, `spec/*.md`,
+  `website/pages/*.md`, `examples/`, every `.claude/skills/*/SKILL.md`. A hand-kept list
+  goes stale the first time a page moves and is blind to every page written after it; a
+  scan has neither failure, and it cannot contain a name that means nothing.
+
+The scan finds 14 statements of the takeover proof across four files, where the list saw
+seven files and read six. A floor asserts the scan itself is not broken, since a gate over
+a set it cannot see is worse than no gate.
+
+Nothing on the website states the proof today, so the phantom hid no live defect — this is
+a repair to the instrument, recorded because the instrument had just been offered as the
+thing that closes the class.
+
+## D1250 — the retracted over-claim went on being published
+
+D1242 found that `converged` was reported at three exits and only one of them said what
+had been compared. The honest sentence — "the world already matches ON EVERY ATTRIBUTE
+THIS RUN CAN COMPARE" — replaced the unqualified "the world already matches the
+candidate" everywhere in the runtime, with a gate over the set so a fourth exit could not
+arrive bare.
+
+The published side was never walked. Executing the quickstart literally — running the
+page rather than reading it — showed the page promising
+
+    ✓ converged — the world already matches the candidate
+
+while the binary prints that sentence with its scope attached. Five places carried the
+retracted wording: `README.md`, `examples/laptop/README.md`, `website/pages/quickstart.md`
+twice, and — found by the gate rather than by hand — the transcript written into
+`spec/onboarding.md` three entries ago, by me, after D1242 was already closed.
+
+So the over-claim was removed from the runtime and left standing for the readers who have
+only the document. That is the audience the correction was for: whoever has run it can see
+the real sentence, and whoever has not is reading the retracted one.
+
+Two gates, because two directions can drift:
+
+- published prose that shows the converged banner must carry the scope within reading
+  distance of it, so the retracted claim cannot be re-published;
+- a banner QUOTED in the README examples must be a sentence the binary actually prints —
+  the runtime's literals are rejoined across their concatenation before the check, the
+  quote-naive shape having produced false results twice here before.
+
+Markdown only, deliberately: `examples/check.sh` matches the same phrase as a shell glob
+against real output. That is a matcher against reality rather than a claim about it, and a
+substring pattern stays correct as the sentence grows.
+
+Four mutants, four killed — README reverted to the over-claim, the quickstart losing its
+qualification, the RUNTIME banner changing while the documents stand still, and the
+proximity window shrunk to nothing.
+
+**The quickstart itself works, recorded as a result.** Scaffold, fill, converge twice: the
+generated candidate has exactly ONE blank (`service`) as the page says, the `sed` the page
+gives matches it, the first run banners APPLIED and the second CONVERGED, both exit 0. The
+page's claim that the second run is the point — proven against recorded reality rather
+than inferred from an apply's exit code — is what the binary does.
+
+## D1251 — the parity gate could not see the verb it was built to catch
+
+`website/pages/cli.md` is the published verb reference, and D1125 already gates it: every
+verb the binary accepts must be listed, and every verb listed must be one the binary
+accepts. That gate has been green.
+
+The binary's help advertises 53 verbs. The page listed 52. The missing one was
+`k8s-skeleton`, absent from the page, the spec, every skill, and from this record too.
+
+The gate did not miss it. The gate could not SEE it, on both sides at once:
+
+    ^  groundhold (?:\[[^\]]*\] )?([a-z][a-z-]*)(\s|$)     the authority (usage text)
+    ^\| `([a-z][a-z-]*)                                      the page
+
+Neither class admits a digit. On the authoritative side the capture stops at `k`, the
+required `(\s|$)` then meets `8`, and the whole LINE fails to match — so the verb never
+entered the set the page is compared against. On the page side the same class would have
+read a row as `k`, but there was no row. Two blindnesses in the same place produce two
+sets that agree, and agreement is what a parity gate reads as success.
+
+That is the reusable shape, and it is sharper than a missing doc line: **a gate comparing
+two derived sets is defeated by a pattern that cannot see a name, because the name is
+dropped from BOTH sides.** A gate over one set fails loudly when its scan breaks; a parity
+gate goes quiet. The D328 floor did not help either — 52 verbs is a healthy-looking number.
+
+It surfaced only because adding the row made the page side produce `k`, a phantom the
+binary does not accept. The fix had to be made before the gate could report the defect.
+
+Worth recording: the first scan I wrote while investigating had the identical bug, and I
+read its output as a finding about six verbs before checking the instrument. The premise
+was wrong in the direction that flatters the investigator.
+
+Both classes now admit digits, and — since a character class cannot be proven by a tree
+that happens to contain no counter-example — the patterns are exercised against
+CONSTRUCTED lines. Without that, dropping the digit again would go unnoticed until the
+next verb with one.
+
+**And the verb's own description was wrong.** Running it, rather than reading it, found the
+usage line calling it `offline mapping scaffolding`. It is not: `SkeletonFor` crawls a live
+cluster's discovery and OpenAPI, and with no kubeconfig it refuses (`no context given and
+no current-context set`, exit 1). "offline" meant "writes nothing" to whoever wrote it —
+the implementation comment says so — and means "needs no cluster" to a reader, which is
+precisely the moment someone reaches for a scaffolding tool. Corrected in the usage text,
+the code comment, and the new row on the CLI page, and gated so it cannot call itself
+offline again.
+
+Mutants: the digit removed from either side of the parity (both killed, one as a phantom
+and one as a missing verb), the new row deleted from the page (killed), and `offline`
+restored to the usage line (killed). One survived and is named rather than dressed up:
+neutering the witness's own equality assertion to a tautology, which no test can detect
+about itself.
+
+The parity itself stays in ONE place — D1125's gate, repaired. A second copy was written
+during this slice and deleted before commit; two gates over one claim is the drift this
+record keeps describing.
+
+## D1252 — sweeping the class D1251 named, including where it was not
+
+D1251 found a parity gate defeated by a character class that could not see a digit, and
+named the shape: a pattern blind to a name drops it from BOTH derived sets, the sets agree,
+and agreement is what the gate reads as success. That shape has siblings by construction —
+this codebase gates published surfaces with regexes over source and prose in a dozen places.
+
+Fourteen gate patterns use a class with no digit. The sweep asked each the only question
+that matters: does its subject contain a name with a digit TODAY?
+
+    silentOnSuccess (20 verbs)                    none
+    verbs invoked across every SKILL.md (18)      none
+    error codes                                   none
+    flag names                                    none
+    the shared usage-block parser                 ONE — k8s-skeleton
+
+Recording the four negatives as results rather than as silence: they are the reason this is
+one repair and not a campaign, and the next person to walk this does not have to re-derive
+them. They are also a warning, since each is one digit-bearing name away from the same hole.
+
+**The live one.** `usageBlocks` parses the CLI's usage text into one block per verb and is
+shared, deliberately, by two gates "so a parser fix reaches each of them". Its head pattern
+was `^  groundhold ([a-z-]+)\s`: on the `k8s-skeleton` line the capture stops at `k`, the
+required `\s` meets `8`, and the LINE does not match — the verb has no block at all. 52 of
+53, and nothing said which one was gone.
+
+What each gate then did with the absence differs, and the difference is the lesson:
+
+- `TestUsageShowsTheProviderFlagWhereItIsRequired` reports a missing block as an error and
+  counts what it checked. It was unaffected here only because this verb takes no
+  `--provider`; had it needed one, the gate would have SAID SO.
+- `TestUsageShowsEveryFlagAVerbRefusesWithout` did `if !ok { continue }` — skip, no word.
+  The comment explained the skip as being for flags that require other flags
+  (`--quarantine requires --fingerprint`), which is a real case. The skip was written for
+  that and silently absorbed a different thing.
+
+Measured, both before and after: nothing was actually wrong. `k8s-skeleton` advertises the
+`--capability` it refuses without. The defect is that no gate was in a position to notice
+either way.
+
+Fixed: the class admits digits; the silent skip now skips only names beginning with `--`
+and reports anything else; and the subject-side pattern reads BOTH refusal phrasings, since
+twenty messages say "<verb> requires --flag" and one says "<verb>: --flag is required" — a
+gate deriving its own subject from prose is choosing what to check by spelling.
+
+**The mutants, including the two that lived.**
+
+    digit removed from the parser         killed — twice, by the guard and by the witness
+    usage line loses --capability         killed
+    silent skip restored                  SURVIVED, alone
+    second refusal phrasing dropped       SURVIVED
+
+Both survivors are honest and neither is dressed up. The silent skip cannot be killed on its
+own: with a working parser no verb is ever missing a block, so the branch is unreachable —
+it is defence against a second defect, not against this one. The second phrasing has no live
+subject: the one verb using it advertises its flag, so removing the pattern changes nothing
+today.
+
+The combination is the interesting measurement, and it reproduces the historical state
+exactly: with the old parser AND the silent skip, `TestUsageShowsEveryFlagAVerbRefusesWithout`
+reports **ok**. That is how the blindness survived. With the same pair applied, the new
+parser witness FAILS — so the state that was quiet for as long as the verb has existed can no
+longer be restored without something saying so.
+
+## D1253 — a typo in a survey and genuine drift were the same verdict
+
+Running `survey` against a constructed set of adversarial documents found the published
+load rules holding exactly as written: a survey without `repo.commit` refuses ("findings
+are true AT a commit, never in general"), a `class` outside the closed set refuses naming
+it, a finding with no `evidence` refuses with the sentence the spec uses. Three claims,
+three enforcements, good messages.
+
+The fourth was different. `spec/survey.md` says "`capabilityHint` is a vocabulary
+capability type", and a hint naming a type the vocabulary does not have produced:
+
+    status: uncovered      drift: true      exit 2      code: survey-drift
+
+which is, to the character, what a REAL type the contract happens not to declare produces.
+Measured side by side, `capability.database.relatoinal` (a typo) and
+`capability.storage.object` (a type that exists) were one verdict.
+
+The consequence is on the published CI path. `examples/ci/gitlab-ci.yml` gates merges on
+that exit with "the code and the contract disagree about reality — reconcile before
+merge". For the typo that sentence is false, and the operator goes to reconcile a contract
+that is correct. The vocabulary is a CLOSED SET the runtime already holds: it could tell
+and did not.
+
+This is the four-valued rule at the top of this file, met in a verb rather than in the
+verifier. Whether a contract covers a type nobody can resolve is UNKNOWN. Collapsing it
+into `uncovered` states an answer nobody established.
+
+`unknown-type` still BLOCKS — an unresolvable witness is not a pass — and says which
+question it could not answer. `uncovered` keeps its stronger meaning: the contract lacks a
+capability of a type that really exists.
+
+Conformance first, as the rule requires: the case was written, run RED, then implemented.
+A second case pins the control — a real type the contract lacks must still read
+`uncovered`, or the new status has renamed the old one and distinguishes nothing.
+
+**The fail-open guard, and how fast it collected.** The branch is guarded by
+`len(knownTypes) > 0` so that a caller with no vocabulary does not turn every hint into
+`unknown-type`. The comment written beside it said a guard against a caller's mistake also
+hides one. Within the hour it did: the first cut built the set from the CLI's `vocabs`,
+`conformance/run.py` sets `GROUNDHOLD_NO_EMBEDDED_VOCAB=1` for the whole suite, so the set
+arrived empty and the branch quietly did nothing — inside the suite meant to pin it. The
+case failed while the same command by hand passed, which is what sent me looking.
+
+The resolution is not a workaround in either direction: whether a capability TYPE exists is
+a property of this build, while `--vocab` and that variable govern which ATTRIBUTE
+definitions apply to a contract. The type set is read from the embedded vocabulary
+directly, and a custom `--vocab` dir still contributes its types.
+
+Three published registers had to move with the status, and each was held by its own gate
+rather than by memory: the spec's bold-defined vocabulary, `CoverageStatuses()`, and a
+hash-pinned fixture shared with the console. Adding two conformance cases then moved the
+suite SIZE, which is published in four more places — the conformance page, the quickstart,
+The instructions file, and the honesty document, whose gate says in as many words that it "drifted".
+Seven registers, seven gates, and not one of them found by remembering to look. That is
+the argument for this style of gate stated better than the entry that introduced it.
+
+    unknown-type removed                      killed
+    unknown-type stops setting drift          killed
+    CLI reverted to `vocabs` (the fail-open)  killed
+
+**Recorded as results rather than silence.** The `hints` verb (D53) was run adversarially
+in the same pass: a terraform state carrying `root_password`, `server_ca_cert` and a SQL
+user password, and a pulumi checkpoint carrying a root password, a CA cert and a pulumi
+SECRET envelope — five canaries, zero crossings. Pulumi INPUTS disagreed with outputs on
+region and engine and the outputs won, as documented. A `connection_name` naming a
+different project refused the hint and printed both identities. `examples/ci` flag usage
+checks out: every flag those workflows pass is accepted, `--explain` included, and an
+unknown flag is refused rather than ignored. The published `go-version: 1.25` is correct —
+a constructed witness showed a `toolchain` line is not a hard floor under
+`GOTOOLCHAIN=local`, which refuted the defect I was about to write up.
+
+## D1254 — the MCP boundary, driven rather than read
+
+The MCP server (D50) was the last untrodden verb of this pass: an agent-facing surface
+whose published claims are security properties, and which no session had ever spoken to.
+So it was spoken to — newline-delimited JSON-RPC over stdio against the shipped binary,
+not a unit harness.
+
+Every claim on the published page holds:
+
+    tools/list without GROUNDHOLD_MCP_ALLOW_APPLY   six tools, no apply
+    tools/list with it                              apply appears
+    apply, no token                                 confirmation_required + plan + token
+    apply with the token                            APPLIED
+    the same token again                            refused: unknown confirm_token
+    the token against a DIFFERENT plan              refused, naming BOTH hashes
+    the token against a different ledger            refused: "the apply target changed
+                                                    (contract/candidate/ledger/vocab/
+                                                    provider/at) — a token confirms ONE
+                                                    decision, not one plan document"
+
+Every one of those is already pinned by a test — `TestTwoStepApply`,
+`TestApplyDisabledByDefault`, `TestTokenConsumedOnHashFailure`,
+`TestConfirmTokenCannotBeSpentOnADifferentTarget`, `TestExpiredTokensAreSwept`. Nothing
+new was gated, deliberately: a second gate over a claim that already has one is the
+drift this record keeps describing. What the session adds is the thing unit tests cannot
+give — that the shipped binary, driven the way an agent drives it, behaves the way the
+tests say the package does.
+
+**The verdict did not move, and that is the finding worth keeping.** `MATURITY.md` grades
+the MCP server `built` / `config-intent`, and the instinct after a successful end-to-end
+run was to raise the evidence class. The document defines its own vocabulary at the top:
+`measured` means **run against a real cloud**. This run touched none — the provider was
+`fake`. Under the everyday meaning of the word the upgrade is obvious, and under the
+document's meaning it is false.
+
+That is the same shape as the entries either side of it, arriving from the other
+direction: a word whose local definition is narrower than its ordinary one, about to be
+used on its ordinary reading in a document whose whole purpose is not to overclaim. The
+note now records what WAS driven and states why the class stays where it is.
+
+**Recorded from the same pass, as results rather than silence.** `hints` (D53) held under
+five secret canaries across terraform and pulumi, including a pulumi SECRET envelope, and
+used outputs over inputs as documented. `examples/ci` passes only flags the CLI accepts,
+and an unknown flag is refused rather than ignored. The published `go-version: 1.25` is
+correct — a constructed witness showed a `toolchain` line is not a hard floor under
+`GOTOOLCHAIN=local`, refuting a defect that was half-written before it was checked.
+
+## D1255 — a whitelist of paths is not a whitelist of files
+
+The export is a whitelist COPY, and the whitelist names PATHS: `spec`, `conformance`,
+`ref`, `go`, `examples`, `website` and a handful of files. The copy was
+`cp -r "$SRC/$path" "$DST/$path"` — the filesystem, not the index. So a whitelisted
+DIRECTORY contributed whatever happened to be sitting in it, including everything git
+ignores.
+
+Found by publishing. The export gate refused a sync with
+
+    LEAK DETECTED in export — a denied term appears in file CONTENTS:
+    grep: .../export/go/groundhold: binary file matches
+
+`go/groundhold` is a 23 MB build output, untracked and gitignored, left in the tree by a
+`go build`. It was caught only because a Go binary embeds its build path and that path
+contained a denied term. Built anywhere else — a different checkout, CI, a colleague's
+machine — it would have been published: a binary of unknown provenance in a source
+mirror whose releases are the attested artifact channel.
+
+Beside it sat `go/internal/converge/.groundhold/converge-plan.yaml`, 200 bytes of local
+test residue. It contains no denied term, so the leak gate would NOT have stopped it. The
+same path would publish a ledger holding real identifiers if one were ever left in a
+whitelisted directory.
+
+The shape was already known here. Two `rm` calls remove `__pycache__`, `*.pyc` and `bin/`
+BY NAME, under the comment "build artifacts never cross: compiled bytecode embeds private
+paths" — the risk named exactly, and handled for the cases someone had seen. That is a
+cleanup, not a property, and it is the D1252 shape again: a remedy written for one case
+absorbs nothing about the next.
+
+Two changes:
+
+- the copy enumerates `git ls-files` under each whitelisted path, so an untracked file
+  cannot ride along by construction (`cp -p`, because `examples/check.sh` and
+  `scripts/adopt-candidate.sh` must stay executable), and a whitelisted path under which
+  git tracks NOTHING is now a refusal rather than a silent empty copy;
+- and the property is asserted afterwards rather than trusted: every file in the export
+  must be tracked in the source. That is what would have caught BOTH artifacts whatever
+  their contents. It carries its own D328 floor, since a broken `ls-files` would
+  otherwise wave everything through.
+
+Measured, because a whitelist change can silently drop something a reader needs: the new
+export's file list against the one just published is **identical** — 0 lost. Planted
+witnesses (an untracked file under `go/`, and a `.groundhold/` residue directory) do not
+appear in the export at all.
+
+## D1256 — the trap that ate the error
+
+Chasing the above, an export gate run died with
+
+    ./examples/check.sh: line 1: LIFE: unbound variable
+
+which is not what failed. `check.sh` installs a cleanup trap per temporary directory, each
+extending the last. The trap added with the onboarding block (D1246, mine, tonight) named
+`"$LIFE"` — a directory created THIRTY LINES LATER. Under `set -u`, any exit in that window
+runs the trap, hits the unset variable, and reports that instead of the cause. The real
+failure never printed, and the run that produced it has not reproduced since; that question
+stays open rather than being answered by a guess.
+
+The same edit dropped `$ONB` from every later trap, so the directory leaked on exit — the
+file's convention is strictly cumulative and I broke it in both directions at once.
+
+Fixed: the earlier trap cleans only what exists at that point, and `$ONB` travels through
+the later ones. A constructed witness forces an exit inside the old window and confirms the
+real cause is now what gets printed.
+
+Worth stating plainly: this was introduced tonight, in the commit that fixed the onboarding
+proof, and it is already published. The defect it hid was in the tooling rather than the
+product — but a masking trap is the reason a session spends an hour on the wrong question,
+and that is exactly what it cost.
+
+## D1257 — the linter CI runs is not in the gate, and its target did not run
+
+The mirror's CI failed the sync PR on one issue:
+
+    internal/provider/silentmapping_gate_test.go:100: func minInt is unused (unused)
+
+A helper written for a gate earlier the same night and left behind when the gate took
+a different shape. Trivial on its own; the interesting part is that it travelled all the
+way to a published branch through a full weekend of `make check`.
+
+`make check` is `vet validate conformance conformance-cli conformance-go examples`. It
+does not lint, and `go vet` does not report unused functions — only unused variables and
+imports. So the local gate could not see this class at all, while the public CI could,
+which is the worst arrangement of the two: the first person to learn is whoever reads a
+red check on a pull request.
+
+`make lint` exists as a separate target. It also did not work:
+
+    cd go && golangci-lint run --timeout=5m
+    /bin/sh: 1: golangci-lint: not found
+
+The binary installs into `$(go env GOPATH)/bin`, which is not on the PATH make's `/bin/sh`
+inherits. So the target answered "not found" to anyone who tried it, which is a good
+explanation for why nobody did. Fixed by putting GOPATH's bin on the PATH for that
+recipe; the linter is present and reports **0 issues** across the tree once the two dead
+helpers are removed (the second, a local `min`, also shadowed the builtin Go has had
+since 1.21).
+
+**Left for the owner, deliberately.** Whether `lint` should join `check` is a decision
+about what the gate IS, not a defect to fix at 3am: it adds roughly two minutes to every
+run, and this record's position is that a gate nobody runs is worse than no gate. The
+argument for adding it is this entry. The argument against is that `check` is already the
+long pole in every slice. Either way the current state — a linter that CI enforces and
+the local gate ignores — is the option nobody chose.

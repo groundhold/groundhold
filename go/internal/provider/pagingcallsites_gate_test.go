@@ -29,7 +29,25 @@ import (
 // suite EXERCISES, where the source scrape saw every literal. That is D317's direction
 // (ask the drivers, do not scrape them) and it is why the coverage assertion below is not
 // optional.
-const unfollowedPagingSiteCeiling = 59
+// D1229 raised this 59 -> 61, and the reason matters more than the number. The ratchet's
+// stated trade is right above: the recorder sees only what the suite EXERCISES. Refreshing
+// the capture recorded 54 chains that had never been in it, and two of them were reads that
+// already existed in the drivers, unfollowed, unseen. So the count went up because the
+// MEASUREMENT got more complete, not because the code got worse — the opposite of what a
+// ratchet tripping usually means, and worth naming so the next reader does not go hunting
+// for a regression that is not there.
+//
+// Both are safe by this gate's own criteria, checked rather than assumed:
+//
+//   - ecr:DescribeRepositories via observeECR — a SERVER-SIDE FILTER naming one item
+//     (`{"repositoryNames":["<name>"]}`), so there is one repository to return.
+//   - elasticloadbalancing:DescribeListeners via listenerProtocols — filtered to one
+//     load balancer by `LoadBalancerArn`, and a load balancer's listeners are bounded by
+//     a service quota (50 by default) well under the response page size.
+//
+// It may only go DOWN from here. If a refresh reveals more, each one gets this treatment:
+// named, and justified or fixed — never absorbed by a bigger number.
+const unfollowedPagingSiteCeiling = 61
 
 func TestRecordedPagingCallSitesFollowTheirToken(t *testing.T) {
 	root := repoRoot(t)

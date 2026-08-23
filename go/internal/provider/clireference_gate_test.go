@@ -42,7 +42,12 @@ func TestTheCLIReferenceListsEveryVerb(t *testing.T) {
 	binary := map[string]bool{}
 	for _, line := range strings.Split(block[1], "\n") {
 		// Two published forms: plain, and with a global flag before the verb.
-		if m := regexp.MustCompile(`^  groundhold (?:\[[^\]]*\] )?([a-z][a-z-]*)(\s|$)`).
+		// D1251: the class was `[a-z][a-z-]*` — no digit. `k8s-skeleton` therefore
+		// matched as `k`, the required `(\s|$)` then failed against the `8`, and the
+		// LINE was skipped entirely: the verb never entered the authoritative set. The
+		// page had no row for it either, so both sides were blind in the same place and
+		// the gate stayed green over precisely the drift it was built to catch.
+		if m := regexp.MustCompile(`^  groundhold (?:\[[^\]]*\] )?([a-z][a-z0-9-]*)(\s|$)`).
 			FindStringSubmatch(line); m != nil {
 			binary[m[1]] = true
 		}
@@ -58,11 +63,11 @@ func TestTheCLIReferenceListsEveryVerb(t *testing.T) {
 	}
 	page := string(raw)
 	listed := map[string]bool{}
-	for _, m := range regexp.MustCompile("(?m)^\\| `([a-z][a-z-]*)").FindAllStringSubmatch(page, -1) {
+	for _, m := range regexp.MustCompile("(?m)^\\| `([a-z][a-z0-9-]*)").FindAllStringSubmatch(page, -1) {
 		listed[m[1]] = true
 	}
 	// Rows that name two verbs at once, e.g. `pair` / `unpair`.
-	for _, m := range regexp.MustCompile("(?m)^\\| `([a-z-]+)` / `([a-z-]+)`").FindAllStringSubmatch(page, -1) {
+	for _, m := range regexp.MustCompile("(?m)^\\| `([a-z0-9-]+)` / `([a-z0-9-]+)`").FindAllStringSubmatch(page, -1) {
 		listed[m[1]], listed[m[2]] = true, true
 	}
 
@@ -89,6 +94,37 @@ func TestTheCLIReferenceListsEveryVerb(t *testing.T) {
 	if len(phantom) > 0 {
 		t.Errorf("the reference lists verbs the binary does not accept:\n  %s\n\n"+
 			"A reader would type them and get an operator error.", strings.Join(phantom, ", "))
+	}
+}
+
+// D1251. The fix above is a character class, and a character class cannot be proven by
+// the tree — the gate would go on passing if the digit were dropped again and no verb
+// happened to contain one that day. So both patterns are exercised against CONSTRUCTED
+// lines, which is what makes the repair a ratchet rather than an edit.
+//
+// The blindness is worth stating once more because it is the reusable part: a parity gate
+// compares two derived sets, and a pattern that cannot see a name drops it from BOTH — so
+// the sets agree, and agreement is exactly what the gate reads as success. My own first
+// scan of these verbs had the identical bug an hour before I found this one.
+func TestTheVerbPatternsSeeAVerbWithADigitInIt(t *testing.T) {
+	usage := "  groundhold k8s-skeleton <group>/<version>/<Kind> --capability <cap>"
+	m := regexp.MustCompile(`^  groundhold (?:\[[^\]]*\] )?([a-z][a-z0-9-]*)(\s|$)`).
+		FindStringSubmatch(usage)
+	if m == nil {
+		t.Fatal("the usage pattern does not match a verb containing a digit at all — the " +
+			"line is SKIPPED, so the verb never reaches the authoritative set and the " +
+			"reference can omit it forever without this gate noticing")
+	}
+	if m[1] != "k8s-skeleton" {
+		t.Errorf("the usage pattern read %q from a k8s-skeleton line — a truncated verb "+
+			"never matches the page and reports as missing, or matches nothing and reports "+
+			"as fine", m[1])
+	}
+	row := "| `k8s-skeleton <group>/<version>/<Kind> --capability <cap>` | scaffolding |"
+	p := regexp.MustCompile("(?m)^\\| `([a-z][a-z0-9-]*)").FindStringSubmatch(row)
+	if p == nil || p[1] != "k8s-skeleton" {
+		t.Errorf("the page pattern read %v from a k8s-skeleton row — a truncated verb "+
+			"becomes a PHANTOM the binary does not accept, which is how this was found", p)
 	}
 }
 

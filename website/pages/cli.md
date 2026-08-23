@@ -22,6 +22,7 @@ interface.
 | `explain <noun>` | one place to ask about any noun the system emits — an error code, a vocabulary path, or a capability type; a type lists its attributes (kind, enum) — the discovery ladder |
 | `example contract` · `example candidate <contract.yaml>` | print a valid starter document; the candidate form scaffolds one entry per capability with its vocab attributes |
 | `suggest <contract> [<candidate>]` | advisory hardening: recommended-but-absent constraints as ready-to-paste snippets, cited by control ID (FSBP/CIS/GDPR); never gates (D203) |
+| `k8s-skeleton <group>/<version>/<Kind> --capability <cap>` | scaffold the MACHINE half of a k8s mapping from a live cluster's discovery + OpenAPI (use `core` for the core group). Reads the cluster and writes nothing to it, but a reachable API server is required — it is not a desk-side tool. Authors no semantics: the vocabulary half is still yours (D1251) |
 | `compose <base> [overlay ...]` | merge a base contract with per-environment overlays into ONE flat contract — dev/staging/prod DRY without inheritance (D199) |
 | `diff <a> <b>` | constraint/capability delta + whether a's invariants are a subset of b's — the dev ⊆ staging ⊆ prod promotion proof (D199) |
 | `survey <contract> --survey <s.json> ...` | code-survey coverage vs the contract; uncovered required deps are drift (`survey-drift`); orphans harden only under `--complete` |

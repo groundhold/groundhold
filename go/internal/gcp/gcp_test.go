@@ -388,15 +388,35 @@ func TestListDiscoversExistingInstances(t *testing.T) {
 			case strings.HasPrefix(r.URL.Path, "/projects/acme-prod/databases/"): // databases.get
 				w.Write([]byte(`{"name":"projects/acme-prod/databases/orders","locationId":"europe-central2","type":"FIRESTORE_NATIVE"}`))
 			default:
-				t.Errorf("unexpected call: %s %s", r.Method, r.URL.Path)
+				// D1232: this used to fail the test, which was right while only four
+				// services were pinned here. `List` sweeps EVERY discoverer, so with
+				// all base URLs pinned the services this fixture does not model reach
+				// it legitimately — "nothing here" is their expected answer, not a
+				// mistake. It is logged rather than swallowed, so a genuinely wrong
+				// route on a MODELLED service is still visible; the modelled ones are
+				// asserted positively below.
+				t.Logf("unmodelled service swept (answered 404): %s %s", r.Method, r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":{"code":404,"message":"not found"}}`))
 			}
 		}))
 	defer srv.Close()
 	d := testDriver(t, srv)
-	d.GcsBaseURL = srv.URL
-	d.PubSubBaseURL = srv.URL
-	d.MemorystoreBaseURL = srv.URL
-	d.FirestoreBaseURL = srv.URL
+	// D1232: pin EVERY base URL, not the four this test happens to serve. `List`
+	// sweeps every discoverer, so an unpinned one sent its request to the real Google
+	// host — 50 of them per run — failed there, and had its failure swallowed by the
+	// sweep while the assertion below counted only what the fixture served. The
+	// discoverers whose routes this fixture does not answer now get a 404 from the
+	// fixture, which is a local, deterministic "nothing here".
+	pinAllBaseURLs(t, d, srv.URL)
+	// Collapsing every service onto ONE fixture host creates collisions production
+	// does not have: Filestore and Memorystore both list at
+	// /projects/{p}/locations/-/instances but live on different hosts
+	// (file.googleapis.com vs redis.googleapis.com), so with both pinned here Filestore
+	// "discovers" the Memorystore instance. Point the services this fixture does not
+	// model at a local host that answers nothing — still hermetic, and faithful to the
+	// separate hosts reality has.
+	d.FilestoreBaseURL = deadLocal(t)
 
 	got, _, err := d.List("europe-central2")
 	if err != nil {

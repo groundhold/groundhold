@@ -14,15 +14,26 @@ import "encoding/xml"
 // downgrades publicExposure to false ONLY on positive enforcement evidence; an
 // unreadable BPA never fabricates "private".
 
-// s3ControlBase is the account-level S3 Control endpoint. The endpoint prefix is
-// "s3-control" but SigV4 signs it under service name "s3" (the s3control service
-// model's signingName) — signing it as "s3-control" yields a 403 that masquerades
-// as permission-denied.
-func (d *Driver) s3ControlBase(region string) string {
+// s3ControlBase is the account-level S3 Control endpoint. Two traps live here and
+// both cost a read that looks like something else.
+//
+// SigV4 signs it under service name "s3" (the s3control model's signingName), not
+// "s3-control" — signing it as "s3-control" yields a 403 that masquerades as
+// permission-denied.
+//
+// D1230: and the host carries the ACCOUNT ID as a DNS PREFIX. There is no
+// `s3-control.<region>.amazonaws.com` — the name does not resolve, in any region,
+// which is what this returned since D240. Every account-level Block Public Access
+// read therefore failed against real AWS with a DNS error, and nothing noticed: the
+// read is lazy (only when a policy already reads public), its failure keeps the
+// CONSERVATIVE public verdict, and every test overrides S3ControlBaseURL, so the
+// hostname was never once exercised. Found by reading a diagnostic that named its
+// own cause in a field run — the message worked even though the code did not.
+func (d *Driver) s3ControlBase(region, account string) string {
 	if d.S3ControlBaseURL != "" {
 		return d.S3ControlBaseURL
 	}
-	return "https://s3-control." + region + ".amazonaws.com"
+	return "https://" + account + ".s3-control." + region + ".amazonaws.com"
 }
 
 // effectiveRestrictPublicBuckets reports whether RestrictPublicBuckets is
@@ -71,7 +82,7 @@ func (d *Driver) accountRPB(region string) (restricted bool, err error) {
 		return false, &awsReadError{Op: op, Cause: "transport",
 			Detail: "the acting identity carries no account id"}
 	}
-	url := d.s3ControlBase(region) + "/v20180820/configuration/publicAccessBlock"
+	url := d.s3ControlBase(region, acct) + "/v20180820/configuration/publicAccessBlock"
 	st, body, cerr := d.doSigned("GET", url, "s3", region,
 		map[string]string{"x-amz-account-id": acct}, nil)
 	return parseRPB(op, st, body, cerr)
@@ -83,20 +94,110 @@ func (d *Driver) accountRPB(region string) (restricted bool, err error) {
 // restricted) — matched on the error code, never a bare 404 (a wrong-account /
 // NoSuchBucket 404 keeps its error). Everything else names its cause.
 func parseRPB(op string, st int, body []byte, err error) (restricted bool, rerr error) {
+	return parsePABFlag(op, st, body, err, func(c pabConfig) string { return c.RestrictPublicBuckets })
+}
+
+// pabConfig is the PublicAccessBlockConfiguration this driver reads. The two flags
+// answer DIFFERENT questions: RestrictPublicBuckets neutralizes a public POLICY,
+// IgnorePublicAcls neutralizes public OBJECT ACLs — the one anonymous path a
+// bucket-scope read otherwise cannot close (D1229).
+type pabConfig struct {
+	RestrictPublicBuckets string `xml:"RestrictPublicBuckets"`
+	IgnorePublicAcls      string `xml:"IgnorePublicAcls"`
+}
+
+// parsePABFlag is the shared ladder for ONE flag of the PublicAccessBlock. One
+// implementation on purpose: a second copy of "a NoSuchPublicAccessBlockConfiguration
+// 404 is a DEFINITIVE not-set" is a second place for that judgement to drift.
+func parsePABFlag(op string, st int, body []byte, err error,
+	pick func(pabConfig) string) (enforced bool, rerr error) {
 	if err != nil {
 		return false, readTransport(op, err)
 	}
 	if st == 200 {
-		var c struct {
-			RestrictPublicBuckets string `xml:"RestrictPublicBuckets"`
-		}
+		var c pabConfig
 		if xml.Unmarshal(body, &c) != nil {
 			return false, readBody(op, st)
 		}
-		return c.RestrictPublicBuckets == "true", nil
+		return pick(c) == "true", nil
 	}
 	if awsErrCode(body) == "NoSuchPublicAccessBlockConfiguration" {
 		return false, nil // definitively not set
 	}
 	return false, readHTTP(op, st, awsErrCode(body))
+}
+
+// cachedFlag memoizes one boolean provider answer, INCLUDING the failure. Re-asking
+// after a 403 would burn a request per bucket to be denied identically each time.
+type cachedFlag struct {
+	done bool
+	val  bool
+	err  error
+}
+
+// effectiveIgnorePublicAcls reports whether public OBJECT ACLs are neutralized for a
+// bucket. D1229, and note the ordering: ACCOUNT level first, cached for the run.
+//
+// That inversion (effectiveRestrictPublicBuckets tries the bucket first) is the whole
+// cost argument. An account that enforces IgnorePublicAcls closes the residual for
+// EVERY bucket after one request per run; only an account that does not enforce it
+// pays a request per bucket, and only for buckets that already measured non-public.
+// Bucket-first would have cost a request per bucket unconditionally.
+//
+// Conservatism is unchanged from its RestrictPublicBuckets twin: enforced=true needs
+// POSITIVE evidence, and an unresolved read returns the error so the caller keeps the
+// full caveat rather than a comfortable "closed".
+func (d *Driver) effectiveIgnorePublicAcls(region, bucket string) (enforced bool, err error) {
+	aIPA, aErr := d.accountIPA(region)
+	if aErr == nil && aIPA {
+		return true, nil
+	}
+	bIPA, bErr := d.bucketIPA(region, bucket)
+	if bErr == nil && bIPA {
+		return true, nil
+	}
+	if aErr == nil && bErr == nil {
+		return false, nil // both definitively NOT enforcing
+	}
+	if bErr != nil {
+		return false, bErr
+	}
+	return false, aErr
+}
+
+func (d *Driver) bucketIPA(region, bucket string) (enforced bool, err error) {
+	st, body, cerr := d.s3Do("GET", region, bucket, "/?publicAccessBlock", "")
+	return parsePABFlag("GetBucketPublicAccessBlock", st, body, cerr,
+		func(c pabConfig) string { return c.IgnorePublicAcls })
+}
+
+// accountIPA is the account-level read, memoized for the run.
+func (d *Driver) accountIPA(region string) (enforced bool, err error) {
+	if d.acctIPA == nil {
+		d.acctIPA = &cachedFlag{}
+	}
+	if d.acctIPA.done {
+		return d.acctIPA.val, d.acctIPA.err
+	}
+	v, e := d.accountIPAUncached(region)
+	*d.acctIPA = cachedFlag{done: true, val: v, err: e}
+	return v, e
+}
+
+func (d *Driver) accountIPAUncached(region string) (enforced bool, err error) {
+	const op = "GetAccountPublicAccessBlock"
+	acct, aerr := d.resolveAccount()
+	if aerr != nil {
+		return false, &awsReadError{Op: op, Cause: "transport",
+			Detail: "cannot resolve the acting account: " + aerr.Error()}
+	}
+	if acct == "" {
+		return false, &awsReadError{Op: op, Cause: "transport",
+			Detail: "the acting identity carries no account id"}
+	}
+	url := d.s3ControlBase(region, acct) + "/v20180820/configuration/publicAccessBlock"
+	st, body, cerr := d.doSigned("GET", url, "s3", region,
+		map[string]string{"x-amz-account-id": acct}, nil)
+	return parsePABFlag(op, st, body, cerr,
+		func(c pabConfig) string { return c.IgnorePublicAcls })
 }

@@ -376,7 +376,26 @@ func (d *Driver) updateKinesis(capability, environment, providerID string,
 				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
 					Reason: fmt.Sprintf("%s outcome unknown (may have landed): %v", action, cerr)}
 			case st == http.StatusOK:
-				// applied
+				// Accepted, NOT applied. Increase/DecreaseStreamRetentionPeriod is async:
+				// the stream enters UPDATING carrying the OLD window and only reaches the new
+				// one on the way back to ACTIVE. Field validation (D1211) caught this driver
+				// reporting succeeded during UPDATING at 24h while the target was 48h — a
+				// false-green a converge would tombstone as applied. Poll to the applied
+				// window before succeeding (D953 poll-to-applied, as the create path polls to
+				// ACTIVE); unknown on timeout keeps the handle for reconcile.
+				deadline := d.Now().Add(d.PollTimeout)
+				for {
+					cur, found, rerr := d.describeStream(region, stream)
+					if rerr == nil && found && cur.StreamStatus == "ACTIVE" && cur.RetentionPeriodHours == hours {
+						break // window applied
+					}
+					if d.Now().After(deadline) {
+						return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+							Reason: fmt.Sprintf("%s accepted but stream not yet at %dh at poll "+
+								"timeout — reconcile via DescribeStreamSummary", action, hours)}
+					}
+					time.Sleep(d.PollInterval)
+				}
 			case st >= 500:
 				return provider.CreateResult{ProviderID: providerID, Status: "unknown",
 					Reason: fmt.Sprintf("%s HTTP %d (server error — may have landed) — reconcile", action, st)}

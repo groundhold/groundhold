@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"groundhold/internal/provider"
@@ -203,28 +204,30 @@ type azureDNSRecordDoc struct {
 
 // recordTarget reconstructs the governed dns.target from the type-specific value
 // block, inverting recordProperties.
-func recordTarget(recordType string, doc azureDNSRecordDoc) string {
+// recordTarget returns the type-specific FIRST value and how many the set holds
+// (D1237 — the count is what the caller discloses; the attribute is one string).
+func recordTarget(recordType string, doc azureDNSRecordDoc) (string, int) {
 	switch recordType {
 	case "A":
 		if len(doc.Properties.ARecords) > 0 {
-			return doc.Properties.ARecords[0].Ipv4Address
+			return doc.Properties.ARecords[0].Ipv4Address, len(doc.Properties.ARecords)
 		}
 	case "AAAA":
 		if len(doc.Properties.AAAARecords) > 0 {
-			return doc.Properties.AAAARecords[0].Ipv6Address
+			return doc.Properties.AAAARecords[0].Ipv6Address, len(doc.Properties.AAAARecords)
 		}
 	case "CNAME":
-		return doc.Properties.CNAMERecord.Cname
+		return doc.Properties.CNAMERecord.Cname, 1
 	case "TXT":
 		if len(doc.Properties.TXTRecords) > 0 && len(doc.Properties.TXTRecords[0].Value) > 0 {
-			return doc.Properties.TXTRecords[0].Value[0]
+			return doc.Properties.TXTRecords[0].Value[0], len(doc.Properties.TXTRecords)
 		}
 	case "MX":
 		if len(doc.Properties.MXRecords) > 0 {
-			return fmt.Sprintf("%d %s", doc.Properties.MXRecords[0].Preference, doc.Properties.MXRecords[0].Exchange)
+			return fmt.Sprintf("%d %s", doc.Properties.MXRecords[0].Preference, doc.Properties.MXRecords[0].Exchange), len(doc.Properties.MXRecords)
 		}
 	}
-	return ""
+	return "", 0
 }
 
 func (d *Driver) observeAzureDNSRecord(capability, providerID string) ([]provider.Observation, []string, error) {
@@ -264,12 +267,23 @@ func (d *Driver) observeAzureDNSRecord(capability, providerID string) ([]provide
 		{Path: "dns.type", Value: recordType, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
-	if tgt := recordTarget(recordType, doc); tgt != "" {
+	var diags []string
+	if tgt, n := recordTarget(recordType, doc); tgt != "" {
 		obs = append(obs, provider.Observation{Path: "dns.target", Value: tgt, Derivation: "measured"})
+		if n > 1 {
+			diags = append(diags, "dns.target reports the FIRST of "+strconv.Itoa(n)+
+				" values in this record set — the attribute is a single string and cannot "+
+				"represent the rest, so a constraint on it is satisfied by one target while "+
+				"the name also resolves to the others")
+		}
+	} else {
+		// D1235, the Azure twin.
+		diags = append(diags, "dns.target not observed: no target could be read for record "+
+			"type "+recordType+" (an unsupported type, or a shape this driver does not decode)")
 	}
 	// dns.proxied is a Cloudflare edge posture — Azure DNS has no proxy, so it is
 	// OMITTED (an honest gap), never fabricated as a false.
-	diags := []string{"dns.proxied not observed — a Cloudflare edge concept with no Azure DNS equivalent"}
+	diags = append(diags, "dns.proxied not observed — a Cloudflare edge concept with no Azure DNS equivalent")
 	return obs, diags, nil
 }
 

@@ -43,7 +43,7 @@ func TestEveryDecodedFieldIsServedBySomeFixture(t *testing.T) {
 		"aws:VPCOptions": true,
 
 		// GCP: an optional budget filter and a TCP uptime check shape.
-		"gcp:budgetFilter": true, "gcp:tcpCheck": true,
+		"gcp:tcpCheck": true,
 		// Azure: budget forecast/contacts.
 		"azure:endDate": true, "azure:forecastSpend": true, "azure:contactGroups": true,
 		// Azure Postgres CMEK: decoded, and the platform-key case emits nothing at
@@ -66,7 +66,7 @@ func TestEveryDecodedFieldIsServedBySomeFixture(t *testing.T) {
 		"aws:EmailIdentities": true, "aws:IdentityType": true,
 		// GCP budget period/precision and the audit-log sink list: read, and served
 		// only by the discovery fixtures, which this sweep does not read.
-		"gcp:calendarPeriod": true, "gcp:nanos": true, "gcp:sinks": true,
+		"gcp:nanos": true, "gcp:sinks": true, // D1234 paid off gcp:calendarPeriod
 	}
 
 	tag := regexp.MustCompile("`json:\"([A-Za-z0-9_]+)[\",]")

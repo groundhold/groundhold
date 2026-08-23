@@ -757,7 +757,24 @@ func Apply(c *contract.Contract, cand *contract.Candidate,
 						"permissions (a non-authoritative omission, not a denial); " +
 						"the apply itself is the authorization oracle"}
 			default:
-				res.Preflight = &PreflightResult{Status: "passed", Checked: needed}
+				// D1240: a PASS used to be the one status with no Reason. Every other
+				// outcome explains itself — `inconclusive` says the omission is not a
+				// denial, `skipped` says why it could not run — and the pass, which is
+				// the outcome that most needs qualifying, said nothing at all.
+				//
+				// The doctrine is old and stated everywhere except here: "a preflight
+				// refusal is trustworthy; a pass is EVIDENCE, not proof" lives in the
+				// driver file headers and in the remediation for a DENIAL, which is the
+				// branch where an operator does not need it. `PreflightResult` is JSON
+				// and this runtime is machine-first, so an agent reading
+				// `{"status":"passed"}` had nothing telling it a mid-apply denial is
+				// still possible — which the same headers say plainly.
+				res.Preflight = &PreflightResult{Status: "passed", Checked: needed,
+					Reason: "the acting identity holds the permissions this plan declares, " +
+						"as of this check — EVIDENCE, not proof: the provider check cannot " +
+						"see deny policies, conditions evaluated at mutation time, or " +
+						"propagation lag, so a mid-apply permission failure stays possible " +
+						"and the write-ahead receipts are the recovery path"}
 			}
 		} else if requirePreflight {
 			return refused(perr.PreflightInconclusive, 2, fmt.Sprintf(

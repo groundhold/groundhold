@@ -10,6 +10,8 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 
 	"groundhold/internal/provider"
@@ -150,6 +152,9 @@ func (d *Driver) observeCWDashboard(capability, providerID string) ([]provider.O
 	}
 	var doc struct {
 		Widgets []struct {
+			// Type decides whether a widget charts metrics at all: text/log/alarm/custom
+			// do not, so their absence from the set is correct rather than a gap.
+			Type       string `json:"type"`
 			Properties struct {
 				Metrics [][]string `json:"metrics"`
 			} `json:"properties"`
@@ -158,19 +163,49 @@ func (d *Driver) observeCWDashboard(capability, providerID string) ([]provider.O
 	if json.Unmarshal([]byte(r.Body), &doc) != nil {
 		return nil, nil, fmt.Errorf("GetDashboard: unparseable body")
 	}
+	// D1236, the AWS twin. Two under-reports lived here, and `dashboard.metrics` is a
+	// SET the vocabulary intends for `subset-of` — so omitting a metric makes that
+	// constraint read SATISFIED over a dashboard charting something unapproved.
+	//
+	//   - `Metrics[0]` took the FIRST metric of each widget. A CloudWatch metric widget
+	//     charts a LIST of them, so a widget with five contributed one. This is the D797
+	//     shape (read Statement[0], miss the rest) in the dashboard driver.
+	//   - a widget whose metrics could not be read was skipped in silence, which is
+	//     indistinguishable from a widget that charts nothing.
 	metrics := []string{}
-	for _, wdg := range doc.Widgets {
-		if len(wdg.Properties.Metrics) > 0 && len(wdg.Properties.Metrics[0]) >= 2 {
-			metrics = append(metrics, wdg.Properties.Metrics[0][0]+"/"+wdg.Properties.Metrics[0][1])
+	var unreadable []string
+	for i, wdg := range doc.Widgets {
+		if wdg.Type != "" && wdg.Type != "metric" {
+			continue // text/log/alarm/custom chart no metric of their own
+		}
+		if len(wdg.Properties.Metrics) == 0 {
+			continue // a metric widget with no series is empty, not unreadable
+		}
+		for _, series := range wdg.Properties.Metrics {
+			if len(series) >= 2 && series[0] != "" && series[1] != "" {
+				metrics = append(metrics, series[0]+"/"+series[1])
+				continue
+			}
+			unreadable = append(unreadable, "widget "+strconv.Itoa(i)+
+				" carries a metric series this driver cannot name")
 		}
 	}
-	return []provider.Observation{
+	sort.Strings(metrics)
+	obs := []provider.Observation{
 		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
 		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
-		{Path: "dashboard.metrics", Value: metrics, Derivation: "measured"},
 		{Path: "dashboard.widgetCount", Value: float64(len(doc.Widgets)), Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
-	}, nil, nil
+	}
+	var diags []string
+	if len(unreadable) > 0 {
+		diags = append(diags, "dashboard.metrics not observed: "+strings.Join(unreadable, "; ")+
+			" — the set this driver can read is INCOMPLETE, and an incomplete set satisfies "+
+			"a subset-of constraint it should not")
+	} else {
+		obs = append(obs, provider.Observation{Path: "dashboard.metrics", Value: metrics, Derivation: "measured"})
+	}
+	return obs, diags, nil
 }
 
 func (d *Driver) deleteCWDashboard(capability, environment, providerID string) provider.CreateResult {

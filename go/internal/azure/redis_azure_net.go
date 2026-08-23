@@ -136,10 +136,16 @@ func (d *Driver) observeRedisAzure(capability, providerID string) ([]provider.Ob
 		obs = append(obs, provider.Observation{Path: "location.region",
 			Value: strings.ToLower(doc.Location), Derivation: "measured"})
 	}
+	var diags []string
 	if v := redisAzureProtocolFor(doc.Properties.RedisVersion); v != "" {
 		obs = append(obs, provider.Observation{Path: "engine.protocol", Value: v, Derivation: "measured"})
+	} else if rv := doc.Properties.RedisVersion; rv != "" {
+		// D1235: a version the mapping does not know (a new major, or Valkey) used to
+		// drop engine.protocol with no word — indistinguishable from a cache that
+		// reports no engine at all.
+		diags = append(diags, "engine.protocol not observed: redisVersion "+rv+
+			" has no equivalent in the vocabulary's engine set")
 	}
-	var diags []string
 	switch doc.Properties.PublicNetworkAccess {
 	case "Enabled":
 		obs = append(obs, provider.Observation{Path: "network.publicExposure", Value: true, Derivation: "measured"})
@@ -332,6 +338,15 @@ func (d *Driver) updateRedisAzure(capability, environment, providerID string,
 			if r := d.patchSetting(rURL, body, providerID, "cache publicNetworkAccess"); r != nil {
 				return *r
 			}
+			// D1222: Redis_Update is long-running — the PATCH 202-accepts while the cache is
+			// still Updating at the old access. Poll to the applied publicNetworkAccess before
+			// reporting succeeded (a security-closing change must not be tombstoned on accept).
+			if r := d.pollAzureApplied(rURL, providerID, "cache publicNetworkAccess", func(b []byte) bool {
+				var doc redisAzureDoc
+				return json.Unmarshal(b, &doc) == nil && doc.Properties.PublicNetworkAccess == access
+			}); r != nil {
+				return *r
+			}
 		case "encryption.inTransit":
 			inTransit, ok := attrs["encryption.inTransit"].(bool)
 			if !ok {
@@ -341,6 +356,16 @@ func (d *Driver) updateRedisAzure(capability, environment, providerID string,
 			// closed. Patch enableNonSslPort to agree with the contract.
 			body, _ := json.Marshal(map[string]any{"properties": map[string]any{"enableNonSslPort": !inTransit}})
 			if r := d.patchSetting(rURL, body, providerID, "cache enableNonSslPort"); r != nil {
+				return *r
+			}
+			// D1222: poll the long-running update to the applied enableNonSslPort before
+			// succeeding — a cache reported TLS-enforced while still Updating at the old port
+			// is the false-green this closes.
+			if r := d.pollAzureApplied(rURL, providerID, "cache enableNonSslPort", func(b []byte) bool {
+				var doc redisAzureDoc
+				return json.Unmarshal(b, &doc) == nil &&
+					doc.Properties.EnableNonSslPort != nil && *doc.Properties.EnableNonSslPort == !inTransit
+			}); r != nil {
 				return *r
 			}
 		default:

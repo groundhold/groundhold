@@ -84,15 +84,33 @@ attributes:
   access.privileged:
     kind: bool
     description: >
-      Whether grant.role confers ADMINISTRATIVE / broadly-privileged access (owner,
-      admin, broad write) rather than least-privilege (read / narrowly scoped). The
-      least-privilege safety semantic. The driver classifies a curated set of
-      well-known privileged roles per cloud; a role OUTSIDE that set is deliberately
-      left UNVERIFIABLE at observe (groundhold will not guess a custom role's privilege
-      — the four-valued verdict is the honest answer, not a fabricated boolean).
+      Whether grant.role confers IAM/administrative CONTROL — the power to grant
+      further access — rather than least privilege. This is the SAME question
+      capability.authorization.role asks of a role's permission set, and it is
+      answered from the same kind of evidence: the actions the role or policy
+      actually confers.
+
+      Evidence, in order (D1231). A role the PROVIDER named and groundhold has
+      curated is classified from that name — the provider chose it and it means what
+      it says. Otherwise the DOCUMENT is read (AWS GetPolicy/GetPolicyVersion, GCP
+      roles.get) and privilege is measured `true` only on POSITIVE evidence: an
+      action conferring control. No match WITHHOLDS rather than concluding false —
+      the escalation set is curated, not exhaustive (ssm:SendCommand and
+      cloudbuild.builds.create are escalation paths outside it), so a miss is not
+      proof of least privilege, and unknown on a hard constraint blocks.
+
+      A measured `true` describes what the DOCUMENT GRANTS, not what the principal
+      can do: a Deny statement, a permissions boundary or an org policy can narrow
+      effective access below it.
     mappings:
-      gcp.iambinding: roles/owner, roles/editor, *admin* => privileged
-      aws.rolepolicy: AdministratorAccess, PowerUserAccess, *FullAccess* => privileged
+      gcp.iambinding: >
+        roles/owner, roles/editor, *admin* by name; otherwise roles.get and any
+        *.setIamPolicy / iam.* permission => privileged
+      aws.rolepolicy: >
+        AdministratorAccess, PowerUserAccess, *FullAccess* by name; otherwise the
+        policy document and any iam:* / credential-minting sts action / a "*" action
+        or "service:*" wildcard => privileged; Allow+NotAction (a complement) is the
+        widest grant there is => privileged
       azure.roleassignment: Owner, Contributor, User Access Administrator => privileged
 
   service.managed:

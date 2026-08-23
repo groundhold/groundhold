@@ -495,3 +495,63 @@ func betweenAWS(s, a, b string) string {
 	}
 	return s[i : i+j]
 }
+
+// D1235. `viewer.protocol` is a CLOSED enum (https-only | redirect-to-https |
+// allow-all) and it is the CDN's TLS posture — whether the edge will serve a viewer
+// over plain HTTP. Two states used to be wrong, in opposite ways:
+//
+//   - a policy value outside the enum was emitted VERBATIM as measured, because the
+//     "mapper" it went through returned its argument on every branch. An out-of-enum
+//     value that looks like a measurement is worse than no value.
+//   - no policy at all produced silence, though CloudFront REQUIRES the field on the
+//     default cache behavior — so an empty read is a read that did not answer.
+//
+// Note what is deliberately NOT done: an unrecognised policy is not reported as
+// `allow-all`. The ranking treats it as weakest for CHOOSING which behavior dominates,
+// which is right; asserting the edge serves plain HTTP is a different claim and this
+// read does not establish it.
+func TestCloudFrontViewerProtocolOutsideTheEnumIsWithheld(t *testing.T) {
+	srv := cfServer(t, "edge", "example.org", "https-strict-2027", true)
+	defer srv.Close()
+	d := cfDriver(t, srv)
+	obs, diags, err := d.observeCloudFront("edge", cfProviderID("000000000000", "E1234567890ABC"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range obs {
+		if o.Path == "viewer.protocol" {
+			t.Fatalf("a policy outside the vocabulary's enum must not be emitted as a "+
+				"measurement, got %v", o.Value)
+		}
+	}
+	var named bool
+	for _, dg := range diags {
+		if strings.Contains(dg, "viewer.protocol not observed") &&
+			strings.Contains(dg, "https-strict-2027") {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("the withholding must name the value it could not place in the enum, got %v", diags)
+	}
+}
+
+// The in-enum path still measures, or the fix has simply stopped reporting.
+func TestCloudFrontViewerProtocolInTheEnumIsStillMeasured(t *testing.T) {
+	srv := cfServer(t, "edge", "example.org", "redirect-to-https", true)
+	defer srv.Close()
+	d := cfDriver(t, srv)
+	obs, _, err := d.observeCloudFront("edge", cfProviderID("000000000000", "E1234567890ABC"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range obs {
+		if o.Path == "viewer.protocol" {
+			if o.Value != "redirect-to-https" {
+				t.Fatalf("viewer.protocol = %v, want redirect-to-https", o.Value)
+			}
+			return
+		}
+	}
+	t.Fatalf("a policy inside the enum must still be measured")
+}

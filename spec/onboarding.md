@@ -3,7 +3,8 @@
 Adopting infrastructure Groundhold did not create. Reality is the first
 author, never the authority: discovery reports what IS; a human decides
 what OUGHT to be; adoption verifies the two agree before any binding is
-written; a converged no-op run proves the takeover.
+written; a `claim` stamps our authorship on the resource; and the
+converged no-op run AFTER that claim proves the takeover.
 
 ## discover
 
@@ -53,8 +54,31 @@ parsed as Groundhold lineage.
 
 ## proof of takeover
 
+Takeover is TWO acts, and this section used to describe only the second.
+
+`adopt` binds the resource in the ledger and deliberately touches nothing in
+the cloud. So the resource still carries no authorship stamp, and the first
+`converge` after an adoption plans a **claim** — the D52 operation whose whole
+job is to stamp authorship on an adopted resource. That planned claim is the
+takeover proceeding, not a draft that fails to match reality.
+
+Run it (`converge … --yes`, or apply the claim), and then:
+
 `converge` (D51) must report **converged** without executing anything.
 An adoption without the no-op proof is a binding, not a takeover.
+
+Measured end to end on the reference provider (D1246):
+
+    adopt                     -> adopted (binds the ledger, never the cloud)
+    converge (no --yes)       -> REFUSED confirmation-required; plan: claim <target>
+    converge --yes            -> CONVERGED (verified against observed reality)
+    converge                  -> CONVERGED (already matches on every attribute
+                                            this run can compare — D1242)
+
+The distinction matters because the rule "a planned change means the draft is
+wrong" is true of attribute mismatches and FALSE of the claim: no amount of
+redrafting removes a missing authorship stamp, so an operator who applies that
+rule to the claim loops forever on a correct draft.
 
 ## unadopt
 
@@ -107,8 +131,9 @@ a line here fails the build.
 
 Migration is the same onboarding path with a head start: hints →
 discover live → compare expected vs observed (disagreements surface as
-state drift found during migration) → draft → adopt → converged no-op
-proof.
+state drift found during migration) → draft → adopt → `converge --yes`
+to execute the claim → converged no-op proof. The claim is not optional
+and not a sign of a bad draft; see §proof of takeover.
 ## Recovering a lost or missing ledger
 
 The ledger holds the authoritative bindings — which live resource each capability

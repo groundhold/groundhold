@@ -256,13 +256,25 @@ func TestCreateRedisAzureRefusesRegionWithoutAvailabilityZones(t *testing.T) {
 // publicNetworkAccess, so a public cache is made private WITHOUT a replacement (which would
 // destroy its data and rotate its hostname and keys). Ownership re-checked; foreign refused.
 func TestUpdateRedisAzurePublicExposure(t *testing.T) {
-	newSrv := func(tagCap string, seen *[]string) *httptest.Server {
+	// The fake is STATEFUL and models the long-running update (D1222): the PATCH 202-accepts
+	// and the cache enters Updating at the OLD access, reaching the new one only back at
+	// Succeeded. A driver that reports succeeded on the PATCH (as it did before D1222) is a
+	// false-green; the poll must ride through the Updating probes to the applied access. When
+	// settle=false the cache never leaves Updating — the stuck case that must read unknown.
+	newSrv := func(tagCap string, settle bool, seen *[]string) *httptest.Server {
+		access, provState, pending, lag := "Enabled", "Succeeded", "", 0
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
 			case "GET":
+				if lag > 0 {
+					lag--
+					if lag == 0 && settle {
+						access, provState = pending, "Succeeded"
+					}
+				}
 				_, _ = w.Write([]byte(`{"location":"westeurope",` +
 					`"tags":{"groundhold-capability":"` + tagCap + `","groundhold-environment":"prod"},` +
-					`"properties":{"provisioningState":"Succeeded","publicNetworkAccess":"Enabled"}}`))
+					`"properties":{"provisioningState":"` + provState + `","publicNetworkAccess":"` + access + `"}}`))
 			case "PATCH":
 				body, _ := io.ReadAll(r.Body)
 				var d struct {
@@ -272,6 +284,7 @@ func TestUpdateRedisAzurePublicExposure(t *testing.T) {
 				}
 				_ = json.Unmarshal(body, &d)
 				*seen = append(*seen, d.Properties.PublicNetworkAccess)
+				pending, provState, lag = d.Properties.PublicNetworkAccess, "Updating", 2
 				w.WriteHeader(200)
 				_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Updating"}}`))
 			default:
@@ -281,9 +294,9 @@ func TestUpdateRedisAzurePublicExposure(t *testing.T) {
 		}))
 	}
 
-	t.Run("remediate public->private (PATCH publicNetworkAccess=Disabled)", func(t *testing.T) {
+	t.Run("remediate public->private (PATCH publicNetworkAccess=Disabled, polled to applied)", func(t *testing.T) {
 		var seen []string
-		srv := newSrv("sessions", &seen)
+		srv := newSrv("sessions", true, &seen)
 		defer srv.Close()
 		d := vnetTestDriver(t, srv)
 		pid := redisAzureProviderID(d.Subscription, "rg1", "sessions-cache")
@@ -297,9 +310,26 @@ func TestUpdateRedisAzurePublicExposure(t *testing.T) {
 		}
 	})
 
+	// The guard for the D1222 false-green: a cache that accepts the PATCH but never leaves
+	// Updating at the old access must read unknown, never succeeded. Remove the poll and this
+	// goes red — succeeded here is the false-green (a public cache reported private).
+	t.Run("stuck Updating times out to unknown", func(t *testing.T) {
+		var seen []string
+		srv := newSrv("sessions", false, &seen)
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		d.PollTimeout = 5 * time.Millisecond
+		pid := redisAzureProviderID(d.Subscription, "rg1", "sessions-cache")
+		res := d.updateRedisAzure("sessions", "prod", pid,
+			map[string]any{"network.publicExposure": false}, []string{"network.publicExposure"})
+		if res.Status != "unknown" || !strings.Contains(res.Reason, "not observed applied") {
+			t.Fatalf("a cache stuck Updating must be unknown, not succeeded: %+v", res)
+		}
+	})
+
 	t.Run("foreign cache refused, no write", func(t *testing.T) {
 		var seen []string
-		srv := newSrv("someone-else", &seen)
+		srv := newSrv("someone-else", true, &seen)
 		defer srv.Close()
 		d := vnetTestDriver(t, srv)
 		pid := redisAzureProviderID(d.Subscription, "rg1", "sessions-cache")
@@ -330,42 +360,75 @@ func TestClassifyRedisAzureChange(t *testing.T) {
 // D1209: updateRedisAzure enforces encryption.inTransit in place — a PATCH of enableNonSslPort,
 // so a cache accepting plaintext is closed to the non-SSL port WITHOUT a replacement.
 func TestUpdateRedisAzureInTransit(t *testing.T) {
-	var seen []bool // enableNonSslPort seen on PATCH
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case "GET":
-			// a cache that accepts plaintext: enableNonSslPort=true => inTransit observed false
-			_, _ = w.Write([]byte(`{"location":"westeurope",` +
-				`"tags":{"groundhold-capability":"sessions","groundhold-environment":"prod"},` +
-				`"properties":{"provisioningState":"Succeeded","enableNonSslPort":true}}`))
-		case "PATCH":
-			body, _ := io.ReadAll(r.Body)
-			var d struct {
-				Properties struct {
-					EnableNonSslPort *bool `json:"enableNonSslPort"`
-				} `json:"properties"`
+	// Stateful async fake (D1222): PATCH accepts and the cache enters Updating at the OLD
+	// port, settling at the new one only back at Succeeded. settle=false is the stuck case.
+	newSrv := func(settle bool, seen *[]bool) *httptest.Server {
+		nonSsl, provState, pending, lag := true, "Succeeded", true, 0
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case "GET":
+				if lag > 0 {
+					lag--
+					if lag == 0 && settle {
+						nonSsl, provState = pending, "Succeeded"
+					}
+				}
+				b := "false"
+				if nonSsl {
+					b = "true"
+				}
+				_, _ = w.Write([]byte(`{"location":"westeurope",` +
+					`"tags":{"groundhold-capability":"sessions","groundhold-environment":"prod"},` +
+					`"properties":{"provisioningState":"` + provState + `","enableNonSslPort":` + b + `}}`))
+			case "PATCH":
+				body, _ := io.ReadAll(r.Body)
+				var d struct {
+					Properties struct {
+						EnableNonSslPort *bool `json:"enableNonSslPort"`
+					} `json:"properties"`
+				}
+				_ = json.Unmarshal(body, &d)
+				if d.Properties.EnableNonSslPort != nil {
+					*seen = append(*seen, *d.Properties.EnableNonSslPort)
+					pending = *d.Properties.EnableNonSslPort
+				}
+				provState, lag = "Updating", 2
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Updating"}}`))
+			default:
+				t.Errorf("unexpected %s", r.Method)
+				w.WriteHeader(404)
 			}
-			_ = json.Unmarshal(body, &d)
-			if d.Properties.EnableNonSslPort != nil {
-				seen = append(seen, *d.Properties.EnableNonSslPort)
-			}
-			w.WriteHeader(200)
-			_, _ = w.Write([]byte(`{"properties":{"provisioningState":"Updating"}}`))
-		default:
-			t.Errorf("unexpected %s", r.Method)
-			w.WriteHeader(404)
+		}))
+	}
+
+	t.Run("enforce TLS (PATCH enableNonSslPort=false, polled to applied)", func(t *testing.T) {
+		var seen []bool
+		srv := newSrv(true, &seen)
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		pid := redisAzureProviderID(d.Subscription, "rg1", "sessions-cache")
+		res := d.updateRedisAzure("sessions", "prod", pid,
+			map[string]any{"encryption.inTransit": true}, []string{"encryption.inTransit"})
+		if res.Status != "succeeded" {
+			t.Fatalf("update: %+v", res)
 		}
-	}))
-	defer srv.Close()
-	d := vnetTestDriver(t, srv)
-	pid := redisAzureProviderID(d.Subscription, "rg1", "sessions-cache")
-	res := d.updateRedisAzure("sessions", "prod", pid,
-		map[string]any{"encryption.inTransit": true}, []string{"encryption.inTransit"})
-	if res.Status != "succeeded" {
-		t.Fatalf("update: %+v", res)
-	}
-	// enforcing TLS closes the non-SSL port: enableNonSslPort must be PATCHed to false.
-	if len(seen) != 1 || seen[0] != false {
-		t.Fatalf("must PATCH enableNonSslPort=false, got %+v", seen)
-	}
+		if len(seen) != 1 || seen[0] != false {
+			t.Fatalf("must PATCH enableNonSslPort=false, got %+v", seen)
+		}
+	})
+
+	t.Run("stuck Updating times out to unknown", func(t *testing.T) {
+		var seen []bool
+		srv := newSrv(false, &seen)
+		defer srv.Close()
+		d := vnetTestDriver(t, srv)
+		d.PollTimeout = 5 * time.Millisecond
+		pid := redisAzureProviderID(d.Subscription, "rg1", "sessions-cache")
+		res := d.updateRedisAzure("sessions", "prod", pid,
+			map[string]any{"encryption.inTransit": true}, []string{"encryption.inTransit"})
+		if res.Status != "unknown" || !strings.Contains(res.Reason, "not observed applied") {
+			t.Fatalf("a cache stuck Updating must be unknown, not succeeded: %+v", res)
+		}
+	})
 }

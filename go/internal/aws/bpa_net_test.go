@@ -105,19 +105,35 @@ func hasDiag(diags []string, sub string) bool {
 }
 
 func TestBPABucketRestrictedDowngrades(t *testing.T) {
-	// (a) bucket RPB=true -> false; account endpoint MUST NOT be hit (short-circuit).
+	// (a) bucket RPB=true -> false, and the RPB RESOLUTION short-circuits without an
+	// account call. D1229 note: this used to assert zero account hits across the whole
+	// observe. It no longer can, because a downgraded verdict IS a measured false and
+	// the residual caveat then reads the account's IgnorePublicAcls (once per run).
+	// The short-circuit itself is unchanged and is asserted directly below, on the
+	// function that owns it, rather than inferred from a whole-observe call count —
+	// which is the sharper test anyway: it cannot be satisfied by an unrelated caller
+	// happening not to run.
 	hits := 0
 	srv := bpaServer(t, true, "true", "true", &hits)
 	defer srv.Close()
-	val, present, diags := observeExposure(t, bpaDriver(t, srv))
+	d := bpaDriver(t, srv)
+	val, present, diags := observeExposure(t, d)
 	if !present || val != false {
 		t.Fatalf("bucket RestrictPublicBuckets=true must downgrade to false, got present=%v val=%v", present, val)
 	}
-	if hits != 0 {
-		t.Errorf("bucket-level true must short-circuit — account endpoint hit %d times", hits)
-	}
 	if !hasDiag(diags, "masked") {
 		t.Errorf("a downgrade must warn the policy is masked, got %v", diags)
+	}
+
+	// the short-circuit, asserted on effectiveRestrictPublicBuckets itself
+	hits = 0
+	d2 := bpaDriver(t, srv)
+	restricted, err := d2.effectiveRestrictPublicBuckets("eu-central-1", "pv-assets-abcd1234")
+	if err != nil || !restricted {
+		t.Fatalf("bucket RPB=true must resolve restricted, got %v err=%v", restricted, err)
+	}
+	if hits != 0 {
+		t.Errorf("bucket-level true must short-circuit — account endpoint hit %d times", hits)
 	}
 }
 
@@ -176,7 +192,16 @@ func TestBPAUnreadableStaysConservativePublic(t *testing.T) {
 }
 
 func TestBPANotQueriedWhenPolicyPrivate(t *testing.T) {
-	// (f) IsPublic=false -> publicExposure=false with NO BPA reads at all (lazy).
+	// (f) IsPublic=false -> publicExposure=false.
+	//
+	// D1229 NARROWED this invariant, deliberately, and the narrowing is the point of
+	// the entry: the RestrictPublicBuckets resolution is still lazy — it fires only
+	// when the policy already reads public, asserted directly below — but the residual
+	// caveat on a measured FALSE now reads IgnorePublicAcls, which is a different flag
+	// answering a different question on the opposite branch. What bounds its cost is
+	// that the ACCOUNT read is memoized for the run (one request, not one per bucket);
+	// s3_residual_gate_test.go holds that, and holds that account-level enforcement
+	// skips the per-bucket read entirely.
 	hits := 0
 	srv := bpaServer(t, false, "true", "true", &hits)
 	defer srv.Close()
@@ -184,7 +209,53 @@ func TestBPANotQueriedWhenPolicyPrivate(t *testing.T) {
 	if !present || val != false {
 		t.Fatalf("a non-public policy must be publicExposure=false, got present=%v val=%v", present, val)
 	}
-	if hits != 0 {
-		t.Errorf("BPA must be queried lazily (never when the policy is private), got %d account calls", hits)
+	if hits > 1 {
+		t.Errorf("at most ONE account read per run is permitted on the private-policy path "+
+			"(D1229's memoized IgnorePublicAcls); got %d", hits)
+	}
+}
+
+// The half of D240's laziness D1229 did NOT touch: RestrictPublicBuckets is resolved
+// only when the policy reads public.
+//
+// This is asserted on the LEG that owns the decision, not on a whole-observe request
+// count — because both flags come from the SAME endpoint, so counting hits there
+// cannot tell an RPB resolution from D1229's IgnorePublicAcls read. A gate that
+// cannot distinguish its two cases is not a gate; this one runs the private and the
+// public policy through the same code and requires opposite answers.
+func TestRestrictPublicBucketsResolvedOnlyForAPublicPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		isPublic bool
+		wantPAB  int
+	}{
+		{"private policy resolves no RPB", false, 0},
+		{"public policy resolves RPB", true, 1},
+	} {
+		pabHits := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.RawQuery {
+			case "publicAccessBlock":
+				pabHits++
+				w.WriteHeader(403)
+				_, _ = w.Write([]byte(`<Error><Code>AccessDenied</Code></Error>`))
+			case "policyStatus":
+				v := "false"
+				if tc.isPublic {
+					v = "true"
+				}
+				_, _ = w.Write([]byte("<PolicyStatus><IsPublic>" + v + "</IsPublic></PolicyStatus>"))
+			default:
+				w.WriteHeader(404)
+				_, _ = w.Write([]byte(`<Error><Code>NoSuch</Code></Error>`))
+			}
+		}))
+		d := s3TestDriver(t, srv)
+		d.S3ControlBaseURL = srv.URL
+		_, _, _ = d.s3PolicyExposureLeg("eu-central-1", "pv-assets-abcd1234")
+		srv.Close()
+		if pabHits != tc.wantPAB {
+			t.Errorf("%s: want %d PublicAccessBlock reads, got %d", tc.name, tc.wantPAB, pabHits)
+		}
 	}
 }

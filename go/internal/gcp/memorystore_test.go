@@ -158,3 +158,41 @@ func TestDeleteMemorystoreForeignRefused(t *testing.T) {
 		t.Fatalf("foreign instance must refuse delete, got %+v", res)
 	}
 }
+
+// D1235. A redisVersion the mapping does not know — a new major, or Valkey — used to
+// drop `engine.protocol` with no word, which reads as "this cache reports no engine"
+// rather than "we could not place the engine it reports". Same shape as the budget
+// period (D1234) and the CloudFront viewer protocol, in the family sweep that found
+// six of these.
+func TestUnmappedRedisVersionIsDiagnosedNotDropped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			w.WriteHeader(404)
+			return
+		}
+		_, _ = w.Write([]byte(`{"name":"projects/acme-prod/locations/europe-west1/instances/gh",` +
+			`"redisVersion":"VALKEY_8_0","locationId":"europe-west1","tier":"BASIC",` +
+			`"memorySizeGb":1,"authEnabled":true,"transitEncryptionMode":"SERVER_AUTHENTICATION"}`))
+	}))
+	defer srv.Close()
+	d := redisDriver(t, srv)
+	obs, diags, err := d.observeMemorystore("sessions",
+		"gredis:acme-prod:europe-west1:gh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range obs {
+		if o.Path == "engine.protocol" {
+			t.Fatalf("an unmapped redisVersion must not be coerced into the engine set, got %v", o.Value)
+		}
+	}
+	var named bool
+	for _, dg := range diags {
+		if strings.Contains(dg, "engine.protocol not observed") && strings.Contains(dg, "VALKEY_8_0") {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("the diagnostic must name the version it could not map, got %v", diags)
+	}
+}

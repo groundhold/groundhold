@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"groundhold/internal/adoptcheck"
@@ -50,7 +51,16 @@ type secretDoc struct {
 	Name        string            `json:"name"`
 	Labels      map[string]string `json:"labels"`
 	Replication struct {
-		Automatic   *struct{} `json:"automatic"`
+		// D1238: `automatic` was decoded as an EMPTY struct — a shape that says "this
+		// variant carries nothing". The API says otherwise: `Automatic` has a
+		// `customerManagedEncryption` field, exactly like a user-managed replica. So a
+		// secret with automatic replication and a customer key reported no key at all,
+		// and the driver's own comment described that as a shape it could not read.
+		Automatic *struct {
+			CustomerManagedEncryption *struct {
+				KmsKeyName string `json:"kmsKeyName"`
+			} `json:"customerManagedEncryption"`
+		} `json:"automatic"`
 		UserManaged *struct {
 			Replicas []struct {
 				Location                  string `json:"location"`
@@ -176,15 +186,38 @@ func (d *Driver) observeSecret(capability, providerID string) ([]provider.Observ
 	// residency: only a userManaged single-region replica is an honest region.
 	if um := doc.Replication.UserManaged; um != nil && len(um.Replicas) == 1 {
 		obs = append(obs, provider.Observation{Path: "location.region", Value: um.Replicas[0].Location, Derivation: "measured"})
-		// D1003: on a single-replica user-managed secret the CMK field is read
-		// reliably from the main GET, so no customer key is a MEASURED FALSE, not an
-		// absence — emit the boolean so a hard constraint cannot pass vacuously. The
-		// else (auto/multi-replica) shape does NOT read CMK, so it stays omitted
-		// (genuinely unknown) rather than a false claim.
-		cmk := um.Replicas[0].CustomerManagedEncryption
-		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: cmk != nil && cmk.KmsKeyName != "", Derivation: "measured"})
 	} else {
 		diags = append(diags, "location.region not observed: automatic or multi-replica replication carries no single-region residency guarantee")
+	}
+
+	// D1238: the customer key is a SEPARATE question from residency, and it used to
+	// ride on the residency branch — so an automatic or multi-replica secret had
+	// `encryption.customerManagedKeys` omitted with a diagnostic that only mentioned
+	// the REGION. The attribute is readable in every replication shape (the API gives
+	// `automatic.customerManagedEncryption` as well as a per-replica one, which the
+	// doc struct used to model as an empty object), so it is answered here for all of
+	// them and the two questions no longer share a branch.
+	//
+	// D1003's reasoning is kept and widened: a readable "no key" is a MEASURED FALSE,
+	// not an absence, so a hard constraint cannot pass vacuously over it.
+	switch cmk, keyed, total := secretCMK(doc); {
+	case total == 0:
+		diags = append(diags, "encryption.customerManagedKeys not observed: the secret "+
+			"declares neither automatic nor user-managed replication, so there is no "+
+			"replica whose key could be read")
+	case cmk:
+		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: true, Derivation: "measured"})
+	default:
+		obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys", Value: false, Derivation: "measured"})
+		if keyed > 0 {
+			// The weakest-across-the-set rule (D1186's shape): `true` means every copy
+			// is under a customer key. A partly-keyed secret is NOT customer-managed,
+			// and saying only `false` would hide that some replicas are.
+			diags = append(diags, "encryption.customerManagedKeys=false because "+
+				strconv.Itoa(keyed)+" of "+strconv.Itoa(total)+" replicas carry a customer "+
+				"key — the attribute is true only when EVERY copy is, and the unkeyed ones "+
+				"are encrypted with a Google-managed key")
+		}
 	}
 	pub, iamErr := d.readSecretPublic(name)
 	if iamErr == nil {
@@ -399,4 +432,30 @@ func (d *Driver) updateSecret(capability, environment, providerID string,
 		}
 	}
 	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+}
+
+// secretCMK answers the customer-key question for ANY replication shape: automatic
+// (one implicit copy) or user-managed (one per replica).
+//
+// D1238. Returns (allKeyed, keyed, total). `allKeyed` is true only when every copy has
+// a key — the weakest-across-the-set rule this codebase applies to encryption
+// elsewhere, because a secret whose replicas are half Google-managed is not a
+// customer-managed secret. total=0 means neither shape was present, which is a read
+// that cannot answer rather than an answer of no.
+func secretCMK(doc secretDoc) (allKeyed bool, keyed, total int) {
+	if a := doc.Replication.Automatic; a != nil {
+		total = 1
+		if a.CustomerManagedEncryption != nil && a.CustomerManagedEncryption.KmsKeyName != "" {
+			keyed = 1
+		}
+	}
+	if um := doc.Replication.UserManaged; um != nil {
+		for _, r := range um.Replicas {
+			total++
+			if r.CustomerManagedEncryption != nil && r.CustomerManagedEncryption.KmsKeyName != "" {
+				keyed++
+			}
+		}
+	}
+	return total > 0 && keyed == total, keyed, total
 }

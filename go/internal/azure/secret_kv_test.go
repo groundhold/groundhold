@@ -145,3 +145,28 @@ func TestDeleteKeyVaultForeignRefused(t *testing.T) {
 		t.Fatalf("foreign vault must refuse delete, got %+v", res)
 	}
 }
+
+// D1241. This driver creates the vault with `enableSoftDelete: true`, so a delete
+// leaves it RECOVERABLE until Azure's retention window expires — and the result said
+// only "succeeded". Its sibling one file over (`key_azure_net.go`, the vault for
+// capability.key.encryption) disclosed exactly this on its own delete; this vault did
+// not. Same package, same shape, one told the operator.
+func TestDeletingTheSecretVaultSaysItIsStillRecoverable(t *testing.T) {
+	srv := kvServer(t, "dbcreds", "Disabled")
+	defer srv.Close()
+	d := kvDriver(t, srv)
+	res := d.createKeyVault("prod", "dbcreds", kvAttrs(), kvImpl(), 1)
+	if res.Status != "succeeded" {
+		t.Fatalf("create: %+v", res)
+	}
+	del := d.deleteKeyVault("dbcreds", "prod", res.ProviderID)
+	if del.Status != "succeeded" {
+		t.Fatalf("delete: %+v", del)
+	}
+	for _, must := range []string{"RECOVERABLE", "soft-delete"} {
+		if !strings.Contains(del.Reason, must) {
+			t.Fatalf("a soft-deleted vault must say the resource is still there — missing "+
+				"%q in %q", must, del.Reason)
+		}
+	}
+}

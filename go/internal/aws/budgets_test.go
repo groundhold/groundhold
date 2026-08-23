@@ -559,3 +559,48 @@ func TestBudgetPeriodIsHonouredInPlace(t *testing.T) {
 		t.Fatalf("the update did not carry the period: %s", sent)
 	}
 }
+
+// D1234. A TimeUnit the mapping does not know used to produce NOTHING: no observation
+// (the map returns empty) and no diagnostic (there was no else). Silence reads as "this
+// budget has no period", which is a different fact from "we could not map the one it
+// has" — and the vocabulary publishes the opposite convention for this attribute.
+//
+// A behavioural witness rather than a source scan, because the structural version of
+// this check is satisfied by `else if false` — a shape that still parses as a branch
+// while producing nothing. Found by mutating it.
+func TestUnmappedBudgetTimeUnitIsDiagnosedNotDropped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			switch budgetTarget2(r) {
+			case "DescribeBudget":
+				// a TimeUnit AWS could add tomorrow, and one groundhold does not map
+				_, _ = w.Write([]byte(`{"Budget":{"BudgetName":"pv-x","BudgetType":"COST",` +
+					`"TimeUnit":"WEEKLY","BudgetLimit":{"Amount":"700.0","Unit":"EUR"}}}`))
+			case "DescribeNotificationsForBudget":
+				_, _ = w.Write([]byte(`{"Notifications":[]}`))
+			default:
+				w.WriteHeader(400)
+			}
+		}))
+	defer srv.Close()
+	d := budgetDriver(t, srv)
+	pid := budgetProviderID(budgetTestAccount, BudgetName("prod", "inference", 1))
+	obs, diags, err := d.observeBudget("inference", pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range obs {
+		if o.Path == "budget.period" {
+			t.Fatalf("an unmapped TimeUnit must not be coerced into the enum, got %v", o.Value)
+		}
+	}
+	var named bool
+	for _, dg := range diags {
+		if strings.Contains(dg, "budget.period not mapped") && strings.Contains(dg, "WEEKLY") {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("the diagnostic must name the value it could not map, got %v", diags)
+	}
+}
