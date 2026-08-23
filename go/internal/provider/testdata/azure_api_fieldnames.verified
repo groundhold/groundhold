@@ -124,7 +124,6 @@ logs
 managedDisk
 managedRuleSets
 managedRules
-migrationStatus
 maxDeliveryCount
 maximum
 message
@@ -133,6 +132,7 @@ metadata
 metricMeasureColumn
 metricName
 metrics
+migrationStatus
 minReplicas
 minimum
 mode
@@ -185,6 +185,7 @@ resourceId
 retentionDurationInDays
 retentionInDays
 roleDefinitionId
+roleName
 rotationPolicy
 ruleId
 ruleSetType
@@ -198,7 +199,6 @@ serviceEndpoints
 sku
 skuConversionStatus
 softDeleteSettings
-source
 sourceAccount
 startDate
 state

@@ -126,7 +126,11 @@ GET	Microsoft.Network/applicationGateways
 GET	Microsoft.Network/applicationGateways/{}
 GET	Microsoft.Network/dnsZones
 GET	Microsoft.Network/dnsZones/{}
+GET	Microsoft.Network/dnsZones/{}/A/{}
+GET	Microsoft.Network/dnsZones/{}/AAAA/{}
 GET	Microsoft.Network/dnsZones/{}/CNAME/{}
+GET	Microsoft.Network/dnsZones/{}/MX/{}
+GET	Microsoft.Network/dnsZones/{}/TXT/{}
 GET	Microsoft.Network/loadBalancers
 GET	Microsoft.Network/loadBalancers/{}
 GET	Microsoft.Network/natGateways/{}

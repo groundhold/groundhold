@@ -120,6 +120,39 @@ case "$out" in
   *)                                 report "converge laptop (proves no-op)" yes no ;;
 esac
 
+# D1246: the ONBOARDING PROOF, exactly as spec/onboarding.md and the
+# onboard-existing skill now describe it. Both used to say a converge straight
+# after `adopt` "must report converged without executing anything", and that a
+# planned change means the draft is wrong — which sent an operator back to
+# redraft over a CLAIM no redraft can remove. Takeover is two acts; this pins
+# both, and pins that the middle step is a refusal rather than a green.
+ONB="$(mktemp -d)"
+trap 'rm -rf "$LEDGER" "$LIFE" "$ONB"' EXIT
+"$CLI" discover --provider fake --at "$AT" --json > "$ONB/d.json" 2>/dev/null || true
+rc=0
+GROUNDHOLD="$CLI" scripts/adopt-candidate.sh --discovery "$ONB/d.json"   --resource fake:existing-db --contract legacy --capability db   --ledger "$ONB/l.ndjson" --at "$AT" >/dev/null 2>&1 || rc=$?
+report "onboarding: adopt-candidate.sh adopts a discovered resource" 0 "$rc"
+rc=0
+out="$("$CLI" converge "$ONB/legacy.contract.yaml" "$ONB/legacy.candidate.yaml" \
+  --ledger "$ONB/l.ndjson" --provider fake --at "$AT" 2>&1)" || rc=$?
+report "onboarding: converge after adopt plans a claim (not converged)" 2 "$rc"
+case "$out" in
+  *"claim a-claim-db"*) report "onboarding: the planned action IS the claim" yes yes ;;
+  *)                    report "onboarding: the planned action IS the claim" yes no ;;
+esac
+rc=0
+"$CLI" converge "$ONB/legacy.contract.yaml" "$ONB/legacy.candidate.yaml" \
+  --ledger "$ONB/l.ndjson" --provider fake --at "$AT" --yes >/dev/null 2>&1 || rc=$?
+report "onboarding: converge --yes executes the claim" 0 "$rc"
+rc=0
+out="$("$CLI" converge "$ONB/legacy.contract.yaml" "$ONB/legacy.candidate.yaml" \
+  --ledger "$ONB/l.ndjson" --provider fake --at "$AT" 2>&1)" || rc=$?
+report "onboarding: the no-op proof passes only AFTER the claim" 0 "$rc"
+case "$out" in
+  *"already matches the candidate"*) report "onboarding: proof is a true no-op" yes yes ;;
+  *)                                 report "onboarding: proof is a true no-op" yes no ;;
+esac
+
 # The README's create → delete lifecycle, against ONE ledger, in order. The delete
 # is the interesting half: --yes must NOT be enough to destroy anything, and the
 # delete target must be pinned from the recorded binding rather than guessed.

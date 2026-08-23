@@ -447,6 +447,18 @@ func (d *Driver) updateFlexServer(capability, environment, providerID string,
 			if r := d.patchSetting(url, body, providerID, "flexible server publicNetworkAccess"); r != nil {
 				return *r
 			}
+			// D1222: a flexible-server update is long-running — the PATCH accepts while the
+			// server is still Updating at the old access. Poll to the applied publicNetworkAccess
+			// (server back out of Updating with the knob at its target) before succeeding, or a
+			// public database reads private on accept while it still answers on the public path.
+			if r := d.pollAzureApplied(url, providerID, "flexible server publicNetworkAccess", func(b []byte) bool {
+				var doc flexDoc
+				return json.Unmarshal(b, &doc) == nil &&
+					doc.Properties.State != "Updating" &&
+					doc.Properties.Network.PublicNetworkAccess == access
+			}); r != nil {
+				return *r
+			}
 		case "encryption.inTransit":
 			inTransit, ok := attrs["encryption.inTransit"].(bool)
 			if !ok {
@@ -463,6 +475,19 @@ func (d *Driver) updateFlexServer(capability, environment, providerID string,
 			cfgURL, _ := d.armURL(rg, d.flexPath(name)+"/configurations/require_secure_transport", pgAPIVersion)
 			body, _ := json.Marshal(map[string]any{"properties": map[string]any{"value": value, "source": "user-override"}})
 			if r := d.patchSetting(cfgURL, body, providerID, "require_secure_transport"); r != nil {
+				return *r
+			}
+			// D1222: a configuration PATCH can be long-running too; poll the parameter back to
+			// its target value before reporting TLS enforced (never succeeded-on-accept while
+			// the server still accepts plaintext).
+			if r := d.pollAzureApplied(cfgURL, providerID, "require_secure_transport", func(b []byte) bool {
+				var doc struct {
+					Properties struct {
+						Value string `json:"value"`
+					} `json:"properties"`
+				}
+				return json.Unmarshal(b, &doc) == nil && doc.Properties.Value == value
+			}); r != nil {
 				return *r
 			}
 		default:

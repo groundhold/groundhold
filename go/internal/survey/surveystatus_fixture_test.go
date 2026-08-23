@@ -17,7 +17,7 @@ import (
 // this test proves the fixture is EXACTLY CoverageStatuses()/OrphanStatuses(), so
 // a status added here fails the fixture until it is copied, which then fails the
 // console build until surveyDigest classifies it (D1024).
-const surveyStatusParitySHA256 = "fc1835d9fee1fb5ab083e59b1b3367f4991be99f84b4228e7ae0711922ad4108"
+const surveyStatusParitySHA256 = "f4a685242924aa0fb8c207c39e685fdcb54cf13c35fe4409c0e57cf15c529886"
 
 func TestSurveyStatusFixtureIsTheContract(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("testdata", "surveystatus_parity.json"))

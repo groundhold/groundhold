@@ -295,12 +295,16 @@ func (d *Driver) grantCloudFrontInvoke(lambdaARN, distID, sourceArn, pid string)
 }
 
 // viewerToVocab reverse-maps a CloudFront ViewerProtocolPolicy to the vocab value.
-func viewerToVocab(p string) string {
+// viewerProtocolInEnum reports whether a CloudFront policy value is one the
+// vocabulary defines. It replaces `viewerToVocab`, which read as a mapping and was
+// not one — both of its branches returned the argument unchanged, so it converted
+// nothing while making the call site look like a conversion had happened (D1235).
+func viewerProtocolInEnum(p string) bool {
 	switch p {
 	case "https-only", "redirect-to-https", "allow-all":
-		return p
+		return true
 	}
-	return p
+	return false
 }
 
 // viewerProtocolRank orders the TLS posture strongest→weakest.
@@ -344,6 +348,7 @@ func (d *Driver) observeCloudFront(capability, providerID string) ([]provider.Ob
 			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
 		}, []string{"distribution not found — bound resource is gone (will re-create)"}, nil
 	}
+	var diags []string
 	obs := []provider.Observation{
 		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
 		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
@@ -361,13 +366,37 @@ func (d *Driver) observeCloudFront(capability, providerID string) ([]provider.Ob
 			policies = append(policies, cb.ViewerProtocolPolicy)
 		}
 	}
-	if weakest := weakestViewerProtocol(policies); weakest != "" {
-		obs = append(obs, provider.Observation{Path: "viewer.protocol", Value: viewerToVocab(weakest), Derivation: "measured"})
+	// D1235. Three states, and only one of them may produce a verdict.
+	//
+	// `viewer.protocol` is a CLOSED enum (https-only | redirect-to-https | allow-all).
+	// weakestViewerProtocol deliberately ranks an unrecognised policy as the weakest —
+	// right, for choosing which behaviour dominates — and the emission then threw that
+	// judgement away: it passed the raw string through `viewerToVocab`, which mapped
+	// nothing (both of its branches returned the argument), so a policy value outside
+	// the enum was emitted VERBATIM as measured. Emitting a value the vocabulary does
+	// not define is worse than emitting nothing: it looks like a measurement.
+	//
+	// Claiming `allow-all` instead would be no better — that asserts the edge serves
+	// plain HTTP, which an unrecognised value does not tell us. So: withhold, and name
+	// the value, which is the one thing actually known.
+	switch weakest := weakestViewerProtocol(policies); {
+	case weakest == "":
+		diags = append(diags, "viewer.protocol not observed: the distribution returned no "+
+			"viewer protocol policy on its default cache behavior or any additional one — "+
+			"CloudFront requires that field, so this is a read that did not answer rather "+
+			"than a distribution without a posture")
+	case !viewerProtocolInEnum(weakest):
+		diags = append(diags, "viewer.protocol not observed: the weakest policy across this "+
+			"distribution's cache behaviors is "+weakest+", which is not one of the three the "+
+			"vocabulary defines — it is ranked as the weakest for comparison, but naming it "+
+			"allow-all would assert a posture this read did not establish")
+	default:
+		obs = append(obs, provider.Observation{Path: "viewer.protocol", Value: weakest, Derivation: "measured"})
 	}
 	if items := doc.DistributionConfig.Origins.Items.Origin; len(items) > 0 && items[0].DomainName != "" {
 		obs = append(obs, provider.Observation{Path: "origin.domain", Value: items[0].DomainName, Derivation: "measured"})
 	}
-	return obs, nil, nil
+	return obs, diags, nil
 }
 
 func (d *Driver) deleteCloudFront(capability, environment, providerID string) provider.CreateResult {

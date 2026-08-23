@@ -84,6 +84,28 @@ type billingBudgetDoc struct {
 	DisplayName  string `json:"displayName"`
 	BudgetFilter struct {
 		CalendarPeriod string `json:"calendarPeriod"`
+		// CustomPeriod is the OTHER half of the API's usage period. D1234 decodes it
+		// because the observe used to ANNOUNCE a custom period from the absence of a
+		// calendar one, without ever reading this. Google's own words are that an unset
+		// calendarPeriod "is the default if the budget is for a custom time period" —
+		// likely, not certain, and a message that names a cause should read the field
+		// that settles it. It costs nothing: same response body, already parsed.
+		//
+		// A POINTER, so absent and present-but-empty are different states. (A second
+		// field carrying the same `customPeriod` tag would have been worse than useless:
+		// encoding/json drops BOTH sides of a tag conflict, silently.)
+		CustomPeriod *struct {
+			StartDate struct {
+				Year  int `json:"year"`
+				Month int `json:"month"`
+				Day   int `json:"day"`
+			} `json:"startDate"`
+			EndDate struct {
+				Year  int `json:"year"`
+				Month int `json:"month"`
+				Day   int `json:"day"`
+			} `json:"endDate"`
+		} `json:"customPeriod"`
 	} `json:"budgetFilter"`
 	Amount struct {
 		SpecifiedAmount struct {
@@ -233,6 +255,16 @@ func budgetObservations(doc billingBudgetDoc) ([]provider.Observation, []string)
 	}
 	if period := budgetPeriodFromCalendar(doc.BudgetFilter.CalendarPeriod); period != "" {
 		obs = append(obs, provider.Observation{Path: "budget.period", Value: period, Derivation: "measured"})
+	} else if cal := doc.BudgetFilter.CalendarPeriod; cal != "" {
+		// D1234: a calendarPeriod this mapping does not know used to produce NOTHING —
+		// no observation and no diagnostic, because the only diagnostic fired on the
+		// EMPTY case. So a value Google adds later, or a literal
+		// CALENDAR_PERIOD_UNSPECIFIED, would read as silence. The vocabulary publishes
+		// the opposite convention for this very attribute ("a timeGrain with no
+		// equivalent is named in a diagnostic, never coerced") and Azure already honors
+		// it; this is the sibling that did not.
+		diags = append(diags, "budget.period not mapped: calendarPeriod "+cal+
+			" has no recurring vocab equivalent")
 	}
 	// D798. WHICH rule this reads decides what the alert watches. A threshold rule
 	// fires on CURRENT_SPEND or on FORECASTED_SPEND, and those are different promises:
@@ -286,7 +318,32 @@ func (d *Driver) observeBillingBudget(capability, providerID string) ([]provider
 	}
 	var diags []string
 	if doc.BudgetFilter.CalendarPeriod == "" {
-		diags = append(diags, "budget.period not observed: the budget uses a custom period, which has no recurring vocab mapping")
+		// D1234: say what was READ, not what was likely. This used to announce "the
+		// budget uses a custom period" from the absence of a calendar one alone. The
+		// API makes that probable — an unset calendarPeriod is the default for a custom
+		// period — but probable is not measured, and the third case (neither set) would
+		// have been described as a custom period that is not there.
+		switch cp := doc.BudgetFilter.CustomPeriod; {
+		case cp != nil:
+			// The window, not just the start: an end date says the budget stops, and its
+			// ABSENCE is meaningful too (the API makes endDate optional — open-ended).
+			// Both are stated, because "onwards" and "to 2026-06-30" are different facts
+			// and the reader is deciding whether this budget still governs anything.
+			window := fmt.Sprintf("%04d-%02d-%02d onwards, no end date",
+				cp.StartDate.Year, cp.StartDate.Month, cp.StartDate.Day)
+			if cp.EndDate.Year != 0 {
+				window = fmt.Sprintf("%04d-%02d-%02d to %04d-%02d-%02d",
+					cp.StartDate.Year, cp.StartDate.Month, cp.StartDate.Day,
+					cp.EndDate.Year, cp.EndDate.Month, cp.EndDate.Day)
+			}
+			diags = append(diags, "budget.period not observed: the budget tracks a CUSTOM "+
+				"period ("+window+"), which is static rather than recurring and so has no "+
+				"equivalent in the vocabulary's recurring enum")
+		default:
+			diags = append(diags, "budget.period not observed: budgetFilter names NEITHER a "+
+				"calendarPeriod nor a customPeriod, so this read cannot say what the budget "+
+				"recurs over")
+		}
 	}
 	obs, obsDiags := budgetObservations(doc)
 	return obs, append(diags, obsDiags...), nil

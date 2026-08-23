@@ -109,7 +109,7 @@ CONVERGED
 Run the identical command again:
 
 ```
-  ✓ converged — the world already matches the candidate
+  ✓ converged — the world already matches the candidate on every attribute this run can compare
 CONVERGED
 ```
 
@@ -342,8 +342,9 @@ front instead of failing halfway. Cost is projected, not guessed, and labelled a
 projection rather than a quote.
 
 Infrastructure that already exists is not a second-class citizen: `discover` →
-`adopt` brings it under contract, and a **converged no-op run is the proof** the
-takeover worked. `groundhold parity` shows, per capability, whether each cloud
+`adopt` brings it under contract, the first `converge` plans a **claim** that
+stamps our authorship on the resource, and the **converged no-op run after that
+claim** is the proof the takeover worked. `groundhold parity` shows, per capability, whether each cloud
 fulfils it, structurally cannot, or simply has no driver yet — which is what
 makes a vendor **bake-off** a deterministic comparison rather than an opinion.
 

@@ -143,7 +143,7 @@ func TestRunStatuses(t *testing.T) {
 		find("unk", "unknown", ""),
 		find("dev", "dev-test", "capability.database.relational"),
 	)
-	rep := Run(c, []*Doc{d}, false)
+	rep := Run(c, []*Doc{d}, false, nil)
 
 	want := map[string]string{
 		"req-covered":   "covered",
@@ -185,7 +185,7 @@ func TestRunNoDriftWithoutUncoveredOrOrphan(t *testing.T) {
 		find("opt", "optional", ""),
 		find("dev", "dev-test", ""),
 	)
-	rep := Run(c, []*Doc{d}, false)
+	rep := Run(c, []*Doc{d}, false, nil)
 	if rep.Drift {
 		t.Errorf("unexpected drift: %+v", rep)
 	}
@@ -203,7 +203,7 @@ func TestRunCoveredWitnessesAllOfType(t *testing.T) {
 	})
 	d := doc("app", "sha", "",
 		find("mysql", "required", "capability.database.relational"))
-	rep := Run(c, []*Doc{d}, false)
+	rep := Run(c, []*Doc{d}, false, nil)
 	if r := findRow(rep, "mysql"); r.Capability != "db-a" {
 		t.Errorf("capability = %q, want db-a (sorted first)", r.Capability)
 	}
@@ -211,7 +211,7 @@ func TestRunCoveredWitnessesAllOfType(t *testing.T) {
 	// cannot say WHICH of the two this repo uses, and `--complete` is the mode an
 	// operator runs to find a capability nobody uses. The report used to be silent
 	// about exactly that case; it now says so, as information.
-	repC := Run(c, []*Doc{d}, true)
+	repC := Run(c, []*Doc{d}, true, nil)
 	if repC.Drift {
 		t.Error("unexpected drift: a type-level witness is real evidence, and " +
 			"accusing every contract with two capabilities of one type would be " +
@@ -237,7 +237,7 @@ func TestRunSingleCapabilityOfTypeIsNotAmbiguous(t *testing.T) {
 	})
 	d := doc("app", "sha", "",
 		find("mysql", "required", "capability.database.relational"))
-	rep := Run(c, []*Doc{d}, true)
+	rep := Run(c, []*Doc{d}, true, nil)
 	if len(rep.Orphans) != 0 {
 		t.Errorf("one capability of the type was witnessed directly; nothing is "+
 			"ambiguous, got %+v", rep.Orphans)
@@ -254,7 +254,7 @@ func TestRunOrphanCompleteGate(t *testing.T) {
 	})
 	d := doc("app", "sha", "") // no findings witness anything
 
-	incomplete := Run(c, []*Doc{d}, false)
+	incomplete := Run(c, []*Doc{d}, false, nil)
 	if incomplete.Drift {
 		t.Error("unwitnessed under !complete must not drift")
 	}
@@ -265,7 +265,7 @@ func TestRunOrphanCompleteGate(t *testing.T) {
 		t.Errorf("orphan type = %q", incomplete.Orphans[0].Type)
 	}
 
-	complete := Run(c, []*Doc{d}, true)
+	complete := Run(c, []*Doc{d}, true, nil)
 	if !complete.Drift || complete.Exit != 2 {
 		t.Error("unwitnessed under --complete must drift with exit 2")
 	}
@@ -284,7 +284,7 @@ func TestRunOrphansSorted(t *testing.T) {
 		"alpha": cap("t"),
 		"mid":   cap("t"),
 	})
-	rep := Run(c, nil, false)
+	rep := Run(c, nil, false, nil)
 	got := []string{}
 	for _, o := range rep.Orphans {
 		got = append(got, o.Capability)
@@ -309,7 +309,7 @@ func TestRunMultiRepoSources(t *testing.T) {
 		find("mysql", "required", "capability.database.relational"))
 	d2 := doc("app-b", "sha-b", "worker",
 		find("redis", "optional", ""))
-	rep := Run(c, []*Doc{d1, d2}, false)
+	rep := Run(c, []*Doc{d1, d2}, false, nil)
 
 	if len(rep.Surveys) != 2 {
 		t.Fatalf("surveys = %+v", rep.Surveys)
@@ -322,7 +322,7 @@ func TestRunMultiRepoSources(t *testing.T) {
 		t.Errorf("survey[1] = %+v", rep.Surveys[1])
 	}
 	// db is witnessed by app-a, so no orphan even under complete.
-	repC := Run(c, []*Doc{d1, d2}, true)
+	repC := Run(c, []*Doc{d1, d2}, true, nil)
 	if repC.Drift {
 		t.Errorf("db is witnessed; unexpected drift: %+v", repC)
 	}
@@ -331,7 +331,7 @@ func TestRunMultiRepoSources(t *testing.T) {
 // Empty inputs: no findings, no capabilities -> clean, non-nil slices.
 func TestRunEmpty(t *testing.T) {
 	c := contractWith("c-empty", map[string]map[string]any{})
-	rep := Run(c, nil, true)
+	rep := Run(c, nil, true, nil)
 	if rep.Contract != "c-empty" {
 		t.Errorf("contract id = %q", rep.Contract)
 	}
@@ -352,8 +352,38 @@ func TestRunCapabilityWithoutType(t *testing.T) {
 	c := contractWith("c1", map[string]map[string]any{
 		"weird": {}, // no "type"
 	})
-	rep := Run(c, nil, false)
+	rep := Run(c, nil, false, nil)
 	if len(rep.Orphans) != 1 || rep.Orphans[0].Type != "" {
 		t.Fatalf("orphans = %+v, want one with empty type", rep.Orphans)
+	}
+}
+
+// D1253. The unknown-type branch is guarded by `len(knownTypes) > 0`, which is
+// fail-open by construction: a caller with no vocabulary must not have every hint
+// turn into unknown-type. Both directions are pinned here, because the guard is the
+// kind of kindness that hides the mistake it was written for.
+func TestAnUnresolvableHintIsUnknownOnlyWhenTypesAreKnown(t *testing.T) {
+	c := contractWith("c1", map[string]map[string]any{
+		"db": {"type": "capability.database.relational"},
+	})
+	d := doc("orders-api", "abc123", "orders-api",
+		find("psycopg", "required", "capability.database.relatoinal"))
+
+	known := map[string]bool{"capability.database.relational": true}
+	rep := Run(c, []*Doc{d}, false, known)
+	if got := rep.Coverage[0].Status; got != "unknown-type" {
+		t.Errorf("with a vocabulary, a hint outside it is unresolvable, got %q — "+
+			"`uncovered` sends the reader to reconcile a contract over a typo", got)
+	}
+	if !rep.Drift {
+		t.Error("an unresolvable witness is not a pass: it must still block")
+	}
+
+	// With no vocabulary the runtime cannot tell a typo from a real type it has not
+	// been told about, so it must NOT claim the stronger answer.
+	bare := Run(c, []*Doc{d}, false, nil)
+	if got := bare.Coverage[0].Status; got != "uncovered" {
+		t.Errorf("with no vocabulary there is nothing to resolve against; the fold must "+
+			"fall back to its old answer rather than invent one, got %q", got)
 	}
 }

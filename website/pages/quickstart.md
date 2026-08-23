@@ -48,6 +48,7 @@ AT="$(date -u +%FT%TZ)"
 ./groundhold converge my.contract.yaml my.candidate.yaml \
   --ledger try.jsonl --provider fake --at "$AT" --yes
 #   the sealed plan carries no actions — the world already matches the candidate
+#   on everything this run can compare, so there is nothing to apply
 # CONVERGED
 ```
 
@@ -176,7 +177,8 @@ capabilities:
 ./groundhold converge \
   examples/laptop/laptop.contract.yaml examples/laptop/laptop.candidate.yaml \
   --ledger state/prod.jsonl --provider fake --at "$(date -u +%FT%TZ)" --yes
-#   ✓ converged — the world already matches the candidate
+#   ✓ converged — the world already matches the candidate on every attribute
+#   this run can compare
 # CONVERGED
 ```
 
@@ -237,7 +239,7 @@ Using it does not require building it.
 
 ```sh
 git clone https://github.com/groundhold/groundhold.git && cd groundhold
-make check        # vet + tests + the full conformance suite (586 cases); 291 run through both implementations, the rest Go-only
+make check        # vet + tests + the full conformance suite (588 cases); 291 run through both implementations, the rest Go-only
 cd go && go build -o ../bin/groundhold-go ./cmd/groundhold && cd ..   # the CLI binary
 ```
 

@@ -37,17 +37,17 @@ func TestSplitGDNSRecProviderID(t *testing.T) {
 // --- rrsetTarget -------------------------------------------------------
 
 func TestRrsetTarget(t *testing.T) {
-	if got := rrsetTarget(dnsRRSet{Rrdatas: nil}); got != "" {
+	if got, _ := rrsetTarget(dnsRRSet{Rrdatas: nil}); got != "" {
 		t.Errorf("no rrdatas must yield empty target, got %q", got)
 	}
-	if got := rrsetTarget(dnsRRSet{Type: "A", Rrdatas: []string{"1.2.3.4"}}); got != "1.2.3.4" {
+	if got, _ := rrsetTarget(dnsRRSet{Type: "A", Rrdatas: []string{"1.2.3.4"}}); got != "1.2.3.4" {
 		t.Errorf("A record target = %q", got)
 	}
-	if got := rrsetTarget(dnsRRSet{Type: "TXT", Rrdatas: []string{`"v=spf1 -all"`}}); got != "v=spf1 -all" {
+	if got, _ := rrsetTarget(dnsRRSet{Type: "TXT", Rrdatas: []string{`"v=spf1 -all"`}}); got != "v=spf1 -all" {
 		t.Errorf("TXT unquote = %q", got)
 	}
 	// an escaped inner quote must unescape too.
-	if got := rrsetTarget(dnsRRSet{Type: "TXT", Rrdatas: []string{`"a\"b"`}}); got != `a"b` {
+	if got, _ := rrsetTarget(dnsRRSet{Type: "TXT", Rrdatas: []string{`"a\"b"`}}); got != `a"b` {
 		t.Errorf("TXT escaped-quote unquote = %q", got)
 	}
 }

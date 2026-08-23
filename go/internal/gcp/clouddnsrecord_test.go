@@ -221,3 +221,41 @@ func TestCreateCloudDNSRecordForeignZoneRefused(t *testing.T) {
 		t.Fatalf("a foreign parent zone must refuse the record write, got %+v", res)
 	}
 }
+
+// D1237, the GCP witness. `dns.target` is one string and a Cloud DNS rrset holds a
+// LIST — the vocabulary discloses that ("rrdatas[0] — the first value only") where an
+// implementer reads it, not where an operator does. A record answering with two
+// addresses reported one, as measured, in silence: `dns.target equals <first>` then
+// read SATISFIED while the name also resolved to the second.
+func TestCloudDNSMultiValueRecordIsDisclosed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"rrsets":[{"name":"www.example.com.","type":"A","ttl":300,` +
+			`"rrdatas":["10.0.0.5","203.0.113.9"]}]}`))
+	}))
+	defer srv.Close()
+	d := dnsDriver(t, srv)
+	obs, diags, err := d.observeCloudDNSRecord(dnsRecordCap,
+		"gdnsrec:acme-prod:example-zone:A:www.example.com.")
+	if err != nil {
+		t.Fatalf("observe: %v", err)
+	}
+	var target any
+	for _, o := range obs {
+		if o.Path == "dns.target" {
+			target = o.Value
+		}
+	}
+	if target != "10.0.0.5" {
+		t.Fatalf("the first value is what the spec reports, got %v", target)
+	}
+	var told bool
+	for _, dg := range diags {
+		if strings.Contains(dg, "FIRST of 2 values") {
+			told = true
+		}
+	}
+	if !told {
+		t.Fatalf("the operator must be told the record holds more than the attribute can "+
+			"carry, got %v", diags)
+	}
+}

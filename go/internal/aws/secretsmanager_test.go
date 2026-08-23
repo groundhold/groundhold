@@ -261,3 +261,50 @@ func TestASMSaysWhenASecretIsScheduledForDeletion(t *testing.T) {
 		})
 	}
 }
+
+// D1241. The delete asks for a 7-day recovery window, so the secret is RESTORABLE and
+// only permanently deleted at the window's end — AWS's own model says so. The result
+// reported a bare "succeeded", which tells a reader (often an agent deciding what to do
+// next) that the secret is gone.
+//
+// The codebase already discloses this for the twins — KMS's pending window, GCP's
+// custom-role undelete window, Azure's key-vault soft delete. This was the outlier.
+func TestDeletingASecretSaysItIsStillRestorable(t *testing.T) {
+	srv := asmServer(t, sanitizeTag("dbcreds"), "")
+	defer srv.Close()
+	d := asmDriver(t, srv)
+	res := d.createASM("eu-central-1", "prod", "dbcreds", asmAttrs(), asmImpl(), 1)
+	if res.Status != "succeeded" {
+		t.Fatalf("create: %+v", res)
+	}
+	del := d.deleteASM("dbcreds", "prod", res.ProviderID)
+	if del.Status != "succeeded" {
+		t.Fatalf("delete: %+v", del)
+	}
+	for _, must := range []string{"RESTORABLE", "7-day recovery window"} {
+		if !strings.Contains(del.Reason, must) {
+			t.Fatalf("a recoverable delete must say the resource is still there and for how "+
+				"long — missing %q in %q", must, del.Reason)
+		}
+	}
+}
+
+// The idempotent "already gone" success is a DIFFERENT thing and must stay bare: there
+// is no recovery window to disclose, and a caveat on every case distinguishes none
+// (D1227).
+func TestAnAlreadyGoneSecretReportsAPlainSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(400)
+		_, _ = w.Write([]byte(`{"__type":"ResourceNotFoundException"}`))
+	}))
+	defer srv.Close()
+	d := asmDriver(t, srv)
+	del := d.deleteASM("dbcreds", "prod", "asm:eu-central-1:gh-dbcreds")
+	if del.Status != "succeeded" {
+		t.Fatalf("a secret that is already gone is an idempotent success: %+v", del)
+	}
+	if strings.Contains(del.Reason, "RESTORABLE") {
+		t.Fatalf("nothing was deleted here, so there is no recovery window to disclose: %q",
+			del.Reason)
+	}
+}

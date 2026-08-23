@@ -485,6 +485,22 @@ func SelfRunner(bin string) Runner {
 	}
 }
 
+// convergedScope is what a "converged" verdict actually claims, in the machine field.
+//
+// D1242. Three sites report `converged` and one of them said the honest thing — "the
+// world already matches on every attribute THIS RUN CAN COMPARE" — in the line printed
+// for a human. The other two said the stronger, unqualified "the world already matches
+// the candidate", and none of the three put the qualification where a machine reads it.
+//
+// The scope is real: convergence is decided over the attributes the run has values for.
+// Hard constraints are already guarded (witnessReality refuses a converged verdict that
+// recorded reality does not witness), so this is not a false green — it is the
+// difference between "matches" and "matches on what was compared", and an agent routing
+// on `{"status":"converged"}` had only the stronger reading available.
+const convergedScope = "converged over the attributes this run could compare — a hard " +
+	"constraint that recorded reality does not witness refuses this verdict, and " +
+	"attributes with no value in this run are not part of the comparison"
+
 type result struct {
 	Status string `json:"status"` // applied|converged|refused|stale-or-conflict|failed|corrupted
 	// Convergence (D136): what the post-apply check actually proved —
@@ -730,9 +746,10 @@ func Converge(o Options) int {
 				o.say("  ✗ cannot certify converged — a hard constraint is not witnessed by recorded reality")
 				return o.finish(g)
 			}
-			o.say("  ✓ converged — the world already matches the candidate")
+			o.say("  ✓ converged — the world already matches the candidate on every " +
+				"attribute this run can compare")
 			return o.finish(result{Status: "converged", Exit: 0,
-				Phases: phases})
+				Phases: phases, Reasons: []string{convergedScope}})
 		case code == 2 && rcode == perr.ObservationRequired &&
 			!observed && o.Ledger != "":
 			// observe is read-only (L2) — porcelain may weave it in, once
@@ -946,8 +963,9 @@ func Converge(o Options) int {
 						g.Phases = phases
 						return o.finish(g)
 					}
-					o.say("  ✓ converged during backoff")
-					return o.finish(result{Status: "converged", Exit: 0, Phases: phases})
+					o.say("  ✓ converged during backoff — on every attribute this run can compare")
+					return o.finish(result{Status: "converged", Exit: 0, Phases: phases,
+						Reasons: []string{convergedScope}})
 				}
 				status, exit := exitStatus(pcode)
 				return o.finish(result{Status: status, Code: prc, Exit: exit,
@@ -978,7 +996,7 @@ func Converge(o Options) int {
 			o.say("  ✓ converged — nothing to apply; the world already matches on " +
 				"every attribute this run can compare")
 			return o.finish(result{Status: "converged", Exit: 0, Phases: phases,
-				Reasons: applyReasons(stdout)})
+				Reasons: append([]string{convergedScope}, applyReasons(stdout)...)})
 		}
 		status, exit := exitStatus(code)
 		// D379: what APPLIED goes first. A run that stopped part-way has already

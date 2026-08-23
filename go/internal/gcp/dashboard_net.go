@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"groundhold/internal/provider"
@@ -81,22 +83,32 @@ func (d *Driver) createDashboard(capability, environment string,
 }
 
 type dashboardDoc struct {
-	DisplayName  string `json:"displayName"`
-	MosaicLayout struct {
-		Tiles []struct {
-			Widget struct {
-				XyChart struct {
-					DataSets []struct {
-						TimeSeriesQuery struct {
-							TimeSeriesFilter struct {
-								Filter string `json:"filter"`
-							} `json:"timeSeriesFilter"`
-						} `json:"timeSeriesQuery"`
-					} `json:"dataSets"`
-				} `json:"xyChart"`
-			} `json:"widget"`
-		} `json:"tiles"`
-	} `json:"mosaicLayout"`
+	DisplayName string `json:"displayName"`
+	// D1236: the layout and the widget body are kept RAW and walked generically.
+	//
+	// A typed struct decodes exactly the shapes somebody thought of, and silently
+	// returns zero values for the rest — which is how this driver came to read ONE of
+	// the API's four layouts (`gridLayout`, `columnLayout`, `mosaicLayout`, `rowLayout`)
+	// and ONE of its ~18 widget kinds. A dashboard in a grid layout, or one built from
+	// scorecards, produced an EMPTY metric set, and an empty set satisfies the
+	// `subset-of` constraint the vocabulary names as this attribute's purpose.
+	Raw json.RawMessage `json:"-"`
+}
+
+// dashboardLayouts are the four containers the Monitoring API defines. Named as a set
+// so a fifth is a build-time decision rather than a silent omission.
+var dashboardLayouts = []string{"mosaicLayout", "gridLayout", "rowLayout", "columnLayout"}
+
+// dashboardMetricWidgets are the widget kinds that CHART a metric and whose query this
+// driver can read. dashboardInertWidgets chart nothing, so their presence is not a gap.
+// Anything in NEITHER list is a widget that may chart a metric this driver cannot
+// extract — the case that must be disclosed rather than skipped.
+var dashboardMetricWidgets = map[string]bool{"xyChart": true, "scorecard": true}
+
+var dashboardInertWidgets = map[string]bool{
+	"text": true, "blank": true, "sectionHeader": true, "title": true,
+	"filterControl": true, "id": true, "visibilityCondition": true,
+	"logsPanel": true, "incidentList": true, "errorReportingPanel": true,
 }
 
 func (d *Driver) getDashboard(project, id string) (dashboardDoc, bool, error) {
@@ -116,6 +128,9 @@ func (d *Driver) getDashboard(project, id string) (dashboardDoc, bool, error) {
 	if json.Unmarshal(body, &doc) != nil {
 		return dashboardDoc{}, false, readBody(op, st)
 	}
+	// Keep the body: the layout and widget walk reads it generically (D1236), which is
+	// what stops a shape nobody typed from becoming an empty answer.
+	doc.Raw = append(json.RawMessage(nil), body...)
 	return doc, true, nil
 }
 
@@ -138,21 +153,63 @@ func (d *Driver) observeDashboard(capability, providerID string) ([]provider.Obs
 			{Path: provider.ResourceAbsentPath, Value: true, Derivation: "measured"},
 		}, []string{"dashboard not found — bound resource is gone (will re-create)"}, nil
 	}
-	metrics := []string{}
-	for _, tile := range doc.MosaicLayout.Tiles {
-		for _, ds := range tile.Widget.XyChart.DataSets {
-			if m := metricFromFilterDash(ds.TimeSeriesQuery.TimeSeriesFilter.Filter); m != "" {
-				metrics = append(metrics, m)
-			}
-		}
-	}
-	return []provider.Observation{
+	obs := []provider.Observation{
 		// Present: clear the marker (F-LC3), or a stale "gone" survives a re-create.
 		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
-		{Path: "dashboard.metrics", Value: metrics, Derivation: "measured"},
-		{Path: "dashboard.widgetCount", Value: float64(len(doc.MosaicLayout.Tiles)), Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
-	}, nil, nil
+	}
+	var diags []string
+	metrics, unreadable, merr := dashboardMetrics(doc.Raw)
+	switch {
+	case merr != nil:
+		diags = append(diags, "dashboard.metrics not observed: "+merr.Error())
+	case len(unreadable) > 0:
+		// D1236: a SET claimed from a partial read is not the set. The vocabulary names
+		// `subset-of` as this attribute's purpose, and an omitted metric makes that
+		// constraint read SATISFIED over a dashboard charting something unapproved — so
+		// a partial answer is withheld rather than shipped as if it were complete.
+		diags = append(diags, "dashboard.metrics not observed: this dashboard carries "+
+			strconv.Itoa(len(unreadable))+" element(s) whose charted metric this driver "+
+			"cannot read ("+strings.Join(unreadable, "; ")+"), so the set it does read is "+
+			"INCOMPLETE — and an incomplete set satisfies a subset-of constraint it should not")
+	default:
+		obs = append(obs, provider.Observation{Path: "dashboard.metrics", Value: metrics, Derivation: "measured"})
+	}
+	if n, ok := dashboardWidgetCount(doc.Raw); ok {
+		obs = append(obs, provider.Observation{Path: "dashboard.widgetCount",
+			Value: float64(n), Derivation: "measured"})
+	} else {
+		diags = append(diags, "dashboard.widgetCount not observed: no layout this driver "+
+			"recognises was present on the dashboard")
+	}
+	return obs, diags, nil
+}
+
+// dashboardWidgetCount counts widgets across every layout. It used to count the tiles
+// of the ONE layout the driver decoded, so a dashboard in any other reported zero
+// widgets — a number, stated as measured, about a dashboard full of them.
+func dashboardWidgetCount(raw []byte) (int, bool) {
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(raw, &doc) != nil {
+		return 0, false
+	}
+	total, found := 0, false
+	for _, layout := range dashboardLayouts {
+		blob, ok := doc[layout]
+		if !ok {
+			continue
+		}
+		var l struct {
+			Widgets []json.RawMessage `json:"widgets"`
+			Tiles   []json.RawMessage `json:"tiles"`
+		}
+		if json.Unmarshal(blob, &l) != nil {
+			continue
+		}
+		found = true
+		total += len(l.Widgets) + len(l.Tiles)
+	}
+	return total, found
 }
 
 func metricFromFilterDash(filter string) string {
@@ -205,4 +262,131 @@ func (d *Driver) deleteDashboard(capability, environment, providerID string) pro
 		return provider.CreateResult{ProviderID: providerID, Status: "failed", Reason: fmt.Sprintf("delete HTTP %d: %s", st, mutDetail(body))}
 	}
 	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+}
+
+// dashboardMetrics walks EVERY layout and EVERY widget of a dashboard document and
+// returns the metrics it could read, plus the widgets it could not.
+//
+// D1236. The attribute is a SET — the vocabulary says a contract constrains it with
+// `subset-of` ("the dashboard charts only approved metrics") — and a set claimed from
+// a partial read is not that set. Under-reporting is the dangerous direction here:
+// omit a metric and `subset-of` reads SATISFIED over a dashboard charting something
+// the allowlist never named.
+//
+// So the walk is generic rather than typed: layouts by name from a declared set,
+// widgets by whichever key each carries. A widget kind that is neither known-readable
+// nor known-inert is REPORTED, not skipped — including one Google adds tomorrow, which
+// is the direction that keeps this from silently re-opening.
+func dashboardMetrics(raw []byte) (metrics []string, unreadable []string, err error) {
+	var doc map[string]json.RawMessage
+	if e := json.Unmarshal(raw, &doc); e != nil {
+		return nil, nil, fmt.Errorf("dashboard body: %v", e)
+	}
+	metrics = []string{}
+	for _, layout := range dashboardLayouts {
+		blob, ok := doc[layout]
+		if !ok {
+			continue
+		}
+		var l struct {
+			Widgets []json.RawMessage `json:"widgets"`
+			Tiles   []struct {
+				Widget json.RawMessage `json:"widget"`
+			} `json:"tiles"`
+		}
+		if json.Unmarshal(blob, &l) != nil {
+			unreadable = append(unreadable, layout+" (its shape did not decode)")
+			continue
+		}
+		widgets := l.Widgets
+		for _, t := range l.Tiles {
+			if len(t.Widget) > 0 {
+				widgets = append(widgets, t.Widget)
+			}
+		}
+		for _, w := range widgets {
+			m, bad := widgetMetrics(w)
+			metrics = append(metrics, m...)
+			unreadable = append(unreadable, bad...)
+		}
+	}
+	sort.Strings(metrics)
+	sort.Strings(unreadable)
+	return metrics, unreadable, nil
+}
+
+// widgetMetrics reads one widget. A collapsibleGroup / singleViewGroup nests more
+// widgets, so it recurses rather than counting itself as unreadable.
+func widgetMetrics(w json.RawMessage) (metrics []string, unreadable []string) {
+	var kinds map[string]json.RawMessage
+	if json.Unmarshal(w, &kinds) != nil {
+		return nil, []string{"a widget whose body did not decode"}
+	}
+	for kind, body := range kinds {
+		switch {
+		case dashboardInertWidgets[kind]:
+			// charts nothing; its absence from the set is correct
+		case kind == "collapsibleGroup" || kind == "singleViewGroup":
+			var grp struct {
+				Widgets []json.RawMessage `json:"widgets"`
+			}
+			if json.Unmarshal(body, &grp) != nil {
+				unreadable = append(unreadable, kind+" (its nested widgets did not decode)")
+				continue
+			}
+			for _, inner := range grp.Widgets {
+				m, bad := widgetMetrics(inner)
+				metrics = append(metrics, m...)
+				unreadable = append(unreadable, bad...)
+			}
+		case dashboardMetricWidgets[kind]:
+			m, ok := widgetQueryMetrics(body)
+			if !ok {
+				unreadable = append(unreadable, kind+" (its query is not a metric.type filter this driver reads)")
+				continue
+			}
+			metrics = append(metrics, m...)
+		default:
+			unreadable = append(unreadable, kind+" (a widget kind this driver does not read)")
+		}
+	}
+	return metrics, unreadable
+}
+
+// widgetQueryMetrics pulls metric.type out of a widget's timeSeriesFilter queries —
+// directly (scorecard) or per dataSet (xyChart). ok=false means the widget charts
+// something this driver cannot name, which the caller discloses.
+func widgetQueryMetrics(body json.RawMessage) (metrics []string, ok bool) {
+	var w struct {
+		DataSets        []json.RawMessage `json:"dataSets"`
+		TimeSeriesQuery json.RawMessage   `json:"timeSeriesQuery"`
+	}
+	if json.Unmarshal(body, &w) != nil {
+		return nil, false
+	}
+	queries := w.DataSets
+	if len(w.TimeSeriesQuery) > 0 {
+		queries = append(queries, body)
+	}
+	if len(queries) == 0 {
+		return nil, false
+	}
+	for _, q := range queries {
+		var ds struct {
+			TimeSeriesQuery struct {
+				TimeSeriesFilter struct {
+					Filter string `json:"filter"`
+				} `json:"timeSeriesFilter"`
+			} `json:"timeSeriesQuery"`
+		}
+		if json.Unmarshal(q, &ds) != nil {
+			return nil, false
+		}
+		m := metricFromFilterDash(ds.TimeSeriesQuery.TimeSeriesFilter.Filter)
+		if m == "" {
+			return nil, false
+		}
+		metrics = append(metrics, m)
+	}
+	return metrics, true
 }

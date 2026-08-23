@@ -49,6 +49,7 @@ cryptoKeyVersions
 cryptoKeys
 currencyCode
 currentMasterVersion
+customPeriod
 customPlacementConfig
 customerManagedEncryption
 customerManagedKey
@@ -61,6 +62,7 @@ databases
 datasetId
 datasetReference
 datasets
+day
 deadLetterPolicy
 deadLetterTopic
 defaultEncryptionConfiguration
@@ -92,6 +94,8 @@ enablePrivateEndpoint
 enablePrivateNodes
 enabled
 encryption
+encryptionConfig
+endDate
 endpoints
 enforce
 error
@@ -129,8 +133,8 @@ items
 jobs
 keyName
 keyRings
-keys
 keyType
+keys
 kmsKey
 kmsKeyName
 labels
@@ -160,7 +164,7 @@ minInstanceCount
 minNumReplicas
 model
 monitoredResource
-mosaicLayout
+month
 name
 nanos
 natIP
@@ -221,6 +225,7 @@ specifiedAmount
 spendBasis
 stackType
 standardSchedule
+startDate
 state
 status
 statusMessage
@@ -263,5 +268,6 @@ versioning
 visibility
 vpnGateways
 widget
+widgets
 writerIdentity
-xyChart
+year

@@ -108,7 +108,7 @@ type OrphanRow struct {
 // is added (the D1023/D328 class). Pinned to the literals the code emits by
 // TestSurveyStatusesMatchTheProducedLiterals.
 func CoverageStatuses() []string {
-	return []string{"covered", "uncovered", "gap", "ignored"}
+	return []string{"covered", "uncovered", "unknown-type", "gap", "ignored"}
 }
 
 // OrphanStatuses is the closed set of OrphanRow.Status values a survey produces.
@@ -138,7 +138,12 @@ type Report struct {
 // silent drift); dev-test → ignored but reported. A capability no
 // survey witnesses is unwitnessed information — another repo may be
 // the consumer — and hardens into orphaned drift only under complete.
-func Run(c *contract.Contract, docs []*Doc, complete bool) *Report {
+// Run folds the surveys against the contract. knownTypes is the vocabulary's closed
+// set of capability types; a hint outside it cannot be resolved, and D1253 refuses to
+// report that as ordinary drift. Passed in rather than read from the embedded vocab so
+// this stays a pure fold over its inputs.
+func Run(c *contract.Contract, docs []*Doc, complete bool,
+	knownTypes map[string]bool) *Report {
 	rep := &Report{Contract: c.ID, Complete: complete,
 		Coverage: []CoverageRow{}, Orphans: []OrphanRow{}}
 
@@ -168,6 +173,24 @@ func Run(c *contract.Contract, docs []*Doc, complete bool) *Report {
 				row.Status = "ignored"
 			case f.Class != "required" || f.CapabilityHint == "":
 				row.Status = "gap"
+			// D1253. Before asking whether the CONTRACT covers this type, ask whether
+			// the type exists at all. `uncovered` and this used to be the same row:
+			// same status, same drift, same exit — so a typo in a hint read as "the
+			// code and the contract disagree about reality", and the operator went to
+			// reconcile a contract that was fine. Whether a contract covers a type
+			// nobody can resolve is UNKNOWN, and unknown is not collapsed here any more
+			// than anywhere else in this runtime. It still blocks.
+			// The `len > 0` guard is FAIL-OPEN, and it earned its warning within the
+			// hour: the first cut built knownTypes from the CLI's `vocabs`, the
+			// conformance runner sets GROUNDHOLD_NO_EMBEDDED_VOCAB for the whole suite,
+			// so the set arrived empty and this branch quietly did nothing — inside the
+			// suite meant to pin it. A guard against a caller's mistake also HIDES one.
+			// The CLI now reads the embedded TYPE set directly, and the conformance case
+			// `unresolvable-capability-hint-is-unknown-not-uncovered` runs under that
+			// same variable, so it fails if the wiring is ever undone.
+			case len(knownTypes) > 0 && !knownTypes[f.CapabilityHint]:
+				row.Status = "unknown-type"
+				rep.Drift = true
 			case len(capsByType[f.CapabilityHint]) > 0:
 				row.Status = "covered"
 				row.Capability = capsByType[f.CapabilityHint][0]

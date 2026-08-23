@@ -303,3 +303,25 @@ func TestRefusesForeignDeleteKMS(t *testing.T) {
 	}
 	certifynet.CertifyDeleteRefusesForeign(t, p)
 }
+
+// D1241. This delete already disclosed its 7-day pending window — and had no test
+// saying so, which is how a correct behaviour becomes an accidental one: nothing would
+// have failed if the Reason were dropped. Found by a gate that requires every
+// recoverable-delete site to carry a behavioural witness.
+func TestSchedulingAKeyForDeletionSaysSo(t *testing.T) {
+	srv := awsKMSServer(t, "datakey", true, 90)
+	defer srv.Close()
+	d := awsKMSDriver(t, srv)
+	res := d.createAWSKMS("eu-central-1", "prod", "datakey", awsKMSAttrs(), nil, 1)
+	if res.Status != "succeeded" {
+		t.Fatalf("create: %+v", res)
+	}
+	del := d.deleteAWSKMS("datakey", "prod", res.ProviderID)
+	if del.Status != "succeeded" {
+		t.Fatalf("delete: %+v", del)
+	}
+	if !strings.Contains(strings.ToLower(del.Reason), "recovery window") {
+		t.Fatalf("a key scheduled for deletion is not gone — the result must say the window: %q",
+			del.Reason)
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"groundhold/internal/provider"
@@ -131,16 +132,25 @@ func (d *Driver) listRecordSet(zoneID, name, recordType string) (r53RecordSet, b
 
 // r53RecordTarget reads the first record value, unquoting a TXT payload back to the
 // raw target the contract declares.
-func r53RecordTarget(s r53RecordSet) string {
+// r53RecordTarget returns the record set's FIRST value and how many it has.
+//
+// D1237: the count is the point. `dns.target` is a single string and the spec says so
+// ("the FIRST value only; a multi-value record set is not represented"), but that
+// disclosure lives where an IMPLEMENTER reads and not where an OPERATOR does. A name
+// answering with 10.0.0.5 AND 203.0.113.9 reported `dns.target: 10.0.0.5` as measured,
+// so `dns.target equals 10.0.0.5` read SATISFIED while the name also resolved to a host
+// no contract approved — and the vocabulary says the governed fact is "does the name
+// resolve to where it should".
+func r53RecordTarget(s r53RecordSet) (string, int) {
 	if len(s.Records) == 0 {
-		return ""
+		return "", 0
 	}
 	v := s.Records[0].Value
 	if s.Type == "TXT" {
 		v = strings.TrimSuffix(strings.TrimPrefix(v, `"`), `"`)
 		v = strings.ReplaceAll(v, `\"`, `"`)
 	}
-	return v
+	return v, len(s.Records)
 }
 
 func (d *Driver) observeRoute53Record(capability, providerID string) ([]provider.Observation, []string, error) {
@@ -165,12 +175,25 @@ func (d *Driver) observeRoute53Record(capability, providerID string) ([]provider
 		{Path: "dns.type", Value: recordType, Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
-	if tgt := r53RecordTarget(s); tgt != "" {
+	var diags []string
+	if tgt, n := r53RecordTarget(s); tgt != "" {
 		obs = append(obs, provider.Observation{Path: "dns.target", Value: tgt, Derivation: "measured"})
+		if n > 1 {
+			diags = append(diags, "dns.target reports the FIRST of "+strconv.Itoa(n)+
+				" values in this record set — the attribute is a single string and cannot "+
+				"represent the rest, so a constraint on it is satisfied by one target while "+
+				"the name also resolves to the others")
+		}
+	} else {
+		// D1235: a record whose target this driver cannot extract used to vanish from
+		// the observation, which reads as "this record points nowhere" rather than "we
+		// could not read where it points".
+		diags = append(diags, "dns.target not observed: no target could be read from this "+
+			"record set (an unsupported record type, or a shape this driver does not decode)")
 	}
 	// dns.proxied is a Cloudflare edge posture — Route 53 has no proxy, so it is
 	// OMITTED (an honest gap), never fabricated as a false.
-	diags := []string{"dns.proxied not observed — a Cloudflare edge concept with no Route 53 equivalent"}
+	diags = append(diags, "dns.proxied not observed — a Cloudflare edge concept with no Route 53 equivalent")
 	return obs, diags, nil
 }
 
@@ -279,7 +302,15 @@ func (d *Driver) deleteRoute53Record(capability, environment, providerID string)
 		return provider.CreateResult{ProviderID: providerID, Status: "succeeded"} // idempotent — already gone
 	}
 	// Route 53 DELETE needs the rrset's EXACT current value; reconstruct it from the read.
-	plan := Route53RecordPlan{ZoneID: zoneID, Name: name, Type: recordType, Target: r53RecordTarget(s)}
+	//
+	// D1237: the count is discarded here deliberately, and the reason is worth stating.
+	// Route 53 rejects a DELETE whose ResourceRecords do not match the live set, so
+	// sending the first of several FAILS rather than deleting the wrong thing — the safe
+	// direction. It can only arise on an ADOPTED multi-value record (a record this driver
+	// created has one target by construction), and the refusal is the provider's, with
+	// its own message. Worth a targeted fix if it is ever seen in the field.
+	tgt, _ := r53RecordTarget(s)
+	plan := Route53RecordPlan{ZoneID: zoneID, Name: name, Type: recordType, Target: tgt}
 	st, resp, e := d.r53Do("POST", route53Path+"/hostedzone/"+zoneID+"/rrset", plan.changeXML("DELETE"))
 	if e != nil {
 		return provider.CreateResult{ProviderID: providerID, Status: "unknown", Reason: fmt.Sprintf("record delete outcome unknown: %v", e)}

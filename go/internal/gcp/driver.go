@@ -29,17 +29,19 @@ type Driver struct {
 	Project string
 	// secrets (D309) holds the credential values of the mutation in flight so the
 	// driver can scrub them out of a Reason before it is persisted.
-	secrets             provider.Redactor
-	BaseURL             string // override for tests; default sqladmin
-	CRMBaseURL          string // override for tests; default cloudresourcemanager (D75)
-	RunBaseURL          string // override for tests; default run.googleapis.com (D76)
-	GcsBaseURL          string // override for tests; default storage.googleapis.com (D77)
-	ComputeBaseURL      string // override for tests; default compute.googleapis.com (D83)
-	CfBaseURL           string // override for tests; default cloudfunctions.googleapis.com (D84)
-	SecretBaseURL       string // override for tests; default secretmanager.googleapis.com (D97)
-	PubSubBaseURL       string // override for tests; default pubsub.googleapis.com (D94)
-	MemorystoreBaseURL  string // override for tests; default redis.googleapis.com (D100)
-	DNSBaseURL          string // override for tests; default dns.googleapis.com (D101)
+	secrets            provider.Redactor
+	BaseURL            string // override for tests; default sqladmin
+	CRMBaseURL         string // override for tests; default cloudresourcemanager (D75)
+	RunBaseURL         string // override for tests; default run.googleapis.com (D76)
+	GcsBaseURL         string // override for tests; default storage.googleapis.com (D77)
+	ComputeBaseURL     string // override for tests; default compute.googleapis.com (D83)
+	CfBaseURL          string // override for tests; default cloudfunctions.googleapis.com (D84)
+	SecretBaseURL      string // override for tests; default secretmanager.googleapis.com (D97)
+	PubSubBaseURL      string // override for tests; default pubsub.googleapis.com (D94)
+	MemorystoreBaseURL string // override for tests; default redis.googleapis.com (D100)
+	DNSBaseURL         string // override for tests; default dns.googleapis.com (D101)
+	// rolePerms memoizes role definitions for ONE observe sweep (D1231).
+	rolePerms           map[string]cachedPerms
 	IAMBaseURL          string // override for tests; default iam.googleapis.com (D105; shared w/ D103)
 	MonitoringBaseURL   string // override for tests; default monitoring.googleapis.com (D106)
 	DashboardBaseURL    string // override for tests; default monitoring.googleapis.com/v1 (D107)

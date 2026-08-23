@@ -450,6 +450,28 @@ func (d *Driver) updateRedshiftServerless(capability, environment, providerID st
 				return provider.CreateResult{Status: "failed",
 					Reason: fmt.Sprintf("UpdateWorkgroup HTTP %d: %s", st, ecsErr(resp))}
 			}
+			// D1223: UpdateWorkgroup is accept-not-applied — the 200 puts the workgroup into
+			// MODIFYING while publiclyAccessible is STILL the old value, and returning succeeded
+			// here reported a public warehouse private on accept while it still answered on the
+			// public endpoint (the D1221 Kinesis / D1222 Azure class, in AWS's 200-then-MODIFYING
+			// shape). Poll GetWorkgroup to AVAILABLE with the flag at its target before succeeding;
+			// FAILED is terminal, still-modifying at the timeout is unknown WITH the pid.
+			deadline := d.Now().Add(d.PollTimeout)
+			for {
+				wg2, found2, perr := d.getWorkgroup(region, name)
+				if perr == nil && found2 && wg2.Status == "AVAILABLE" && wg2.PubliclyAccessible == public {
+					break // applied
+				}
+				if perr == nil && found2 && wg2.Status == "FAILED" {
+					return provider.CreateResult{ProviderID: providerID, Status: "failed",
+						Reason: "workgroup entered status FAILED while applying publiclyAccessible"}
+				}
+				if d.Now().After(deadline) {
+					return provider.CreateResult{ProviderID: providerID, Status: "unknown",
+						Reason: "UpdateWorkgroup accepted but publiclyAccessible not yet applied at poll timeout — reconcile"}
+				}
+				time.Sleep(d.PollInterval)
+			}
 		default:
 			return provider.CreateResult{Status: "failed",
 				Reason: "no redshiftserverless in-place mapping for " + path}

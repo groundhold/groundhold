@@ -174,5 +174,14 @@ func (d *Driver) deleteKeyVault(capability, environment, providerID string) prov
 	// is Azure's data-protection default (mirrors deletionProtection), not a lie
 	// about the delete — the vault is gone from active use; purge is a separate,
 	// deliberate act we do not take.
-	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+	// D1241: the same weaker-than-the-word success as the AWS twin, and its sibling in
+	// this very package already says it. This driver CREATES the vault with
+	// `enableSoftDelete: true` (secret_kv.go), so a delete leaves the vault recoverable
+	// until its retention window expires — while `key_azure_net.go`, the vault for
+	// capability.key.encryption, discloses precisely that on its own delete. One vault
+	// delete in the package told the operator; the other did not.
+	return provider.CreateResult{ProviderID: providerID, Status: "succeeded",
+		Reason: "vault (and its secret) deleted; this driver enables soft-delete at create, " +
+			"so Azure keeps it RECOVERABLE until the retention window expires — purge is a " +
+			"separate, deliberate act not taken here"}
 }

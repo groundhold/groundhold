@@ -40,7 +40,12 @@ func TestEveryGCPFieldNameExistsInTheProviderAPI(t *testing.T) {
 		"client_email":   "service-account key file field (auth.go), not an API response",
 		"private_key":    "service-account key file field (auth.go), not an API response",
 		"private_key_id": "service-account key file field (auth.go), not an API response",
-		"token_uri":      "service-account key file field (auth.go), not an API response",
+		// encoding/json's ignore directive, not a field name at all — the same
+		// exception the AWS list already carries. It appears on the dashboard doc's
+		// raw-body field (D1236), which is populated from the response rather than
+		// decoded from it.
+		"-":         "encoding/json ignore directive, not a field name",
+		"token_uri": "service-account key file field (auth.go), not an API response",
 		// securitycentermanagement.googleapis.com serves its discovery document only to
 		// an authenticated caller (403 without credentials), and we do not hold any. The
 		// names come from that API's published reference; they are UNCONFIRMED here and
