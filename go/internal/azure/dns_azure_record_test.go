@@ -242,7 +242,7 @@ func TestRecordTarget(t *testing.T) {
 		{"WIDGET", `{"properties":{}}`, ""},
 	}
 	for _, c := range cases {
-		if got := recordTarget(c.recordType, mkDoc(c.json)); got != c.want {
+		if got, _ := recordTarget(c.recordType, mkDoc(c.json)); got != c.want {
 			t.Errorf("recordTarget(%q, %s) = %q, want %q", c.recordType, c.json, got, c.want)
 		}
 	}

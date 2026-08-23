@@ -201,3 +201,24 @@ func TestDeleteAzureKeyForeignRefused(t *testing.T) {
 		t.Fatalf("foreign key must refuse delete, got %+v", res)
 	}
 }
+
+// D1241. This delete already disclosed Azure's soft-delete retention — and had no test
+// saying so. A correct behaviour with no witness is an accidental one; nothing would
+// have failed if the Reason were dropped, which is exactly what happened to its sibling
+// (the SECRET vault, one file over, which reported a bare success until this entry).
+func TestDeletingTheKeyVaultSaysItIsStillRecoverable(t *testing.T) {
+	srv := azKeyServer(t, "datakey", "RSA-HSM", "P90D")
+	defer srv.Close()
+	d := azKeyDriver(t, srv)
+	res := d.createAzureKey("prod", "datakey", azKeyAttrs(), azKeyImpl(), 1)
+	if res.Status != "succeeded" {
+		t.Fatalf("create: %+v", res)
+	}
+	del := d.deleteAzureKey("datakey", "prod", res.ProviderID)
+	if del.Status != "succeeded" {
+		t.Fatalf("delete: %+v", del)
+	}
+	if !strings.Contains(strings.ToLower(del.Reason), "recoverable") {
+		t.Fatalf("a soft-deleted vault is not gone — the result must say so: %q", del.Reason)
+	}
+}

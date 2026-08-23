@@ -340,6 +340,7 @@ route53	GET	/2013-04-01/healthcheck
 route53	GET	/2013-04-01/healthcheck/hc-123
 route53	GET	/2013-04-01/healthcheck/hc-abc-123
 route53	GET	/2013-04-01/hostedzone
+route53	GET	/2013-04-01/hostedzone/Z123456789ABC/rrset
 route53	GET	/2013-04-01/hostedzone/Z1234ABC
 route53	GET	/2013-04-01/hostedzone/Z123ABC
 route53	GET	/2013-04-01/hostedzone/Z123ABC/rrset
@@ -391,6 +392,7 @@ s3	GET	/pv-media/?encryption
 s3	GET	/pv-media/?lifecycle
 s3	GET	/pv-media/?object-lock
 s3	GET	/pv-media/?policyStatus
+s3	GET	/pv-media/?publicAccessBlock
 s3	GET	/pv-media/?replication
 s3	GET	/pv-media/?versioning
 s3	GET	/pv-replica-eu-abcd1234/?location
@@ -400,6 +402,7 @@ s3	GET	/pv-vault-abcd1234/?encryption
 s3	GET	/pv-vault-abcd1234/?lifecycle
 s3	GET	/pv-vault-abcd1234/?object-lock
 s3	GET	/pv-vault-abcd1234/?policyStatus
+s3	GET	/pv-vault-abcd1234/?publicAccessBlock
 s3	GET	/pv-vault-abcd1234/?replication
 s3	GET	/pv-vault-abcd1234/?versioning
 s3	GET	/v20180820/configuration/publicAccessBlock

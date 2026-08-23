@@ -151,8 +151,10 @@ func TestCreateObserveDeleteAzureRole(t *testing.T) {
 	}
 }
 
-// A custom (unclassifiable) role leaves access.privileged unverifiable, never
-// guessed — the four-valued honesty the domain exists to show.
+// A role outside the curated set leaves access.privileged unverifiable, never
+// guessed — the four-valued honesty the domain exists to show. It is NOT necessarily
+// a custom role, and D1225 stopped the diagnostic from saying so; see
+// azrole_named_gate_test.go for the gates on which cause gets named.
 // TestCreateAzureRoleBodyCarriesPrincipalType (D896): the PUT body's principalType must be
 // the operand's value, not a hardcoded "ServicePrincipal" — else a User/Group grant is sent
 // as a ServicePrincipal and Azure 400s it.

@@ -164,3 +164,86 @@ func TestTheDiscoverySweepDoesNotReadEachAccountsPolicy(t *testing.T) {
 			"trust.principals would then read as an empty one.", diags)
 	}
 }
+
+// D1239. The sweep's pace decision (D868/D141: no second call per account) was stated
+// only in a comment, so a DISCOVERED service account arrived with `trust.principals`
+// simply absent. On a security-floored attribute whose whole subject is who may assume
+// this identity, absent reads exactly like "nobody may" — the reassuring answer, and
+// not the one the sweep established.
+//
+// The decision stands. The silence does not.
+func TestTheDiscoverySweepSaysTrustIsUnreadRatherThanAbsent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, ":getIamPolicy"):
+			t.Errorf("the sweep must not read the IAM policy (D141 pace)")
+		case strings.HasSuffix(r.URL.Path, "/serviceAccounts"):
+			_, _ = w.Write([]byte(`{"accounts":[{"name":"projects/acme-prod/serviceAccounts/app-runner",` +
+				`"email":"app-runner@acme-prod.iam.gserviceaccount.com","displayName":"app runner",` +
+				`"description":"groundhold:capability=app-runner;environment=prod"}]}`))
+		default:
+			_, _ = w.Write([]byte(`{"name":"projects/acme-prod/serviceAccounts/app-runner",` +
+				`"email":"app-runner@acme-prod.iam.gserviceaccount.com","displayName":"app runner",` +
+				`"description":"groundhold:capability=app-runner;environment=prod"}`))
+		}
+	}))
+	defer srv.Close()
+	d := gsaDriver(t, srv)
+
+	found, diags, err := d.discoverServiceAccounts("europe-west1")
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if len(found) == 0 {
+		t.Fatal("the sweep found nothing — this test would then pass over an empty subject (D328)")
+	}
+	var told bool
+	for _, dg := range diags {
+		if strings.Contains(dg, "trust.principals not observed") &&
+			strings.Contains(dg, "UNREAD, not nobody") {
+			told = true
+		}
+	}
+	if !told {
+		t.Fatalf("a discovered account must say its trust was UNREAD, or absent reads as "+
+			"nobody-may-assume on a floored attribute: %v", diags)
+	}
+}
+
+// The observe path is the one that DOES read it, and it must not carry the sweep's
+// caveat — a sentence on every case distinguishes none (D1227).
+func TestObserveDoesNotCarryTheSweepsUnreadCaveat(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, ":getIamPolicy"):
+			_, _ = w.Write([]byte(`{"bindings":[{"role":"roles/iam.serviceAccountUser",` +
+				`"members":["user:a@example.com"]}]}`))
+		case strings.HasSuffix(r.URL.Path, "/keys"):
+			_, _ = w.Write([]byte(`{"keys":[]}`))
+		default:
+			_, _ = w.Write([]byte(`{"name":"projects/acme-prod/serviceAccounts/app-runner",` +
+				`"email":"app-runner@acme-prod.iam.gserviceaccount.com","displayName":"app runner"}`))
+		}
+	}))
+	defer srv.Close()
+	d := gsaDriver(t, srv)
+	obs, diags, err := d.observeGServiceAccount("runner",
+		gsaProviderID("acme-prod", "app-runner"))
+	if err != nil {
+		t.Fatalf("observe: %v", err)
+	}
+	var haveTrust bool
+	for _, o := range obs {
+		if o.Path == "trust.principals" {
+			haveTrust = true
+		}
+	}
+	if !haveTrust {
+		t.Fatalf("observe reads the policy, so trust.principals must be measured: %v", diags)
+	}
+	for _, dg := range diags {
+		if strings.Contains(dg, "UNREAD, not nobody") {
+			t.Fatalf("observe DID read it — the sweep's caveat must not fire here: %q", dg)
+		}
+	}
+}

@@ -39,6 +39,48 @@ func roleDefinitionID(sub, roleGuid string) string {
 	return "/subscriptions/" + sub + "/providers/Microsoft.Authorization/roleDefinitions/" + roleGuid
 }
 
+// azureRoleDefDoc is the slice of a roleDefinitions GET this driver reads.
+// `type` is ARM's own answer to built-in vs custom — the only authority on it,
+// because an Azure role-definition id is a bare GUID either way (unlike a GCP
+// `roles/...` id or an AWS `:aws:policy/` ARN, which carry the distinction).
+type azureRoleDefDoc struct {
+	Properties struct {
+		RoleName string `json:"roleName"`
+		Type     string `json:"type"` // BuiltInRole | CustomRole
+	} `json:"properties"`
+}
+
+// resolveAzureRoleDefinition asks ARM what a role-definition GUID actually is.
+//
+// D1225. Two things depended on guessing this and both were wrong in the field:
+//
+//   - `grant.role` used to fall back to the raw GUID for any role outside the
+//     four-entry curated table. The vocabulary defines that attribute as the NAMED
+//     role — "the grant's semantic identity" — so a GUID there is not a weaker
+//     answer, it is a different namespace, and a hard constraint written in names
+//     (`not-in: [..., "Key Vault Administrator"]`) read SATISFIED over an assignment
+//     that WAS Key Vault Administrator. Measured on a real subscription.
+//   - the privilege diagnostic told the operator the role was custom. The one
+//     unclassifiable role in that subscription was `Defender Agentless VM Scan`,
+//     `type: BuiltInRole` — a first-party role, blamed on the estate.
+//
+// Resolving here does not introduce the name/GUID asymmetry, it FINISHES it:
+// `azRoleNameForGuid` already preferred the name, for the four roles it knew.
+// A failure to resolve returns ok=false and the caller withholds rather than
+// falling back — the fallback is the defect.
+func (d *Driver) resolveAzureRoleDefinition(sub, roleGuid string) (name, kind string, ok bool) {
+	url := fmt.Sprintf("%s%s?api-version=%s", d.BaseURL, roleDefinitionID(sub, roleGuid), roleAssignmentAPIVersion)
+	st, resp, err := d.doARM("GET", url, nil)
+	if err != nil || st != http.StatusOK {
+		return "", "", false
+	}
+	var doc azureRoleDefDoc
+	if json.Unmarshal(resp, &doc) != nil || doc.Properties.RoleName == "" {
+		return "", "", false
+	}
+	return doc.Properties.RoleName, doc.Properties.Type, true
+}
+
 func (d *Driver) createAzureRole(environment, capability string,
 	attrs, impl map[string]any, generation int) provider.CreateResult {
 	plan, err := BuildAzureRole(environment, capability, attrs, impl, generation)
@@ -128,16 +170,47 @@ func (d *Driver) observeAzureRole(capability, providerID string) ([]provider.Obs
 	// Present: clear the marker, or a stale "gone" survives a re-create.
 	obs := []provider.Observation{
 		{Path: provider.ResourceAbsentPath, Value: false, Derivation: "measured"},
-		{Path: "grant.role", Value: azRoleNameForGuid(roleGuid), Derivation: "measured"},
 		{Path: "grant.principal", Value: doc.Properties.PrincipalID, Derivation: "measured"},
 		{Path: "access.scope", Value: "account", Derivation: "measured"},
 		{Path: "service.managed", Value: true, Derivation: "measured"},
 	}
 	var diags []string
+
+	// D1225: grant.role is the NAMED role. The curated table answers for four roles;
+	// ARM answers for the rest. If NEITHER can, the attribute is withheld — a raw
+	// GUID under a name-valued attribute silently satisfies name-based constraints.
+	roleName, roleKind := azRoleNameForGuid(roleGuid), ""
+	if roleName == roleGuid {
+		if n, k, ok := d.resolveAzureRoleDefinition(sub, roleGuid); ok {
+			roleName, roleKind = n, k
+		} else {
+			roleName = ""
+			diags = append(diags, "grant.role not observed: the role definition for "+roleGuid+
+				" could not be read, so the NAMED role is not claimed — the raw GUID is not the named "+
+				"identity this attribute defines, and reporting it would satisfy name-based constraints")
+		}
+	}
+	if roleName != "" {
+		obs = append(obs, provider.Observation{Path: "grant.role", Value: roleName, Derivation: "measured"})
+	}
+
 	if priv, known := classifyAzureRoleGuid(roleGuid); known {
 		obs = append(obs, provider.Observation{Path: "access.privileged", Value: priv, Derivation: "measured"})
 	} else {
-		diags = append(diags, "access.privileged not observed: role "+roleGuid+" is not in groundhold's known built-in role set (a custom role's privilege is not guessed)")
+		// Name the cause ARM reported, never one this code assumed.
+		switch roleKind {
+		case "BuiltInRole":
+			diags = append(diags, "access.privileged not observed: role "+roleName+" ("+roleGuid+
+				") is BUILT-IN to Azure but is not in groundhold's curated built-in role set — "+
+				"the gap is groundhold's, and privilege is not guessed")
+		case "CustomRole":
+			diags = append(diags, "access.privileged not observed: role "+roleName+" ("+roleGuid+
+				") is a CUSTOM role — its privilege is not guessed")
+		default:
+			diags = append(diags, "access.privileged not observed: role "+roleGuid+
+				" is not in groundhold's curated built-in role set, and its definition could not be read "+
+				"to say whether it is built-in or custom — privilege is not guessed")
+		}
 	}
 	return obs, diags, nil
 }

@@ -140,6 +140,28 @@ func awsPolicyMutating(perms []string) bool {
 	return false
 }
 
+// awsStsMints are the STS actions that hand out CREDENTIALS. Everything else STS
+// offers is inert — `sts:GetCallerIdentity` is the most harmless call in AWS and is
+// in almost every read-only policy.
+//
+// D1231 sub-finding: this function fired on `svc == "sts"` WHOLESALE, while the
+// published mapping in capability.authorization.role.yaml says "any iam:* /
+// sts:AssumeRole". Code broader than the published claim, and broader in a way that
+// matters now: with D1231 the classifier decides a MEASURED emission for arbitrary
+// customer policies, so a clone of ReadOnlyAccess or SecurityAudit — both of which
+// carry sts:GetCallerIdentity — would have measured privileged=true. A false alarm
+// at estate scale erodes the alarm, and on the role path (which emits `false` too) it
+// also refused a candidate's true least-privilege claim.
+//
+// Narrowed to the credential-minting verbs, which is WIDER than the vocab's literal
+// "sts:AssumeRole" — AssumeRoleWithSAML/WithWebIdentity and the token-getters mint
+// credentials just as surely — so the vocabulary moves to meet it rather than the
+// code shrinking to a claim that was itself too narrow.
+var awsStsMints = map[string]bool{
+	"AssumeRole": true, "AssumeRoleWithSAML": true, "AssumeRoleWithWebIdentity": true,
+	"GetFederationToken": true, "GetSessionToken": true,
+}
+
 func awsActionPrivileged(a string) bool {
 	if a == "*" {
 		return true
@@ -148,7 +170,29 @@ func awsActionPrivileged(a string) bool {
 	if i := strings.IndexByte(a, ':'); i >= 0 {
 		svc, verb = a[:i], a[i+1:]
 	}
-	return svc == "iam" || svc == "sts" || verb == "*"
+	if verb == "*" {
+		return true
+	}
+	if svc == "iam" {
+		// The vocabulary defines privilege as "the power to GRANT FURTHER ACCESS".
+		// Reading IAM is not that: iam:GetRole / iam:ListPolicies / iam:SimulatePolicy
+		// are reconnaissance, and they are in every read-only baseline. The mapping's
+		// shorthand ("any iam:*") over-reached its own definition; the definition wins
+		// and the mapping is corrected to match (D1231).
+		return !awsReadVerb(verb)
+	}
+	return svc == "sts" && awsStsMints[verb]
+}
+
+// awsReadVerb reports whether an IAM action verb only READS. AWS's own naming
+// convention carries this: Get*, List* and Simulate* are the read surface, and
+// everything else in the iam namespace writes or mints. Inverting (exempt the reads)
+// rather than enumerating the writes is deliberate — a NEW iam write verb is then
+// privileged by default, which is the safe direction for a security-floored attribute.
+func awsReadVerb(verb string) bool {
+	return strings.HasPrefix(verb, "Get") ||
+		strings.HasPrefix(verb, "List") ||
+		strings.HasPrefix(verb, "Simulate")
 }
 
 func awsPolicyPrivileged(perms []string) bool {

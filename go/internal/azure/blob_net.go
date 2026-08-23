@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"groundhold/internal/provider"
 )
@@ -262,6 +263,58 @@ func (d *Driver) putSetting(url string, body []byte, pid, what string) *provider
 func (d *Driver) patchSetting(url string, body []byte, pid, what string) *provider.CreateResult {
 	st, resp, err := d.doARM("PATCH", url, body)
 	return terminalOr(st, resp, err, pid, what)
+}
+
+// azProvisioningState reads properties.provisioningState from an ARM resource body.
+// Empty when the body has no such field (some child resources carry none) or is unparseable.
+func azProvisioningState(resp []byte) string {
+	var d struct {
+		Properties struct {
+			ProvisioningState string `json:"provisioningState"`
+		} `json:"properties"`
+	}
+	if json.Unmarshal(resp, &d) != nil {
+		return ""
+	}
+	return d.Properties.ProvisioningState
+}
+
+// pollAzureApplied closes the D1222 false-green: an ARM PATCH/PUT that a driver treats as done
+// on any 2xx is WRONG for a long-running operation, where a 202 only ACCEPTS the change — the
+// resource is still Updating and the knob still reads its OLD value. Reporting succeeded there
+// is the D953 shape (a security-closing change tombstoned as applied while not in effect), and
+// it is invisible to a synchronous fake, exactly as the D1211 Kinesis false-green was. After
+// the mutation the caller GETs the resource here until provisioningState is terminal AND the
+// knob it changed reads the target (applied), so a sync 200 returns on the first read and an
+// async 202 rides through the Updating probes. Failed/Canceled is a terminal failed; a resource
+// that never applies at the poll timeout is unknown WITH the pid (the change may yet land).
+//
+// applied is the caller's knob predicate over the resource body — checking provisioningState
+// alone would race a resource still briefly Succeeded from BEFORE the update began, so the knob
+// value is the load-bearing half of the condition.
+func (d *Driver) pollAzureApplied(getURL, pid, what string, applied func([]byte) bool) *provider.CreateResult {
+	deadline := d.Now().Add(d.PollTimeout)
+	for {
+		st, resp, err := d.doARM("GET", getURL, nil)
+		if err == nil && st == http.StatusOK {
+			switch azProvisioningState(resp) {
+			case "Failed", "Canceled":
+				return &provider.CreateResult{ProviderID: pid, Status: "failed",
+					Reason: what + ": the async operation entered state " + azProvisioningState(resp)}
+			case "Succeeded", "":
+				// Succeeded (or a child with no provisioningState) AND the knob at its target
+				// is the applied state; anything else (Updating, knob still old) keeps polling.
+				if applied(resp) {
+					return nil
+				}
+			}
+		}
+		if d.Now().After(deadline) {
+			return &provider.CreateResult{ProviderID: pid, Status: "unknown",
+				Reason: what + " accepted but not observed applied at poll timeout — reconcile"}
+		}
+		time.Sleep(d.PollInterval)
+	}
 }
 
 // azErrCode extracts the normalized error code from an Azure JSON error body:

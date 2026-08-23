@@ -178,6 +178,10 @@ func TestMetamorphicGCSRoundTrip(t *testing.T) {
 			t.Setenv("GROUNDHOLD_GCP_ACCESS_TOKEN", "test-token")
 			d := NewDriver("acme-prod")
 			d.GcsBaseURL = srv.URL
+			// D1233: the GCS observer folds the effective org policy for
+			// publicAccessPrevention, which unpinned reached the real
+			// orgpolicy.googleapis.com.
+			d.OrgPolicyBaseURL = srv.URL
 			d.ProjNumber = "111"
 
 			attrs := map[string]any{

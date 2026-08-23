@@ -197,6 +197,17 @@ func (d *Driver) observeGServiceAccountTrust(capability, providerID string, with
 			diags = append(diags, "trust.principals not observed: the service account's IAM "+
 				"policy gave no answer, so who may assume this identity was not established")
 		}
+	} else {
+		// D1239: the DISCOVERY sweep deliberately does not pay a second call per account
+		// (D868, the D141 pace budget), and that decision lived only in a comment. So a
+		// discovered account arrived with `trust.principals` simply absent — which reads
+		// exactly like an account nobody may assume, on a security-floored attribute
+		// whose whole subject is who may assume it. The pace decision stands; the silence
+		// does not.
+		diags = append(diags, "trust.principals not observed: this is the DISCOVERY sweep, "+
+			"which does not read each account's IAM policy (a second call per account, "+
+			"deliberately outside the crawl's pace budget) — absent here means UNREAD, not "+
+			"nobody; `observe` on this account reads it")
 	}
 	if doc.DisplayName != "" {
 		obs = append(obs, provider.Observation{Path: "display.name", Value: doc.DisplayName, Derivation: "measured"})

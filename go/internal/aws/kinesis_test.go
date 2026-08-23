@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -342,12 +343,27 @@ func TestUpdateKinesisRetention(t *testing.T) {
 		action string
 		hours  int
 	}
+	// The fake is STATEFUL and models the async lag that caught the D1211 false-green in
+	// the field: Increase/DecreaseStreamRetentionPeriod returns 200 but the stream enters
+	// UPDATING carrying the OLD window, and only reaches the new one back at ACTIVE. A driver
+	// that reports succeeded on the 200 tombstones the change while it is still UPDATING at
+	// the old value. The poll must ride THROUGH the UPDATING probes to the applied window.
 	newSrv := func(capLabel string, current int, seen *[]call) *httptest.Server {
+		var mu sync.Mutex
+		visibleHours, visibleStatus, targetHours, lag := current, "ACTIVE", current, 0
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			defer mu.Unlock()
 			switch kinesisTarget2(r) {
 			case "DescribeStreamSummary":
-				_, _ = w.Write([]byte(`{"StreamDescriptionSummary":{"StreamStatus":"ACTIVE",` +
-					`"RetentionPeriodHours":` + itoaK(current) + `}}`))
+				if lag > 0 {
+					lag--
+					if lag == 0 {
+						visibleHours, visibleStatus = targetHours, "ACTIVE"
+					}
+				}
+				_, _ = w.Write([]byte(`{"StreamDescriptionSummary":{"StreamStatus":"` + visibleStatus + `",` +
+					`"RetentionPeriodHours":` + itoaK(visibleHours) + `}}`))
 			case "ListTagsForStream":
 				_, _ = w.Write([]byte(`{"Tags":[{"Key":"groundhold-capability","Value":"` + capLabel +
 					`"},{"Key":"groundhold-environment","Value":"prod"}]}`))
@@ -358,6 +374,8 @@ func TestUpdateKinesisRetention(t *testing.T) {
 				}
 				_ = json.Unmarshal(body, &b)
 				*seen = append(*seen, call{action: kinesisTarget2(r), hours: b.RetentionPeriodHours})
+				// accepted: enters UPDATING at the OLD window, settles ACTIVE at the new one
+				targetHours, visibleStatus, lag = b.RetentionPeriodHours, "UPDATING", 2
 				w.WriteHeader(200)
 			default:
 				t.Errorf("unexpected %q", kinesisTarget2(r))
@@ -424,6 +442,45 @@ func TestUpdateKinesisRetention(t *testing.T) {
 		}
 		if len(seen) != 0 {
 			t.Fatalf("a refused update must issue NO call, got %+v", seen)
+		}
+	})
+
+	// The guard for the D1211 field finding: a stream that accepts the change (200) but never
+	// leaves UPDATING at the OLD window must be reported unknown, never succeeded. Remove the
+	// poll-to-applied and this is the test that goes red — succeeded here IS the false-green.
+	t.Run("stuck UPDATING times out to unknown", func(t *testing.T) {
+		var seen []call
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch kinesisTarget2(r) {
+			case "DescribeStreamSummary":
+				_, _ = w.Write([]byte(`{"StreamDescriptionSummary":{"StreamStatus":"UPDATING",` +
+					`"RetentionPeriodHours":24}}`))
+			case "ListTagsForStream":
+				_, _ = w.Write([]byte(`{"Tags":[{"Key":"groundhold-capability","Value":"events"},` +
+					`{"Key":"groundhold-environment","Value":"prod"}]}`))
+			case "IncreaseStreamRetentionPeriod":
+				body, _ := io.ReadAll(r.Body)
+				var b struct {
+					RetentionPeriodHours int `json:"RetentionPeriodHours"`
+				}
+				_ = json.Unmarshal(body, &b)
+				seen = append(seen, call{action: kinesisTarget2(r), hours: b.RetentionPeriodHours})
+				w.WriteHeader(200)
+			default:
+				t.Errorf("unexpected %q", kinesisTarget2(r))
+				w.WriteHeader(400)
+			}
+		}))
+		defer srv.Close()
+		d := kinesisDriver(t, srv)
+		d.PollTimeout = 5 * time.Millisecond // never settles → times out fast
+		res := d.updateKinesis("events", "prod", pid,
+			map[string]any{"retention.window": "168h"}, []string{"retention.window"})
+		if res.Status != "unknown" || !strings.Contains(res.Reason, "not yet at 168h") {
+			t.Fatalf("a stream stuck UPDATING must be unknown, not succeeded: %+v", res)
+		}
+		if len(seen) != 1 {
+			t.Fatalf("the change must have been issued once, got %+v", seen)
 		}
 	})
 }

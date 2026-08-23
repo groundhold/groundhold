@@ -142,8 +142,19 @@ func (d *Driver) observeRolePolicyAttachment(capability, providerID string) ([]p
 	var diags []string
 	if priv, known := classifyAWSPolicy(policyArn); known {
 		obs = append(obs, provider.Observation{Path: "access.privileged", Value: priv, Derivation: "measured"})
+		return obs, diags, nil
+	}
+	// D1231: the NAME did not settle it, so read the DOCUMENT. This reaches both
+	// populations the name heuristic leaves behind — customer-managed policies (whose
+	// name its author chose, D1228) and AWS-managed ones outside the curated set,
+	// which in a real account was 63 of 72 unclassified grants.
+	if priv, known, why := d.grantPrivilegeFromDocument(policyArn); known {
+		obs = append(obs, provider.Observation{Path: "access.privileged", Value: priv, Derivation: "measured"})
 	} else {
-		diags = append(diags, "access.privileged not observed: policy "+policyArn+" is not in groundhold's known privileged-policy set (a custom policy's privilege is not guessed)")
+		// The wording says what the DOCUMENT grants, never what the principal CAN do:
+		// a Deny statement, a permissions boundary or an SCP can all narrow effective
+		// access below what the document says.
+		diags = append(diags, "access.privileged not observed: policy "+policyArn+" — "+why)
 	}
 	return obs, diags, nil
 }

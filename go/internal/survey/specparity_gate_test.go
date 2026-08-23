@@ -28,7 +28,11 @@ import (
 // never drawn.
 func TestSurveyStatusVocabularyMatchesTheSpec(t *testing.T) {
 	want := map[string]bool{
-		"covered": true, "uncovered": true, "gap": true, "ignored": true,
+		// D1253: `unknown-type` — a hint the vocabulary cannot resolve. It is not
+		// `uncovered`, which asserts the contract lacks a REAL type; the two used to
+		// be one row and an operator could not tell a typo from genuine drift.
+		"covered": true, "uncovered": true, "unknown-type": true, "gap": true,
+		"ignored":  true,
 		"orphaned": true, "unwitnessed": true, "witnessed-by-type": true,
 	}
 

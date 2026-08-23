@@ -185,3 +185,56 @@ cases:
               evidence: ["app/db.py:12"]
     expect:
       error: true
+
+  # D1253. A capabilityHint naming a type the VOCABULARY does not have is not the
+  # same finding as one naming a real type the contract happens not to declare, and
+  # the two used to be indistinguishable: both reported `uncovered`, both set drift,
+  # both exited 2. An operator told "the code and the contract disagree about
+  # reality" went to reconcile the contract, when the survey had a typo.
+  #
+  # Whether the contract covers a type nobody can resolve is UNKNOWN, and this
+  # project does not collapse unknown into an answer. It still blocks — an
+  # unresolvable witness is not a pass — but it says which question it could not
+  # answer.
+  - name: unresolvable-capability-hint-is-unknown-not-uncovered
+    impl: go
+    survey:
+      contract: *sys1
+      surveys:
+        - apiVersion: survey/v0.1
+          kind: CodeSurvey
+          repo: { name: orders-api, commit: abc123 }
+          service: orders-api
+          generatedAt: "2026-07-14T00:00:00Z"
+          findings:
+            - dependency: psycopg
+              class: required
+              capabilityHint: capability.database.relatoinal
+              evidence: ["app/db.py:12"]
+    expect:
+      exit: 2
+      coverage: { psycopg: unknown-type }
+      orphans: { db: unwitnessed }
+
+  # The control that gives the case above its meaning: a REAL type the contract does
+  # not declare must keep reporting `uncovered`, or the new status has simply
+  # renamed the old one and nothing is distinguished.
+  - name: real-type-the-contract-lacks-is-still-uncovered
+    impl: go
+    survey:
+      contract: *sys1
+      surveys:
+        - apiVersion: survey/v0.1
+          kind: CodeSurvey
+          repo: { name: orders-api, commit: abc123 }
+          service: orders-api
+          generatedAt: "2026-07-14T00:00:00Z"
+          findings:
+            - dependency: boto3
+              class: required
+              capabilityHint: capability.storage.object
+              evidence: ["app/files.py:3"]
+    expect:
+      exit: 2
+      coverage: { boto3: uncovered }
+      orphans: { db: unwitnessed }

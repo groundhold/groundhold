@@ -10,6 +10,7 @@
 package aws
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -101,11 +102,101 @@ func BuildRolePolicyAttachment(environment, capability string,
 	return p, nil
 }
 
+// grantPrivilegeFromDocument classifies a grant's privilege by READING the policy
+// document, for the policies whose NAME proves nothing (D1228: a customer-managed
+// policy's name is whatever its author typed).
+//
+// D1231. This is the evidence standard `capability.authorization.role` has always
+// held — it derives privilege from the ACTION VERBS — brought to the capability that
+// was guessing from a substring. Two reviews recommended it independently; what
+// changed the calculus was that `iam:GetPolicy`/`iam:GetPolicyVersion` ship inside
+// AWS's own `ReadOnlyAccess` and `SecurityAudit`, so the read costs an identity
+// nothing it does not already have.
+//
+// The asymmetry is the whole design. `true` is emitted on POSITIVE evidence only —
+// an action that confers control. Absence of such an action is NOT evidence of least
+// privilege: the pattern set is a curated list, not a proof, and known escalation
+// paths (`lambda:UpdateFunctionCode` on a privileged function, `ssm:SendCommand`)
+// match nothing in it. So "no match" WITHHOLDS. Under-reporting privilege is the
+// direction D797 called the most dangerous this tool has, and a verb table cannot
+// rule it out.
+//
+// Returns (privileged, known, why). known=false always carries a `why` naming what
+// stopped it — a read that failed, or a document that granted no matching action.
+func (d *Driver) grantPrivilegeFromDocument(policyArn string) (privileged, known bool, why string) {
+	actions, err := d.policyActionsCached(policyArn)
+	switch {
+	case errors.Is(err, errPolicyComplement):
+		// `Allow` with `NotAction` — "everything EXCEPT these". The sibling refuses to
+		// ENUMERATE that set, and rightly; but refusing to enumerate is not a reason to
+		// withhold the CLASSIFICATION. A complement is the widest grant there is.
+		return true, true, ""
+	case errors.Is(err, errPolicyAbsent):
+		return false, false, "the policy document is gone"
+	case err != nil:
+		return false, false, "its document did not read (" + err.Error() + ")"
+	}
+	if awsPolicyPrivileged(actions) {
+		return true, true, ""
+	}
+	return false, false, "its document grants no action in groundhold's escalation set " +
+		"(that set is curated, not exhaustive, so this is NOT proof of least privilege)"
+}
+
+// policyActionsCached memoizes the document read for ONE observe sweep. Grants share
+// policies heavily — a real account showed 87 grants over far fewer distinct policies
+// — so without this the same document is fetched once per attachment.
+//
+// The cache is per-SWEEP, deliberately, not per-process: the runtime's thesis is
+// measuring reality at an instant (`--at`), and a long-lived driver (the MCP server,
+// the console BFF) would otherwise serve one instant's document under another
+// instant's clock. Failures are cached too — 87 grants re-asking one denied policy
+// produces 87 identical diagnostics and invites throttling.
+func (d *Driver) policyActionsCached(policyArn string) ([]string, error) {
+	if d.policyDocs == nil {
+		d.policyDocs = map[string]cachedActions{}
+	}
+	if c, ok := d.policyDocs[policyArn]; ok {
+		return c.actions, c.err
+	}
+	a, e := d.getCustomPolicyActions(policyArn)
+	d.policyDocs[policyArn] = cachedActions{actions: a, err: e}
+	return a, e
+}
+
+type cachedActions struct {
+	actions []string
+	err     error
+}
+
+// awsPolicyIsAWSManaged reports whether a managed-policy ARN names a policy AWS
+// publishes rather than one the account wrote. AWS-managed policies carry the
+// literal account segment `aws` (`arn:<partition>:iam::aws:policy/<name>`), so the
+// ARN itself settles it in every partition — the partition is NOT hardcoded, or
+// aws-us-gov and aws-cn would read as customer-managed. See D1225: the diagnostic
+// must name the cause it checked, not the one it assumed.
+func awsPolicyIsAWSManaged(arn string) bool {
+	p := strings.Split(arn, ":")
+	return len(p) >= 6 && p[0] == "arn" && p[2] == "iam" && p[4] == "aws"
+}
+
 // classifyAWSPolicy reports whether a managed policy confers privileged access and
 // whether groundhold can classify it. A curated v0 set: AdministratorAccess /
 // PowerUserAccess / any *FullAccess* are privileged; *ReadOnly* is least-privilege;
 // everything else is UNKNOWN (the four-valued honest answer).
 func classifyAWSPolicy(arn string) (privileged, known bool) {
+	// D1228. The heuristic below reads a NAME. That is evidence only when AWS chose
+	// the name: for a customer-managed policy the name is whatever its author typed,
+	// so `CompanyReadOnlyBaseline` matched "ReadOnly" and reported
+	// access.privileged=FALSE — measured — over a document that may hold
+	// `"Action": "*"`. Under-reporting privilege is, in D797's own words about the
+	// sibling capability, "the most dangerous direction this tool has", and that
+	// sibling (capability.authorization.role) already derives privilege from the
+	// ACTION VERBS rather than the name. Until this one can read the document too,
+	// an author-chosen name buys nothing and the answer is UNKNOWN.
+	if !awsPolicyIsAWSManaged(arn) {
+		return false, false
+	}
 	name := arn[strings.LastIndex(arn, "/")+1:]
 	switch name {
 	case "AdministratorAccess", "PowerUserAccess", "IAMFullAccess":

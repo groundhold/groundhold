@@ -27,16 +27,22 @@ import (
 // The fix is precision, not retraction, so the gate is a NAMED set: exactly these
 // packages may issue an outbound request. A new one is either a driver (add it here
 // deliberately) or a destination nobody agreed to.
+// netReachAllowed is the published set: exactly these packages, shipped in the binary,
+// may issue an outbound request. It lives at package scope because D1247 added a second
+// gate over the same claim, and two copies of a closed set drift — the answer is one
+// registry read by both, not two lists kept in step by hand.
+var netReachAllowed = map[string]string{
+	// The configured provider.
+	"internal/aws": "driver", "internal/azure": "driver", "internal/gcp": "driver",
+	"internal/k8s": "driver", "internal/cloudflare": "driver",
+	"internal/hetzner": "driver", "internal/upstash": "driver",
+	// The two the security note now names.
+	"internal/notify": "operator-supplied --notify-url (D229)",
+	"internal/reach":  "post-apply reachability probe of the resource itself (D537)",
+}
+
 func TestOnlyNamedPackagesReachTheNetwork(t *testing.T) {
-	allowed := map[string]string{
-		// The configured provider.
-		"internal/aws": "driver", "internal/azure": "driver", "internal/gcp": "driver",
-		"internal/k8s": "driver", "internal/cloudflare": "driver",
-		"internal/hetzner": "driver", "internal/upstash": "driver",
-		// The two the security note now names.
-		"internal/notify": "operator-supplied --notify-url (D229)",
-		"internal/reach":  "post-apply reachability probe of the resource itself (D537)",
-	}
+	allowed := netReachAllowed
 
 	root := repoRoot(t)
 	goRoot := filepath.Join(root, "go")

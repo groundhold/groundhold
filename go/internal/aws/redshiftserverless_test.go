@@ -392,12 +392,27 @@ func TestAdoptsExistingRedshiftServerless(t *testing.T) {
 // tags; foreign refused with no UpdateWorkgroup.
 func TestUpdateRedshiftServerlessPublicExposure(t *testing.T) {
 	name := RSSName("prod", "lake", 1)
-	newSrv := func(capLabel string, seen *[]bool) *httptest.Server {
+	// Stateful async fake (D1223): UpdateWorkgroup is accept-not-applied — the workgroup enters
+	// MODIFYING at the OLD publiclyAccessible and reaches the target only back at AVAILABLE. A
+	// driver that succeeds on the UpdateWorkgroup 200 (as it did before D1223) is a false-green;
+	// the poll must ride the MODIFYING probes to the applied flag. settle=false is the stuck case.
+	newSrv := func(capLabel string, settle bool, seen *[]bool) *httptest.Server {
+		public, status, pending, lag := true, "AVAILABLE", false, 0
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch rssAction(r) {
 			case "GetWorkgroup":
+				if lag > 0 {
+					lag--
+					if lag == 0 && settle {
+						public, status = pending, "AVAILABLE"
+					}
+				}
+				pub := "false"
+				if public {
+					pub = "true"
+				}
 				_, _ = w.Write([]byte(`{"workgroup":{"workgroupName":"` + name + `","workgroupArn":"arn:wg",` +
-					`"namespaceName":"n","status":"AVAILABLE","publiclyAccessible":true}}`))
+					`"namespaceName":"n","status":"` + status + `","publiclyAccessible":` + pub + `}}`))
 			case "ListTagsForResource":
 				_, _ = w.Write([]byte(`{"tags":[{"key":"groundhold-capability","value":"` + capLabel +
 					`"},{"key":"groundhold-environment","value":"prod"}]}`))
@@ -408,7 +423,8 @@ func TestUpdateRedshiftServerlessPublicExposure(t *testing.T) {
 				}
 				_ = json.Unmarshal(body, &d)
 				*seen = append(*seen, d.PubliclyAccessible)
-				_, _ = w.Write([]byte(`{"workgroup":{"workgroupName":"` + name + `","status":"MODIFYING","publiclyAccessible":false}}`))
+				pending, status, lag = d.PubliclyAccessible, "MODIFYING", 2
+				_, _ = w.Write([]byte(`{"workgroup":{"workgroupName":"` + name + `","status":"MODIFYING","publiclyAccessible":true}}`))
 			default:
 				t.Errorf("unexpected action %q", rssAction(r))
 				w.WriteHeader(400)
@@ -416,9 +432,9 @@ func TestUpdateRedshiftServerlessPublicExposure(t *testing.T) {
 		}))
 	}
 
-	t.Run("remediate public->private (UpdateWorkgroup publiclyAccessible=false)", func(t *testing.T) {
+	t.Run("remediate public->private (UpdateWorkgroup publiclyAccessible=false, polled to applied)", func(t *testing.T) {
 		var seen []bool
-		srv := newSrv("lake", &seen)
+		srv := newSrv("lake", true, &seen)
 		defer srv.Close()
 		d := rssDriver(t, srv)
 		pid := rssProviderID("eu-central-1", name)
@@ -432,9 +448,26 @@ func TestUpdateRedshiftServerlessPublicExposure(t *testing.T) {
 		}
 	})
 
+	// The D1223 guard: a workgroup that accepts the update but never leaves MODIFYING must read
+	// unknown, not succeeded. Remove the poll and this goes red (a public warehouse reported
+	// private on accept while it still answered on the public endpoint).
+	t.Run("stuck MODIFYING times out to unknown", func(t *testing.T) {
+		var seen []bool
+		srv := newSrv("lake", false, &seen)
+		defer srv.Close()
+		d := rssDriver(t, srv)
+		d.PollTimeout = 5 * time.Millisecond
+		pid := rssProviderID("eu-central-1", name)
+		res := d.updateRedshiftServerless("lake", "prod", pid,
+			map[string]any{"network.publicExposure": false}, nil, []string{"network.publicExposure"})
+		if res.Status != "unknown" || !strings.Contains(res.Reason, "not yet applied") {
+			t.Fatalf("a workgroup stuck MODIFYING must be unknown, not succeeded: %+v", res)
+		}
+	})
+
 	t.Run("foreign workgroup refused, no UpdateWorkgroup", func(t *testing.T) {
 		var seen []bool
-		srv := newSrv("someone-else", &seen)
+		srv := newSrv("someone-else", true, &seen)
 		defer srv.Close()
 		d := rssDriver(t, srv)
 		pid := rssProviderID("eu-central-1", name)

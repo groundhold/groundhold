@@ -68,7 +68,11 @@ race:
 
 # lint: gosec + staticcheck (config in go/.golangci.yml). Blocking in CI.
 lint:
-	cd go && golangci-lint run --timeout=5m
+	@# D1257: golangci-lint installs into $(go env GOPATH)/bin, which is not on the
+	@# PATH make's /bin/sh sees — so this target answered `golangci-lint: not found`
+	@# and nobody ran it. CI runs the linter and the local gate does not, which is
+	@# how an unused function reached a published branch.
+	cd go && PATH="$$PATH:$$(go env GOPATH)/bin" golangci-lint run --timeout=5m
 
 # cover: Go runtime coverage, printed as a single total.
 cover:

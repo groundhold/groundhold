@@ -80,12 +80,29 @@ func (d *Driver) s3DoH(method, region, bucket, path string, extra map[string]str
 }
 
 // awsErrCode pulls the <Code> out of an S3 XML error body.
+//
+// D1230: S3 and S3 CONTROL do not use the same envelope. Plain S3 answers with
+// `<Error><Code>` at the root; S3 Control wraps it, `<ErrorResponse><Error><Code>`.
+// Only the first was read, so an S3 Control error arrived here as the empty string —
+// and the caller that matters, parsePABFlag, decides whether a 404 is a DEFINITIVE
+// "no configuration set" or an unreadable answer BY THAT CODE. An account with no
+// Block Public Access configuration therefore read as unreadable rather than as
+// not-set: conservative, invisible, and wrong.
+//
+// Confirmed against the live API, not inferred: AWS returned
+// `<ErrorResponse><Error><Code>NoSuchPublicAccessBlockConfiguration</Code>...`.
+// Both shapes are matched now; the direct one wins when both could, which keeps every
+// existing S3 call site answering exactly as before.
 func awsErrCode(body []byte) string {
 	var e struct {
-		Code string `xml:"Code"`
+		Code    string `xml:"Code"`
+		Wrapped string `xml:"Error>Code"`
 	}
 	_ = xml.Unmarshal(body, &e)
-	return e.Code
+	if e.Code != "" {
+		return e.Code
+	}
+	return e.Wrapped
 }
 
 // createS3 runs the ordered plan. Bucket create is synchronous. A 409 continues
@@ -729,11 +746,7 @@ func (d *Driver) observeS3(capability, providerID string) ([]provider.Observatio
 		// both legs definitively non-public — the ONLY path to a measured false
 		obs = append(obs, provider.Observation{Path: "network.publicExposure",
 			Value: false, Derivation: "measured"})
-		diags = append(diags, "network.publicExposure=false covers the bucket policy and bucket "+
-			"ACL only; per-object ACLs and S3 Access Point policies are not enumerable at bucket "+
-			"scope — an individually-public object or a public access point would not be seen. "+
-			"Enforce IgnorePublicAcls (neutralizes public object ACLs) and run the anonymous-GET "+
-			"outcome probe to close the residual.")
+		diags = append(diags, d.s3FalseExposureResidual(region, bucket))
 	default:
 		diags = append(diags, "network.publicExposure withheld: neither leg proved public and at "+
 			"least one leg's read did not complete (its cause is named in the leg diag above) — a "+
@@ -741,6 +754,65 @@ func (d *Driver) observeS3(capability, providerID string) ([]provider.Observatio
 			"private)")
 	}
 	return obs, diags, nil
+}
+
+// s3FalseExposureResidual is the caveat that rides a measured
+// `publicExposure=false`. It discloses what a bucket-scope read cannot see.
+//
+// D1227, found in the field. The previous wording ended "Enforce IgnorePublicAcls
+// (neutralizes public object ACLs) and run the anonymous-GET outcome probe to close
+// the residual" — an INSTRUCTION that presumes the flag is off, on a code path that
+// never reads it. Across ten real buckets in one account, nine had IgnorePublicAcls
+// enforced and one did not, and all ten were told to go enforce it. Advice that
+// presumes an unmeasured fact is the D1225 class wearing a different hat, and it has
+// its own cost: a sentence that fits every case distinguishes none, so the bucket
+// that genuinely needed attention was invisible among the nine that did not.
+//
+// This states the residual as a CONDITION the reader can evaluate rather than an
+// action this code has no grounds to prescribe. Naming the flag is what makes it
+// checkable; asserting its value is what made it wrong.
+//
+// D1229 took the stronger fix D1227 had deferred: the effective IgnorePublicAcls IS
+// read now, so the caveat names which residual is open for THIS bucket. Two review
+// arguments changed the answer, and both corrected a premise rather than a preference.
+//
+// The permission cost was near-notional: s3:GetBucketPublicAccessBlock and
+// s3:GetAccountPublicAccessBlock are BOTH inside AWS's own ReadOnlyAccess and
+// SecurityAudit (verified against the live policy documents, wildcard patterns
+// expanded), so the identity that can read an estate can already read this. And for a
+// security-floored attribute the required permission is product SEMANTICS, not
+// overhead — the better failure is "I cannot verify this" than "I inferred it".
+// The call cost is bounded by reading the ACCOUNT level once per run (see
+// effectiveIgnorePublicAcls): a hardened account pays one request in total.
+//
+// D240's laziness is NARROWED, not discarded: RestrictPublicBuckets still fires only
+// when the policy reads public. This is a different flag answering a different
+// question on the opposite branch.
+//
+// The access-point sentence is a CORRECTION of D1227's, which said both residuals were
+// "not enumerable at bucket scope". That was false: ListAccessPoints takes a bucket
+// filter and GetAccessPointPolicyStatus answers per access point (confirmed against
+// the live API). They are not READ here, which is a different claim, and the caveat
+// now makes the weaker one.
+func (d *Driver) s3FalseExposureResidual(region, bucket string) string {
+	const base = "network.publicExposure=false covers the bucket policy and bucket ACL. "
+	const ap = "A same-account S3 Access Point with its own public policy is not read by this " +
+		"observation (it is enumerable — ListAccessPoints filtered by bucket — but not yet read " +
+		"here); the anonymous-GET outcome probe covers it by measurement."
+	ignored, err := d.effectiveIgnorePublicAcls(region, bucket)
+	switch {
+	case err != nil:
+		return base + "Public OBJECT ACLs could not be ruled out: IgnorePublicAcls did not read (" +
+			err.Error() + "), so an individually-public object may grant anonymous access without " +
+			"appearing in either leg — treat that residual as OPEN. " + ap
+	case ignored:
+		return base + "Public OBJECT ACLs are neutralized for this bucket (IgnorePublicAcls is " +
+			"enforced at bucket or account level), so that residual is CLOSED. " + ap
+	default:
+		return base + "IgnorePublicAcls is NOT enforced for this bucket, so an individually-public " +
+			"OBJECT would grant anonymous reads without appearing in either leg — this is the open " +
+			"residual to act on, and enforcing IgnorePublicAcls closes it. " + ap
+	}
 }
 
 // public-group ACL URIs (S3 predefined groups). A grant to either is public per

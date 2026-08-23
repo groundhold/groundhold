@@ -192,8 +192,30 @@ func (d *Driver) observeIAMBinding(capability, providerID string) ([]provider.Ob
 	// an unclassifiable role leaves access.privileged unverifiable, never guessed.
 	if priv, known := classifyGCPRole(role); known {
 		obs = append(obs, provider.Observation{Path: "access.privileged", Value: priv, Derivation: "measured"})
+	} else if priv, known, why := d.bindingPrivilegeFromRole(role); known {
+		// D1231: the ID did not settle it, so read the role DEFINITION. This reaches
+		// both populations — custom roles (D1228) and the predefined roles outside the
+		// curated set, which in a real project was 37 of 49 bindings.
+		obs = append(obs, provider.Observation{Path: "access.privileged", Value: priv, Derivation: "measured"})
+	} else if why != "" {
+		// The wording says what the DEFINITION includes, never what the principal CAN
+		// do: a deny policy or an org policy can narrow effective access below it.
+		diags = append(diags, "access.privileged not observed: role "+role+" — "+why)
 	} else {
-		diags = append(diags, "access.privileged not observed: role "+role+" is not in groundhold's known privileged-role set (a custom role's privilege is not guessed)")
+		// D1225: name the cause the id actually proves. The old wording said "a custom
+		// role's privilege is not guessed" for EVERY unclassifiable role, which is a
+		// claim about the estate that this code never checked — and in the field it is
+		// usually false (37 of 49 role bindings in a real project are predefined roles
+		// outside the curated set; none were custom). The remedy differs by cause:
+		// a predefined role is groundhold's gap to close, a custom one is not.
+		if gcpRoleIsPredefined(role) {
+			diags = append(diags, "access.privileged not observed: role "+role+" is PREDEFINED by Google "+
+				"but is not in groundhold's curated privileged-role set — the gap is groundhold's, and privilege is not guessed")
+		} else {
+			diags = append(diags, "access.privileged not observed: role "+role+" is a CUSTOM role "+
+				"— its id was chosen by whoever wrote it, so it is not evidence about the permissions "+
+				"behind it, and privilege is not guessed (D1228)")
+		}
 	}
 	return obs, diags, nil
 }
@@ -235,4 +257,50 @@ func (d *Driver) deleteIAMBinding(capability, environment, providerID string) pr
 		return *r
 	}
 	return provider.CreateResult{ProviderID: providerID, Status: "succeeded"}
+}
+
+// rolePermissionsCached fetches a role's includedPermissions, memoized for ONE sweep.
+//
+// Per sweep, not per process, for the reason the AWS twin gives: a long-lived driver
+// would otherwise serve one instant's definition under another instant's clock,
+// against the --at thesis. Failures are cached too — a project with many bindings on
+// one unreadable role would otherwise re-ask (and re-fail) once per binding.
+//
+// The URL shape differs by role kind, and both are the role id verbatim under v1:
+// `roles/<id>` for predefined, `projects/<p>/roles/<id>` (or organizations/...) for
+// custom. So the id IS the resource path — no reassembly, nothing to get wrong.
+func (d *Driver) rolePermissionsCached(role string) ([]string, error) {
+	if d.rolePerms == nil {
+		d.rolePerms = map[string]cachedPerms{}
+	}
+	if c, ok := d.rolePerms[role]; ok {
+		return c.perms, c.err
+	}
+	p, e := d.getRolePermissions(role)
+	d.rolePerms[role] = cachedPerms{perms: p, err: e}
+	return p, e
+}
+
+type cachedPerms struct {
+	perms []string
+	err   error
+}
+
+func (d *Driver) getRolePermissions(role string) ([]string, error) {
+	const op = "roles.get"
+	url := d.iamBase() + "/" + role
+	st, body, err := d.call("GET", url, nil)
+	if err != nil {
+		return nil, readTransport(op, err)
+	}
+	if st != http.StatusOK {
+		return nil, readHTTP(op, st, gcpErrCode(body))
+	}
+	var doc struct {
+		IncludedPermissions []string `json:"includedPermissions"`
+	}
+	if json.Unmarshal(body, &doc) != nil {
+		return nil, readBody(op, st)
+	}
+	return doc.IncludedPermissions, nil
 }

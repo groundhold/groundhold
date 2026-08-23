@@ -84,6 +84,16 @@ type backupDRDoc struct {
 	// force=true removes the vault "and any data source from this backup vault"
 	// (D752). It decides the lock mode; nothing else in this response does.
 	EffectiveTime string `json:"effectiveTime"`
+
+	// EncryptionConfig is the vault's own answer about customer-managed keys.
+	// D1226: this driver used to append, unconditionally, the diagnostic "Backup
+	// and DR vaults use Google-managed encryption" — a claim about the SERVICE that
+	// nothing here measured and that the provider's published API contradicts:
+	// `BackupVault.encryptionConfig.kmsKeyName` is documented as "The Cloud KMS key
+	// name to encrypt backups in this backup vault".
+	EncryptionConfig struct {
+		KMSKeyName string `json:"kmsKeyName"`
+	} `json:"encryptionConfig"`
 }
 
 func (doc backupDRDoc) ours(capability, environment string) bool {
@@ -208,7 +218,16 @@ func (d *Driver) observeBackupDR(capability, providerID string) ([]provider.Obse
 	if s := doc.BackupMinimumEnforcedRetentionDuration; s != "" {
 		obs = append(obs, provider.Observation{Path: "retention.minimum", Value: s, Derivation: "measured"})
 	}
-	diags = append(diags, "encryption.customerManagedKeys not observed: Backup and DR vaults use Google-managed encryption")
+	// D1226: read the vault's encryptionConfig instead of asserting the service has
+	// none. A key name present is the vault's OWN statement that backups in it are
+	// encrypted with a customer key, so the reassuring direction rests on the
+	// provider's word rather than ours; absent means the optional field is unset,
+	// which is the alarming direction and safe to state. (Google's field doc notes
+	// that some workload backups — compute disk backups — may instead inherit their
+	// source key; that is a property of individual backups, not of the vault
+	// configuration this attribute describes.)
+	obs = append(obs, provider.Observation{Path: "encryption.customerManagedKeys",
+		Value: doc.EncryptionConfig.KMSKeyName != "", Derivation: "measured"})
 	return obs, diags, nil
 }
 
